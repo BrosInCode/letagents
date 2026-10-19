@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type {
@@ -208,15 +209,18 @@ async function listCursorModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
   const command = process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
-  const context = cursorModelExecutionContext(input);
-  if (context.error) {
-    return modelResult("cursor", "error", [], null, context.error);
-  }
-  const cacheKey = `cursor:${command}:${context.cacheKey}`;
+  // The key holds every input of the managed profile's location, so a fresh
+  // answer is returned before the profile (about 30 sync fs calls) is prepared.
+  // A hit runs no Cursor process, so it needs no workspace MCP check either.
+  const cacheKey = `cursor:${JSON.stringify(cursorModelCacheKeyParts(command, input))}`;
   const forceRefresh = Boolean(input.refreshModels);
   const cached = modelListCache.get(cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return cloneModelResult(cached.result);
+  }
+  const context = cursorModelExecutionContext(input);
+  if (context.error) {
+    return modelResult("cursor", "error", [], null, context.error);
   }
 
   const result = await execFileWithTimeout(command, ["models"], {
@@ -242,10 +246,44 @@ async function listCursorModels(
   return cloneModelResult(next);
 }
 
+/** Expired entries stay this long so a failed rediscovery can serve the last ready list. */
+const MODEL_LIST_STALE_RETENTION_MS = 10 * 60_000;
+const MODEL_LIST_CACHE_LIMIT = 64;
+
+function pruneModelListCache(now: number): void {
+  for (const [key, entry] of modelListCache) {
+    if (entry.expiresAt + MODEL_LIST_STALE_RETENTION_MS <= now) modelListCache.delete(key);
+  }
+  for (const key of modelListCache.keys()) {
+    if (modelListCache.size < MODEL_LIST_CACHE_LIMIT) break;
+    modelListCache.delete(key);
+  }
+}
+
+/** Test-only: the number of remembered model lists. */
+export function modelListCacheSizeForTest(): number {
+  return modelListCache.size;
+}
+
+function cursorModelCacheKeyParts(command: string, input: DesktopAgentProviderPreflightInput): string[] {
+  const workspaceRoot = normalizeOptionalPath(input.repoRootPath);
+  return [
+    command,
+    DEFAULT_CURSOR_MCP_POLICY,
+    workspaceRoot ? resolve(workspaceRoot) : "",
+    process.env.LETAGENTS_CURSOR_SOURCE_HOME ?? "",
+    process.env.LETAGENTS_CURSOR_MANAGED_HOME ?? "",
+    process.env.LETAGENTS_STATE_PATH ?? "",
+    homedir(),
+  ];
+}
+
 function cacheModelListResult(
   cacheKey: string,
   result: DesktopAgentProviderModelsResult,
 ): void {
+  pruneModelListCache(Date.now());
+  modelListCache.delete(cacheKey);
   modelListCache.set(cacheKey, {
     expiresAt: Date.now() + (result.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
     result,
@@ -256,6 +294,7 @@ function refreshStaleReadyModelCache(
   cacheKey: string,
   cached: ModelListCacheEntry,
 ): DesktopAgentProviderModelsResult {
+  modelListCache.delete(cacheKey);
   modelListCache.set(cacheKey, {
     expiresAt: Date.now() + MODEL_LIST_ERROR_CACHE_MS,
     result: cached.result,
@@ -266,7 +305,6 @@ function refreshStaleReadyModelCache(
 function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput): {
   cwd?: string;
   env: NodeJS.ProcessEnv;
-  cacheKey: string;
   error: string | null;
 } {
   const workspaceRoot = normalizeOptionalPath(input.repoRootPath);
@@ -281,19 +319,11 @@ function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput):
     return {
       cwd: resolvedWorkspaceRoot ?? undefined,
       env,
-      cacheKey: [
-        mcpPolicy,
-        resolvedWorkspaceRoot ?? "",
-        profile.homeDir,
-        profile.configDir,
-        profile.dataDir,
-      ].join(":"),
       error: null,
     };
   } catch (error) {
     return {
       env: buildCursorChildEnv(),
-      cacheKey: `${mcpPolicy}:${resolvedWorkspaceRoot ?? ""}`,
       error: error instanceof Error ? error.message : String(error),
     };
   }

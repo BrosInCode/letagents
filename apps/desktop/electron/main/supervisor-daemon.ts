@@ -391,6 +391,11 @@ export interface SupervisorDaemonLifecycleOptions {
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
   now?: () => Date;
+  /**
+   * How long a verified-ready status answers `ensureRunning` without a new
+   * negotiation. Default 2000 ms. Zero turns the cache off.
+   */
+  readyStatusTtlMs?: number;
 }
 
 export function supervisorDaemonSpawnEnvironment(
@@ -446,8 +451,9 @@ const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
 /** State and runtime identity must agree even when retaining a daemon's provider environment. */
 export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessEnv>): string {
   const home = env.HOME ?? homedir();
-  const effective: NodeJS.ProcessEnv = {
-    ...env,
+  // Read only the keys that enter the hash. Copying all of `process.env` for
+  // every call cost about 190 us and ran on every supervisor request.
+  const effective: Partial<Record<(typeof SUPERVISOR_COMPATIBILITY_KEYS)[number], string | undefined>> = {
     HOME: home,
     LETAGENTS_API_URL: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     // MCP consumes a nonempty state path verbatim, unlike the desktop chat paths.
@@ -456,6 +462,9 @@ export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessE
     LETAGENTS_LOCAL_FILES_DIR: env.LETAGENTS_LOCAL_FILES_DIR?.trim() || join(home, ".letagents", "local-files"),
     LETAGENTS_LOCAL_PROFILE_PATH: env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() || join(home, ".letagents", "local-profile.json"),
     LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() || join(home, ".letagents", "chat-storage.json"),
+    LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY: env.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY,
+    LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256: env.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256,
+    LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV: env.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV,
   };
   return createHash("sha256")
     .update(JSON.stringify(SUPERVISOR_COMPATIBILITY_KEYS.map((key) => [key, effective[key] ?? null])))
@@ -478,6 +487,22 @@ export class SupervisorDaemonClient {
   readonly socketPath: string;
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
+  /**
+   * Short-lived answer for `ensureRunning`.
+   *
+   * Problem: every supervisor IPC (list-agents, state push, inspector poll every
+   * 5 s, approvals) ran a full negotiation: a maintenance-file read, an
+   * environment copy with two SHA-256 fingerprints, and a `daemon.negotiate`
+   * request on a new socket.
+   * Rule: after a negotiation that proved the daemon ready and current, reuse
+   * that status for `readyStatusTtlMs`.
+   * Invalidation: any lost connection, timeout or disconnect, daemon exit, a
+   * disconnect seen by the observer, a handoff, a maintenance request, an
+   * application-update step, or an environment refresh clears it at once.
+   * A held maintenance status is never cached.
+   */
+  private readyStatus: { status: DesktopSupervisorDaemonStatus; expiresAt: number } | null = null;
+  private readonly readyStatusTtlMs: number;
   private applicationUpdateHandoff: Promise<void> | null = null;
   private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdatePrepared = false;
@@ -506,6 +531,7 @@ export class SupervisorDaemonClient {
     if (this.applicationUpdatePrepared) return Promise.reject(new Error("The application update is already being installed."));
     if (this.maintenanceOperation) return this.maintenanceOperation;
     this.maintenanceRequested = true;
+    this.invalidateReadyStatus();
     for (const cancel of this.maintenanceRequests) cancel();
     const operation = withDaemonMaintenanceOperation(async owner => {
       const hold = await owner.read();
@@ -618,6 +644,7 @@ export class SupervisorDaemonClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
+    this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
       const child = spawn(process.execPath, [scriptPath], {
         cwd,
@@ -640,13 +667,31 @@ export class SupervisorDaemonClient {
     }
     if (this.environmentRefreshHandoff) return this.environmentRefreshHandoff;
     if (!this.ensureOperation) {
+      const cached = this.readyStatus;
+      if (cached && Date.now() < cached.expiresAt && !this.drainingCurrentDaemon
+        && !this.maintenanceOperation && (!this.ownedDaemon || this.ownedDaemon.ready)) {
+        return Promise.resolve(cached.status);
+      }
+      this.readyStatus = null;
       this.ensureOperation = Promise.resolve(startupPreparation)
         .then(() => desktopShellEnvironmentReady())
         .then(() => this.ensureRunningOnce())
-        .then((status) => this.rememberReadyStatus(status))
+        .then((status) => this.cacheReadyStatus(this.rememberReadyStatus(status)))
         .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  private cacheReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
+    if (this.readyStatusTtlMs > 0 && !this.maintenanceRequested && !status.maintenanceHoldId
+      && !this.applicationUpdateHandoff && !this.applicationUpdatePrepared) {
+      this.readyStatus = { status, expiresAt: Date.now() + this.readyStatusTtlMs };
+    }
+    return status;
+  }
+
+  private invalidateReadyStatus(): void {
+    this.readyStatus = null;
   }
 
   /** Join startup already registered by the app without starting another service. */
@@ -856,6 +901,7 @@ export class SupervisorDaemonClient {
    * generations during normal startup reconciliation.
    */
   prepareForApplicationUpdate(): Promise<void> {
+    this.invalidateReadyStatus();
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Application update handoff currently requires macOS."));
@@ -876,6 +922,7 @@ export class SupervisorDaemonClient {
   /** Restore the current app's daemon only when Squirrel failed to take over. */
   resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
     this.applicationUpdatePrepared = false;
+    this.invalidateReadyStatus();
     return this.ensureRunning();
   }
 
@@ -892,8 +939,9 @@ export class SupervisorDaemonClient {
         if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
           throw new Error("Supervisor startup is paused while LetAgents installs an application update.");
         }
+        this.invalidateReadyStatus();
         this.ensureOperation = this.ensureRunningOnce(true)
-          .then((status) => this.rememberReadyStatus(status))
+          .then((status) => this.cacheReadyStatus(this.rememberReadyStatus(status)))
           .finally(() => { this.ensureOperation = null; });
         return this.ensureOperation;
       })().finally(() => {
@@ -1118,7 +1166,7 @@ export class SupervisorDaemonClient {
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
     if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle requires an exact identity and desired state.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
     return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
   }
 
@@ -1128,9 +1176,11 @@ export class SupervisorDaemonClient {
     }
     const status = await this.ensureRunning();
     if (recovery && !status.capabilities.agentRuntimeRecoveryV2) {
+      this.invalidateReadyStatus();
       throw new Error("Update the background service to use reconnect and runtime restart controls.");
     }
     if (!status.capabilities.agentRuntimeRecovery) {
+      this.invalidateReadyStatus();
       throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
     }
     const result = await this.request<{ outcome: "recovering"; entry: WireEntry }>(
@@ -1151,6 +1201,7 @@ export class SupervisorDaemonClient {
     }
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) {
+      this.invalidateReadyStatus();
       throw new Error("This supervisor is too old for durable agent naming; rebuild the desktop daemon.");
     }
     return mapEntry(await this.request<WireEntry>("manifest.set_display_name", {
@@ -1163,6 +1214,7 @@ export class SupervisorDaemonClient {
   async retryRoomDelivery(input: DesktopSupervisorRoomDeliveryRetryInput): Promise<void> {
     const status = await this.ensureRunning();
     if (!status.capabilities.roomDeliveryRetry) {
+      this.invalidateReadyStatus();
       throw new Error("This supervisor does not support room delivery retry.");
     }
     await this.request<{ accepted: boolean }>("supervisor.retry_room_delivery", {
@@ -1179,6 +1231,7 @@ export class SupervisorDaemonClient {
   async restoreAgentConversation(input: import("../ipc-types/agents.js").DesktopSupervisorConversationRestoreInput): Promise<void> {
     const status = await this.ensureRunning();
     if (!status.capabilities.providerContinuationRepair) {
+      this.invalidateReadyStatus();
       throw new Error("This supervisor does not support provider conversation restoration.");
     }
     await this.request<{ accepted: boolean }>("supervisor.restore_agent_conversation", {
@@ -1195,6 +1248,7 @@ export class SupervisorDaemonClient {
   async skipRoomDelivery(input: import("../ipc-types/agents.js").DesktopSupervisorRoomDeliverySkipInput): Promise<void> {
     const status = await this.ensureRunning();
     if (!status.capabilities.roomDeliverySkip) {
+      this.invalidateReadyStatus();
       throw new Error("This supervisor does not support safely skipping a blocked room message.");
     }
     await this.request<{ accepted: boolean }>("supervisor.skip_room_delivery", {
@@ -1215,7 +1269,7 @@ export class SupervisorDaemonClient {
   ): Promise<DesktopSupervisorManifestEntry | null> {
     if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(expectedDesiredState) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle compare-and-set requires exact typed fields.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
     const result = await this.request<{ applied: boolean; entry: WireEntry }>("manifest.compare_and_set_desired_state", {
       id,
       expected_desired_state: expectedDesiredState,
@@ -1237,6 +1291,7 @@ export class SupervisorDaemonClient {
     }
     const status = await this.ensureRunning();
     if (status.generation !== input.daemonGeneration) {
+      this.invalidateReadyStatus();
       throw new Error("The supervisor generation changed before turn control was sent.");
     }
     return this.request<DesktopSupervisorTurnControlResult>("manifest.control_turn", {
@@ -1281,7 +1336,7 @@ export class SupervisorDaemonClient {
   async getAgentInspectorDetail(input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail> {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.roomId) || (input.sourceMessageId !== undefined && input.sourceMessageId !== null && !nonEmptyString(input.sourceMessageId))) throw new Error("Agent inspector detail requires exact non-empty entry, room, and optional source identities.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentInspectorDetail) throw new Error("This supervisor does not support agent inspector detail history.");
+    if (!status.capabilities.agentInspectorDetail) { this.invalidateReadyStatus(); throw new Error("This supervisor does not support agent inspector detail history."); }
     const detail = await this.request<Record<string, unknown>>("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
     return mapAgentInspectorDetail(detail, input);
   }
@@ -1289,7 +1344,7 @@ export class SupervisorDaemonClient {
   async getAgentConfiguration(entryId: string, daemonGeneration: number): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration> {
     if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Agent configuration requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
     const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
     return mapAgentConfiguration(value, entryId, daemonGeneration);
   }
@@ -1299,7 +1354,7 @@ export class SupervisorDaemonClient {
       || !input.configuration || typeof input.configuration !== "object"
       || !Object.hasOwn(input.configuration, "model") || !Object.hasOwn(input.configuration, "reasoningEffort") || !Object.hasOwn(input.configuration, "charter") || !Object.hasOwn(input.configuration, "permissionProfileId")) throw new Error("Agent configuration update requires exact typed coordinates and fields.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
     const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
       model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
       permission_profile_id: input.configuration.permissionProfileId,
@@ -1387,7 +1442,7 @@ export class SupervisorDaemonClient {
       throw new Error("Agent configuration apply requires exact typed coordinates.");
     }
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    if (!status.capabilities.agentInspectorSettings) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon."); }
     const result = await this.request<Record<string, unknown>>(
       "supervisor.apply_agent_configuration",
       {
@@ -1411,21 +1466,21 @@ export class SupervisorDaemonClient {
   async prepareRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMovePrepareInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.destinationRoomId) || !nonEmptyString(input.requestId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move preparation requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.prepare_room_move", { entry_id: input.entryId, destination_room_id: input.destinationRoomId, request_id: input.requestId, daemon_generation: input.daemonGeneration }), input.entryId);
   }
 
   async commitRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move commit requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.commit_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 15_000), input.entryId, input.operationId);
   }
 
   async acknowledgeRoomMoveSourceRevocation(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { sourceAgentSessionId: string }): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.sourceAgentSessionId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move credential acknowledgement requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.acknowledge_room_move_source_revocation", {
       operation_id: input.operationId, entry_id: input.entryId, source_agent_session_id: input.sourceAgentSessionId, daemon_generation: input.daemonGeneration,
     }), input.entryId, input.operationId);
@@ -1434,7 +1489,7 @@ export class SupervisorDaemonClient {
   async rollbackRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { error: string }): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.error) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move rollback requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.rollback_room_move", {
       operation_id: input.operationId, entry_id: input.entryId, error: input.error, daemon_generation: input.daemonGeneration,
     }), input.entryId, input.operationId);
@@ -1443,14 +1498,14 @@ export class SupervisorDaemonClient {
   async getRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
     if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move status requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
     return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.get_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
   }
 
   async getCurrentRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorCurrentRoomMoveInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove | null> {
     if (!nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Current room-move discovery requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    if (!status.capabilities.agentRoomMove) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon."); }
     const result = await this.request<Record<string, unknown> | null>("supervisor.get_current_room_move", {
       entry_id: input.entryId,
       daemon_generation: input.daemonGeneration,
@@ -1474,7 +1529,7 @@ export class SupervisorDaemonClient {
       || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)
       || typeof grantRevokedWithoutWorkerSession !== "boolean") throw new Error("Retire requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
     const result = await this.request<Record<string, unknown>>("supervisor.retire_agent", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
@@ -1517,7 +1572,7 @@ export class SupervisorDaemonClient {
       || typeof grantRevokedWithoutWorkerSession !== "boolean"
       || typeof includeCleanupIdentity !== "boolean") throw new Error("Purge requires exact typed coordinates.");
     const status = await this.ensureRunning();
-    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    if (!status.capabilities.agentLifecycle) { this.invalidateReadyStatus(); throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon."); }
     const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
@@ -1572,6 +1627,7 @@ export class SupervisorDaemonClient {
       execution_generation_id: input.executionGenerationId, agent_session_id: input.agentSessionId,
       agent_session_token: input.credential, daemon_generation: status.generation,
     });
+    if (result.status !== "installed") this.invalidateReadyStatus();
     return result.status === "installed" ? "installed" : "stale";
   }
 
@@ -1591,7 +1647,7 @@ export class SupervisorDaemonClient {
       throw new Error("An Open Model endpoint and model are required.");
     }
     const status = await this.ensureRunning();
-    if (status.generation !== input.daemonGeneration) return "stale";
+    if (status.generation !== input.daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
     const result = await this.request<{ status?: unknown }>(
       "supervisor.install_open_model_credential",
       {
@@ -1603,6 +1659,7 @@ export class SupervisorDaemonClient {
         daemon_generation: input.daemonGeneration,
       },
     );
+    if (result.status !== "installed") this.invalidateReadyStatus();
     return result.status === "installed" ? "installed" : "stale";
   }
 
@@ -1637,7 +1694,7 @@ export class SupervisorDaemonClient {
     const status = await this.ensureRunning();
     // Never let a request started against an old process install into its
     // successor. The daemon independently checks this fence too.
-    if (status.generation !== input.daemonGeneration) return "stale";
+    if (status.generation !== input.daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
     const result = await this.request<{ status?: unknown }>("supervisor.install_host_grant", {
       entry_id: input.entryId,
       room_id: input.roomId,
@@ -1656,6 +1713,7 @@ export class SupervisorDaemonClient {
       ...(input.recoveryOnly ? { recovery_only: true } : {}),
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS);
     if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
+    this.invalidateReadyStatus();
     return "stale";
   }
 
@@ -1666,18 +1724,20 @@ export class SupervisorDaemonClient {
       room_id: roomId,
       daemon_generation: status.generation,
     });
+    if (result.status !== "queued") this.invalidateReadyStatus();
     return result.status === "queued" ? "queued" : "stale";
   }
 
   /** Establish a daemon-inbox entry's one-time durable room boundary. */
   async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string): Promise<"bootstrapped" | "existing" | "stale"> {
     const status = await this.ensureRunning();
-    if (status.generation !== daemonGeneration) return "stale";
+    if (status.generation !== daemonGeneration) { this.invalidateReadyStatus(); return "stale"; }
     const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...(initialMessage?.trim() ? { initial_message: initialMessage.trim() } : {}),
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
+    if (result.status !== "bootstrapped" && result.status !== "existing") this.invalidateReadyStatus();
     return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }
 
@@ -1763,6 +1823,7 @@ export class SupervisorDaemonClient {
     child.once("error", (error) => {
       // An error after a successful spawn may be an IPC/signalling error,
       // not process death. A failed spawn has no native PID to preserve.
+      this.invalidateReadyStatus();
       if (childPid === null && this.ownedDaemon === owned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_spawn_error",
@@ -1771,6 +1832,7 @@ export class SupervisorDaemonClient {
       });
     });
     child.once("exit", (exitCode, signal) => {
+      this.invalidateReadyStatus();
       if (this.ownedDaemon === owned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_exited",
@@ -1797,6 +1859,7 @@ export class SupervisorDaemonClient {
   }
 
   private async drainCurrentDaemon(daemonVersion: number): Promise<void> {
+    this.invalidateReadyStatus();
     this.drainingCurrentDaemon = true;
     for (const ready of this.startupApprovalWaiters) ready();
     try {
@@ -1913,6 +1976,7 @@ export class SupervisorDaemonClient {
   }
 
   private recordAttachedDaemonDisconnect(): void {
+    this.invalidateReadyStatus();
     const observation = this.attachedDaemonObservation;
     if (!observation) return;
     const current = this.observeRetiredDaemon(observation.identity);
@@ -2124,6 +2188,8 @@ export class SupervisorDaemonClient {
         if (onAbort) signal?.removeEventListener("abort", onAbort);
         this.maintenanceRequests.delete(cancelForMaintenance);
         socket.destroy();
+        if (error && (isConnectionUnavailable(error) || error instanceof SupervisorDaemonRequestTimeoutError
+          || /disconnected before replying/.test(error.message))) this.invalidateReadyStatus();
         if (error) reject(error); else resolve(value as T);
       };
       const cancelForMaintenance = () => finish(new Error(DAEMON_MAINTENANCE_MESSAGE));
@@ -2149,6 +2215,9 @@ export class SupervisorDaemonClient {
           const response = JSON.parse(chunks.join("")) as WireResponse;
           if (response.id !== id) throw new Error("Supervisor daemon response id mismatch.");
           if (!response.ok) {
+            // The daemon refused. Generation and capability fences answer this way, and the cached
+            // status the request was built from may be what is stale, so the next call negotiates again.
+            this.invalidateReadyStatus();
             if (/Protocol version mismatch/i.test(response.error ?? "")) {
               throw new SupervisorDaemonProtocolMismatchError(version, response.version, response.error ?? "Protocol version mismatch.");
             }

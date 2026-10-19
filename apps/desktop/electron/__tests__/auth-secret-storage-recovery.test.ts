@@ -16,9 +16,10 @@ require.cache[id] = { id, filename: id, loaded: true, exports: { safeStorage: {
   decryptString: (value: Buffer) => { reads++; const token = value.toString(); if (token === failToken) throw new Error('private native error'); return token; },
 } } } as NodeJS.Module;
 test.after(() => { if (previous) require.cache[id] = previous; else delete require.cache[id]; });
-const { getDesktopAuthStatus, readStoredAuth } = await import('../main/auth.js');
+const { getDesktopAuthStatus, readStoredAuth, setStoredAuthDecryptFailureTtlMsForTest } = await import('../main/auth.js');
 
 test('locked, failed, or partial credential reads stay uncached and never overwrite stored credentials', async () => {
+  setStoredAuthDecryptFailureTtlMsForTest(0); // this test checks that every read retries the decrypt
   const path = join(env.tempDir, 'letagents-desktop-auth.json');
   const stored = JSON.stringify({ version: 2, encryptedToken: testEncryptedToken('app-test'), encryptedAgentToken: testEncryptedToken('agent-test'), encryptedAppLoginVerifier: testEncryptedToken('verifier-test'), account: { id: 'account-test' }, savedAt: new Date().toISOString() });
   writeFileSync(path, stored);

@@ -230,7 +230,35 @@ function updateAgentLocalState(
   });
 }
 
+/**
+ * The host id is made once and never changes, but the grant coordinator, the
+ * rental handlers and local supervision asked for it on many calls, and each
+ * call read and parsed the whole shared state file.
+ * Rule: remember the id for the state path it came from. Trust it for
+ * `HOST_ID_RECHECK_MS` (30 s) and only while the state file still exists. After
+ * that, or if the path changes or the file is gone, read the file again.
+ * Bound: one entry.
+ */
+const HOST_ID_RECHECK_MS = 30_000;
+let cachedHostId: { path: string; hostId: string; verifiedAt: number } | null = null;
+
+export function clearDesktopHostIdCacheForTest(): void {
+  cachedHostId = null;
+}
+
 export function getOrCreateDesktopHostId(): string {
+  const statePath = getLetAgentsLocalStatePath();
+  const cached = cachedHostId;
+  if (cached && cached.path === statePath && Date.now() - cached.verifiedAt < HOST_ID_RECHECK_MS
+    && existsSync(statePath)) {
+    return cached.hostId;
+  }
+  const hostId = resolveDesktopHostId();
+  cachedHostId = { path: statePath, hostId, verifiedAt: Date.now() };
+  return hostId;
+}
+
+function resolveDesktopHostId(): string {
   const existing = readAgentLocalState().local_host_id;
   if (typeof existing === "string" && existing.trim()) {
     return existing;

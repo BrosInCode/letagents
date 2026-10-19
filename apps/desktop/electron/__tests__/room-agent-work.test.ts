@@ -193,19 +193,28 @@ test('workspace links require an exact receipt and a verified published file; ha
 });
 
 
-test('workspace link decoration shares exact editor verification only inside one request', async (t) => {
+test('workspace link decoration memoizes the editor per extension and bundle; opening always verifies again', async (t) => {
   const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
   const { DatabaseSync } = await import('node:sqlite');
   const { tmpdir } = await import('node:os');
   const { join, basename } = await import('node:path');
   const { promisify } = await import('node:util');
   const root = await mkdtemp(join(tmpdir(), 'workspace-editor-verification-'));
-  const paths = ['one.ts', 'two.ts', 'three.ts'];
+  const paths = ['one.ts', 'two.ts', 'three.md'];
   for (const path of paths) await writeFile(join(root, path), 'export {};\n');
   const workspace = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready',
     files: paths.map(path => ({ path, previous_path: null, status: 'added', additions: 1, deletions: 0, binary: false })),
     additions: 3, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false };
-  const editor = { id: 'com.microsoft.VSCode', path: '/Applications/Code.app' };
+  const bundle = async (name: string) => {
+    const path = join(root, name);
+    await mkdir(join(path, 'Contents', '_CodeSignature'), { recursive: true });
+    await writeFile(join(path, 'Contents', 'Info.plist'), '<plist/>');
+    await writeFile(join(path, 'Contents', '_CodeSignature', 'CodeResources'), 'sealed-1');
+    await mkdir(join(path, 'Contents', 'MacOS'), { recursive: true });
+    await writeFile(join(path, 'Contents', 'MacOS', 'Electron'), 'binary-1');
+    return path;
+  };
+  const editor = { id: 'com.microsoft.VSCode', path: await bundle('Code.app') };
   const associations = new Map(paths.map(path => [path, editor]));
   const commands: Array<{ command: string; args: string[] }> = [];
   let failVerification = false;
@@ -244,40 +253,141 @@ test('workspace link decoration shares exact editor verification only inside one
     const input = { roomId: ROOM, agentKey: 'test/agent', sourceMessageId: 'msg_123', paths };
     const expected = paths.map(path => ({ path, kind: 'local' }));
     const count = (command: string) => commands.filter(call => call.command === command).length;
+    // Before this cache: 3 osascript + 1 codesign per request, every request.
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
-    assert.equal(count('/usr/bin/osascript'), 3, 'every exact file keeps its own association query');
-    assert.equal(count('/usr/bin/codesign'), 1, 'three identical editor checks share one verification');
+    assert.equal(count('/usr/bin/osascript'), 2, 'one association query per extension (.ts, .md)');
+    assert.equal(count('/usr/bin/codesign'), 1, 'one verification per exact editor bundle');
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
-    assert.equal(count('/usr/bin/codesign'), 2, 'a later request verifies again');
+    assert.equal(count('/usr/bin/osascript'), 2, 'a later request reuses the association');
+    assert.equal(count('/usr/bin/codesign'), 1, 'a later request reuses the verified, unchanged bundle');
     database.exec("UPDATE room_work_publications SET state='closed'");
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), [], 'each request still rechecks its current receipt');
-    assert.equal(count('/usr/bin/codesign'), 2);
     database.exec("UPDATE room_work_publications SET state='open'");
     assert.equal(await subject.openLocalSourceFile(join(root, paths[0]!)), '');
-    assert.equal(count('/usr/bin/codesign'), 3, 'opening never uses the decoration verification');
+    assert.equal(count('/usr/bin/osascript'), 3, 'opening queries the association afresh');
+    assert.equal(count('/usr/bin/codesign'), 2, 'opening never uses the decoration verification');
     assert.equal(count('/usr/bin/open'), 1);
 
     commands.length = 0;
-    associations.set(paths[1]!, { ...editor, path: '/Applications/Other Code.app' });
+    await writeFile(join(editor.path, 'Contents', '_CodeSignature', 'CodeResources'), 'sealed-2');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 1, 'a re-signed or updated bundle is verified again');
+    commands.length = 0;
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 0);
+    await writeFile(join(editor.path, 'Contents', 'MacOS', 'Electron'), 'binary-2');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 1, 'a replaced main executable is verified again');
+
+    commands.length = 0;
+    subject.clearWorkspaceFileLinkCachesForTest();
+    const other = await bundle('Other Code.app');
+    associations.set(paths[2]!, { ...editor, path: other });
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
     assert.equal(count('/usr/bin/codesign'), 2, 'different application paths do not share verification');
     commands.length = 0;
-    associations.set(paths[1]!, { ...editor, id: 'com.microsoft.VSCodeInsiders' });
+    subject.clearWorkspaceFileLinkCachesForTest();
+    associations.set(paths[2]!, { ...editor, id: 'com.microsoft.VSCodeInsiders' });
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
     assert.equal(count('/usr/bin/codesign'), 2, 'different identifiers at the same path do not share verification');
 
     commands.length = 0;
-    associations.set(paths[1]!, editor);
+    subject.clearWorkspaceFileLinkCachesForTest();
+    associations.set(paths[2]!, editor);
     failVerification = true;
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), []);
     assert.equal(count('/usr/bin/codesign'), 1, 'a shared failure denies every affected link');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), []);
+    assert.equal(count('/usr/bin/codesign'), 1, 'a failure is remembered briefly');
     assert.notEqual(await subject.openLocalSourceFile(join(root, paths[0]!)), '');
     assert.equal(count('/usr/bin/codesign'), 2, 'a failed open also performs fresh verification');
     assert.equal(count('/usr/bin/open'), 0);
+    failVerification = false;
+    await writeFile(join(editor.path, 'Contents', '_CodeSignature', 'CodeResources'), 'sealed-3');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected, 'a repaired bundle is verified again at once');
   } finally {
     Object.defineProperty(process, 'platform', platform);
     database.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('remote workspace links share one room poll and one gh lookup per file; opening looks up afresh', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { promisify } = await import('node:util');
+  const home = await mkdtemp(join(tmpdir(), 'workspace-remote-links-'));
+  const room = 'github.com/acme/widgets';
+  const workspace = { captured_at: '2026-09-08T00:00:00.000Z', branch: 'feature', base_revision: 'a'.repeat(40), state: 'ready',
+    files: ['a.ts', 'b.ts', 'gone.ts'].map(path => ({ path, previous_path: null, status: 'added', additions: 1, deletions: 0, binary: false })),
+    additions: 3, deletions: 0, hidden_files: 0, patch: '', patch_truncated: false };
+  let polls = 0;
+  let pollStatus = 'ready';
+  t.mock.module('node:os', { namedExports: { homedir: () => home } });
+  t.mock.module('../main/rooms/agent-work.js', { namedExports: { pollDesktopRoomAgentWork: async () => {
+    polls += 1;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    return { status: pollStatus, response: pollStatus !== 'ready' ? null : { snapshot: { work: [{ agentKey: 'test/agent', sourceMessageId: 'msg_123', summary: { ...summary(), version: 2, workspace } }] } } };
+  } } });
+  const lookups: string[] = [];
+  const execute = async (command: string, args: string[]) => {
+    assert.equal(command, 'gh');
+    lookups.push(args[1]!);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const path = /contents\/([^?]+)/.exec(args[1]!)![1]!;
+    if (path === 'gone.ts') throw new Error('Not Found');
+    return { stdout: JSON.stringify({ type: 'file', path, html_url: `https://github.com/acme/widgets/blob/feature/${path}` }), stderr: '' };
+  };
+  t.mock.module('node:child_process', { namedExports: { execFile: Object.assign(
+    () => { throw new Error('Use the promisified command runner'); }, { [promisify.custom]: execute },
+  ) } });
+  const now = Date.now();
+  let clock = now;
+  t.mock.method(Date, 'now', () => clock);
+  try {
+    const subject = await import(new URL('../main/workspace-file-links.js?remote-links-test', import.meta.url).href);
+    const row = (path: string) => ({ roomId: room, agentKey: 'test/agent', sourceMessageId: 'msg_123', paths: [path] });
+    const link = (path: string) => [{ path, kind: 'github', url: `https://github.com/acme/widgets/blob/feature/${path}` }];
+    // Before this cache: three rendered rows cost three polls and three gh calls, every render.
+    const first = await Promise.all(['a.ts', 'b.ts', 'a.ts'].map(path => subject.resolveWorkspaceFileLinks(row(path))));
+    assert.deepEqual(first, [link('a.ts'), link('b.ts'), link('a.ts')]);
+    assert.equal(polls, 1, 'concurrent rows share one in-flight room poll');
+    assert.equal(lookups.length, 2, 'concurrent rows share one in-flight gh lookup per file');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(row('gone.ts')), []);
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(row('gone.ts')), []);
+    assert.equal(lookups.length, 3, 'a missing file is remembered briefly');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(row('a.ts')), link('a.ts'));
+    assert.equal(polls, 1);
+    assert.equal(lookups.length, 3);
+
+    clock = now + 16_000;
+    await subject.resolveWorkspaceFileLinks(row('a.ts'));
+    assert.equal(polls, 2, 'the room poll expires after 15 seconds');
+    assert.equal(lookups.length, 3, 'a found file stays cached for 10 minutes');
+    clock = now + 61_000;
+    await subject.resolveWorkspaceFileLinks(row('gone.ts'));
+    assert.equal(lookups.length, 4, 'a missing file is checked again after one minute');
+    clock = now + 11 * 60_000;
+    await subject.resolveWorkspaceFileLinks(row('a.ts'));
+    assert.equal(lookups.length, 5, 'a found file is checked again after 10 minutes');
+
+    pollStatus = 'access_revoked';
+    clock = now + 12 * 60_000;
+    const pollsBeforeRevoked = polls;
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(row('a.ts')), []);
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(row('a.ts')), []);
+    assert.equal(polls, pollsBeforeRevoked + 2, 'a poll that is not ready is never reused');
+    pollStatus = 'ready';
+
+    const before = { polls, lookups: lookups.length };
+    let opened = '';
+    await subject.openWorkspaceFile(row('a.ts'), async () => 'unused', async (url: string) => { opened = url; });
+    assert.equal(opened, link('a.ts')[0]!.url);
+    assert.equal(polls, before.polls + 1, 'opening polls the receipt afresh');
+    assert.equal(lookups.length, before.lookups + 1, 'opening verifies the published file afresh');
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 

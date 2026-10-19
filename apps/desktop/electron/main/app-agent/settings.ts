@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { SettingsFileCache } from "../settings-file-cache.js";
 import type {
   DesktopAppAgentSaveSettingsInput,
   DesktopAppAgentSettingsStatus,
@@ -117,31 +118,48 @@ function normalizeModel(model: string | null | undefined): string {
   return model?.trim() || DEFAULT_APP_AGENT_OPENROUTER_MODEL;
 }
 
+// Decrypted settings, reused while the file is unchanged. See SettingsFileCache.
+const appAgentSettingsCache = new SettingsFileCache<StoredAppAgentSettings>();
+
+export function clearAppAgentSettingsCacheForTest(): void {
+  appAgentSettingsCache.invalidate();
+}
+
 export async function readAppAgentSettings(
   options: AppAgentSettingsStoreOptions = {},
 ): Promise<StoredAppAgentSettings> {
   const settingsPath = getAppAgentSettingsStorePath(options);
   const secretStorage = options.secretStorage || defaultSecretStorage();
-  try {
-    const raw = await readFile(settingsPath, "utf8");
-    const parsed = JSON.parse(raw) as PersistedAppAgentSettings;
-    return {
-      enabled: parsed.enabled === true,
-      openRouterApiKey: decryptSecret(
+  return appAgentSettingsCache.read(settingsPath, secretStorage, async () => {
+    try {
+      const raw = await readFile(settingsPath, "utf8");
+      const parsed = JSON.parse(raw) as PersistedAppAgentSettings;
+      const openRouterApiKey = decryptSecret(
         parsed.encryptedOpenRouterApiKey,
         secretStorage,
-      ),
-      model: normalizeModel(parsed.model),
-      savedAt: parsed.savedAt || null,
-    };
-  } catch {
-    return {
-      enabled: false,
-      openRouterApiKey: null,
-      model: DEFAULT_APP_AGENT_OPENROUTER_MODEL,
-      savedAt: null,
-    };
-  }
+      );
+      return {
+        value: {
+          enabled: parsed.enabled === true,
+          openRouterApiKey,
+          model: normalizeModel(parsed.model),
+          savedAt: parsed.savedAt || null,
+        },
+        // A key that exists but could not be decrypted (locked Keychain) is retried on the next read.
+        cacheable: openRouterApiKey !== null || !parsed.encryptedOpenRouterApiKey,
+      };
+    } catch (error) {
+      return {
+        value: {
+          enabled: false,
+          openRouterApiKey: null,
+          model: DEFAULT_APP_AGENT_OPENROUTER_MODEL,
+          savedAt: null,
+        },
+        cacheable: (error as NodeJS.ErrnoException)?.code === "ENOENT",
+      };
+    }
+  });
 }
 
 export async function saveAppAgentSettings(
@@ -182,7 +200,12 @@ export async function writeAppAgentSettings(
     savedAt: settings.savedAt || new Date().toISOString(),
   };
   await mkdir(dirname(settingsPath), { recursive: true });
-  await writeFile(settingsPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+  appAgentSettingsCache.invalidate(settingsPath);
+  try {
+    await writeFile(settingsPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+  } finally {
+    appAgentSettingsCache.invalidate(settingsPath);
+  }
 }
 
 export async function getAppAgentSettingsStatus(
