@@ -10,9 +10,11 @@
  *
  *   node --import tsx daemon/__tests__/watch-state-wake.bench.ts [entries] [running] [wakes] [stopped-receipts]
  *
- * Reports SQLite statements executed per wake, wall time per wake, and the
- * serialized payload size. The "changed" rows write one running agent's inbox
- * before every wake, as a busy room does.
+ * Reports SQLite statements executed per wake, wall time per wake, the
+ * serialized payload size, the time to serialize and parse that payload, and
+ * the time the desktop client's `mapEntry` takes to validate and map it.
+ * The "changed" rows write one running agent's inbox before every wake, as a
+ * busy room does.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,6 +22,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync, StatementSync } from "node:sqlite";
 
+import { mapEntry } from "../../electron/main/supervisor-daemon.js";
 import { SupervisorDaemon } from "../main.js";
 import type { DaemonManifestEntry } from "../types.js";
 
@@ -122,7 +125,7 @@ async function main(): Promise<void> {
 
     let next = 1_000_000;
     const measure = async (label: string, change: boolean) => {
-      const times: number[] = []; const counts: number[] = []; let bytes = 0; let serializeMs = 0;
+      const times: number[] = []; const counts: number[] = []; let bytes = 0; let serializeMs = 0; let parseMs = 0; let mapMs = 0;
       for (let wake = 0; wake < WAKES; wake += 1) {
         if (change) {
           next += 1;
@@ -137,8 +140,16 @@ async function main(): Promise<void> {
         times.push(performance.now() - start);
         counts.push(statements - before);
         const serializeStart = performance.now();
-        bytes = Buffer.byteLength(JSON.stringify({ version: 1, id: "x", ok: true, result: snapshot }));
+        const frame = JSON.stringify({ version: 1, id: "x", ok: true, result: snapshot });
         serializeMs += performance.now() - serializeStart;
+        bytes = Buffer.byteLength(frame);
+        // What the desktop client pays to read the frame.
+        const parseStart = performance.now();
+        const parsed = JSON.parse(frame) as { result: { entries: Parameters<typeof mapEntry>[0][] } };
+        parseMs += performance.now() - parseStart;
+        const mapStart = performance.now();
+        for (const wire of parsed.result.entries) mapEntry(wire);
+        mapMs += performance.now() - mapStart;
       }
       const last = await internals.watchState({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0 }) as { entries: Array<{ delivery_receipts?: Array<{ timeline?: unknown[] }> }> };
       const receiptBytes = Buffer.byteLength(JSON.stringify(last.entries.map((entry) => entry.delivery_receipts ?? [])));
@@ -149,7 +160,8 @@ async function main(): Promise<void> {
       console.log(JSON.stringify({ label, entries: ENTRIES, running: RUNNING, wakes: WAKES,
         statements_median: counts[Math.floor(counts.length / 2)], ms_median: Number(times[Math.floor(times.length / 2)]!.toFixed(2)),
         ms_p90: Number(times[Math.floor(times.length * 0.9)]!.toFixed(2)), payload_bytes: bytes,
-        serialize_ms_mean: Number((serializeMs / WAKES).toFixed(2)) }));
+        serialize_ms_mean: Number((serializeMs / WAKES).toFixed(2)), parse_ms_mean: Number((parseMs / WAKES).toFixed(2)),
+        client_map_ms_mean: Number((mapMs / WAKES).toFixed(2)) }));
     };
     await measure("warm-up", false);
     await measure("unchanged", false);
