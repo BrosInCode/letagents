@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
 import { join, relative, resolve, extname } from 'node:path';
-import { realpath, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
@@ -186,11 +186,18 @@ async function verifyEditor(editor: { id: string; path: string }): Promise<boole
     return true;
   } catch { return false; }
 }
-/** Identity of the installed bundle: an update, re-sign, or replacement changes it. */
+/**
+ * Identity of the installed bundle: an update, re-sign, or replacement
+ * changes it. Covers the bundle, Info.plist, the seal (CodeResources) and
+ * every file in Contents/MacOS, which holds the main executable.
+ */
 async function editorBundleFingerprint(editorPath: string): Promise<string | null> {
   try {
     const parts = [];
-    for (const path of [editorPath, join(editorPath, 'Contents', 'Info.plist'), join(editorPath, 'Contents', '_CodeSignature', 'CodeResources')]) {
+    const executables = await readdir(join(editorPath, 'Contents', 'MacOS')).catch(() => [] as string[]);
+    const paths = [editorPath, join(editorPath, 'Contents', 'Info.plist'), join(editorPath, 'Contents', '_CodeSignature', 'CodeResources'),
+      ...executables.sort().map(name => join(editorPath, 'Contents', 'MacOS', name))];
+    for (const path of paths) {
       const info = await stat(path, { bigint: true }).catch(() => null);
       parts.push(info ? [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(':') : '-');
     }

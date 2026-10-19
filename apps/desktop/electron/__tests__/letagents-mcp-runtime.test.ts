@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -137,6 +137,9 @@ test("a sealed runtime tree is hashed once while every entry's metadata is uncha
   const dependencyFile = join(nodeModules, "dependency", "index.js");
   mkdirSync(join(nodeModules, "dependency"), { recursive: true });
   writeFileSync(dependencyFile, "module.exports = 1;\n");
+  // A whole-second mtime can be put back exactly (utimes rounds sub-ms values).
+  const WHOLE_SECOND = 1_700_000_000;
+  utimesSync(dependencyFile, WHOLE_SECOND, WHOLE_SECOND);
   const expectedBundledTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(nodeModules);
   const resolveOnce = () => resolveLetAgentsMcpRuntime({ resourcesPath: resources, env: {}, expectedBundledTreeSha256 });
   const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
@@ -155,7 +158,14 @@ test("a sealed runtime tree is hashed once while every entry's metadata is uncha
   assert.equal(counts.hashes - before.hashes, 1, "five resolutions cost one complete hash");
   assert.equal(counts.metadataWalks - before.metadataWalks, 4, "later resolutions still walk the complete tree");
 
-  // Same size, deep in a dependency: only the metadata (ctime) reveals it.
+  // Same size and the old mtime put back: only ctime reveals this write.
+  const original = statSync(dependencyFile, { bigint: true });
+  writeFileSync(dependencyFile, "module.exports = 3;\n");
+  utimesSync(dependencyFile, WHOLE_SECOND, WHOLE_SECOND);
+  assert.equal(statSync(dependencyFile, { bigint: true }).mtimeNs, original.mtimeNs);
+  assert.throws(resolveOnce, /complete tree integrity check/, "a write that keeps mtime still forces a re-hash");
+
+  // Same size, deep in a dependency: only the metadata reveals it.
   writeFileSync(dependencyFile, "module.exports = 2;\n");
   const tampered = { ...counts };
   assert.throws(resolveOnce, /complete tree integrity check/);

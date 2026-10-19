@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, statSync } from "node:fs";
-import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -118,7 +118,6 @@ export function resetProjectBindingsStoreCachesForTest(): void {
   }
   openStores.clear();
   validatedBindings.clear();
-  filesystemNamespaces.clear();
 }
 
 function openStoreConnection(storePath: string): SqliteDatabase {
@@ -146,6 +145,14 @@ function openStoreConnection(storePath: string): SqliteDatabase {
   }
   return database;
 }
+
+function discardStore(storePath: string, database: SqliteDatabase): void {
+  if (openStores.get(storePath)?.database === database) openStores.delete(storePath);
+  try { database.close(); } catch { /* already closed */ }
+}
+
+/** Test-only hook run inside the bind transaction, just before COMMIT. */
+export const projectBindingsStoreTestHooks: { beforeCommit?: (database: SqliteDatabase) => void } = {};
 
 function releaseStore(_database: SqliteDatabase): void {
   // The connection is shared and long-lived; see openStore.
@@ -274,38 +281,37 @@ async function canonicalDirectory(rootPath: string): Promise<string> {
 }
 
 /**
- * Mount device number -> volume UUID (from df + diskutil). Device numbers are
- * reassigned when volumes mount, so an entry lives 10 minutes at most, and a
- * failed or empty answer is dropped at once so the next call asks again.
+ * Mount device number -> volume UUID (df + diskutil), shared only inside one
+ * listProjectBindings pass. Device numbers are reused when another volume is
+ * mounted at the same place, so an answer never outlives the pass.
  */
-const filesystemNamespaces = new Map<string, { expiresAt: number; namespace: Promise<string | null> }>();
-const FILESYSTEM_NAMESPACE_TTL_MS = 10 * 60_000;
-const FILESYSTEM_NAMESPACE_LIMIT = 64;
+type FilesystemNamespaceCache = Map<string, Promise<string | null>>;
 
-function cachedFilesystemNamespace(path: string, device: bigint): Promise<string | null> {
-  const key = device.toString();
-  const now = Date.now();
-  const hit = filesystemNamespaces.get(key);
-  if (hit && hit.expiresAt > now) return hit.namespace;
-  if (filesystemNamespaces.size >= FILESYSTEM_NAMESPACE_LIMIT) filesystemNamespaces.clear();
-  const entry = { expiresAt: now + FILESYSTEM_NAMESPACE_TTL_MS, namespace: defaultFilesystemNamespace(path) };
-  filesystemNamespaces.set(key, entry);
-  const forget = () => {
-    if (filesystemNamespaces.get(key) === entry) filesystemNamespaces.delete(key);
-  };
-  entry.namespace.then((namespace) => { if (!namespace) forget(); }, forget);
-  return entry.namespace;
+let filesystemNamespaceResolver: (path: string) => Promise<string | null> = defaultFilesystemNamespace;
+
+/** Test-only: replace the df + diskutil lookup used for the default namespace path. */
+export function setFilesystemNamespaceResolverForTest(
+  resolver: ((path: string) => Promise<string | null>) | null,
+): void {
+  filesystemNamespaceResolver = resolver ?? defaultFilesystemNamespace;
 }
 
 async function filesystemVerificationKeys(
   rootPath: string,
   context: DesktopProjectBindingContext,
   options: ProjectBindingsStoreOptions,
+  namespaceCache: FilesystemNamespaceCache = new Map(),
 ): Promise<FilesystemVerification> {
   const rootStats = await stat(rootPath, { bigint: true });
   const resolveNamespace = async (path: string, device: bigint): Promise<string | null> => {
     if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
-    return cachedFilesystemNamespace(path, device);
+    const cacheKey = device.toString();
+    let namespace = namespaceCache.get(cacheKey);
+    if (!namespace) {
+      namespace = filesystemNamespaceResolver(path);
+      namespaceCache.set(cacheKey, namespace);
+    }
+    return namespace;
   };
   const rootNamespace = await resolveNamespace(rootPath, rootStats.dev);
   const rootNamespaceKey = rootNamespace ? namespaceDigest(rootNamespace) : null;
@@ -399,12 +405,17 @@ function sameLocalProjectAfterGitSetup(
  *    worktree (canonicalDirectory runs on every call);
  *  - the folder and its `.git` directory are the same filesystem objects
  *    (device, inode, birth time) - a swapped folder or Git directory differs;
- *  - HEAD, config, packed-refs and refs/remotes/origin/HEAD are unchanged
- *    (device, inode, size, mtime, ctime) - these feed the derived room;
+ *  - HEAD, config, config.worktree, commondir, packed-refs and
+ *    refs/remotes/origin/HEAD are unchanged (device, inode, size, mtime,
+ *    ctime) - these feed the derived room;
+ *  - the global and system Git config files and the GIT_CONFIG_* variables
+ *    are unchanged (they can rewrite the origin URL through insteadOf);
  *  - fewer than 45 seconds have passed (fallback for anything not listed,
  *    for example a nested local branch file).
  * Only folders whose `.git` is a real directory are memoized. Plain folders,
- * linked worktrees (`.git` file) and nested checkouts validate in full.
+ * linked worktrees (`.git` file), nested checkouts and any repository whose
+ * config (or the global config) uses [include]/[includeIf] validate in full:
+ * an included file can change the origin URL without touching these files.
  */
 type ValidatedBinding = {
   row: string;
@@ -444,18 +455,49 @@ async function statIdentity(path: string, content: boolean): Promise<string> {
   }
 }
 
+const GIT_CONFIG_INCLUDE = /^\s*\[\s*include(?:if)?\b/im;
+
+function globalGitConfigPaths(): string[] {
+  const home = homedir();
+  const xdg = process.env.XDG_CONFIG_HOME?.trim() || join(home, ".config");
+  return [
+    process.env.GIT_CONFIG_GLOBAL?.trim() || join(home, ".gitconfig"),
+    join(xdg, "git", "config"),
+    process.env.GIT_CONFIG_SYSTEM?.trim() || "/etc/gitconfig",
+    "/opt/homebrew/etc/gitconfig",
+    "/usr/local/etc/gitconfig",
+  ];
+}
+
+async function readOptionalText(path: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
 async function bindingFingerprint(rootPath: string): Promise<string | null> {
   try {
     const gitPath = join(rootPath, ".git");
     const gitInfo = await lstat(gitPath);
     if (!gitInfo.isDirectory()) return null;
+    const configFiles = [join(gitPath, "config"), join(gitPath, "config.worktree"), ...globalGitConfigPaths()];
+    const configTexts = await Promise.all(configFiles.map(readOptionalText));
+    if (configTexts.some((text) => GIT_CONFIG_INCLUDE.test(text))) return null;
     const parts = await Promise.all([
       statIdentity(rootPath, false),
       statIdentity(gitPath, false),
-      ...["HEAD", "config", "packed-refs", join("refs", "remotes", "origin", "HEAD")]
+      ...["HEAD", "commondir", "packed-refs", join("refs", "remotes", "origin", "HEAD")]
         .map((name) => statIdentity(join(gitPath, name), true)),
+      ...configFiles.map((path) => statIdentity(path, true)),
     ]);
-    return JSON.stringify([rootPath, ...parts]);
+    const environment = Object.keys(process.env)
+      .filter((name) => name.startsWith("GIT_"))
+      .sort()
+      .map((name) => [name, process.env[name]]);
+    return JSON.stringify([rootPath, ...parts, environment]);
   } catch {
     return null;
   }
@@ -479,6 +521,7 @@ function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: s
 async function validateProjectBinding(
   binding: DesktopProjectBinding,
   options: ProjectBindingsStoreOptions,
+  namespaceCache: FilesystemNamespaceCache,
   rereadOnConflict: boolean,
 ): Promise<DesktopProjectBinding | null> {
   try {
@@ -499,7 +542,7 @@ async function validateProjectBinding(
     validatedBindings.delete(binding.id);
     projectBindingValidationCountsForTest.full += 1;
     const derived = await deriveFilesystemContext(rootPath);
-    const current = await filesystemVerificationKeys(rootPath, derived.context, options);
+    const current = await filesystemVerificationKeys(rootPath, derived.context, options, namespaceCache);
     const comparison = compareVerificationKeys(binding.verificationKeys, current);
     const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
     if (!comparison.matches && !gitSetup) return null;
@@ -517,7 +560,7 @@ async function validateProjectBinding(
     if (!rereadOnConflict) return null;
     const latest = readBindingById(binding.id, options);
     return latest
-      ? validateProjectBinding(latest, options, false)
+      ? validateProjectBinding(latest, options, namespaceCache, false)
       : null;
   } catch {
     return null;
@@ -539,8 +582,9 @@ export async function listProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBinding[]> {
   const bindings = readBindings(options);
+  const namespaceCache: FilesystemNamespaceCache = new Map();
   const available = await Promise.all(bindings.map((binding) =>
-    validateProjectBinding(binding, options, true)
+    validateProjectBinding(binding, options, namespaceCache, true)
   ));
   return available.filter((binding): binding is DesktopProjectBinding => Boolean(binding));
 }
@@ -604,13 +648,17 @@ export async function bindProjectRoot(input: {
       binding.createdAt,
       binding.updatedAt,
     );
+    projectBindingsStoreTestHooks.beforeCommit?.(database);
     database.exec("COMMIT");
     return binding;
   } catch (error) {
     try {
       database.exec("ROLLBACK");
     } catch {
-      // Preserve the transaction's original failure.
+      // The shared connection may still be inside the transaction. Discard
+      // it so no later caller inherits (or commits) half of this write.
+      // The original failure is preserved below.
+      discardStore(getProjectBindingsStorePath(options), database);
     }
     throw error;
   } finally {

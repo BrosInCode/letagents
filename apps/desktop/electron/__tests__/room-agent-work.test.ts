@@ -210,6 +210,8 @@ test('workspace link decoration memoizes the editor per extension and bundle; op
     await mkdir(join(path, 'Contents', '_CodeSignature'), { recursive: true });
     await writeFile(join(path, 'Contents', 'Info.plist'), '<plist/>');
     await writeFile(join(path, 'Contents', '_CodeSignature', 'CodeResources'), 'sealed-1');
+    await mkdir(join(path, 'Contents', 'MacOS'), { recursive: true });
+    await writeFile(join(path, 'Contents', 'MacOS', 'Electron'), 'binary-1');
     return path;
   };
   const editor = { id: 'com.microsoft.VSCode', path: await bundle('Code.app') };
@@ -270,6 +272,12 @@ test('workspace link decoration memoizes the editor per extension and bundle; op
     await writeFile(join(editor.path, 'Contents', '_CodeSignature', 'CodeResources'), 'sealed-2');
     assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
     assert.equal(count('/usr/bin/codesign'), 1, 'a re-signed or updated bundle is verified again');
+    commands.length = 0;
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 0);
+    await writeFile(join(editor.path, 'Contents', 'MacOS', 'Electron'), 'binary-2');
+    assert.deepEqual(await subject.resolveWorkspaceFileLinks(input), expected);
+    assert.equal(count('/usr/bin/codesign'), 1, 'a replaced main executable is verified again');
 
     commands.length = 0;
     subject.clearWorkspaceFileLinkCachesForTest();

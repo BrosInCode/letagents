@@ -11,8 +11,172 @@ import {
   bindProjectRoot,
   listProjectBindings,
   projectBindingValidationCountsForTest,
+  projectBindingsStoreTestHooks,
   resetProjectBindingsStoreCachesForTest,
+  setFilesystemNamespaceResolverForTest,
 } from "../main/project-bindings-store.js";
+
+function hostedRepo(temporary: string, name = "repo"): string {
+  const root = join(temporary, name);
+  mkdirSync(root, { recursive: true });
+  execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widgets.git"], { cwd: root });
+  return root;
+}
+
+const hostedContext = { roomIdentifier: "github.com/acme/widgets", gitRoom: null };
+
+test("a different volume behind the same device number fails closed once the memo expires", async (t) => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-volume-"));
+  const root = hostedRepo(temporary);
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite") };
+  resetProjectBindingsStoreCachesForTest();
+  // The default (df + diskutil) path, keyed by device number inside a pass.
+  let volume = "darwin:aaaaaaaa-0000-0000-0000-000000000000";
+  let lookups = 0;
+  setFilesystemNamespaceResolverForTest(async () => { lookups += 1; return volume; });
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  try {
+    await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    assert.equal((await listProjectBindings(storeOptions)).length, 1);
+    assert.equal(lookups, 2, "root and .git share one device: one lookup per pass after binding's own");
+    // Another APFS image mounted at the same path: same device number, new UUID.
+    volume = "darwin:bbbbbbbb-0000-0000-0000-000000000000";
+    now += 46_000;
+    assert.deepEqual(await listProjectBindings(storeOptions), [], "a changed volume UUID fails closed");
+    volume = "darwin:aaaaaaaa-0000-0000-0000-000000000000";
+    assert.equal((await listProjectBindings(storeOptions)).length, 1, "the original volume is accepted again");
+  } finally {
+    setFilesystemNamespaceResolverForTest(null);
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("Git config includes and other origin inputs keep the binding from being memoized or reused", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-include-"));
+  const root = hostedRepo(temporary);
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  resetProjectBindingsStoreCachesForTest();
+  const counts = projectBindingValidationCountsForTest;
+  try {
+    await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    await listProjectBindings(storeOptions);
+
+    // An included file can rewrite the origin URL with .git/config untouched.
+    const extra = join(temporary, "extra.cfg");
+    writeFileSync(extra, "[remote \"origin\"]\n\turl = git@github.com:acme/widgets.git\n");
+    execFileSync("git", ["config", "include.path", extra], { cwd: root });
+    execFileSync("git", ["config", "--unset", "remote.origin.url"], { cwd: root });
+    assert.equal(execFileSync("git", ["remote", "get-url", "origin"], { cwd: root, encoding: "utf8" }).trim(), "git@github.com:acme/widgets.git");
+    await listProjectBindings(storeOptions);
+    let full = counts.full;
+    assert.equal((await listProjectBindings(storeOptions)).length, 1);
+    assert.equal(counts.full - full, 1, "a repository with [include] is never memoized");
+    writeFileSync(extra, "[remote \"origin\"]\n\turl = git@github.com:other/repo.git\n");
+    assert.deepEqual(await listProjectBindings(storeOptions), [], "an included origin change fails closed at once");
+    execFileSync("git", ["config", "--unset", "include.path"], { cwd: root });
+    execFileSync("git", ["config", "remote.origin.url", "git@github.com:acme/widgets.git"], { cwd: root });
+
+    assert.equal((await listProjectBindings(storeOptions)).length, 1);
+    full = counts.full;
+    await listProjectBindings(storeOptions);
+    assert.equal(counts.full - full, 0, "without includes the binding is memoized again");
+    writeFileSync(join(root, ".git", "commondir"), "../elsewhere\n");
+    full = counts.full;
+    await listProjectBindings(storeOptions);
+    assert.equal(counts.full - full, 1, "a new commondir re-validates");
+    rmSync(join(root, ".git", "commondir"));
+    await listProjectBindings(storeOptions);
+    writeFileSync(join(root, ".git", "config.worktree"), "[core]\n");
+    full = counts.full;
+    await listProjectBindings(storeOptions);
+    assert.equal(counts.full - full, 1, "a config.worktree change re-validates");
+  } finally {
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a new folder around the same Git directory is caught by the root identity", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-root-"));
+  const root = hostedRepo(temporary);
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  resetProjectBindingsStoreCachesForTest();
+  try {
+    await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    assert.equal((await listProjectBindings(storeOptions)).length, 1);
+    renameSync(root, join(temporary, "old"));
+    mkdirSync(root);
+    renameSync(join(temporary, "old", ".git"), join(root, ".git"));
+    assert.deepEqual(await listProjectBindings(storeOptions), [], "the same .git in a new folder fails closed at once");
+  } finally {
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a change made while validation runs is never served from the memo", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-race-"));
+  const root = hostedRepo(temporary);
+  let swapDuringValidation = false;
+  const storeOptions = {
+    storePath: join(temporary, "bindings.sqlite"),
+    resolveFilesystemNamespace: async () => {
+      if (swapDuringValidation) {
+        swapDuringValidation = false;
+        // The room was already derived from the old remote; switch it now.
+        execFileSync("git", ["remote", "set-url", "origin", "git@github.com:other/repo.git"], { cwd: root });
+      }
+      return "test-volume";
+    },
+  };
+  resetProjectBindingsStoreCachesForTest();
+  try {
+    await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    swapDuringValidation = true;
+    assert.equal((await listProjectBindings(storeOptions)).length, 1, "this pass saw the old remote");
+    assert.deepEqual(await listProjectBindings(storeOptions), [], "the next pass must see the new remote");
+  } finally {
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a failed ROLLBACK discards the shared store connection", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-rollback-"));
+  const root = hostedRepo(temporary);
+  const storePath = join(temporary, "bindings.sqlite");
+  const storeOptions = { storePath, resolveFilesystemNamespace: async () => "test-volume" };
+  resetProjectBindingsStoreCachesForTest();
+  try {
+    projectBindingsStoreTestHooks.beforeCommit = (database) => {
+      const exec = database.exec.bind(database);
+      database.exec = (sql: string) => {
+        if (sql === "ROLLBACK") throw new Error("rollback failed");
+        exec(sql);
+      };
+      throw new Error("write failed");
+    };
+    await assert.rejects(
+      bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions),
+      /write failed/,
+    );
+    projectBindingsStoreTestHooks.beforeCommit = undefined;
+    // The abandoned transaction held the write lock; a discarded connection releases it.
+    const other = new DatabaseSync(storePath);
+    other.exec("PRAGMA busy_timeout = 100");
+    other.exec("BEGIN IMMEDIATE; ROLLBACK;");
+    other.close();
+    const binding = await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    assert.deepEqual((await listProjectBindings(storeOptions)).map((item) => item.id), [binding.id]);
+  } finally {
+    projectBindingsStoreTestHooks.beforeCommit = undefined;
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
 
 /** Put a counting `git` first on PATH; returns a reader for the spawn count. */
 function countGitSpawns(directory: string): { count: () => number; restore: () => void } {

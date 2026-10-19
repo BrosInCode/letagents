@@ -19,6 +19,23 @@ import {
 
 const visibleWindow = () => ({ isDestroyed: () => false, isVisible: () => true });
 
+/** Wait for the refresh queue to drain, failing fast (not timing out) on a refresh loop. */
+async function settled(withinMs = 5_000): Promise<void> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      waitForActiveRepoStatusRefreshForTest(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new assert.AssertionError({
+          message: `the watcher did not settle within ${withinMs} ms: refreshes keep triggering refreshes`,
+        })), withinMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function countGitSpawns(directory: string): { count: () => number; restore: () => void } {
   const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
   const bin = join(directory, "bin");
@@ -56,7 +73,7 @@ test("the reconciliation tick is one git status unless repository metadata chang
   const git = countGitSpawns(temporary);
   try {
     await startRepoStatusWatch(root);
-    await waitForActiveRepoStatusRefreshForTest();
+    await settled();
 
     let before = git.count();
     await refreshActiveRepoStatusForTest({ full: true });
@@ -121,16 +138,16 @@ test("working-tree events inside ignored directories do not refresh status", asy
   });
   try {
     await startRepoStatusWatch(root);
-    await waitForActiveRepoStatusRefreshForTest();
+    await settled();
     await new Promise((resolve) => setTimeout(resolve, 600));
-    await waitForActiveRepoStatusRefreshForTest();
+    await settled();
     const baseline = refreshes;
     // Before this filter: each burst of writes below node_modules cost a git status.
     for (let index = 0; index < 20; index += 1) {
       writeFileSync(join(root, "node_modules", "pkg", `file-${index}.js`), `${index}\n`);
     }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
-    await waitForActiveRepoStatusRefreshForTest();
+    await settled();
     assert.equal(refreshes, baseline, "ignored writes never refresh status");
     assert.equal(asked.filter((directory) => directory === "node_modules").length, 1, "one check per directory");
 
@@ -165,13 +182,11 @@ test("git reading its own index does not start the next refresh; a real index wr
   });
   try {
     await startRepoStatusWatch(root);
-    await waitForActiveRepoStatusRefreshForTest();
-    await refreshActiveRepoStatusForTest({ status: true });
+    await new Promise((resolve) => setTimeout(resolve, 600));
     const baseline = refreshes;
     // Before this check: each status read of .git/index raised a "change"
     // event on macOS, so an idle repository refreshed about 3 times a second.
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    await waitForActiveRepoStatusRefreshForTest();
     assert.ok(refreshes - baseline <= 1, `an idle repository settles (${refreshes - baseline} refreshes in 2 s)`);
 
     const refreshed = new Promise<void>((resolve) => { resolveRefresh = resolve; });

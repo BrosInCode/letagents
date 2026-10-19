@@ -350,6 +350,16 @@ test("a fresh Cursor model list is returned before the managed profile is prepar
   await listDesktopAgentProviderModels("cursor", { repoRootPath });
   assert.equal(existsSync(join(tempDir, "profile-skip", "other-home")), true, "a different profile location is a different key");
   process.env.LETAGENTS_CURSOR_MANAGED_HOME = managedHome;
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = join(tempDir, "profile-skip-other-user");
+    mkdirSync(process.env.HOME, { recursive: true });
+    rmSync(managedHome, { recursive: true, force: true });
+    await listDesktopAgentProviderModels("cursor", { repoRootPath });
+    assert.equal(existsSync(managedHome), true, "a different HOME is a different key");
+  } finally {
+    process.env.HOME = previousHome;
+  }
   await listDesktopAgentProviderModels("cursor", { repoRootPath, refreshModels: true });
   assert.equal(existsSync(managedHome), true, "refreshModels prepares the profile again");
 });
