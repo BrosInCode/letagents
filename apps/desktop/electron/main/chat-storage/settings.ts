@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -98,19 +98,61 @@ function buildSettings(input: {
   };
 }
 
+/**
+ * In-memory copy of chat-storage.json.
+ *
+ * Problem: ~79 call sites resolve the room storage mode (live metadata, polls,
+ * typing heartbeat, approvals), and each one read and parsed the file, up to
+ * four times per call.
+ *
+ * Rule: serve the parsed settings from memory while one `stat` of the file shows
+ * the same inode, mtime and size. This catches writes by other processes (the
+ * MCP server reads the file and tests write it). `writeChatStorageSettings`
+ * drops the copy before and after it writes, so our own writes show at once.
+ * Bound: one entry. Callers get a copy, so they cannot change the cached value.
+ */
+type CachedChatStorageSettings = {
+  fingerprint: string | null;
+  settings: DesktopChatStorageSettings;
+};
+let cachedChatStorageSettings: CachedChatStorageSettings | null = null;
+
+function cloneSettings(settings: DesktopChatStorageSettings): DesktopChatStorageSettings {
+  return { ...settings, roomOverrides: { ...settings.roomOverrides } };
+}
+
+async function fingerprintChatStorageFile(): Promise<string | null> {
+  try {
+    const info = await stat(chatStorageSettingsPath);
+    return `${info.ino}:${info.mtimeMs}:${info.size}`;
+  } catch {
+    return null;
+  }
+}
+
+export function clearChatStorageSettingsCacheForTest(): void {
+  cachedChatStorageSettings = null;
+}
+
 export async function readChatStorageSettings(): Promise<DesktopChatStorageSettings> {
+  const fingerprint = await fingerprintChatStorageFile();
+  const cached = cachedChatStorageSettings;
+  if (cached && cached.fingerprint === fingerprint) return cloneSettings(cached.settings);
+  let settings: DesktopChatStorageSettings;
   try {
     const raw = await readFile(chatStorageSettingsPath, "utf8");
     const parsed = JSON.parse(raw) as PersistedChatStorageSettings;
     const mode = normalizeChatStorageMode(parsed.defaultMode ?? parsed.mode);
-    return buildSettings({
+    settings = buildSettings({
       mode,
       roomOverrides: normalizeRoomOverrides(parsed.roomOverrides),
       savedAt: parsed.savedAt,
     });
   } catch {
-    return buildSettings({ mode: "cloud" });
+    settings = buildSettings({ mode: "cloud" });
   }
+  cachedChatStorageSettings = { fingerprint, settings };
+  return cloneSettings(settings);
 }
 
 export async function readLocalProfileId(): Promise<string> {
@@ -171,12 +213,20 @@ async function writeChatStorageSettings(
     savedAt: new Date().toISOString(),
   } satisfies PersistedChatStorageSettings;
   await mkdir(dirname(chatStorageSettingsPath), { recursive: true });
-  await writeFile(chatStorageSettingsPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-  return buildSettings({
+  cachedChatStorageSettings = null;
+  try {
+    await writeFile(chatStorageSettingsPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  } finally {
+    cachedChatStorageSettings = null;
+  }
+  const written = buildSettings({
     mode: normalizeChatStorageMode(next.defaultMode ?? next.mode),
     roomOverrides: normalizeRoomOverrides(next.roomOverrides),
     savedAt: next.savedAt,
   });
+  // The next read re-reads the file once. That avoids caching a fingerprint
+  // that another process could change between our write and our stat.
+  return written;
 }
 
 export async function setChatStorageMode(

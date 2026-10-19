@@ -14,7 +14,7 @@ import {
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "./rooms/local-store.js";
-import { getLocalChatMessages } from "./rooms/messages/local-store.js";
+import { getLocalChatChangeStamp, getLocalChatMessages } from "./rooms/messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
 import { subscribeLocalTasks } from "./rooms/local-task-subscription.js";
 import {
@@ -1038,6 +1038,8 @@ function scheduleCatchUpRetry(
   }, catchUpRetryDelayMs);
 }
 
+const localPollFallbackQueryMs = 10_000;
+
 async function pollLocalDesktopRoomMessages(
   stream: NonNullable<typeof activeRoomStream>,
   localRoomIdentifier: string,
@@ -1047,8 +1049,23 @@ async function pollLocalDesktopRoomMessages(
     roomIdentifier: stream.roomIdentifier,
   });
 
+  // Skip the message query while the database shows no change since the last
+  // query (no write here, no commit by another process). A slow fallback
+  // still queries every `localPollFallbackQueryMs`, in case a change is missed.
+  let lastQueryKey: string | null = null;
+  let lastQueryAt = 0;
   while (isCurrentRoomStream(stream)) {
     try {
+      const queryKey = `${await getLocalChatChangeStamp()}|${localRoomIdentifier}|${stream.lastMessageId ?? ""}`;
+      if (
+        lastQueryKey === queryKey &&
+        Date.now() - lastQueryAt < localPollFallbackQueryMs
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        continue;
+      }
+      lastQueryAt = Date.now();
+      lastQueryKey = null;
       const page = await getLocalChatMessages(localRoomIdentifier, {
         after: stream.lastMessageId,
         limit: roomMessageHistoryPageSize,
@@ -1070,6 +1087,9 @@ async function pollLocalDesktopRoomMessages(
         }
         stream.lastMessageId = message.id;
       }
+      // Remember the key from BEFORE the query. A write that landed during the
+      // query changes the next key, so it cannot be missed.
+      lastQueryKey = page.has_more ? null : queryKey;
       await new Promise((resolve) => setTimeout(resolve, page.messages.length ? 250 : 1500));
     } catch (error) {
       if (!isCurrentRoomStream(stream)) return;

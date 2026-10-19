@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -132,6 +132,7 @@ function storePath(): string {
 // passed through main-process functions and is never put in IPC return values.
 export function encryptSupervisorGrantForStorage(token: string, storage = getStorage()): string {
   if (!storage.isEncryptionAvailable()) {
+    storageProbeCache = null;
     throw new DesktopSecureStorageUnavailableError(
       "macOS Keychain encryption is unavailable; host grant was not stored.",
     );
@@ -139,6 +140,7 @@ export function encryptSupervisorGrantForStorage(token: string, storage = getSto
   try {
     return `safe:${storage.encryptString(token).toString("base64")}`;
   } catch {
+    storageProbeCache = null;
     throw new DesktopSecureStorageUnavailableError(
       "OS-backed encryption became unavailable while saving the host grant.",
     );
@@ -151,8 +153,36 @@ export function encryptSupervisorGrantForStorage(token: string, storage = getSto
  * login Keychain is locked or its password is out of sync.
  */
 export function getDesktopSupervisorGrantStorageStatus(
-  storage = getStorage(),
+  storage?: ReturnType<typeof getStorage>,
   platform = process.platform,
+): DesktopSecureStorageStatus {
+  // Only the real OS storage is cached. A caller that passes its own storage
+  // (tests, mocks) always gets a fresh probe.
+  const useCache = storage === undefined && platform === process.platform;
+  const now = Date.now();
+  if (useCache && storageProbeCache && now < storageProbeCache.expiresAt) return { ...storageProbeCache.status };
+  const status = probeDesktopSupervisorGrantStorage(storage ?? getStorage(), platform);
+  // Never keep a failure: "Check again" after an unlock must probe again at once.
+  storageProbeCache = useCache && status.available ? { status, expiresAt: now + STORAGE_PROBE_TTL_MS } : null;
+  return { ...status };
+}
+
+/**
+ * Keychain probe cache.
+ * Problem: each Add-Agent preflight did an encrypt plus decrypt round trip.
+ * Rule: a successful probe of the real OS storage is reused for 30 s. A failed
+ * probe is never cached. A failed encrypt or decrypt of a real grant clears it.
+ */
+const STORAGE_PROBE_TTL_MS = 30_000;
+let storageProbeCache: { status: DesktopSecureStorageStatus; expiresAt: number } | null = null;
+
+export function clearDesktopSupervisorGrantStorageStatusCache(): void {
+  storageProbeCache = null;
+}
+
+function probeDesktopSupervisorGrantStorage(
+  storage: ReturnType<typeof getStorage>,
+  platform: NodeJS.Platform,
 ): DesktopSecureStorageStatus {
   const unavailable = (): DesktopSecureStorageStatus => ({
     available: false,
@@ -177,8 +207,9 @@ export function getDesktopSupervisorGrantStorageStatus(
 }
 
 export function decryptSupervisorGrantFromStorage(value: string, storage = getStorage()): string | null {
-  if (!value.startsWith("safe:") || !storage.isEncryptionAvailable()) return null;
-  try { return storage.decryptString(Buffer.from(value.slice(5), "base64")); } catch { return null; }
+  if (!value.startsWith("safe:")) return null;
+  if (!storage.isEncryptionAvailable()) { storageProbeCache = null; return null; }
+  try { return storage.decryptString(Buffer.from(value.slice(5), "base64")); } catch { storageProbeCache = null; return null; }
 }
 
 function toMetadata(response: {
@@ -353,8 +384,48 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
   };
 }
 
+/**
+ * In-memory copy of the grant registry.
+ *
+ * Problem: every `list-agents` and every daemon state push re-read and
+ * re-normalized the whole registry file to project agent keys.
+ * Rule: keep the parsed registry while one `stat` shows the same path, inode,
+ * mtime and size. Only this Electron process writes the file (the daemon never
+ * does), and `writeRegistry` drops the copy before and after each write. The
+ * stat also catches a second app instance or a manual edit.
+ * Bound: one entry. Writers get a deep copy, so a failed mutation cannot leave
+ * the shared copy half changed. Pure readers use the shared copy and must not
+ * change it. A positive grant is never kept past a changed file.
+ */
+let registrySnapshot: { path: string; fingerprint: string | null; registry: StoredGrantRegistry | null } | null = null;
+
+async function readRegistryFingerprint(path: string): Promise<string | null> {
+  try {
+    const info = await stat(path);
+    return `${info.ino}:${info.mtimeMs}:${info.size}`;
+  } catch {
+    return null;
+  }
+}
+
+async function readRegistryShared(): Promise<Readonly<StoredGrantRegistry> | null> {
+  const path = storePath();
+  const fingerprint = await readRegistryFingerprint(path);
+  const cached = registrySnapshot;
+  if (cached && cached.path === path && cached.fingerprint === fingerprint) return cached.registry;
+  let registry: StoredGrantRegistry | null;
+  try { registry = registryFrom(JSON.parse(await readFile(path, "utf8"))); } catch { registry = null; }
+  registrySnapshot = { path, fingerprint, registry };
+  return registry;
+}
+
 async function readRegistry(): Promise<StoredGrantRegistry | null> {
-  try { return registryFrom(JSON.parse(await readFile(storePath(), "utf8"))); } catch { return null; }
+  const shared = await readRegistryShared();
+  return shared ? structuredClone(shared) as StoredGrantRegistry : null;
+}
+
+export function clearDesktopSupervisorGrantRegistryCacheForTest(): void {
+  registrySnapshot = null;
 }
 
 async function writeRegistry(registry: StoredGrantRegistry): Promise<void> {
@@ -364,9 +435,14 @@ async function writeRegistry(registry: StoredGrantRegistry): Promise<void> {
   // the old complete registry or the new complete registry, never JSON that
   // drops a different agent's credential.
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(registry)}\n`, { encoding: "utf8", mode: 0o600 });
-  await rename(temporaryPath, path);
-  await chmod(path, 0o600);
+  registrySnapshot = null;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(registry)}\n`, { encoding: "utf8", mode: 0o600 });
+    await rename(temporaryPath, path);
+    await chmod(path, 0o600);
+  } finally {
+    registrySnapshot = null;
+  }
 }
 
 /** Serialize every registry read-modify-write in this Electron main process. */
@@ -945,16 +1021,19 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
 
 /** Return the stored canonical identity for one exact durable manifest entry. */
 export async function readDesktopSupervisorGrantAgentKeyForEntry(entryId: string): Promise<string | null> {
-  const registry = await readRegistry();
+  const registry = await readRegistryShared();
   const agentKey = registry?.entryAgentKeys[entryId.trim()];
   return agentKey?.trim() ? canonicalSupervisorGrantAgentKey(agentKey) : null;
 }
 
-/** Read the renderer-safe identity projection with one Keychain decrypt per manifest refresh. */
+/**
+ * Read the renderer-safe identity projection. It reads only registry metadata:
+ * no Keychain decrypt, and no file read while the registry file is unchanged.
+ */
 export async function readDesktopSupervisorGrantAgentKeysForEntries(
   entryIds: readonly string[],
 ): Promise<Map<string, string>> {
-  const registry = await readRegistry();
+  const registry = await readRegistryShared();
   const result = new Map<string, string>();
   for (const rawEntryId of entryIds) {
     const entryId = rawEntryId.trim();
@@ -986,7 +1065,7 @@ export async function readDesktopSupervisorGrantRevocationAttestationForEntry(
 ): Promise<"exact" | "none" | null> {
   const normalizedEntryId = entryId.trim();
   if (!normalizedEntryId) return null;
-  const registry = await readRegistry();
+  const registry = await readRegistryShared();
   if (!registry) return null;
   const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
   if (!receipt) return null;
@@ -1197,7 +1276,9 @@ export async function getOrCreateDesktopSupervisorAgentIdentity(input: {
 }
 
 export async function clearDesktopSupervisorGrant(): Promise<void> {
+  registrySnapshot = null;
   await rm(storePath(), { force: true });
+  registrySnapshot = null;
 }
 
 export async function revokeDesktopSupervisorGrant(options: GrantStorageOptions = {}): Promise<void> {
@@ -1237,7 +1318,7 @@ export async function revokeDesktopSupervisorGrant(options: GrantStorageOptions 
     if (Object.keys(current.grants).length === 0
       && Object.keys(current.entryAgentKeys).length === 0
       && Object.keys(current.credentialRevocations).length === 0
-      && Object.keys(current.purgeRevocationReceipts).length === 0) await rm(storePath(), { force: true });
+      && Object.keys(current.purgeRevocationReceipts).length === 0) { registrySnapshot = null; await rm(storePath(), { force: true }); registrySnapshot = null; }
     else await writeRegistry(current);
   });
 }

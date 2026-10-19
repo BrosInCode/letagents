@@ -915,6 +915,7 @@ export class SupervisorDaemon {
       onPermissionChanged: entryId => {
         this.executionDelegations.requestDecisions(entryId);
         this.requestConvergence(entryId);
+        this.stateWatch.notify(); // a request or its resolution wakes the desktop's state watch
       },
       automaticReview: createAutomaticPermissionReviewer({ custody: this.workerRuntimeCustody, isClosing: () => this.handoffScheduled,
         daemonGeneration: () => this.singleton.currentGeneration, nowMs: () => this.nowMs() }),
