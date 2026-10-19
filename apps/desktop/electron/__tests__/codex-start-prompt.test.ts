@@ -45,6 +45,7 @@ test("Codex start prompts give a polling worker its join, codename and registrat
   assert.match(pollingPrompt, /direct @mention of your exact ID\/name/);
   assert.match(pollingPrompt, /literal @everyone broadcast/);
   assert.match(pollingPrompt, /unassigned task updates/);
+  assert.match(pollingPrompt, /Do not claim unassigned tasks on your own/);
   assert.match(pollingPrompt, /Never react to your own output/);
   assert.match(pollingPrompt, /Stop immediately if a browser\/user room message text exactly equals: \/stop-codex-room/);
   assert.match(pollingPrompt, /reply in this thread with exactly: LOCAL_CODEX_ROOM_test_DONE/);

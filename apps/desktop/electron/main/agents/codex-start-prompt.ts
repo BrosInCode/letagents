@@ -69,7 +69,7 @@ export function buildCodexStartPrompt(input: {
     ? [
       "Codex room activation policy: every observed message remains shared transcript context, and you must advance the cursor for every observed message (including last_observed_message_id when no visible messages are returned).",
       "Only reply or start work for a direct @mention of your exact ID/name, a literal @everyone broadcast, a task assigned or actively leased to your exact worker, or a reply/thread where you were directly addressed or are already a participant.",
-      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
+      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Do not claim unassigned tasks on your own; work starts when a task is assigned to you. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
     ]
     : [];
   const deadlineInstruction =
