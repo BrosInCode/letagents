@@ -181,6 +181,8 @@ type HarnessOptions = {
   pacing?: WorkerAuthorityCoordinatorOptions["pacing"];
   holdIngressForBearerRotation?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["holdIngressForBearerRotation"]>;
   bearerSuccessorBinding?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorBinding"]>;
+  bearerSuccessorAbandoned?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorAbandoned"]>;
+  bindError?: Error;
 };
 
 function fixture(options: HarnessOptions = {}) {
@@ -231,6 +233,7 @@ function fixture(options: HarnessOptions = {}) {
     recordExecutionBinding: options.recordExecutionBinding ?? (async () => { events.push("binding:record-execution"); }),
     bind: async (input, bindOptions) => {
       events.push("binding:bind");
+      if (options.bindError) throw options.bindError;
       credential = input.agent_session_token;
       binding = workerBinding({
         entry_id: input.entry_id,
@@ -464,6 +467,7 @@ function fixture(options: HarnessOptions = {}) {
       start: async () => { deliveryStarts += 1; events.push("delivery:start"); },
       ...(options.holdIngressForBearerRotation ? { holdIngressForBearerRotation: options.holdIngressForBearerRotation } : {}),
       ...(options.bearerSuccessorBinding ? { bearerSuccessorBinding: options.bearerSuccessorBinding } : {}),
+      ...(options.bearerSuccessorAbandoned ? { bearerSuccessorAbandoned: options.bearerSuccessorAbandoned } : {}),
     },
     convergence: {
       request: (_entryId, kind) => { convergenceRequests += 1; convergenceKinds.push(kind); events.push("convergence:request"); },
@@ -1304,6 +1308,21 @@ test("binding a new credential for the same worker session tells the lane, befor
 
   await harness.subject.bindWorkerSession({ ...input, agent_session_id: "session-other", agent_session_token: "other-secret" });
   assert.deepEqual(successors(), ["successor:agent-1"], "another session is not this lane's successor");
+});
+
+test("a failed bind of the announced successor tells the lane that no successor is coming", async () => {
+  const harness = fixture({
+    bindError: new Error("bind failed"),
+    bearerSuccessorBinding: (entryId) => { harness.events.push(`successor:${entryId}`); },
+    bearerSuccessorAbandoned: (entryId) => { harness.events.push(`abandoned:${entryId}`); },
+  });
+  await assert.rejects(harness.subject.bindWorkerSession({
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", agent_session_token: "rotated-secret", credential_ref: "rotated-ref",
+    api_url: "https://letagents.test",
+  }), /bind failed/);
+  const marks = harness.events.filter((event) => event.startsWith("successor:") || event.startsWith("abandoned:"));
+  assert.deepEqual(marks, ["successor:agent-1", "abandoned:agent-1"]);
 });
 
 test("binding adopts a provided credential reference even when the worker bearer is unchanged", async () => {

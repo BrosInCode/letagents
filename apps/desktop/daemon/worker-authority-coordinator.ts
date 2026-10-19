@@ -259,6 +259,8 @@ export type WorkerAuthorityCoordinatorOptions = {
     holdIngressForBearerRotation?(entryId: string): () => void;
     /** The successor of a held bearer is about to be bound; see holdIngressForBearerRotation. */
     bearerSuccessorBinding?(entryId: string): void;
+    /** The bind announced by bearerSuccessorBinding failed: no successor is coming. */
+    bearerSuccessorAbandoned?(entryId: string): void;
   };
   convergence: {
     request(entryId: string, kind?: ConvergenceRequestKind): void;
@@ -647,12 +649,19 @@ export class WorkerAuthorityCoordinator {
     await assertAuthorityCurrent();
     // Only the credential changes: the lane's authority check fails from this
     // bind until the lane adopts the new bearer, and the lane waits for that.
+    let successorNoted = false;
+    const abandonSuccessor = () => {
+      if (!successorNoted) return;
+      successorNoted = false;
+      this.options.delivery.bearerSuccessorAbandoned?.(input.entry_id);
+    };
     if (currentBinding && !exactCurrentBinding
       && currentBinding.entry_id === input.entry_id
       && currentBinding.room_id === input.room_id
       && currentBinding.work_attempt_id === input.work_attempt_id
       && currentBinding.execution_generation_id === input.execution_generation_id
       && currentBinding.agent_session_id === input.agent_session_id) {
+      successorNoted = true;
       this.options.delivery.bearerSuccessorBinding?.(input.entry_id);
     }
     const binding = exactCurrentBinding && currentBinding
@@ -663,7 +672,7 @@ export class WorkerAuthorityCoordinator {
             && currentBinding.work_attempt_id === entry.work_attempt_id
             ? currentBinding.room_cursor
             : attempt.checkpoints.at(-1)?.room_cursor ?? null,
-        } : undefined);
+        } : undefined).catch((error: unknown) => { abandonSuccessor(); throw error; });
     this.options.custody.installLiveBinding(input.entry_id, {
       agentSessionId: binding.agent_session_id,
       executionGenerationId: binding.execution_generation_id,
@@ -685,7 +694,10 @@ export class WorkerAuthorityCoordinator {
         // Failing here left the agent latched in recovery behind a binding
         // that every retry then found exact and skipped. After the room
         // refused the bearer, only an accepted announcement proves it again.
-        if (announcement === "require_accepted" || !deferrableNativeActivityFailure(error)) throw error;
+        if (announcement === "require_accepted" || !deferrableNativeActivityFailure(error)) {
+          abandonSuccessor();
+          throw error;
+        }
       }
     }
     await assertAuthorityCurrent();

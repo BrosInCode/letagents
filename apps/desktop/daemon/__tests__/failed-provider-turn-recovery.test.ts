@@ -706,6 +706,53 @@ test("a rotation that revokes the bearer before the lane adopts its successor is
   }
 });
 
+test("a failed successor bind clears the flag, and a 403 during a hold is a refusal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-rotation-403-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let status: 401 | 403 = 403;
+  let refuseNow = false;
+  let bound = "bearer-1";
+  const polledWith: string[] = [];
+  const delivery: SupervisedAgentDelivery = new SupervisedAgentDelivery(store, roomTurnPort(async () => { throw new Error("not used"); }), {
+    poll: async ({ bearer, signal }) => {
+      polledWith.push(bearer);
+      if (refuseNow) throw new SupervisedRoomAuthorizationError(`Supervised room poll failed with HTTP ${status}.`, status);
+      await new Promise((resolve) => { setTimeout(resolve, 5); signal.addEventListener("abort", resolve, { once: true }); });
+      return {};
+    },
+    publish: async () => { throw new Error("not used"); },
+  }, async (authority) => authority.bearer === bound, 10, undefined,
+  (_delayMs, signal) => pause(2, signal));
+  try {
+    await store.bootstrapCursor({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "0" });
+    await delivery.start(deliveryAgent(null));
+    assert.ok(await eventually(() => polledWith.length >= 2));
+
+    // A 403 is no rotation: it is the room's refusal even while a hold stands.
+    const release = delivery.holdIngressForBearerRotation("agent-1");
+    refuseNow = true;
+    assert.ok(await eventually(() => delivery.roomRefusesAccess("agent-1")), "a 403 under a hold is reported as a refusal");
+    refuseNow = false;
+    release();
+
+    // A bind that failed after announcing its successor leaves no flag behind.
+    const release2 = delivery.holdIngressForBearerRotation("agent-1");
+    delivery.bearerSuccessorBinding("agent-1");
+    delivery.bearerSuccessorAbandoned("agent-1");
+    bound = "elsewhere";
+    // ensureStarted fills only an absent lane: it starts one once the old lane has ended.
+    assert.ok(await eventually(async () => {
+      await delivery.ensureStarted({ ...deliveryAgent(null), bearer: "elsewhere" });
+      return polledWith.at(-1) === "elsewhere";
+    }), "the old lane ended without waiting out the hold, so a new one could start");
+    release2();
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the production room poll tells a refused bearer apart from any other failure", async () => {
   const previousFetch = globalThis.fetch;
   const poll = () => productionSupervisedDeliveryHttp.poll({

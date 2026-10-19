@@ -752,7 +752,7 @@ export class SupervisedAgentDelivery {
       } catch (error) {
         // The rotation revoked this bearer: wait for its successor, with no
         // refusal, health change or backoff.
-        const hold = error instanceof SupervisedRoomAuthorizationError ? this.bearerHold(agent.agentId, bearer) : null;
+        const hold = error instanceof SupervisedRoomAuthorizationError && error.status === 401 ? this.bearerHold(agent.agentId, bearer) : null;
         if (hold) {
           this.bearerRevoked(hold);
           continue;
@@ -841,7 +841,7 @@ export class SupervisedAgentDelivery {
       const bearer = agent.bearer;
       const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal }).catch((error: unknown) => {
         if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer
-          && !this.bearerHold(agent.agentId, bearer)) owner.roomRefused = true;
+          && (error.status !== 401 || !this.bearerHold(agent.agentId, bearer))) owner.roomRefused = true;
         throw error;
       });
       if (owner) this.roomAcceptsAgain(agent.agentId, owner);
@@ -958,6 +958,13 @@ export class SupervisedAgentDelivery {
     const owner = this.loopOwners.get(agentId);
     const hold = owner ? this.bearerHold(agentId, owner.bearer) : null;
     if (hold) hold.successorBinding = true;
+  }
+
+  /** The announced successor bind failed: a later loss of authority is no rotation. */
+  bearerSuccessorAbandoned(agentId: string): void {
+    const owner = this.loopOwners.get(agentId);
+    const hold = owner ? this.bearerHold(agentId, owner.bearer) : null;
+    if (hold) hold.successorBinding = false;
   }
 
   /**
@@ -1855,7 +1862,7 @@ export class SupervisedAgentDelivery {
         const fresh = await this.http.context({ roomId: agent.roomId, apiUrl: agent.apiUrl,
           bearer, signal: turnController.signal }).catch((error: unknown) => {
           if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) {
-            const hold = this.bearerHold(agent.agentId, bearer);
+            const hold = error.status === 401 ? this.bearerHold(agent.agentId, bearer) : null;
             if (hold) this.bearerRevoked(hold);
             else owner.roomRefused = true;
           }
