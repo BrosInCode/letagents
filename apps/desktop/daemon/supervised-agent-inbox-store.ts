@@ -36,15 +36,7 @@ import { sameInboxHead, finalStates, RETAINED_TIMELINE_EVENTS_PER_RECEIPT, trans
 export { sameInboxHead } from "./supervised-agent-inbox-store/inbox-rules.js";
 import { run, UNTOUCHED_PENDING_SQL, UNTOUCHED_BLOCKED_FOLLOW_UP_SQL, RECEIPT_METADATA_COLUMNS, RECEIPT_SELECTION_SQL, INBOX_READS } from "./supervised-agent-inbox-store/sql.js";
 import { rowToItem, rowToReceiptProjectionMetadata, rowToItemMetadata, rowToProviderTurnBinding, sameProviderTurnBinding, rowToEvent, rowToInspectorItem, rowToContinuationRepair, safeOutcome, safeSource, boundaryToDetail } from "./supervised-agent-inbox-store/row-mapping.js";
-
-class EffectAuthorityError extends Error {}
-const MAX_EFFECTS_PER_PROVIDER_TURN = 128;
-const MAX_UNRESOLVED_EFFECTS_PER_AGENT = 128;
-const MAX_EFFECT_REQUEST_BYTES = 64 * 1024;
-const MAX_EFFECT_REQUEST_BYTES_PER_PROVIDER_TURN = 512 * 1024;
-const MAX_EFFECT_RESULT_BYTES = 256 * 1024;
-const MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN = 1024 * 1024;
-const MAX_EFFECT_ERROR_BYTES = 16 * 1024;
+import { EffectAuthorityError, MAX_EFFECTS_PER_PROVIDER_TURN, MAX_UNRESOLVED_EFFECTS_PER_AGENT, MAX_EFFECT_REQUEST_BYTES, MAX_EFFECT_REQUEST_BYTES_PER_PROVIDER_TURN, MAX_EFFECT_RESULT_BYTES, MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN, MAX_EFFECT_ERROR_BYTES, serializeEffectJson, effectRequestFingerprint, truncateEffectError, rowToEffect, rowToTombstonedEffect } from "./supervised-agent-inbox-store/effect-values.js";
 
 /** Tells one opened connection from the next, so a version read on a replaced connection never equals an older one. */
 const connectionIdentities = new WeakMap<DatabaseSync, number>();
@@ -2655,51 +2647,5 @@ export class SupervisedAgentInboxStore {
   private pruneAgentHistory(database: DatabaseSync, agentId: string, protectedUncertainEffectId: string | null = null): void {
     pruneSupervisedAgentHistory(database, agentId, this.now, protectedUncertainEffectId);
   }
-}
-
-function serializeEffectJson(value: unknown, label: string): string {
-  let serialized: string | undefined;
-  try { serialized = JSON.stringify(value); }
-  catch { throw new Error(`A supervised effect ${label} must be JSON-serializable.`); }
-  if (serialized === undefined) throw new Error(`A supervised effect ${label} must be a JSON value.`);
-  return serialized;
-}
-
-function effectRequestFingerprint(requestJson: string): string {
-  return createHash("sha256").update(requestJson).digest("hex");
-}
-
-function truncateEffectError(error: string): string {
-  if (Buffer.byteLength(error, "utf8") <= MAX_EFFECT_ERROR_BYTES) return error;
-  const suffix = "… [truncated]";
-  const prefixBytes = MAX_EFFECT_ERROR_BYTES - Buffer.byteLength(suffix, "utf8");
-  const prefix = Buffer.from(error, "utf8").subarray(0, prefixBytes).toString("utf8").replace(/\uFFFD+$/u, "");
-  return `${prefix}${suffix}`;
-}
-
-function rowToEffect(row: Row): SupervisedEffectRecord {
-  return {
-    effect_id: String(row.effect_id), agent_id: String(row.agent_id), room_id: String(row.room_id),
-    execution_generation_id: String(row.execution_generation_id), provider_turn_id: String(row.provider_turn_id),
-    mcp_request_id: String(row.mcp_request_id), tool_name: String(row.tool_name), request: JSON.parse(String(row.request_json)),
-    mutation: Number(row.mutation) === 1,
-    state: String(row.state) as SupervisedEffectRecord["state"],
-    result: row.result_json === null ? null : JSON.parse(String(row.result_json)),
-    error: row.error === null ? null : String(row.error),
-    created_at: String(row.created_at), updated_at: String(row.updated_at),
-  };
-}
-
-function rowToTombstonedEffect(row: Row): SupervisedEffectRecord {
-  return {
-    effect_id: String(row.effect_id), agent_id: String(row.agent_id), room_id: String(row.room_id),
-    execution_generation_id: String(row.execution_generation_id), provider_turn_id: String(row.provider_turn_id),
-    mcp_request_id: String(row.mcp_request_id), tool_name: String(row.tool_name), request: null,
-    mutation: Number(row.mutation) === 1,
-    state: String(row.state) as SupervisedEffectRecord["state"],
-    result: row.result_json === null ? null : JSON.parse(String(row.result_json)),
-    error: row.error === null ? null : String(row.error),
-    created_at: String(row.created_at), updated_at: String(row.updated_at),
-  };
 }
 
