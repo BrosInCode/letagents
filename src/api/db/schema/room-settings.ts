@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, check, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import type { GitHubRoomChatEventKind, RoomAgentReplyOrder } from "../../../../shared/room-settings.mjs";
 import { rooms } from "./core.js";
 
@@ -18,6 +18,7 @@ export const room_settings = pgTable("room_settings", {
   // NULL means parallel (the default). Only 'sequential', which a room admin
   // turns on, makes agents activated together answer one after another.
   agent_reply_order: text("agent_reply_order").$type<RoomAgentReplyOrder>(),
+  expressions_enabled: boolean("expressions_enabled").notNull().default(false),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

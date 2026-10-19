@@ -33,7 +33,7 @@ export { addMessage, addMessageWithCreateStatus, getMessageStreamCheckpoint, get
 export type { AddMessageOptions, MessageCreateTransaction } from "./db/messages.js";
 export type { MessageThreadInboxFilter, MessageThreadInboxItem, MessageThreadInboxPage } from "./db/messages.js";
 export type { MessageThreadReadOverlay, MessageThreadReadTarget } from "./db/messages.js";
-export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
+export { getMessageAttachmentUpload, deleteExpiredPendingMessageAttachmentUpload, listExpiredPendingMessageAttachmentUploads, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
 export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, heartbeatNativeHarnessTaskLeases, recordNativeHarnessActivity, markRoomAgentDeliveryConnected, markRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat, pauseDesktopRoomAgentDelivery, isStaleDesktopRoomAgentDeliverySignalError, markRoomAgentDeliveryDisconnected, forceDisconnectRoomAgentDeliverySession, getRoomAgentDeliverySessions, getReachableWorkerDeliverySessionForAgentSession, pruneStaleRoomAgentDeliveryInstances } from "./db/presence.js";
 export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceSnapshot } from "./db/presence.js";
 export { getLivenessAnnouncementCandidate } from "./db/presence.js";

@@ -4,8 +4,8 @@ import type { AuthenticatedRequest } from '../../http/helpers.js';
 import type { RoomMessageRouteDeps } from './messages/types.js';
 import { resolveParticipantRoom, routeParam } from './messages/helpers.js';
 import { requireWorkerRequestAgentIdentity } from '../../request/agent-identity.js';
-import { createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, RoomKnowledgeError, type KnowledgeActor, type KnowledgeInput, type KnowledgeType } from '../../../../shared/room-knowledge.mjs';
-import { commitAttentionAnswer } from '../../rooms/attention-answers.js';
+import { ATTENTION_CLOSED_RESPONSE, createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, RoomKnowledgeError, type KnowledgeActor, type KnowledgeInput, type KnowledgeType } from '../../../../shared/room-knowledge.mjs';
+import { commitAttentionAnswer, commitAttentionRequest, type AttentionRequestPublisher } from '../../rooms/attention-answers.js';
 import * as store from '../../db/room-knowledge.js';
 import { emitProjectMessage } from '../../server/events.js';
 import { getTasksForRooms } from '../../db.js';
@@ -23,12 +23,12 @@ function human(req: AuthenticatedRequest): KnowledgeActor | null {
   return req.sessionAccount && (req.authKind === 'session' || isHumanAppWrite(req, req.body ?? {}))
     ? { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: 'human' } : null;
 }
-async function actor(req: AuthenticatedRequest, roomId: string): Promise<KnowledgeActor> {
+async function actor(req: AuthenticatedRequest, roomId: string): Promise<{ author: KnowledgeActor; worker?: AttentionRequestPublisher }> {
   const account = human(req);
-  if (account) return account;
+  if (account) return { author: account };
   const worker = await requireWorkerRequestAgentIdentity({ req, room_id: roomId, body: req.body ?? {} });
   if (!worker.ok) throw new RoomKnowledgeError(worker.error, worker.status);
-  return { id: worker.identity.agent_key, label: worker.identity.actor_label, kind: 'agent' };
+  return { author: { id: worker.identity.agent_key, label: worker.identity.actor_label, kind: 'agent' }, worker: worker.identity };
 }
 export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDeps) {
   const db = deps.store ?? store;
@@ -49,10 +49,13 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
     app.post(new RegExp(`^/rooms/(.+)/${type}$`), async (req: AuthenticatedRequest, res) => {
       try {
         const project = await room(req, res); if (!project) return;
-        const author = await actor(req, project.id);
+        const { author, worker } = await actor(req, project.id);
         const record = createKnowledgeRecord(project.id, type, req.body as KnowledgeInput & { client_id: string }, author);
         await db.assertKnowledgeSource(project.id, record.source_message_id);
-        res.status(201).json({ record: await db.createRoomKnowledge(record) });
+        // An agent's request is shown in the room where it asks.
+        res.status(201).json({ record: type === 'attention' && worker
+          ? await commitAttentionRequest(project.id, record, worker, { store: db, emitMessage: publish })
+          : await db.createRoomKnowledge(record) });
       } catch (error) { fail(res, error); }
     });
   }
@@ -89,4 +92,24 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
     if (type === 'memory') app.patch(/^\/rooms\/(.+)\/memory\/([^/]+)$/, handler);
     else app.post(/^\/rooms\/(.+)\/attention\/([^/]+)\/respond$/, handler);
   }
+  // A person closes a request without a decision. The agent that asked is
+  // told in the room, as with an answer, and stops waiting on it.
+  app.post(/^\/rooms\/(.+)\/attention\/([^/]+)\/close$/, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      const person = human(req);
+      if (!person) throw new RoomKnowledgeError('A signed-in human must close requests.', 403);
+      const id = knowledgeId(routeParam(req, 1));
+      const old = await db.getRoomKnowledge(project.id, id);
+      if (!old || old.type !== 'attention') { res.status(404).json({ error: 'Record not found.' }); return; }
+      const expected = req.body?.expected_version;
+      // Retrying a successful close after a lost HTTP response is harmless.
+      if (old.response?.closed && old.response.actor.id === person.id && old.response.body === ATTENTION_CLOSED_RESPONSE && old.version === expected + 1) {
+        res.json({ record: old }); return;
+      }
+      const next = reviseKnowledgeRecord(old, { expected_version: expected, close: true }, person);
+      await db.assertKnowledgeSource(project.id, next.source_message_id);
+      res.json({ record: await commitAttentionAnswer(project.id, old, next, person, { store: db, emitMessage: publish }) });
+    } catch (error) { fail(res, error); }
+  });
 }

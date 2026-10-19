@@ -154,6 +154,7 @@ function titleCase(value: string): string {
 
 function checkTone(conclusion: string): GitHubEventPresentation["tone"] {
   const normalized = conclusion.toLowerCase();
+  if (normalized === "success") return "emerald";
   if (["failure", "timed_out", "cancelled"].includes(normalized)) return "rose";
   if (["action_required", "neutral"].includes(normalized)) return "amber";
   return "sky";

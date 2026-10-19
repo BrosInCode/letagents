@@ -1815,6 +1815,47 @@ test("a handle says its process was started with the owner's setup exactly when 
   assert.deepEqual(attached, [true, undefined]);
 });
 
+test("the router asks the adapter how the current handle takes images, and answers none for any other handle", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const asked: Array<{ workAttemptId: string; pid: number | null }> = [];
+  adapter.roomTurnImageDelivery = (nativeHandle) => {
+    asked.push({ workAttemptId: nativeHandle.workAttemptId, pid: nativeHandle.pid });
+    return "file";
+  };
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "images", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+
+  assert.equal(await router.roomTurnImageDelivery(handle), "file", "the adapter's answer is passed through");
+  assert.deepEqual(asked, [{ workAttemptId: "images", pid: handle.pid }], "the adapter is asked once, about the native handle");
+  adapter.roomTurnImageDelivery = () => "memory";
+  assert.equal(await router.roomTurnImageDelivery(handle), "memory", "every turn is asked afresh");
+  adapter.roomTurnImageDelivery = () => null;
+  assert.equal(await router.roomTurnImageDelivery(handle), null, "an adapter can say it takes none");
+
+  adapter.roomTurnImageDelivery = (nativeHandle) => { asked.push({ workAttemptId: nativeHandle.workAttemptId, pid: nativeHandle.pid }); return "file"; };
+  asked.length = 0;
+  const neverSpawned = { ...handle, workAttemptId: "never-spawned" };
+  assert.equal(await router.roomTurnImageDelivery(neverSpawned), null, "a handle the router never held");
+  assert.equal(await router.roomTurnImageDelivery({ ...handle, providerContinuationId: "forged" }), null, "a handle with another continuation");
+  assert.equal(await router.roomTurnImageDelivery({ ...handle, pid: (handle.pid ?? 0) + 1 }), null, "a handle with another process");
+  assert.deepEqual(asked, [], "the adapter is never asked about a handle the router does not own");
+
+  const replacement = await router.spawn(spawn);
+  assert.notEqual(replacement.pid, handle.pid, "the same attempt now has a new process");
+  assert.equal(await router.roomTurnImageDelivery(handle), null, "the replaced handle");
+  assert.equal(await router.roomTurnImageDelivery(replacement), "file", "the current handle");
+  assert.deepEqual(asked, [{ workAttemptId: "images", pid: replacement.pid }]);
+});
+
+test("the router answers no image delivery when the adapter has no such question", async () => {
+  const adapter = fakeAdapter("codex", []);
+  assert.equal(Object.hasOwn(adapter, "roomTurnImageDelivery"), false);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "plain", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.equal(await router.roomTurnImageDelivery(handle), null);
+});
+
 test("usage reads use the acquired native connection and discard replacement responses", async () => {
   const adapter = fakeAdapter("codex", []);
   const router = new ProviderActionPortRouter({ codex: async () => adapter });

@@ -1,7 +1,10 @@
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface Message {
+  /** Public profile of the authenticated human publisher, never inferred from sender text. */
+  sender_profile?: { login: string; avatar_url: string | null } | null;
   /** Random desktop submission identity; internal publisher keys stay private. */
   client_message_id?: string;
   id: string;
@@ -9,6 +12,7 @@ export interface Message {
   sender: string;
   text: string;
   /** Human-facing copy; canonical text remains the agent/routing input. */
+  gif?: RoomGif | null;
   display_text?: string | null;
   agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
@@ -101,6 +105,7 @@ export interface MessageReplyReference {
   sender: string;
   text: string;
   /** Human-facing copy; canonical text remains the agent/routing input. */
+  gif?: RoomGif | null;
   display_text?: string | null;
   source: string | null;
   timestamp: string;
@@ -157,6 +162,8 @@ export interface MessageAttachmentUpload {
   attached_message_number: number | null;
   created_at: string;
   attached_at: string | null;
+  uploader_account_id: string | null;
+  uploader_agent_session_id: string | null;
 }
 
 export interface MessageRow {
@@ -167,6 +174,7 @@ export interface MessageRow {
   sender: string;
   text: string;
   /** Human-facing copy; canonical text remains the agent/routing input. */
+  gif?: RoomGif | null;
   display_text?: string | null;
   agent_prompt_kind: string | null;
   source: string | null;
@@ -264,4 +272,6 @@ export interface MessageAttachmentUploadRow {
   attached_message_number: number | null;
   created_at: string;
   attached_at: string | null;
+  uploader_account_id: string | null;
+  uploader_agent_session_id: string | null;
 }

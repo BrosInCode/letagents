@@ -1,5 +1,5 @@
 import { ClaudeCompaction, type ClaudeStartupDeadline } from "./claude-compaction.js";
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -29,6 +29,7 @@ import {
   type ProviderRoomTurnOptions,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
@@ -530,24 +531,32 @@ function assistantTextOf(message: ClaudeStreamMessage): string | null {
   return text || null;
 }
 
-function userStreamJsonLine(text: string, uuid?: string): string {
+/**
+ * Claude Code takes base64 image blocks in a stream-json user message and
+ * resizes them itself. Each image follows a short label that names it, in the
+ * order the prompt's attachment notes number them.
+ */
+function userStreamJsonLine(text: string, uuid?: string, attachments?: ProviderRoomTurnRequest["attachments"]): string {
+  const images = includedRoomTurnImages(attachments).flatMap(image => image.data ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}` },
+    { type: "image", source: { type: "base64", media_type: image.mimeType,
+      data: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64") } },
+  ] : []);
   return JSON.stringify({
     type: "user",
     ...(uuid ? { uuid } : {}),
-    message: { role: "user", content: [{ type: "text", text }] },
+    message: { role: "user", content: [{ type: "text", text }, ...images] },
   });
 }
 
-export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
+export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest, context = formatRoomTurnContext(request)): string {
   return [
     ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${CLAUDE_NO_ROOM_REPLY_SENTINEL} with no other text.`,
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...context,
   ].join("\n");
 }
 
@@ -1206,6 +1215,7 @@ const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
 };
 
 class ClaudeProviderHandle implements ProviderHandle {
+  readonly roomContext = new RoomTurnContextCache();
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   launchNotices: readonly string[] = [];
   /** The process was started with its owner's own Claude Code setup. */
@@ -1287,6 +1297,7 @@ class ClaudeProviderHandle implements ProviderHandle {
   ) {
     this.execution = new ProviderExecutionObserver(now);
     child.onDisconnect(() => {
+      this.roomContext.reset();
       this.permissionControlAvailable = false;
       this.clearPermissions();
       if (this.executionExitObserved) return;
@@ -1511,6 +1522,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     };
   }
 
+  /** Claude Code takes base64 image blocks on stdin and resizes them itself. */
+  roomTurnImageDelivery(): RoomTurnImageDelivery {
+    return "memory";
+  }
+
   async runRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -1542,8 +1558,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       handle.executionTurnStarted = false;
       handle.executionTerminalCheckpoint = null;
       handle.executionTools.clear();
+      const context = handle.roomContext.prepare(request, handle.providerContinuationId);
       try {
-        handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request), turnId));
+        handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request, context.lines), turnId, request.attachments));
       } catch (error) {
         // The exact id is durable, but the native write did not occur. Release
         // the local waiter and fail this continuation so recovery/reconcile can
@@ -1559,8 +1576,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       const result = this.providerRoomTurnResult(handle, terminal);
       await options.checkpointTerminalResult?.(result);
       if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
+      if ((result.outcome === "reply" || result.outcome === "no_reply")
+        && handle.permissionControlAvailable && !handle.terminal && !options.detachSignal?.aborted) context.commit();
+      else handle.roomContext.reset();
       return result;
     } catch (error) {
+      handle.roomContext.reset();
       if (terminalPromise && handle.activeRoomTurnId !== turnId) {
         this.removeExactRoomTurnWaiters(handle, turnId, error);
         await terminalPromise.catch(() => undefined);
@@ -1580,6 +1601,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
+    handle.roomContext.reset();
     const turnId = request.providerTurnId.trim();
     if (!turnId) {
       throw new ClaudeRoomTurnRecoveryError("Claude room-turn recovery requires an exact persisted turn id.");
@@ -2355,6 +2377,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     usage.snapshot(handle.providerContinuationId);
     usage.claude(message, this.deps.now());
     this.handleCompactions.get(handle)?.observe(message);
+    if (message.type === "system" && message.session_id === handle.providerContinuationId && message.parent_tool_use_id == null
+      && (message.subtype === "compact_boundary" || (message.subtype === "status"
+        && (message.status === "compacting" || message.compact_result === "success" || message.compact_result === "failed")))) {
+      handle.roomContext.reset();
+    }
     // Native approval payloads stay host-ephemeral; do not publish them to room activity.
     if (message.type === "control_request" || message.type === "control_cancel_request") {
       this.consumePermission(handle, message);

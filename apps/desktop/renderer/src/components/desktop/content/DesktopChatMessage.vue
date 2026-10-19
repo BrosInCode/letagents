@@ -4,11 +4,13 @@
     class="room-chat-message"
     tabindex="-1"
     :class="{
+      'is-github-history': githubHistory,
       'is-system-message': isSystem,
       'is-github-message': Boolean(githubEvent),
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
+      'has-thread': context === 'timeline' && (threadIndicatorVisible || activeThreadRoot),
       'is-compact-continuation': compactWithPrevious,
       'is-ambient-system-message': isAmbientSystem || isWakeNotice,
       'is-wake-notice': isWakeNotice,
@@ -20,6 +22,7 @@
     }"
     :style="{ '--message-accent': senderColor }"
     :data-owner-kind="ownerKind"
+    :data-chat-role="senderRole"
     :data-message-id="message.id"
     :data-thread-message-id="threadMessageId || undefined"
     :data-testid="testId || `room-message-${message.id}`"
@@ -27,15 +30,11 @@
     @pointerup.stop="handleSelectionPointerUp"
   >
     <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
-    <div
-      v-else
-      class="room-chat-avatar"
-      :style="{ '--avatar-color': senderColor }"
-      aria-hidden="true"
-    />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" />
+    <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
-      <div class="room-message-meta">
+      <div v-if="!githubHistory" class="room-message-meta">
         <div class="room-message-author-block">
           <button
             v-if="ownerKind === 'agent'"
@@ -47,12 +46,8 @@
             {{ displayName }}
           </button>
           <strong v-else>{{ displayName }}</strong>
-          <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <ProviderBadge
-            v-if="ideLabel"
-            :label="ideLabel"
-            :agent-key="message.agentIdentity?.agentKey"
-          />
+          <span v-if="ownerKind === 'agent' && ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
+
         </div>
         <div class="room-message-meta-tail">
           <div class="room-message-actions">
@@ -120,8 +115,12 @@
 
       <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
         <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
-        <span>{{ message.outgoing.status === "pending" ? "Sending…" : "Delivery not confirmed" }}</span>
+        <span>{{ message.outgoing.status === "pending" ? "Sending…" : message.outgoing.error?.includes('expressions_disabled:') ? "GIF sending is off in this room" : "Delivery not confirmed" }}</span>
         <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
+        <template v-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
+          <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
+          <button v-else type="button" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
+        </template>
       </div>
       <div class="room-message-bubble">
         <button
@@ -137,6 +136,8 @@
 
         <DesktopGitHubEventCard
           v-if="githubEvent"
+          :history="githubHistory"
+          :timestamp="message.timestamp"
           room
           :event="githubEvent"
           :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
@@ -145,11 +146,12 @@
         />
 
         <DesktopLongMessageContent
-          v-else
+          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
           :room-identifier="roomIdentifier"
+          :sender="readerSender"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
         />
@@ -160,6 +162,7 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
+        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -392,10 +395,11 @@
 </template>
 
 <script setup lang="ts">
+import RoomGif from "./room-chat/RoomGif.vue";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
 import { reminderAccount } from "../../../composables/useMessageReminders";
-import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
+import { discardRefusedDesktopGif, sendDesktopOutgoingWithoutGif, retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
 import { Check, ChevronDown, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
@@ -418,7 +422,9 @@ import {
 } from "../../../domain/room-urls";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
-import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
+import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
+import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
+import "../../../../../../../shared/ui/chat-palette.css";
 import {
   getSenderColor,
   parseSenderIdentity,
@@ -450,10 +456,11 @@ import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
 import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";
 import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../../../shared/message-link-previews.mjs";
 import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
-import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
+import { useMessageViewer, injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
 const props = withDefaults(defineProps<{
+  githubHistory?: boolean;
   message: DesktopRoomMessage;
   compactWithPrevious?: boolean;
   threadSummary: ThreadIndicatorSummary;
@@ -619,6 +626,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
+const gifState = ref<'loading' | 'ready' | 'unavailable'>('loading');
 const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
 const { pushActionToast } = useDesktopActionToasts();
 function reminderScheduled(dueAt: string) {
@@ -638,7 +646,7 @@ const selectionPopoverPosition = ref({ x: 0, y: 0 });
 const selectedQuoteText = ref("");
 let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
-const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
+const displayName = computed(() => props.message.source === "browser" ? props.message.sender : props.message.agentIdentity?.displayName || identity.value.displayName);
 const ownerAttribution = computed(() => resolveOwnerAttribution({
   ownerAttribution: props.message.agentIdentity?.ownerAttribution,
   ownerLabel: props.message.agentIdentity?.ownerLabel,
@@ -646,19 +654,33 @@ const ownerAttribution = computed(() => resolveOwnerAttribution({
   sender: props.message.sender,
 }));
 const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
-const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+const isSystem = computed(() => props.message.source !== "browser" && ["system", "letagents"].includes(props.message.sender.toLowerCase()));
 /** An agent's wake rule fired: a quiet line, not a conversation. */
 const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE);
 const isAmbientSystem = computed(() =>
-  isAmbientSystemMessage(props.message.sender, props.message.text || "")
+  props.message.source !== "browser" && isAmbientSystemMessage(props.message.sender, props.message.text || "")
 );
-const githubEvent = computed(() => parseGitHubEvent(props.message));
+const githubEvent = computed(() => props.message.source === "browser" ? null : parseGitHubEvent(props.message));
+const viewer = useMessageViewer();
+const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
+  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
+const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
+const readerSender = computed(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent' : senderRole.value === 'self' ? 'You'
+    : ownerKind.value === 'agent' ? ownerAttribution.value || 'Agent' : ownerKind.value === 'human' ? 'Human' : 'Room',
+  timestamp: props.message.timestamp,
+  avatarUrl: avatarUrl.value,
+  agent: ownerKind.value === 'agent',
+  provider: ideLabel.value,
+  agentKey: props.message.agentIdentity?.agentKey,
+}));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
   if (isSystem.value) return "system";
   if (props.message.source === "github") return "github";
-  if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   if (props.message.source === "browser") return "human";
+  if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   return "room";
 });
 const provenanceLabel = computed(() =>
@@ -962,11 +984,11 @@ function messageCopyText(): string {
   const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
-    return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
+    return props.message.attachments[0]?.fileName || "1 attachment";
   }
   if (props.message.attachments.length > 1) {
     return props.message.attachments
-      .map((attachment) => attachment.fileName || attachment.name || "attachment")
+      .map((attachment) => attachment.fileName)
       .join("\n");
   }
   return "";

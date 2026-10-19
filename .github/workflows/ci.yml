@@ -4,6 +4,21 @@ on:
   # Recovery path when GitHub drops a push webhook during an Actions outage.
   # Dispatch on staging preserves the same publish/deploy branch gates below.
   workflow_dispatch:
+    inputs:
+      purpose:
+        description: Checks, or a synthetic Jev measurement using existing server credentials (no deployment)
+        type: choice
+        default: checks
+        options:
+          - checks
+          - room-ack-evaluation
+      ack_suite:
+        description: Synthetic suite for the isolated Jev evaluation
+        type: choice
+        default: baseline
+        options:
+          - baseline
+          - holdout
   pull_request:
     branches:
       - dev
@@ -22,6 +37,7 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -63,6 +79,9 @@ jobs:
       - name: Type check (server)
         run: npx tsc --noEmit
 
+      - name: Test standalone Room evaluator
+        run: node --test scripts/prepare-room-ack-eval.test.mjs
+
       - name: Test desktop notification server helpers
         run: npm run test:notifications
 
@@ -97,7 +116,10 @@ jobs:
         run: node --import tsx --test src/api/__tests__/room-artifact-routes.test.ts
 
       - name: Test automatic command review
-        run: node --import tsx --test src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts src/api/__tests__/jev-acknowledgment.test.ts src/api/__tests__/jev-acknowledgment-eval.test.ts
+
+      - name: Run GitHub room event unit tests
+        run: node --import tsx --test src/api/__tests__/github-notify-account-access.test.ts src/api/__tests__/github-room-events.test.ts src/api/__tests__/github-room-event-projection.test.ts src/api/__tests__/github-room-event-artifacts.test.ts src/api/__tests__/github-git-room-routing.test.ts
 
       - name: Build Vue app
         run: npm run build:web
@@ -110,6 +132,13 @@ jobs:
 
       - name: Audit desktop dependency advisories
         run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
+
+      # The packaged MCP runtime is sealed into the desktop code as a digest
+      # of the tree its committed lock installs. The release build refuses to
+      # package when they differ; check it here so the change that moved one
+      # without the other fails, not the release.
+      - name: Verify packaged MCP runtime digest
+        run: npm --prefix apps/desktop run verify:mcp-runtime-digest
 
       - name: Run verified desktop dependency lifecycle scripts
         run: npm rebuild --prefix apps/desktop
@@ -199,11 +228,12 @@ jobs:
 
   # ── DB-backed integration tests ──
   integration-tests:
+    if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        image: docker.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
@@ -273,8 +303,8 @@ jobs:
       - name: Test message pins
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-pins-routes.test.ts src/api/__tests__/message-pin-store.test.ts src/api/__tests__/message-pins-db.test.ts
 
-      - name: Test message reactions
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
+      - name: Test message reactions and optional GIFs
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/giphy-client.test.ts src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
 
       - name: Test room message search
         run: node --import tsx --test src/api/__tests__/message-search-routes.test.ts src/api/__tests__/message-search-db.test.ts src/api/__tests__/message-search-controller.test.ts
@@ -295,7 +325,9 @@ jobs:
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
+          --test-concurrency=1
           src/api/__tests__/thread-inbox-parity-db.test.ts
+          src/api/__tests__/human-thread-audience-db.test.ts
 
       - name: Run desktop push worker database tests
         run: >-
@@ -455,7 +487,7 @@ jobs:
   # this workflow is registered as a trusted publisher for the package.
   npm-publish:
     needs: [build, integration-tests]
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -514,7 +546,7 @@ jobs:
   # ── Build and push Docker images to GHCR ──
   docker:
     needs: [build, integration-tests]
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -560,12 +592,13 @@ jobs:
   # ── Deploy to production server ──
   deploy:
     needs: docker
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
       GH_DEPLOY_TOKEN: ${{ github.token }}
+      GIPHY_API_KEY: ${{ secrets.GIPHY_API_KEY }}
     steps:
       - name: Deploy to production
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
@@ -573,13 +606,24 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: GH_DEPLOY_TOKEN
+          envs: GH_DEPLOY_TOKEN,GIPHY_API_KEY
           script: |
             set -e
 
             IMAGE_TAG="${{ needs.docker.outputs.image_tag }}"
 
             cd "${{ secrets.DEPLOY_PATH }}"
+
+            # Optional client-provider configuration; never print the key.
+            # An unset repository secret preserves the host's existing setting.
+            if [ -n "${GIPHY_API_KEY:-}" ]; then
+              umask 077
+              sed '/^GIPHY_API_KEY=/d' .env > .env.giphy-next
+              printf '\nGIPHY_API_KEY=%s\n' "$GIPHY_API_KEY" >> .env.giphy-next
+              chown --reference=.env .env.giphy-next
+              mv .env.giphy-next .env
+            fi
+            unset GIPHY_API_KEY
 
             # Keep enough room before Git and Docker writes on the deploy host.
             df -h || true
@@ -641,3 +685,81 @@ jobs:
             fi
 
             echo "Deploy successful (${IMAGE_TAG})"
+
+  # Manual synthetic measurement only. No room data, deploy token, service
+  # restart or configuration write. Jev credentials never leave the container.
+  room-ack-evaluation:
+    if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'room-ack-evaluation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit
+      - name: Verify dependency signatures
+        run: npm audit signatures
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+      - name: Audit dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs .
+      # TypeScript's transpiler needs no dependency lifecycle scripts.
+      - name: Test and prepare the standalone evaluator
+        id: evaluator
+        run: |
+          node --test scripts/prepare-room-ack-eval.test.mjs
+          node scripts/prepare-room-ack-eval.mjs "${RUNNER_TEMP}/room-ack-eval"
+          tar -czf "${RUNNER_TEMP}/room-ack-eval.tgz" -C "${RUNNER_TEMP}/room-ack-eval" .
+          echo "Reviewed source: ${GITHUB_SHA}"
+          sha256sum "${RUNNER_TEMP}/room-ack-eval.tgz"
+          echo "payload=$(base64 -w0 "${RUNNER_TEMP}/room-ack-eval.tgz")" >> "${GITHUB_OUTPUT}"
+      - name: Measure on the existing server without deploying
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        env:
+          ROOM_ACK_EVAL_PAYLOAD: ${{ steps.evaluator.outputs.payload }}
+          ROOM_ACK_EVAL_SUITE: ${{ inputs.ack_suite }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: ROOM_ACK_EVAL_PAYLOAD,ROOM_ACK_EVAL_SUITE
+          command_timeout: 10m
+          script: |
+            set -eu
+            umask 077
+            case "$ROOM_ACK_EVAL_SUITE" in baseline|holdout) ;; *) exit 2 ;; esac
+            task_dir=$(mktemp -d /tmp/letagents-ack-eval.XXXXXXXX)
+            container_id=""
+            cleanup() {
+              if [ -n "$container_id" ]; then
+                docker exec "$container_id" rm -rf "$task_dir" >/dev/null 2>&1 || true
+              fi
+              rm -rf "$task_dir"
+            }
+            trap cleanup EXIT
+            printf '%s' "$ROOM_ACK_EVAL_PAYLOAD" | base64 -d > "$task_dir/payload.tgz"
+            unset ROOM_ACK_EVAL_PAYLOAD
+            sha256sum "$task_dir/payload.tgz"
+            tar -xzf "$task_dir/payload.tgz" -C "$task_dir"
+            rm "$task_dir/payload.tgz"
+            container_id=$(docker inspect --format '{{.Id}}' letagents-api)
+            test "$(docker inspect --format '{{.State.Running}}' "$container_id")" = true
+            docker cp "$task_dir" "$container_id:$task_dir"
+            # This watchdog runs INSIDE the container. An SSH disconnect cannot
+            # leave an unbounded paid evaluation running in the background.
+            status=0
+            docker exec "$container_id" timeout -s KILL 480 node "$task_dir/scripts/room-acknowledgment-eval.js" --suite "$ROOM_ACK_EVAL_SUITE" --runs 3 --json "$task_dir/result.json" || status=$?
+            if ! docker exec "$container_id" cat "$task_dir/result.json"; then
+              if [ "$status" -eq 0 ]; then status=3; fi
+            fi
+            exit "$status"

@@ -20,7 +20,6 @@ const { tempDir } = createElectronTestEnv({
 const {
   listDesktopAgentProviderModels,
   normalizeManagedAgentEffort,
-  normalizeManagedAgentEffortForProvider,
   normalizeManagedAgentModel,
   parseCodexModelsOutput,
   parseCursorModelsOutput,
@@ -33,13 +32,9 @@ test("managed agent model normalization trims blanks to null", () => {
   assert.equal(normalizeManagedAgentModel(null), null);
 });
 
-test("managed agent effort normalization is provider aware", () => {
+test("managed agent effort normalization trims and rejects unknown values", () => {
   assert.equal(normalizeManagedAgentEffort("  high  "), "high");
   assert.equal(normalizeManagedAgentEffort("unsupported"), null);
-  assert.equal(normalizeManagedAgentEffortForProvider("codex", "xhigh"), "xhigh");
-  assert.equal(normalizeManagedAgentEffortForProvider("codex", "max"), null);
-  assert.equal(normalizeManagedAgentEffortForProvider("claude-code", "max"), "max");
-  assert.equal(normalizeManagedAgentEffortForProvider("cursor", "high"), null);
 });
 
 test("Cursor model parser handles labels, defaults, duplicates, and empty lines", () => {
@@ -291,7 +286,6 @@ test("Cursor model discovery uses the managed profile environment", async () => 
 
   const result = await listDesktopAgentProviderModels("cursor", {
     repoRootPath: tempDir,
-    cursorMcpPolicy: "filter_letagents",
   });
 
   assert.equal(result.status, "ready");

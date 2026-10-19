@@ -84,8 +84,8 @@ test("thread-context messages expose their DOM contract through the shared compo
   assert.match(html, /aria-label="Jump to root"/);
   assert.match(html, /data-task-reference-id="task_42"/);
   assert.match(html, /EmmyMay&#39;s agent/);
-  assert.match(html, /room-provider-badge--codex/);
-  assert.match(html, /aria-label="Codex provider"/);
+  assert.match(html, /chat-avatar is-agent/);
+  assert.match(html, /aria-label="Oak · Codex"/);
   assert.match(html, /<img/);
   assert.doesNotMatch(html, /room-message-ide/);
   assert.doesNotMatch(html, /room-message-provenance[^>]*data-kind="agent"/);
@@ -760,4 +760,16 @@ test('desktop row conditions exclude outgoing messages, unconfirmed IDs and unre
     if ('threadRootId' in message) assert.equal(vm.canMarkUnread.value, false);
     if ('source' in message) assert.equal(vm.reactable.value, false);
   });
+});
+
+
+test("a browser publisher with a legacy agent-looking name stays human with its real avatar", async () => {
+  const html = await renderToString(createSSRApp({ render: () => h(DesktopChatMessage as object, {
+    message: { id: "msg_human", sender: "Oak | EmmyMay's agent | Codex", text: "Hello", source: "browser", timestamp: "2026-10-12T10:00:00Z", attachments: [], senderProfile: { login: "person", avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4" } },
+    highlightQuery: "", searchActive: false, context: "timeline",
+    threadSummary: { count: 0, unreadCount: 0, participants: [] },
+  }) }));
+  assert.match(html, /data-chat-role="human"/);
+  assert.match(html, /https:\/\/avatars.githubusercontent.com\/u\/1/);
+  assert.doesNotMatch(html, /chat-avatar is-agent/);
 });

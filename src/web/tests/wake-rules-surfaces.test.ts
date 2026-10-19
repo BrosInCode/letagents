@@ -18,7 +18,7 @@ const roomPage = source('../src/pages/Room.vue')
 test('wake notices render as one quiet line with the shared crescent instead of the sender dot', () => {
   assert.match(chatMessage, /import WakeGlyph from '\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/shared\/ui\/WakeGlyph\.vue'/)
   assert.match(chatMessage, /props\.message\.source === WAKE_NOTICE_SOURCE/)
-  assert.match(chatMessage, /<WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" \/>\s*<div v-else class="message-avatar"/)
+  assert.match(chatMessage, /<WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" \/>\s*<ChatAvatar v-else-if="senderRole"[^>]*\/>\s*<div v-else class="message-avatar"/)
   // No meta row, bubble, or reply affordance: the line is the whole message.
   const wakeBody = chatMessage.slice(
     chatMessage.indexOf('<div v-if="isWakeNotice" class="message-body wake-notice-body">'),
@@ -57,7 +57,7 @@ test('the agent detail shows its wake rules and opens the wake message in the ch
   assert.match(tabPanels, /:revealMessageId="revealMessageId"/)
   assert.match(tabPanels, /@revealed="handleMessageRevealed"/)
   assert.match(roomPage, /@openChat="handleActiveTabChange\('chat'\)"/)
-  // The chat reveals the message after its own first scroll to the bottom.
-  assert.match(messageList, /scrollToBottom\('instant'\)\s*setupReadObserver\(\)\s*initialScrollSettled = true\s*revealRequestedMessage\(\)/)
+  // The chat reveals the message after restoring the room reading position.
+  assert.match(messageList, /restorePosition\(\)\s*setupReadObserver\(\)\s*initialScrollSettled = true\s*revealRequestedMessage\(\)/)
   assert.match(messageList, /MAX_REVEAL_OLDER_PAGES = 20/)
 })

@@ -11,7 +11,8 @@ const AUTHORIZATION_ASSIGNMENT = /((?:\\?["']?)\b(?:authorization|proxy[_-]?auth
 const EMBEDDED_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|set[_-]?cookie|credential|credentials|password|passwd|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
 const AUTHORIZATION_SCHEME_VALUE = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
 const KNOWN_TOKEN = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
-const URL_PASSWORD = /(https?:\/\/[^\s/:@]+:)([^\s/@]{4,})(@)/gi;
+/** The password in URL userinfo of any scheme: postgres://admin:pass@host, redis://:pass@host. */
+const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*:)(?!\[REDACTED\]@)([^\s/@]+)(@)/gi;
 const PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 
 export type RedactionResult<T = unknown> = { value: T; redacted: boolean; truncated: boolean };

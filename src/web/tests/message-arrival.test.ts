@@ -471,3 +471,17 @@ test('a reply grows from a work row pinned outside the scrolling list', async ()
     assert.equal(flight.style.height,'640px','the flight is clipped to the list and the strip together')
   } finally {app.unmount();Object.assign(globalThis,saved)}
 })
+
+test('web live strip shows the line a working agent published, and follows it as it changes', async () => {
+  const agent = {agent_session_id:'one',agent_key:'owner/agent',display_name:'Willow',status:'working',freshness:'active',status_text:'Using a tool'}
+  const presence = ref<any[]>([agent]), messages = ref<any[]>([{id:'msg_1'}])
+  const scope = effectScope()
+  let indicators: ReturnType<typeof useRoomWorkIndicators>
+  scope.run(() => { indicators = useRoomWorkIndicators(() => presence.value, () => messages.value, () => 'room') })
+  await nextTick()
+  assert.equal(indicators!.value[0].summary, 'Using a tool')
+  presence.value = [{...agent,status_text:'Checking `billing.ts` for the bug'}]
+  await nextTick()
+  assert.deepEqual(indicators!.value.map(work => work.summary), ['Checking `billing.ts` for the bug'])
+  scope.stop()
+})

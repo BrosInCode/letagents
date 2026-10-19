@@ -1,5 +1,5 @@
 <template>
-  <article class="room-contribution" v-if="changes" aria-label="Agent contribution">
+  <article class="room-contribution" v-if="changes" :aria-label="changes.state === 'ready' ? 'Agent contribution' : 'Workspace snapshot'">
     <span class="room-contribution-mark" aria-hidden="true"><FileDiff :size="17" /></span>
     <div class="room-contribution-body">
       <div class="room-contribution-byline">
@@ -7,8 +7,9 @@
           <button type="button" @click="emit('open-workspace', work)">{{ identity.displayName }}</button>
           <span v-if="identity.ownerAttribution">{{ identity.ownerAttribution }}</span>
         </div>
-        <time :datetime="changes.captured_at" :title="formatFullTimestamp(changes.captured_at)">{{ formatShortDateTime(changes.captured_at) }}</time>
+        <time :datetime="snapshotTimestamp" :title="formatFullTimestamp(snapshotTimestamp)">{{ formatShortDateTime(snapshotTimestamp) }}</time>
       </div>
+      <p v-if="changes.state !== 'ready'" class="room-contribution-unavailable">Workspace snapshot · Changes from this turn are unavailable.</p>
       <ContributionDescription :work="work" />
       <button class="room-contribution-review" type="button" @click="emit('open-workspace', work)"><span>{{ changes.state === 'ready' ? `Review ${count} ${count === 1 ? 'file' : 'files'}` : 'View workspace' }}</span><span v-if="changes.state === 'ready'" class="room-contribution-counts"><b>+{{ changes.additions }}</b><b>−{{ changes.deletions }}</b></span><ChevronRight :size="14" aria-hidden="true" /></button>
       <span v-if="status !== 'ready'" class="room-contribution-unavailable">Updates unavailable</span>
@@ -25,6 +26,9 @@ import { formatFullTimestamp, formatShortDateTime } from '../../../../domain/tim
 const props = defineProps<{ work: DesktopRoomAgentWork; participants: readonly DesktopParticipantSummary[]; status: string }>();
 const emit = defineEmits<{ 'open-workspace': [work: DesktopRoomAgentWork] }>();
 const changes = computed(() => contributionChanges(props.work));
+const snapshotTimestamp = computed(() => changes.value?.state === 'ready'
+  ? changes.value.captured_at
+  : ('workspace' in props.work.summary ? props.work.summary.workspace?.captured_at : null) ?? changes.value!.captured_at);
 const count = computed(() => (changes.value?.files.length ?? 0) + (changes.value?.hidden_files ?? 0));
 const identity = computed(() => workspaceAgentTarget(props.work, props.participants));
 </script>

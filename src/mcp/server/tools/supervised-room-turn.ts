@@ -5,6 +5,20 @@ const MAX_ROOM_REPLY_BYTES = 32 * 1024;
 
 /** Select routing only; the daemon remains the sole final-answer publisher. */
 export function registerReplyThreadTool(server: McpServer): void {
+  const gifTool = server.tool("set_reply_gif",
+    "Attach one GIF from search_gifs to your final room reply, or pass gif:null to clear it. This records an intent only, sends nothing, and does not complete the turn. Finish normally with a reply and meaningful text; that text is the fallback if the GIF is unavailable. For a GIF-only visual reply set text_fallback_only:true. A no_reply outcome always sends nothing, including no GIF. Use sparingly and never replace requested reasoning or work.",
+    { gif: z.object({ provider: z.literal("giphy"), id: z.string().regex(/^[a-zA-Z0-9]{1,128}$/), title: z.string().max(200), text_fallback_only: z.literal(true).optional() }).strict().nullable() },
+    async () => { throw new Error("set_reply_gif requires the active daemon-owned room turn."); },
+  );
+  // The local-room facade intentionally omits unsupported cloud-only tools.
+  if (gifTool) gifTool.inputSchema = z.object({ gif: z.object({ provider: z.literal("giphy"), id: z.string().regex(/^[a-zA-Z0-9]{1,128}$/), title: z.string().max(200), text_fallback_only: z.literal(true).optional() }).strict().nullable() }).strict();
+  const attachmentFiles = z.array(z.string().min(1).max(4096)).min(1).max(4).nullable();
+  const attachmentsTool = server.tool("set_reply_attachments",
+    "Attach up to 4 files from your workspace to your final room reply, such as a screenshot, a short screen recording, a log or a report that shows your result. Pass paths relative to your working directory, or absolute paths inside it. The daemon copies the files when you call this, so save them first; later edits are not sent. Each file can be up to 25 MB. Files outside your workspace and files that may hold credentials (.env, keys, .git, .ssh) are refused. This records an intent only, sends nothing, and does not complete the turn: finish with a normal reply and meaningful text. Call again to replace the files, or pass files:null to clear them. A no_reply outcome sends nothing.",
+    { files: attachmentFiles },
+    async () => { throw new Error("set_reply_attachments requires the active daemon-owned room turn."); },
+  );
+  if (attachmentsTool) attachmentsTool.inputSchema = z.object({ files: attachmentFiles }).strict();
   const tool = server.tool(
     "set_reply_thread",
     "Opt into a new thread for your final answer only when the user asks for one or a sustained side discussion would distract from the room. Answer ordinary top-level questions in the main room by default, without this tool; existing thread replies stay threaded automatically. Takes no arguments, sends no message, and does not finish the turn. Continue working and use your normal final completion when ready. Unavailable for synthetic task continuations or corrections.",

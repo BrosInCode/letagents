@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../shared/room-expressions.mjs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { encodeRoomIdPath } from "../../../room-id.js";
@@ -26,6 +27,7 @@ type MessageRecord = Record<string, unknown>;
 type SendMessageInput = {
   room_id?: string;
   text: string;
+  gif?: RoomGif | null;
   reply_to?: string;
   thread_parent_id?: string;
   agent_session_id?: string;
@@ -36,6 +38,7 @@ type AgentSessionCredentialPayload = Record<string, string>;
 export function buildSendMessageRequestBody(input: {
   sender: string;
   text: string;
+  gif?: RoomGif | null;
   replyTarget?: string;
   resolvedThreadRoot?: string;
   credentials: AgentSessionCredentialPayload;
@@ -43,6 +46,7 @@ export function buildSendMessageRequestBody(input: {
   return {
     sender: input.sender,
     text: input.text,
+    ...(input.gif ? { gif: input.gif } : {}),
     reply_to: input.replyTarget,
     ...(input.resolvedThreadRoot ? { thread_root_id: input.resolvedThreadRoot } : {}),
     ...input.credentials,
@@ -137,6 +141,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     : undefined;
 
   if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+    if (input.gif) throw new Error("GIFs require a cloud room.");
     const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
     const message = await addLocalChatMessage(sqliteRoomId || localRoomId, {
       sender: identity.actor_label,
@@ -164,6 +169,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       body: JSON.stringify(buildSendMessageRequestBody({
         sender: identity.actor_label,
         text: input.text,
+        ...(input.gif ? { gif: input.gif } : {}),
         replyTarget,
         resolvedThreadRoot,
         credentials: agentSessionCredentials(agentSession),
@@ -193,6 +199,7 @@ export function registerSendMessageTool(server: McpServer): void {
     "send_message",
     "Send a message to a Let Agents Chat room. For focused side discussion, prefer send_thread_message or pass thread_parent_id so the reply stays in that message thread instead of polluting the main room.",
     {
+      gif: z.object({ provider: z.literal("giphy"), id: z.string().regex(/^[a-zA-Z0-9]{1,128}$/), title: z.string().max(200) }).optional().describe("Optional GIF from search_gifs; use sparingly. If unavailable, continue with text."),
       room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
       sender: z
         .string()
@@ -216,14 +223,15 @@ export function registerSendMessageTool(server: McpServer): void {
         .optional()
         .describe("Registered agent session to use for this message. Required for worker messages."),
     },
-    async ({ room_id, sender: _sender, text, reply_to, thread_parent_id, conversation_id: _conversation_id, agent_session_id }) =>
-      sendMessageFromTool({ room_id, text, reply_to, thread_parent_id, agent_session_id })
+    async ({ room_id, sender: _sender, text, gif, reply_to, thread_parent_id, conversation_id: _conversation_id, agent_session_id }) =>
+      sendMessageFromTool({ room_id, text, gif, reply_to, thread_parent_id, agent_session_id })
   );
 
   server.tool(
     "send_thread_message",
     "Reply inside an existing message thread without posting a top-level room message. Use this when discussion should drill into one topic and keep the main room clean.",
     {
+      gif: z.object({ provider: z.literal("giphy"), id: z.string().regex(/^[a-zA-Z0-9]{1,128}$/), title: z.string().max(200) }).optional().describe("Optional GIF from search_gifs; use sparingly. If unavailable, continue with text."),
       room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
       text: z.string().describe("The thread reply text to send."),
       thread_parent_id: z
@@ -238,7 +246,7 @@ export function registerSendMessageTool(server: McpServer): void {
         .optional()
         .describe("Registered agent session to use for this thread reply. Required for worker messages."),
     },
-    async ({ room_id, text, thread_parent_id, conversation_id: _conversation_id, agent_session_id }) =>
-      sendMessageFromTool({ room_id, text, thread_parent_id, agent_session_id })
+    async ({ room_id, text, gif, thread_parent_id, conversation_id: _conversation_id, agent_session_id }) =>
+      sendMessageFromTool({ room_id, text, gif, thread_parent_id, agent_session_id })
   );
 }

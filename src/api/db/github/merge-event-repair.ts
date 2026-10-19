@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, notInArray, or, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
+import { PARTICIPANT_PULL_REQUEST_ACTION_LIST } from "../../github/room-events/pull-request.js";
 import { toGitHubWebhookDelivery, toTaskLease } from "../mappers.js";
 import { github_room_events, github_webhook_deliveries, messages, rooms, task_leases } from "../schema.js";
 import type { GitHubRoomEvent, GitHubWebhookDelivery, TaskLease, TaskLeaseRow } from "../types.js";
@@ -25,7 +26,11 @@ export async function listLinkedPullRequestMergeEvents(): Promise<GitHubRoomEven
   return rows as GitHubRoomEvent[];
 }
 
-/** The newest stored event of one pull request, whatever room holds it. */
+/**
+ * The newest stored event of one pull request, whatever room holds it.
+ * Participant events (review requests, assignments) are skipped, so they never
+ * stand in for the PR state.
+ */
 export async function getNewestPullRequestRoomEvent(
   githubObjectUrl: string
 ): Promise<GitHubRoomEvent | null> {
@@ -34,7 +39,8 @@ export async function getNewestPullRequestRoomEvent(
     .from(github_room_events)
     .where(and(
       eq(github_room_events.event_type, "pull_request"),
-      eq(github_room_events.github_object_url, githubObjectUrl)
+      eq(github_room_events.github_object_url, githubObjectUrl),
+      notInArray(github_room_events.action, [...PARTICIPANT_PULL_REQUEST_ACTION_LIST])
     ))
     .orderBy(
       desc(github_room_events.event_order_at),

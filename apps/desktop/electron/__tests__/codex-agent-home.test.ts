@@ -338,6 +338,7 @@ test("a sandboxed launch does not start when Codex cannot be asked, when the age
  */
 function fakeCodex(settings: {
   signIn?: "in-place" | "replace" | "none"; store?: string; layers?: unknown[];
+  discoverRouting?: boolean;
   /**
    * The MCP servers it lists besides the room's own, and what a project does to the room's own: add a key, which no launch
    * override takes back, or set only keys that a launch's own override for that server sets too.
@@ -392,6 +393,11 @@ function fakeCodex(settings: {
     "    if (m.method === 'account/read') {",
     "      const file = path.join(process.env.CODEX_HOME, 'auth.json');",
     "      const auth = JSON.parse(fs.readFileSync(file, 'utf8'));",
+    "      if (settings.discoverRouting) {",
+    "        const routing = await fetch(new URL('/api/codex/accounts/check', process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE));",
+    "        const workspace = (await routing.json()).accounts?.find((account) => account.id === auth.tokens.account_id);",
+    "        if (!routing.ok || workspace?.account_routing_override !== 'NO_CONSTRAINT' || workspace.workspace_backend_origin !== 'https://codex-check.letagents.invalid') { send({ id: m.id, error: { message: 'workspace routing discovery failed' } }); return; }",
+    "      }",
     "      const answer = await fetch(process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE, { method: 'POST', body: JSON.stringify({ refresh_token: auth.tokens.refresh_token }) });",
     "      auth.tokens = { ...auth.tokens, ...(await answer.json()) };",
     "      if (settings.signIn === 'in-place') fs.writeFileSync(file, JSON.stringify(auth));",
@@ -417,6 +423,15 @@ async function waitForExit(launch: { pid: number | null; exited: Promise<unknown
   clearTimeout(timer);
   if (!exited && launch.pid !== null) terminateSpawnedProcess(launch.pid);
 }
+
+test("workspace discovery in the synthetic sign-in check still proves an in-place refresh", async () => {
+  for (const signIn of ["in-place", "replace", "none"] as const) {
+    const parent = fixture("routing-sign-in-check");
+    const result = await checkCodexKeepsLinkedSignIn(fakeCodex({ signIn, discoverRouting: true }).bin, { PATH: process.env.PATH }, parent);
+    assert.equal(result, signIn === "in-place", signIn);
+    assert.deepEqual(readdirSync(parent), []);
+  }
+});
 
 test("a Codex that writes a new sign-in file over the linked one is found out with a made-up sign-in, before the owner's is linked", async () => {
   const run = { PATH: process.env.PATH };

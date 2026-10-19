@@ -5,6 +5,8 @@ import { isVisibleRoomMessage } from './identity'
 import {
   appendRoomMessage,
   isLoadingOlderMessages,
+  olderMessagesError,
+  roomSessionVersion,
   lastSendError,
   messages,
   messagesHasOlder,
@@ -82,14 +84,21 @@ export function createRoomMessageActions() {
       return false
     }
 
+    const origin = room.value.identifier, version = roomSessionVersion
+    const current = () => roomSessionVersion === version && room.value?.identifier === origin
     isLoadingOlderMessages.value = true
+    olderMessagesError.value = ''
     try {
-      const page = await fetchMessages(room.value.identifier, firstMessageId)
+      const page = await fetchMessages(origin, firstMessageId)
+      if (!current()) return false
       replaceRoomMessages(mergeMessages(messages.value, page.messages))
       messagesHasOlder.value = page.hasOlder
       return page.messages.length > 0
+    } catch {
+      if (current()) olderMessagesError.value = 'Older messages could not be loaded. Try again.'
+      return false
     } finally {
-      isLoadingOlderMessages.value = false
+      if (current()) isLoadingOlderMessages.value = false
     }
   }
 

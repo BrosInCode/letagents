@@ -1124,6 +1124,80 @@ function managedHarness() {
   return { ...env, state };
 }
 
+test("a transient managed-contract check retries without stranding or replacing an idle native runtime", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  const failure = Object.assign(new Error("contract probe timed out"), { transientProviderStart: true });
+  let reads = 0, entered!: () => void, resolve!: (contract: string) => void;
+  const reading = new Promise<void>(done => { entered = done; });
+  const contract = new Promise<string>(done => { resolve = done; });
+  env.options.provider!.describeManagedLaunchContract = async () => {
+    if (++reads === 1) throw failure;
+    entered();
+    return contract;
+  };
+  assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 15_000 });
+  assert.equal(env.entry.condition, "none", "a read-only timeout must not install the generic blocked latch");
+  let admitted = false;
+  const admission = env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation), {})
+    .then(value => { admitted = value; return value; });
+  await reading;
+  assert.equal(admitted, false, "delivery still needs the verified contract");
+  const retry = env.coordinator.refreshManaged("agent-1");
+  resolve("a".repeat(64));
+  assert.equal(await admission, true);
+  assert.equal(await retry, undefined);
+  assert.equal(reads, 2, "the existing shared probe is reused");
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+  assert.equal(env.options.streams.currentInstallation("agent-1"), installation);
+});
+
+test("managed-contract verification has a separate bounded retry episode for each installation", async () => {
+  const env = managedHarness();
+  const failure = Object.assign(new Error("contract probe timed out"), { transientProviderStart: true });
+  env.options.provider!.describeManagedLaunchContract = async () => { throw failure; };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 15_000 });
+  }
+  await assert.rejects(env.coordinator.refreshManaged("agent-1"), error => error === failure,
+    "exhaustion reaches the existing scheduler diagnostic instead of retrying forever");
+  env.options.streams.currentInstallation = () => ({ ...installation, nonce: Symbol("successor") });
+  const successor = env.options.streams.currentInstallation("agent-1")!;
+  env.options.streams.currentInstallation = () => successor;
+  assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 15_000 },
+    "a different installation does not inherit an exhausted episode");
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+});
+
+for (const change of ["pause", "handoff", "replacement", "blocked", "configuration"] as const) {
+  test(`a late managed-contract timeout cannot schedule verification after ${change}`, async () => {
+    const env = managedHarness();
+    let entered!: () => void, fail!: (error: Error) => void;
+    const reading = new Promise<void>(done => { entered = done; });
+    const contract = new Promise<string>((_resolve, reject) => { fail = reject; });
+    env.options.provider!.describeManagedLaunchContract = async () => { entered(); return contract; };
+    const checking = env.coordinator.refreshManaged("agent-1");
+    await reading;
+    if (change === "pause") env.entry.desired_state = "paused";
+    else if (change === "handoff") env.options.authority.isHandoffScheduled = () => true;
+    else if (change === "replacement") env.options.streams.currentInstallation = () => ({ ...installation });
+    else if (change === "blocked") env.entry.condition = "coordination_blocked";
+    else env.configuration.config_revision += 1;
+    fail(Object.assign(new Error("contract probe timed out"), { transientProviderStart: true }));
+    assert.equal(await checking, undefined);
+    assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+    if (change === "blocked") assert.equal(env.entry.condition, "coordination_blocked");
+  });
+}
+
+test("invalid managed-contract evidence still fails closed without a verification retry", async () => {
+  const env = managedHarness();
+  const failure = new Error("runtime integrity check failed");
+  env.options.provider!.describeManagedLaunchContract = async () => { throw failure; };
+  await assert.rejects(env.coordinator.refreshManaged("agent-1"), error => error === failure);
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+});
+
 test("managed refresh normalizes an unknown legacy birth once without editing Inspector revisions or pending work", async () => {
   const env = managedHarness();
   await env.coordinator.refreshManaged("agent-1");
@@ -1769,6 +1843,50 @@ test("managed delivery admission coalesces one demand but permits later wakes on
   assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), true);
   assert.equal(env.state.desiredReads, 1);
   assert.equal(env.convergenceLifecycleStates.length, 2);
+});
+
+test("concurrent cold admissions share one desired contract probe and retry after failure", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  let release!: (contract: string) => void;
+  let fail!: (error: Error) => void;
+  env.options.provider!.describeManagedLaunchContract = () => {
+    env.state.desiredReads++;
+    return new Promise<string>((resolve, reject) => { release = resolve; fail = reject; });
+  };
+  const agent = deliveryAgentFor(installation);
+  const first = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const second = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const failed = Promise.allSettled([first, second]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(env.state.desiredReads, 1);
+  fail(new Error("probe unavailable"));
+  assert.ok((await failed).every(result => result.status === "rejected"));
+  const retry = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const sharedRetry = env.coordinator.canAdmitManagedDelivery(agent, {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(env.state.desiredReads, 2);
+  release("a".repeat(64));
+  assert.deepEqual(await Promise.all([retry, sharedRetry]), [true, true]);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, {}), true);
+  assert.equal(env.state.desiredReads, 2);
+});
+
+test("desired contract probes stay separate for local and hosted Room routes", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  const routes: string[] = [];
+  const releases: Array<() => void> = [];
+  env.options.provider!.describeManagedLaunchContract = ({ apiUrl }) => {
+    routes.push(apiUrl);
+    return new Promise(resolve => releases.push(() => resolve("a".repeat(64))));
+  };
+  const agent = deliveryAgentFor(installation);
+  const reads = ["https://letagents.chat", "letagents-local://rooms"].map(apiUrl => env.coordinator.canAdmitManagedDelivery({ ...agent, apiUrl }, {}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(routes, ["https://letagents.chat", "letagents-local://rooms"]);
+  releases.forEach(release => release());
+  assert.deepEqual(await Promise.all(reads), [true, true]);
 });
 
 test("an older admission read cannot overwrite or consume a newer delivery demand", async () => {

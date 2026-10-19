@@ -28,7 +28,6 @@ export function attestProviderSpawnPolicy(
   const profile = assertManagedAgentPermissionProfileAvailable(
     provider,
     request.permissionProfileId as never,
-    "supervised",
   ).id;
   const policy = plainPolicy(request.launchPolicy, provider);
   let ownerSetupPolicy: Record<string, unknown> | null = null;

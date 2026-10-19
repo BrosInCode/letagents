@@ -25,54 +25,29 @@
       </button>
     </div>
 
-    <Teleport to="body">
-      <div
-        v-if="readerOpen"
-        class="reader-backdrop"
-        @click.self="closeReader"
-      >
-        <section
-          ref="readerDialog"
-          class="reader-dialog"
-          role="dialog"
-          aria-modal="true"
-          :aria-labelledby="readerTitleId"
-          tabindex="-1"
-          @keydown.esc="closeReader"
-        >
-          <header class="reader-header">
-            <div>
-              <p class="reader-eyebrow">{{ statsLabel }}</p>
-              <h2 :id="readerTitleId">Message reader</h2>
-            </div>
-            <button class="reader-close" type="button" @click="closeReader">
-              Close
-            </button>
-          </header>
-
-          <div class="reader-content md-content" v-html="html" @click="handleInlineReferenceClick" />
-
-          <footer class="reader-footer">
-            <button class="reader-action" type="button" @click="copyText">
-              {{ copyLabel }}
-            </button>
-            <button class="reader-action primary" type="button" @click="closeReader">
-              Done
-            </button>
-          </footer>
-        </section>
-      </div>
-    </Teleport>
+    <MessageReader
+      v-if="readerOpen"
+      :text="text"
+      :html="html"
+      :sender="sender"
+      :room-identifier="roomIdentifier"
+      @close="readerOpen = false"
+      @content-click="handleInlineReferenceClick"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, ref } from 'vue'
+import MessageReader from '../../../../../shared/ui/MessageReader.vue'
+import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
 
 const props = withDefaults(defineProps<{
   text: string
   html: string
   messageId: string
+  sender?: MessageReaderSender
+  roomIdentifier?: string | null
   collapseAfterChars?: number
   collapseAfterLines?: number
 }>(), {
@@ -86,8 +61,6 @@ const emit = defineEmits<{
 
 const expanded = ref(false)
 const readerOpen = ref(false)
-const copied = ref(false)
-const readerDialog = ref<HTMLElement | null>(null)
 
 const lineCount = computed(() => {
   if (!props.text) return 0
@@ -106,7 +79,6 @@ const safeMessageId = computed(() => {
 })
 
 const contentId = computed(() => `message-content-${safeMessageId.value}`)
-const readerTitleId = computed(() => `message-reader-title-${safeMessageId.value}`)
 
 const statsLabel = computed(() => {
   const lines = lineCount.value
@@ -114,16 +86,8 @@ const statsLabel = computed(() => {
   return `${lines} ${lines === 1 ? 'line' : 'lines'} / ${chars} chars`
 })
 
-const copyLabel = computed(() => copied.value ? 'Copied' : 'Copy text')
-
 function openReader() {
   readerOpen.value = true
-  copied.value = false
-  nextTick(() => readerDialog.value?.focus())
-}
-
-function closeReader() {
-  readerOpen.value = false
 }
 
 function handleInlineReferenceClick(event: MouseEvent) {
@@ -136,18 +100,6 @@ function handleInlineReferenceClick(event: MouseEvent) {
   event.stopPropagation()
   readerOpen.value = false
   emit('taskReferenceClick', taskId)
-}
-
-async function copyText() {
-  try {
-    await navigator.clipboard.writeText(props.text)
-    copied.value = true
-    window.setTimeout(() => {
-      copied.value = false
-    }, 1600)
-  } catch {
-    copied.value = false
-  }
 }
 </script>
 
@@ -190,9 +142,7 @@ async function copyText() {
   line-height: 1.3;
 }
 
-.long-message-button,
-.reader-close,
-.reader-action {
+.long-message-button {
   border: 1px solid var(--line, #27272a);
   border-radius: 8px;
   background: var(--surface, #18181b);
@@ -207,88 +157,12 @@ async function copyText() {
 }
 
 .long-message-button:hover,
-.long-message-button:focus-visible,
-.reader-close:hover,
-.reader-close:focus-visible,
-.reader-action:hover,
-.reader-action:focus-visible {
+.long-message-button:focus-visible {
   background: color-mix(in srgb, var(--surface, #18181b) 84%, var(--text, #fafafa) 8%);
   border-color: var(--muted, #71717a);
   outline: none;
 }
 
-.reader-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(9, 9, 11, 0.78);
-}
-
-.reader-dialog {
-  display: flex;
-  flex-direction: column;
-  width: min(960px, 100%);
-  max-height: min(86vh, 900px);
-  overflow: hidden;
-  border: 1px solid var(--line, #27272a);
-  border-radius: 8px;
-  background: var(--bg-0, #09090b);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
-}
-
-.reader-dialog:focus {
-  outline: none;
-}
-
-.reader-header,
-.reader-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--line, #27272a);
-  flex-shrink: 0;
-}
-
-.reader-footer {
-  justify-content: flex-end;
-  border-top: 1px solid var(--line, #27272a);
-  border-bottom: none;
-}
-
-.reader-eyebrow {
-  margin: 0 0 4px;
-  color: var(--muted, #a1a1aa);
-  font-size: 0.72rem;
-  line-height: 1.2;
-}
-
-.reader-header h2 {
-  margin: 0;
-  color: var(--text, #fafafa);
-  font-size: 1rem;
-  line-height: 1.2;
-}
-
-.reader-content {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 28px clamp(20px, 6vw, 72px) 40px;
-  color: var(--text, #fafafa);
-}
-
-.reader-action.primary {
-  background: var(--text, #fafafa);
-  color: var(--bg-0, #09090b);
-  border-color: var(--text, #fafafa);
-}
-
-.reader-content,
 .long-message-content :deep(.md-content) {
   line-height: 1.68;
   font-size: 0.94rem;
@@ -296,36 +170,16 @@ async function copyText() {
   word-break: normal;
 }
 
-.reader-content {
-  width: 100%;
-}
-
-.reader-content :deep(pre) {
-  max-width: 100%;
-  overflow-x: auto;
-  padding: 12px;
-}
-
-.reader-content :deep(> *),
-.reader-content > * {
-  max-width: 72ch;
-  margin-right: auto;
-  margin-left: auto;
-}
-
-.reader-content :deep(a),
 .long-message-content :deep(a) {
   color: #60a5fa;
   text-decoration: none;
   word-break: break-all;
 }
 
-.reader-content :deep(a:hover),
 .long-message-content :deep(a:hover) {
   text-decoration: underline;
 }
 
-.reader-content :deep(.task-reference-link),
 .long-message-content :deep(.task-reference-link) {
   display: inline;
   padding: 0;
@@ -340,15 +194,12 @@ async function copyText() {
   text-underline-offset: 0.14em;
 }
 
-.reader-content :deep(.task-reference-link:hover),
-.reader-content :deep(.task-reference-link:focus-visible),
 .long-message-content :deep(.task-reference-link:hover),
 .long-message-content :deep(.task-reference-link:focus-visible) {
   color: #93c5fd;
   text-decoration-color: currentColor;
 }
 
-.reader-content :deep(code),
 .long-message-content :deep(code) {
   padding: 2px 5px;
   border-radius: 4px;
@@ -357,7 +208,6 @@ async function copyText() {
   font-size: 0.84em;
 }
 
-.reader-content :deep(.mention-token),
 .long-message-content :deep(.mention-token) {
   display: inline-flex;
   align-items: center;
@@ -373,30 +223,8 @@ async function copyText() {
     max-height: 220px;
   }
 
-  .reader-backdrop {
-    align-items: stretch;
-    padding: 10px;
-  }
-
-  .reader-dialog {
-    max-height: calc(100dvh - 20px);
-  }
-
-  .reader-header,
-  .reader-footer {
-    align-items: center;
-    flex-wrap: wrap;
-    padding: 12px;
-  }
-
-  .reader-close,
-  .reader-action,
   .long-message-button {
     min-height: 44px;
-  }
-
-  .reader-content {
-    padding: 14px;
   }
 }
 </style>

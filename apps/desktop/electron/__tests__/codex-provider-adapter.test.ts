@@ -1,5 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +33,7 @@ import type {
   ProviderConnectionRef,
   ProviderContinuationRef,
   ProviderHandle,
+  ProviderRoomTurnRequest,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
@@ -2107,6 +2109,8 @@ const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   list_wake_rules: "approved",        // what agents in the room are waiting for
   get_room_artifacts: "approved",     // branches, pull requests and checks shared with the room
   get_room_events: "approved",        // GitHub events the room already holds
+  // Optional expression lookup, enabled by the Room's human-admin setting.
+  search_gifs: "approved",           // provider metadata; no repository writes
   // Saying something in the room.
   send_message: "approved",
   send_thread_message: "approved",
@@ -2114,8 +2118,12 @@ const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   post_reasoning: "approved",
   request_human_input: "approved",    // a question in a person's "Needs you" inbox
   set_reply_thread: "approved",       // where the final answer goes; approved at every access level
+  set_reply_gif: "approved",          // optional attachment to the same final answer
+  react_to_message: "approved",       // room communication under the agent's identity
   // Runs git in a folder the caller names, on this Mac and outside Codex's sandbox.
   check_repo: "refused",
+  // The daemon reads the named files on this Mac, outside Codex's sandbox, and posts them to the room.
+  set_reply_attachments: "refused",
   // Runs git, then asks GitHub, GitLab or Bitbucket about the repository: another machine.
   check_repo_visibility: "refused",
   // Runs git and writes .letagents.json into the repository.
@@ -2154,11 +2162,11 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   assert.deepEqual(approved, [
     "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
     "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
-    "read_messages", "request_human_input", "send_message", "send_thread_message", "set_reply_thread",
+    "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ]);
   // An approved tool that is not chat or status is one the room server itself classes as a read,
   // and none of the three that touch this Mac's repository or another service is approved.
-  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread"];
+  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread", "set_reply_gif", "react_to_message"];
   assert.deepEqual(approved.filter((name) => !speaks.includes(name) && !SUPERVISED_READ_ONLY_TOOLS.has(name)), []);
   for (const name of ["check_repo", "check_repo_visibility", "initialize_repo"]) assert.equal(READ_ONLY_ROOM_TOOL_DECISIONS[name], "refused", name);
 
@@ -2515,6 +2523,83 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
   });
   assert.equal(handle.pid, 4100);
   assert.equal(handle.providerContinuationId, "thread-1", "the bounded delivery retains the original app-server thread");
+});
+
+/** Runs one bounded room turn and returns the exact `input` Codex received in `turn/start`. */
+async function codexRoomTurnInput(attachments: ProviderRoomTurnRequest["attachments"]) {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  let input: Array<Record<string, unknown>> | null = null;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      input = (params as { input: Array<Record<string, unknown>> }).input;
+      return { turn: { id: "turn-images" } } as T;
+    }
+    if (method === "thread/read") return {
+      thread: { id: handle.providerContinuationId, turns: [{ id: "turn-images", status: "completed", items: [
+        { type: "agentMessage", phase: "final", text: "Seen." },
+      ] }] },
+    } as T;
+    return originalRequest<T>(method, params);
+  };
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-images", actionId: "action-images",
+    sourceMessage: { id: "message-1", text: "What is in these?" },
+    activation: { for_current_agent: { reason: "mention" } },
+    ...(attachments ? { attachments } : {}),
+  }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush();
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-images" } });
+  assert.deepEqual(await pending, { turnId: "turn-images", outcome: "reply", text: "Seen.", evidence: "transcript" });
+  return { adapter, input: input! };
+}
+
+test("Codex bounded room turn passes included images as labelled local image paths after the prompt", async () => {
+  const { adapter, input } = await codexRoomTurnInput([
+    { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "not_image" },
+    { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: 2048, status: "image",
+      image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
+    { index: 3, fileName: "photo.jpg", mimeType: "image/jpeg", sizeBytes: 4096, status: "image",
+      image: { mimeType: "image/jpeg", path: "/scratch/turn-1/image-2.jpg" } },
+  ]);
+  assert.equal(adapter.roomTurnImageDelivery(), "file");
+  const [prompt, ...rest] = input;
+  assert.equal(prompt!.type, "text");
+  assert.deepEqual(prompt!.text_elements, []);
+  assert.deepEqual(rest, [
+    { type: "text", text: 'Image 1: "shot \\"1\\".png"', text_elements: [] },
+    { type: "localImage", path: "/scratch/turn-1/image-1.png" },
+    { type: "text", text: 'Image 2: "photo.jpg"', text_elements: [] },
+    { type: "localImage", path: "/scratch/turn-1/image-2.jpg" },
+  ], "labels and paths follow the prompt in the order the notes number them");
+  const lines = String(prompt!.text).split("\n");
+  const header = lines.indexOf("Files attached to the source message (LetAgents prepared them for this turn; do not try to download them):");
+  assert.ok(header > 0, "the prompt lists the attached files");
+  assert.deepEqual(lines.slice(header + 1, header + 4), [
+    '- Attachment 1: "notes.pdf" (application/pdf, 500 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.',
+    '- Attachment 2: "shot \\"1\\".png" (image/png, 2 KB). Included after this text as image 1.',
+    '- Attachment 3: "photo.jpg" (image/jpeg, 4 KB). Included after this text as image 2.',
+  ]);
+  assert.equal(JSON.stringify(rest).includes("notes.pdf"), false, "a file that is not an image is only a note in the text");
+});
+
+test("Codex bounded room turn adds nothing for an image without a file path or for a turn without images", async () => {
+  const withoutPath = await codexRoomTurnInput([
+    { index: 1, fileName: "inline.png", mimeType: "image/png", sizeBytes: 3, status: "image",
+      image: { mimeType: "image/png", data: new Uint8Array([1, 2, 3]) } },
+    { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
+  ]);
+  assert.equal(withoutPath.input.length, 1, "bytes in memory are not an input Codex reads; only the prompt text is sent");
+  assert.equal(withoutPath.input[0]!.type, "text");
+  const none = await codexRoomTurnInput(undefined);
+  assert.equal(none.input.length, 1);
+  assert.doesNotMatch(String(none.input[0]!.text), /Files attached to the source message/);
+  const empty = await codexRoomTurnInput([]);
+  assert.equal(empty.input.length, 1);
+  assert.doesNotMatch(String(empty.input[0]!.text), /Files attached to the source message/);
 });
 
 test("Codex bounded room turn verifies its exact terminal state when thread idle arrives without a turn terminal event", async () => {
@@ -4450,10 +4535,11 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
         await agent.eventually(() => !terminals.settling(agent.id), "the daemon stops waiting for the exit", 5_000);
       }
       await agent.eventually(() => unended() === 0, "the ended process has a saved terminal");
-      // In this fixture a purge after retirement stops at its next step for
-      // every agent, with or without a fault in the exit's recording: the
-      // fake server keeps no record of the ended session. Removal has got
-      // past the process's exit once it answers that, as it does for both.
+      // The agent's first working event published its live activity line,
+      // so the daemon holds a native publication that names its worker
+      // session: that is the exact evidence a purge needs, and the purge
+      // completes for both. Removal has got past the process's exit once it
+      // answers that.
       let answer: { outcome: string; error?: string } = { outcome: "" };
       await agent.eventually(async () => {
         answer = (await purge()).result as typeof answer;
@@ -4461,8 +4547,7 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
       }, "removal is no longer refused for a process that looks alive").catch((error) => {
         throw new Error(`${(error as Error).message}: ${JSON.stringify(answer)}`);
       });
-      assert.deepEqual(answer, { outcome: "invalid",
-        error: "Purge credential recovery needs an exact retained worker session or durable proof that no worker session was minted." });
+      assert.equal(answer.outcome, "purged", answer.error);
       assert.equal(agent.harness.launches.length, 1, "an agent being removed is not started again");
     } finally {
       endFault();
@@ -6237,9 +6322,67 @@ test("Codex custodial polling reads the selected built executable contract witho
     assert.equal(harness.launches.length, 0);
     await writeFile(entry, "throw new Error('contract-probe-owner-canary');");
     await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) => error instanceof Error
-      && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
+      && /contract could not be read/.test(error.message) && /Exit: 1; signal: none; killed: false; elapsed: \d+ms; output: 0 bytes\./.test(error.message)
+      && !error.message.includes("contract-probe-owner-canary") && !error.message.includes(entry));
     await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
       && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
+    for (const source of ["process.exit(1)", "process.stdout.write('not JSON')", "process.stdout.write('x'.repeat(70000))", "process.kill(process.pid, 'SIGKILL')"]) {
+      await writeFile(entry, source);
+      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+        error instanceof Error && !(error as Error & { transientProviderStart?: boolean }).transientProviderStart);
+    }
+    // A healthy child can finish while the parent's event loop is delayed.
+    // Deadline cleanup must not misdiagnose its discarded output as malformed.
+    for (const [completion, expected] of [
+      [`process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))})`, "deadline"],
+      ["process.exit(1)", "failure"],
+    ]) {
+      const probeStartedFile = join(directory, "probe-started");
+      const probeReleaseFile = join(directory, "probe-release");
+      await rm(probeStartedFile, { force: true });
+      await rm(probeReleaseFile, { force: true });
+      await writeFile(entry, `import { writeFileSync, existsSync } from 'node:fs';
+        writeFileSync(${JSON.stringify(probeStartedFile)}, 'started');
+        const release = setInterval(() => {
+          if (!existsSync(${JSON.stringify(probeReleaseFile)})) return;
+          clearInterval(release);
+          ${completion};
+        }, 5);`);
+      const delayedProbe = adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry });
+      const delayedProbeAssertion = assert.rejects(delayedProbe, (error: unknown) =>
+        error instanceof Error && (expected === "deadline"
+          ? (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
+            && /deadline/.test(error.message) && !/malformed/.test(error.message)
+          : !(error as Error & { transientProviderStart?: boolean }).transientProviderStart));
+      const childStartDeadline = Date.now() + 5_000;
+      while (!(await readFile(probeStartedFile, "utf8").catch(() => ""))) {
+        assert.ok(Date.now() < childStartDeadline, "contract probe child must start before blocking its parent");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      writeFileSync(probeReleaseFile, "release");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8_200);
+      await delayedProbeAssertion;
+    }
+
+    const descendantPidFile = join(directory, "probe-child.pid");
+    await writeFile(entry, `import { spawn } from 'node:child_process';
+      import { writeFileSync } from 'node:fs';
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 1, 2] });
+      writeFileSync(${JSON.stringify(descendantPidFile)}, String(child.pid));
+      setInterval(() => {}, 1000);`);
+    const probeStartedAt = Date.now();
+    try {
+      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+        error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
+        && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
+      assert.ok(Date.now() - probeStartedAt < 15_000, "inherited output pipes must not extend the eight-second probe deadline to the descendant's lifetime");
+    } finally {
+      const descendantPid = Number(await readFile(descendantPidFile, "utf8").catch(() => "0"));
+      if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+    }
+    // A fresh probe must actually read the repaired executable after timeout.
     await writeFile(entry, [
       "if (process.argv[2] !== '--letagents-runtime-contract' || process.env.LETAGENTS_TOKEN) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
@@ -7775,6 +7918,53 @@ test("resume capability fails honestly when app-server lacks thread/resume", asy
   assert.equal(adapter.capabilities().resume, false);
 });
 
+test("cold resume explains an exact saved-thread writer conflict without replacing or interrupting its owner", async () => {
+  for (const exact of [true, false]) {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest();
+    const first = await adapter.spawn(request);
+    harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    const nativeError = new Error(`thread ${exact ? first.providerContinuationId : "another-thread"} already has an active writer`);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (...args) => {
+      const client = createRpcClient(...args) as FakeRpc;
+      const original = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        if (method === "thread/resume") {
+          client.requests.push({ method, params });
+          throw nativeError;
+        }
+        return original<T>(method, params);
+      };
+      return client;
+    };
+    const resumedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    await assert.rejects(resumedAdapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: first.providerContinuationId!,
+    }, request), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      if (exact) {
+        assert.match(error.message, /saved Codex conversation is being used by another running Codex session/);
+        assert.match(error.message, /Resume this agent after that session has stopped/);
+        assert.equal(error.cause, undefined, "raw provider errors must not leak back into the UI");
+        assert.equal("transientProviderStart" in error, false);
+        assert.equal("providerRuntimeGone" in error, false);
+      } else assert.equal(error, nativeError, "an unrelated thread error keeps its original meaning");
+      return true;
+    });
+    assert.equal(resumedAdapter.capabilities().resume, true);
+    assert.equal(harness.launches.length, 2, "no fallback or replacement runtime is launched");
+    assert.deepEqual(harness.signals, [{ pid: 4101, signal: "SIGTERM" }], "only the failed new launch is stopped");
+    assert.equal(harness.clients[1]!.closed, true);
+    assert.deepEqual(harness.clients[1]!.requests.filter(({ method }) => /^(thread|turn)\/(start|resume)$/.test(method))
+      .map(({ method }) => method), ["thread/resume"], "no new thread or model turn starts");
+    assert.equal((requestByMethod(harness.clients[1]!, "thread/resume").params as { threadId: string }).threadId, first.providerContinuationId);
+  }
+});
+
 test("spawn fails clearly when the configured LetAgents MCP workplace is absent", async () => {
   const harness = createHarness({ workplacePresent: false });
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -8699,6 +8889,39 @@ test("Codex turn-boundary inspection validates the complete native snapshot with
   subscription.dispose();
 });
 
+test("an unloaded Codex thread proves idle only when its exact app-server has no loaded threads", async () => {
+  const cases = [
+    { name: "empty", loaded: { data: [], nextCursor: null }, idle: true },
+    { name: "same thread loaded", loaded: { data: ["thread-1"], nextCursor: null } },
+    { name: "another thread loaded", loaded: { data: ["other-thread"], nextCursor: null } },
+    { name: "incomplete page", loaded: { data: [], nextCursor: "next" } },
+    { name: "missing cursor", loaded: { data: [] } },
+    { name: "missing data", loaded: { nextCursor: null } },
+    { name: "null data", loaded: { data: null, nextCursor: null } },
+    { name: "unavailable", loaded: new Error("read failed") },
+    { name: "process replaced", loaded: { data: [], nextCursor: null }, race: true },
+  ];
+  for (const testCase of cases) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    const calls: string[] = [];
+    client.request = async <T>(method: string): Promise<T> => {
+      calls.push(method);
+      if (method === "thread/read") return { thread: { id: handle.providerContinuationId,
+        status: { type: "notLoaded" }, turns: [{ id: "finished", status: "completed" }] } } as T;
+      assert.equal(method, "thread/loaded/list");
+      if (testCase.race) harness.launches[0]!.processIdentity += "-replaced";
+      if (testCase.loaded instanceof Error) throw testCase.loaded;
+      return testCase.loaded as T;
+    };
+    assert.equal((await adapter.inspectTurnBoundary(handle)).state, testCase.idle ? "idle" : "unknown", testCase.name);
+    assert.deepEqual(calls, ["thread/read", "thread/loaded/list"], testCase.name);
+    assert.deepEqual(harness.signals, []);
+  }
+});
+
 for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
   test(`Codex turn-boundary inspection rejects ${race} changes during its native read`, async () => {
     const harness = createHarness();
@@ -8747,18 +8970,23 @@ for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
   });
 }
 
-for (const race of ["none", "permission", "connection", "birth", "active", "unknown", "reservation"] as const) {
+for (const race of ["none", "unloaded", "unloaded_permission", "unloaded_connection", "permission", "connection", "birth", "active", "unknown", "reservation"] as const) {
   test(`idle replacement sends no signal after ${race} proof changes`, async () => {
     const harness = createHarness({ exitOnSignal: true });
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
     const client = harness.clients[0]!;
-    client.request = async <T>(): Promise<T> => {
+    client.request = async <T>(method: string): Promise<T> => {
+      if (method === "thread/loaded/list") {
+        if (race === "unloaded_permission") client.pendingPermissions.set(22, { id: 22, method: "unknown/request", params: {}, connectionId: client.connectionEpoch });
+        if (race === "unloaded_connection") client.connectionEpoch = "replacement";
+        return { data: [], nextCursor: null } as T;
+      }
       if (race === "permission") client.pendingPermissions.set(22, { id: 22, method: "unknown/request", params: {}, connectionId: client.connectionEpoch });
       if (race === "connection") client.connectionEpoch = "replacement";
       if (race === "birth") harness.launches[0]!.processIdentity += "-replacement";
       return (race === "unknown" ? {} : { thread: { id: handle.providerContinuationId,
-        status: { type: race === "active" ? "active" : "idle" },
+        status: { type: race.startsWith("unloaded") ? "notLoaded" : race === "active" ? "active" : "idle" },
         turns: race === "active" ? [{ id: "turn-live", status: "inProgress" }] : [] } }) as T;
     };
     let finalChecks = 0;
@@ -8766,7 +8994,7 @@ for (const race of ["none", "permission", "connection", "birth", "active", "unkn
       finalChecks += 1;
       if (race === "reservation") throw new Error("reservation changed");
     });
-    if (race === "none") {
+    if (race === "none" || race === "unloaded") {
       assert.equal((await stopping).terminalCause, "stopped");
       assert.equal(finalChecks, 1);
       assert.deepEqual(harness.signals, [{ pid: handle.pid, signal: "SIGTERM" }]);
@@ -10111,4 +10339,43 @@ test("inspector reads idle Codex account limits without opening Live and fences 
   client.connectionEpoch = "reconnected";
   finish({ rateLimits: { primary: { usedPercent: 99 } } });
   assert.equal(await pending, null, "old connection response is never presented as current");
+});
+
+test("bounded Codex context reuse resets on exact compaction, failure and reconnect", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client); let turn = 0; let compact = false; let fail = false;
+  const prompts: string[] = [];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      prompts.push((params as { input: Array<{ text: string }> }).input[0]!.text);
+      turn++;
+      if (fail) throw new Error("ambiguous native dispatch");
+      if (compact) client.emit({ method: "item/started", params: { threadId: handle.providerContinuationId,
+        turnId: `turn-cache-${turn}`, item: { type: "contextCompaction", id: "compact" } } });
+      client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: `turn-cache-${turn}` } });
+      return { turn: { id: `turn-cache-${turn}` } } as T;
+    }
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{
+      id: `turn-cache-${turn}`, status: "completed", items: [{ type: "agentMessage", phase: "final", text: "LETAGENTS_NO_ROOM_REPLY" }],
+    }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const request = { roomId: "focus_95", inboxItemId: "cache-inbox", actionId: "cache-action", activation: {},
+    sourceMessage: { id: "msg_20", source: "browser", text: "Thanks" },
+    observedContext: Array.from({ length: 8 }, (_, i) => ({ id: `msg_${i + 1}`, source: "agent", text: `Perspective ${i}` })),
+  };
+  const run = () => adapter.runRoomTurn(handle, request);
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  client.emit({ method: "thread/compacted", params: { threadId: "unrelated-thread" } });
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  compact = true; await run(); compact = false;
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/, "mid-turn compaction invalidates even a successful pending commit");
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  fail = true; await assert.rejects(run(), /ambiguous native dispatch/); fail = false;
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  client.disconnect();
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
 });

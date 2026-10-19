@@ -218,19 +218,17 @@ function decryptTokenFromStorage(
   const encryptedToken = parsed.encryptedToken || null;
   if (!encryptedToken) return null;
 
-  if (
-    !encryptedToken.startsWith("safe:") ||
-    !desktopSecretStorage().isEncryptionAvailable()
-  ) {
-    return null;
-  }
+  if (!encryptedToken.startsWith("safe:")) return null;
 
   try {
+    if (!desktopSecretStorage().isEncryptionAvailable()) throw new Error();
     return desktopSecretStorage().decryptString(
       Buffer.from(encryptedToken.slice("safe:".length), "base64"),
     );
   } catch {
-    return null;
+    // Keep the entire read retryable. A partially decrypted session must not
+    // enter the cache or overwrite unreadable ciphertext during account refresh.
+    throw new Error("System credential storage is temporarily unavailable.");
   }
 }
 

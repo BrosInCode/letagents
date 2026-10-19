@@ -67,6 +67,7 @@ export function appendRoomMessage(message: RoomMessage): boolean {
 }
 export const messagesHasOlder = ref(false)
 export const isLoadingOlderMessages = ref(false)
+export const olderMessagesError = ref('')
 /** False until the joined room's initial message page has been loaded once. */
 export const messagesLoaded = ref(false)
 export const presence = ref<RoomAgentPresence[]>([])
@@ -143,6 +144,7 @@ export function resetRoomState(options: {
   replaceRoomMessages([])
   messagesHasOlder.value = false
   isLoadingOlderMessages.value = false
+  olderMessagesError.value = ''
   messagesLoaded.value = false
   tasks.value = []
   roomArtifacts.value = []

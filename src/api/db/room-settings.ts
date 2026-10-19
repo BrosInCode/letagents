@@ -8,6 +8,7 @@ import {
 } from "../../../shared/room-settings.mjs";
 import { db } from "./client.js";
 import { room_settings } from "./schema.js";
+import { disableRoomReplyTurnsTx, queueReplyTurnWakes } from "./messages/reply-turns.js";
 
 export interface ResolvedGitHubRoomChatEventKinds {
   enabled_kinds: GitHubRoomChatEventKind[];
@@ -153,11 +154,29 @@ export async function getRoomAgentReplyOrder(roomId: string): Promise<RoomAgentR
 
 /** null returns the room to the default (parallel) without choosing it. */
 export async function setRoomAgentReplyOrder(roomId: string, order: RoomAgentReplyOrder | null): Promise<void> {
-  await db
-    .insert(room_settings)
-    .values({ room_id: roomId, agent_reply_order: order })
-    .onConflictDoUpdate({
-      target: room_settings.room_id,
-      set: { agent_reply_order: order, updated_at: sql`now()` },
-    });
+  const released = await db.transaction(async (tx) => {
+    await tx.insert(room_settings)
+      .values({ room_id: roomId, agent_reply_order: order })
+      .onConflictDoUpdate({
+        target: room_settings.room_id,
+        set: { agent_reply_order: order, updated_at: sql`now()` },
+      });
+    // Receipt creation holds a shared lock on this setting until commit. Once
+    // this update wins, no old sequential plan can commit behind the release.
+    return order === "sequential" ? [] : disableRoomReplyTurnsTx(tx, roomId);
+  });
+  queueReplyTurnWakes(released);
+}
+
+/** Expressions are chosen per room and always default off. */
+export async function getRoomExpressionsEnabled(roomId: string): Promise<boolean> {
+  const [row] = await db.select({ enabled: room_settings.expressions_enabled })
+    .from(room_settings).where(eq(room_settings.room_id, roomId));
+  return row?.enabled === true;
+}
+
+export async function setRoomExpressionsEnabled(roomId: string, enabled: boolean): Promise<void> {
+  await db.insert(room_settings).values({ room_id: roomId, expressions_enabled: enabled })
+    .onConflictDoUpdate({ target: room_settings.room_id,
+      set: { expressions_enabled: enabled, updated_at: sql`now()` } });
 }

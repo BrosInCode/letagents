@@ -13,7 +13,6 @@ import {
   Fragment,
   ssrContextKey,
   type Component,
-  type InjectionKey,
 } from "vue";
 import * as Vue from "vue";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
@@ -26,7 +25,6 @@ let AddAgentActionBar: Component;
 let AddAgentSetupStatus: Component;
 let AddAgentRuntimeSettings: Component;
 let AddAgentSupervisedLaunchActions: Component;
-let managedAgentSessionsKey: InjectionKey<unknown>;
 let actionStyleNames: Record<string, string>;
 let compiledActionCss: string;
 
@@ -68,11 +66,6 @@ before(async () => {
       "/renderer/src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css?inline",
     )
   ).default;
-  managedAgentSessionsKey = (
-    await vite.ssrLoadModule(
-      "/renderer/src/components/desktop/content/add-agent/managed-agent-sessions-context.ts",
-    )
-  ).managedAgentSessionsKey;
 });
 
 after(async () => {
@@ -192,21 +185,18 @@ async function renderReadyLaunch(controller: ReturnType<typeof readyController>[
     render: () => h(Fragment, [
       h(AddAgentSupervisedLaunch, { controller }),
       h(AddAgentActionBar, {
-        roomIdentifier: "room-1",
         providerId: "codex",
         provider: {
           id: "codex",
           name: "Codex",
           description: "",
-          capabilities: ["desktop_managed_runtime", "supervised_runtime"],
+          capabilities: ["supervised_runtime"],
           runtimeCommand: null,
           mcpTargetId: "codex",
           permissionProfiles: [],
           defaultPermissionProfileId: null,
         },
         preflight: { nextAction: null, status: "ready" },
-        permissionProfile: null,
-        launchMode: "supervised",
         setupBusy: false,
         setupActionLabel: "",
         copyingAuthCommand: false,
@@ -223,11 +213,6 @@ async function renderReadyLaunch(controller: ReturnType<typeof readyController>[
         charterMissing: false,
       }),
     ]),
-  });
-  app.provide(managedAgentSessionsKey, {
-    sessions: ref([]),
-    refresh: async () => undefined,
-    upsert: () => undefined,
   });
   return renderToString(app);
 }

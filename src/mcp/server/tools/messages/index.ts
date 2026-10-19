@@ -4,6 +4,7 @@ import { registerPostReasoningTool } from "./reasoning-tool.js";
 import { registerSendMessageTool } from "./send-tool.js";
 import { registerPostStatusTool } from "./status-tool.js";
 import { registerWaitForMessagesTool } from "./wait-tool.js";
+import { registerExpressionTools } from "./expressions-tool.js";
 
 export function registerStatusTools(server: McpServer): void {
   registerPostStatusTool(server);
@@ -11,6 +12,7 @@ export function registerStatusTools(server: McpServer): void {
 }
 
 export function registerMessageTools(server: McpServer, options: { includeDeliveryLoop?: boolean } = {}): void {
+  registerExpressionTools(server);
   registerSendMessageTool(server);
   registerReadMessagesTool(server);
   if (options.includeDeliveryLoop !== false) registerWaitForMessagesTool(server);

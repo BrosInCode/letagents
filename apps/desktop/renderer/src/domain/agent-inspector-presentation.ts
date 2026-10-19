@@ -21,8 +21,8 @@ export function agentInspectorActionErrorMessage(
   error: unknown,
 ): string {
   const detail = error instanceof Error ? error.message : "";
-  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
-    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
+  if ((kind === "reconnect" || kind === "reconnect_runtime") && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
+    return "This provider process has stopped. Open Diagnostics → Agent runtime for recovery options to continue with the same identity and workspace.";
   }
   if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
     return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
@@ -38,7 +38,7 @@ export function agentInspectorSignal(projection: AgentInspectorProjection, nowMs
   if (projection.resourceFreshness === 'stale') return {
     state: 'stale', label: 'Updates delayed', detail: 'Showing the last known state. Controls return when the connection does.', tone: 'amber', moving: false,
   };
-  if (agentCompactionProgress(projection.entry)) return {
+  if (!projection.runtimeExited && agentCompactionProgress(projection.entry)) return {
     state: 'compacting', label: 'Compacting context', detail: 'Summarizing earlier context.', tone: 'violet', moving: true,
   };
   const state = projection.overallState;
@@ -94,4 +94,54 @@ export function sharedAgentInspectorPresentation(
     else signal = { state: 'online', label: 'Online', detail: current.statusText || 'Ready for room work.', tone: 'green', moving: false };
   }
   return { owner, ownerLabel, provider, signal };
+}
+
+export function actionProgressMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
+  return ({
+    mention: "Opening the room composer…",
+    pause: "Pausing this agent…",
+    resume: "Resuming this agent…",
+    reconnect: "Restoring the existing agent connection…",
+    recover: "Restarting the agent app…",
+    reconnect_runtime: "Reconnecting the agent and its room messages…",
+    restart_runtime: "Restarting the agent app with its saved conversation…",
+    fresh_runtime: "Restarting the agent app with a new conversation…",
+    stop_turn: "Stopping the current turn…",
+    steer_turn: "Applying correction to this session…",
+    retry_turn_control: "Retrying the previous stop or correction…",
+    resolve_turn_control: "Saving the confirmed result…",
+    retry_delivery: "Retrying this delivery…",
+    restore_conversation: "Restoring this agent’s conversation…",
+    skip_message: "Skipping this blocked message…",
+    retire_agent: "Retiring this saved agent…",
+    save_settings: "Saving settings…",
+    apply_settings: "Restarting with saved settings…",
+    move_room: "Moving room…",
+    purge_agent: "Deleting history and settings…",
+  } as const)[kind];
+}
+
+export function actionSuccessMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
+  return ({
+    mention: "Composer ready.",
+    pause: "Agent paused.",
+    resume: "Agent resumed.",
+    reconnect: "Reconnection requested.",
+    recover: "The agent app is restarting. Its name and project files are kept.",
+    reconnect_runtime: "Reconnection requested. Check the agent and room connection status.",
+    restart_runtime: "Restart requested with the saved conversation. Wait for the agent to be ready before continuing.",
+    fresh_runtime: "A new conversation was requested. Your project files and history are kept. Wait for the agent to be ready before continuing.",
+    stop_turn: "Current turn stopped.",
+    steer_turn: "Correction applied to the same agent session.",
+    retry_turn_control: "Previous stop or correction completed.",
+    resolve_turn_control: "Confirmed result saved.",
+    retry_delivery: "Delivery retry started.",
+    restore_conversation: "Conversation restoration started.",
+    skip_message: "Message skipped. Later room work can continue.",
+    retire_agent: "Agent retired. Its project files and history are kept.",
+    save_settings: "Settings saved.",
+    apply_settings: "Restart requested to apply your settings.",
+    move_room: "Room move started.",
+    purge_agent: "History and settings deleted. Project files are kept.",
+  } as const)[kind];
 }

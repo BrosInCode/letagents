@@ -11,8 +11,6 @@ import type {
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
 import {
-  normalizeCursorMcpPolicy,
-  prepareCursorManagedProfile,
   prepareCursorSupervisedProfile,
   type CursorManagedProfile,
 } from "./cursor-managed-profile.js";
@@ -34,6 +32,7 @@ import {
   type LetAgentsMcpRuntime,
 } from "./letagents-mcp-runtime.js";
 import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
+import { cachedProbe, probeKey } from "./provider-probe-cache.js";
 import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
@@ -81,7 +80,8 @@ export async function runDesktopCursorProviderPreflight(
   const command = runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN ||
     provider.runtimeCommand ||
     "cursor-agent";
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
   }
@@ -100,12 +100,10 @@ export async function runDesktopCursorProviderPreflight(
 
   const version = firstOutputLine(versionResult);
   const workspaceRoot = input.repoRootPath?.trim() ? resolve(input.repoRootPath.trim()) : null;
-  const supervised = input.launchMode === "supervised";
-  const cursorMcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
   const requestedPermissionProfileId = normalizeRequestedPermissionProfileId(input.permissionProfileId);
   const permissionProfile = managedAgentPermissionProfileForProvider(
     "cursor",
-    requestedPermissionProfileId ?? (supervised ? "sandboxed_write" : null),
+    requestedPermissionProfileId ?? "sandboxed_write",
   );
   if (requestedPermissionProfileId && permissionProfile.id !== requestedPermissionProfileId) {
     return {
@@ -132,29 +130,25 @@ export async function runDesktopCursorProviderPreflight(
     };
   }
   const launchOptions = cursorLaunchOptionsForPermissionProfile(permissionProfile.id);
-  if (supervised || launchOptions.force || launchOptions.sandbox) {
-    const flagResult = await execFileWithTimeout(command, ["--help"], {
+  const flagResult = await cachedProbe(probeKey(command, ["--help"], workspaceRoot), () =>
+    execFileWithTimeout(command, ["--help"], {
       cwd: workspaceRoot ?? undefined,
       env: runtimeEnv,
       timeoutMs,
-    });
-    if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions, supervised)) {
-      return {
-        providerId: provider.id,
-        status: "error",
-        canStart: false,
-        message: "Cursor Agent does not support the selected permission profile.",
-        detail: supervised
-          ? "Update Cursor Agent to use this access level."
-          : "Update Cursor Agent so managed Cursor can use the required --force and --sandbox flags.",
-        nextAction: null,
-        version,
-        mcpStatus,
-      };
-    }
+    }));
+  if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions)) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Cursor Agent does not support the selected permission profile.",
+      detail: "Update Cursor Agent to use this access level.",
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
   }
-  const roomOnlyReadOnly = supervised
-    && input.roomOnly === true
+  const roomOnlyReadOnly = input.roomOnly === true
     && !workspaceRoot
     && permissionProfile.id === "read_only";
   if (!workspaceRoot && !roomOnlyReadOnly) {
@@ -184,32 +178,23 @@ export async function runDesktopCursorProviderPreflight(
     if (roomOnlyReadOnly) {
       preflightWorkspaceRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-workspace-preflight-"));
     }
-    if (supervised && preflightWorkspaceRoot) {
-      preflightProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-preflight-"));
-    }
+    preflightProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-preflight-"));
     try {
-      supervisedMcpRuntime = supervised && preflightWorkspaceRoot
-        ? options.mcpRuntime ?? resolveLetAgentsMcpRuntime({
-          devEntryPath: process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()
-            ? join(sourceWorkspaceRoot, "dist", "mcp", "server.js")
-            : undefined,
-        })
-        : undefined;
-      managedProfile = supervised && preflightWorkspaceRoot
-        ? prepareCursorSupervisedProfile({
-          workAttemptId: `preflight:${preflightWorkspaceRoot}`,
-          apiBaseUrl: desktopApiUrl,
-          workspaceRoot: preflightWorkspaceRoot,
-          profileRoot: preflightProfileRoot!,
-          mcpRuntime: supervisedMcpRuntime,
-          identityAttestationOnly: true,
-          inspectionOnly: true,
-          mcpWorkingDirectory: preflightProfileRoot!,
-        })
-        : prepareCursorManagedProfile({
-          workspaceRoot,
-          mcpPolicy: cursorMcpPolicy,
-        });
+      supervisedMcpRuntime = options.mcpRuntime ?? resolveLetAgentsMcpRuntime({
+        devEntryPath: process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()
+          ? join(sourceWorkspaceRoot, "dist", "mcp", "server.js")
+          : undefined,
+      });
+      managedProfile = prepareCursorSupervisedProfile({
+        workAttemptId: `preflight:${preflightWorkspaceRoot}`,
+        apiBaseUrl: desktopApiUrl,
+        workspaceRoot: preflightWorkspaceRoot!,
+        profileRoot: preflightProfileRoot,
+        mcpRuntime: supervisedMcpRuntime,
+        identityAttestationOnly: true,
+        inspectionOnly: true,
+        mcpWorkingDirectory: preflightProfileRoot,
+      });
     } catch (error) {
       return {
         providerId: provider.id,
@@ -223,65 +208,43 @@ export async function runDesktopCursorProviderPreflight(
       };
     }
     let managedEnv = buildCursorChildEnv(managedProfile.env);
-    if (supervised) {
-      delete managedEnv.CURSOR_API_KEY;
-      delete managedEnv.CURSOR_AUTH_TOKEN;
-    }
-    let attestedPersonalIdentity: Awaited<ReturnType<typeof assertCursorPersonalIdentity>> | undefined;
-    if (supervised) {
-      try {
-        attestedPersonalIdentity = await (options.personalIdentityAttestor ?? assertCursorPersonalIdentity)({
-          cursorBin: command,
-          cwd: preflightProfileRoot!,
-          env: managedEnv,
-          writableProfileRoot: preflightProfileRoot!,
-          requiredReadableRoots: managedProfile.authReadRoots,
-          timeoutMs,
-        });
-      } catch (error) {
-        if (error instanceof CursorIdentityAuthRequiredError) {
-          return {
-            providerId: provider.id,
-            status: "auth_required",
-            canStart: false,
-            message: "Cursor Agent needs sign-in.",
-            detail: error.message,
-            nextAction: "authenticate",
-            version,
-            mcpStatus,
-          };
-        }
-        return {
-          providerId: provider.id,
-          status: "error",
-          canStart: false,
-          message: "Could not verify the Cursor account in use.",
-          detail: error instanceof Error ? error.message : String(error),
-          nextAction: null,
-          version,
-          mcpStatus,
-        };
-      }
-    } else {
-      const authResult = await execFileWithTimeout(command, ["status"], {
-        cwd: workspaceRoot ?? undefined,
+    delete managedEnv.CURSOR_API_KEY;
+    delete managedEnv.CURSOR_AUTH_TOKEN;
+    let attestedPersonalIdentity: Awaited<ReturnType<typeof assertCursorPersonalIdentity>>;
+    try {
+      attestedPersonalIdentity = await (options.personalIdentityAttestor ?? assertCursorPersonalIdentity)({
+        cursorBin: command,
+        cwd: preflightProfileRoot,
         env: managedEnv,
+        writableProfileRoot: preflightProfileRoot,
+        requiredReadableRoots: managedProfile.authReadRoots,
         timeoutMs,
       });
-      if (!authResult.ok) {
+    } catch (error) {
+      if (error instanceof CursorIdentityAuthRequiredError) {
         return {
           providerId: provider.id,
           status: "auth_required",
           canStart: false,
           message: "Cursor Agent needs sign-in.",
-          detail: firstOutputLine(authResult) || "Sign in with Cursor Agent before starting a local room agent.",
+          detail: error.message,
           nextAction: "authenticate",
           version,
           mcpStatus,
         };
       }
+      return {
+        providerId: provider.id,
+        status: "error",
+        canStart: false,
+        message: "Could not verify the Cursor account in use.",
+        detail: error instanceof Error ? error.message : String(error),
+        nextAction: null,
+        version,
+        mcpStatus,
+      };
     }
-    if (supervised && workspaceRoot && permissionProfile.id === "sandboxed_write") {
+    if (workspaceRoot && permissionProfile.id === "sandboxed_write") {
       try {
         await (options.workspaceGenerationSupportChecker ?? assertSupervisedWorkspaceGenerationSupported)(workspaceRoot);
       } catch (error) {
@@ -299,7 +262,7 @@ export async function runDesktopCursorProviderPreflight(
     }
 
     const resealAuthenticatedSupervisedProfile = async (): Promise<DesktopAgentProviderPreflight | null> => {
-      if (!supervised || !preflightProfileRoot || !supervisedMcpRuntime) return null;
+      if (!preflightProfileRoot || !supervisedMcpRuntime) return null;
       try {
         managedProfile = prepareCursorSupervisedProfile({
           workAttemptId: `preflight:${preflightWorkspaceRoot}`,
@@ -331,7 +294,7 @@ export async function runDesktopCursorProviderPreflight(
     const postAuthProfileError = await resealAuthenticatedSupervisedProfile();
     if (postAuthProfileError) return postAuthProfileError;
 
-    if (supervised && preflightProfileRoot && supervisedMcpRuntime) {
+    if (preflightProfileRoot && supervisedMcpRuntime) {
       // Prove both the hidden project-config suppression flag and the exact
       // packaged bridge from a fresh credentialless profile. The authority
       // wrapper denies network and confines reads, writes, and process exec;
@@ -375,66 +338,18 @@ export async function runDesktopCursorProviderPreflight(
       }
     }
 
-    if (!supervised && cursorMcpPolicy !== "normal") {
-      // Supervised launches exercise project isolation only inside the two
-      // credentialless, sandboxed authority attestations immediately before
-      // each turn. An authenticated `mcp list` is unsafe here: Cursor loads
-      // account-managed plugin and team MCP definitions while merely listing.
-      const mcpResult = await execFileWithTimeout(command, ["mcp", "list"], {
-        cwd: workspaceRoot!,
-        env: managedEnv,
-        timeoutMs,
-      });
-      if (!mcpResult.ok) {
-        return {
-          providerId: provider.id,
-          status: "error",
-          canStart: false,
-          message: "Cursor managed MCP policy could not be checked.",
-          detail: firstOutputLine(mcpResult) || "Cursor failed while listing MCP servers under the selected managed profile.",
-          nextAction: null,
-          version,
-          mcpStatus,
-        };
-      }
-      if (mentionsLetAgentsMcp(mcpResult)) {
-        return {
-          providerId: provider.id,
-          status: "error",
-          canStart: false,
-          message: "Cursor can still see LetAgents MCP.",
-          detail: "Managed Cursor must not expose LetAgents room tools under the selected MCP policy. Remove project-level LetAgents MCP config or repair the managed profile.",
-          nextAction: null,
-          version,
-          mcpStatus,
-        };
-      }
-      if (cursorMcpPolicy === "none" && mcpListHasVisibleServers(mcpResult)) {
-        return {
-          providerId: provider.id,
-          status: "error",
-          canStart: false,
-          message: "Cursor can still see MCP servers.",
-          detail: "The No MCPs policy must not expose any Cursor MCP servers. Remove project-level MCP config or repair the managed profile.",
-          nextAction: null,
-          version,
-          mcpStatus,
-        };
-      }
-    }
-
     return {
       providerId: provider.id,
       status: "ready",
       canStart: true,
-      message: `Cursor Agent is ready to start${supervised ? " supervised" : ""} with ${
-        supervised && permissionProfile.id === "sandboxed_write"
+      message: `Cursor Agent is ready to start supervised with ${
+        permissionProfile.id === "sandboxed_write"
           ? "Workspace writes"
-          : supervised && permissionProfile.id === "full_access"
+          : permissionProfile.id === "full_access"
             ? "Full access"
             : permissionProfile.label
       }.`,
-      detail: cursorPreflightReadyDetail(cursorMcpPolicy, mcpStatus, permissionProfile.id, supervised),
+      detail: cursorPreflightReadyDetail(permissionProfile.id),
       nextAction: null,
       version,
       mcpStatus,
@@ -484,20 +399,6 @@ function firstOutputLine(result: ExecResult): string | null {
   return line || null;
 }
 
-function mentionsLetAgentsMcp(result: ExecResult): boolean {
-  return `${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents");
-}
-
-function mcpListHasVisibleServers(result: ExecResult): boolean {
-  const output = `${result.stdout}\n${result.stderr}`.trim().toLowerCase();
-  return Boolean(
-    output &&
-    output !== "[]" &&
-    !output.includes("no mcp") &&
-    !output.includes("no servers"),
-  );
-}
-
 function normalizeRequestedPermissionProfileId(
   value: DesktopAgentProviderPreflightInput["permissionProfileId"],
 ): DesktopManagedAgentPermissionProfileId | null {
@@ -508,31 +409,15 @@ function normalizeRequestedPermissionProfileId(
 function cursorHelpSupportsLaunchOptions(
   result: ExecResult,
   launchOptions: ReturnType<typeof cursorLaunchOptionsForPermissionProfile>,
-  supervised: boolean,
 ): boolean {
   const output = `${result.stdout}\n${result.stderr}`;
   return (!launchOptions.force || output.includes("--force")) &&
-    (!(launchOptions.sandbox || supervised) || output.includes("--sandbox")) &&
-    (!supervised || output.includes("--trust"));
+    output.includes("--sandbox") &&
+    output.includes("--trust");
 }
 
 function cursorPreflightReadyDetail(
-  policy: ReturnType<typeof normalizeCursorMcpPolicy>,
-  mcpStatus: DesktopMcpInstallTarget["status"] | null,
   permissionProfileId: Parameters<typeof cursorPermissionProfileReadyDetail>[0],
-  supervised: boolean,
 ): string {
-  const permissionDetail = cursorPermissionProfileReadyDetail(permissionProfileId, supervised);
-  if (supervised) {
-    return `${permissionDetail} This agent connects only to LetAgents room tools and keeps running when the desktop app restarts.`;
-  }
-  if (policy === "normal") {
-    return `${permissionDetail} Cursor can use your configured tools, including LetAgents if connected.`;
-  }
-  if (policy === "none") {
-    return `${permissionDetail} Connected tools are disabled for this agent.`;
-  }
-  return mcpStatus === "installed"
-    ? `${permissionDetail} Your connected tools remain available, except LetAgents.`
-    : `${permissionDetail} LetAgents room tools are disabled for this agent.`;
+  return `${cursorPermissionProfileReadyDetail(permissionProfileId)} This agent connects only to LetAgents room tools and keeps running when the desktop app restarts.`;
 }

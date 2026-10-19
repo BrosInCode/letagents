@@ -4,30 +4,33 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
-  DesktopCursorMcpPolicy,
   DesktopGitRoomInfo,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
-  DesktopManagedAgentPermissionRequest,
-  DesktopManagedAgentSession,
   DesktopParticipantSummary,
-  DesktopReasoningSession,
   DesktopRoomInfo,
   DesktopRoomMessage,
   DesktopSupervisorManifestEntry,
-  DesktopSupervisorActivityEvent,
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
 import { isGenericAgentProviderLabel } from "./agent-provider";
-import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
+import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../../../../src/shared/agent-presence";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { BACKGROUND_WORK_METHOD, humanFacingSupervisorActivitySummary, isHumanVisibleSupervisorActivity, liveActivityEchoText } from "../../../../../shared/live-activity-summary.mjs";
+// The owner's echo and the line published to room presence share one source.
+export {
+  humanFacingSupervisorActivitySummary,
+  isHumanVisibleSupervisorActivity,
+  LIVE_ACTIVITY_ECHO_MAX_LENGTH,
+  liveActivityEchoText,
+} from "../../../../../shared/live-activity-summary.mjs";
 
 /** Current native-owner progress, never inferred from saved activity or a timer. */
 export function agentCompactionProgress(entry: Pick<DesktopSupervisorManifestEntry,
   "provider" | "providerProgress" | "desiredState" | "observedState" | "condition">) {
-  return entry.provider === "claude-code" && entry.desiredState === "running"
+  return ["claude-code", "open-model"].includes(entry.provider) && entry.desiredState === "running"
     && entry.condition === "none" && !["stopped", "stopping", "failed"].includes(entry.observedState)
     && entry.providerProgress?.state === "compacting" ? entry.providerProgress : null;
 }
@@ -37,15 +40,9 @@ export interface AgentSetupConfirmation {
   action: DesktopAgentProviderSetupAction;
 }
 
-export function hasDesktopManagedRuntime(
-  provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
-): boolean {
-  return Boolean(provider?.capabilities.includes("desktop_managed_runtime"));
-}
-
 /**
- * Durable supervision is stricter than the app-owned managed runtime. A
- * provider opts in only after its native evidence cells prove that lifecycle.
+ * A provider opts in to durable supervision only after its native evidence
+ * cells prove that lifecycle.
  */
 export function hasSupervisedRuntime(
   provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
@@ -191,156 +188,8 @@ export function supervisedProviderLaunchPolicy(
   }
 }
 
-export function isVisibleManagedAgentSession(
-  session: DesktopManagedAgentSession,
-): boolean {
-  if (session.status === "failed" || session.status === "interrupted") {
-    return false;
-  }
-  return session.canStop;
-}
-
-export function isDeliverableManagedAgentSession(
-  session: DesktopManagedAgentSession,
-): boolean {
-  return isVisibleManagedAgentSession(session) &&
-    session.status !== "blocked" &&
-    Boolean(session.agentSessionId) &&
-    (
-      session.status === "running" ||
-      session.status === "unknown" ||
-      (session.deliveryMode === "desktop_events" && session.status === "completed")
-    );
-}
-
-export function canStopManagedAgentTurn(
-  session: Pick<DesktopManagedAgentSession, "canStop" | "status"> | null | undefined,
-): boolean {
-  return Boolean(
-    session?.canStop &&
-    (session.status === "starting" || session.status === "running")
-  );
-}
-
 export function normalizeManagedAgentRoomIdentifier(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
-}
-
-/**
- * Resolve Inspector activity through durable supervisor bindings when they
- * exist. Returning null (rather than an empty list) tells the caller that a
- * pre-registration label fallback is still necessary.
- */
-export function exactSupervisorEntriesForManagedSessions(
-  entries: readonly DesktopSupervisorManifestEntry[],
-  sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
-): DesktopSupervisorManifestEntry[] | null {
-  const ids = new Set(sessions.map((session) => session.supervisorEntryId).filter((id): id is string => Boolean(id)));
-  if (ids.size === 0) return null;
-  return entries.filter((entry) => ids.has(entry.id));
-}
-
-/**
- * Prefer the daemon's durable worker binding over every display-name fallback.
- * A room worker may be renamed when it re-registers, while same-provider peers
- * may intentionally share one manifest label.
- */
-export function exactSupervisorEntriesForTarget(
-  entries: readonly DesktopSupervisorManifestEntry[],
-  sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
-  targetAgentSessionId: string | null | undefined,
-  knownSupervisorEntryIds: readonly string[] = [],
-): DesktopSupervisorManifestEntry[] | null {
-  const sessionId = targetAgentSessionId?.trim() || null;
-  if (sessionId) {
-    const bound = entries.filter((entry) => entry.agentSessionId === sessionId);
-    if (bound.length) return bound;
-  }
-  const sessionEntries = exactSupervisorEntriesForManagedSessions(entries, sessions);
-  if (sessionEntries) return sessionEntries;
-  const knownIds = new Set(knownSupervisorEntryIds);
-  if (knownIds.size) {
-    return entries.filter((entry) => knownIds.has(entry.id));
-  }
-  // A specific room worker must never widen to a same-label peer merely
-  // because its daemon projection is still loading.
-  return sessionId ? [] : null;
-}
-
-/**
- * Join an Activity worker back to the local managed session that launched its
- * supervisor entry. The managed runtime's own agentSessionId can differ from
- * the room worker id after MCP registration, so supervisorEntryId is the
- * durable bridge between those two projections.
- */
-export function managedAgentSessionMatchesSupervisorTarget(
-  session: Pick<DesktopManagedAgentSession, "supervisorEntryId">,
-  entries: readonly DesktopSupervisorManifestEntry[],
-  targetAgentSessionId: string | null | undefined,
-  knownSupervisorEntryIds: readonly string[] = [],
-): boolean {
-  const exactEntries = exactSupervisorEntriesForTarget(
-    entries,
-    [],
-    targetAgentSessionId,
-    knownSupervisorEntryIds,
-  );
-  if (!exactEntries || exactEntries.length !== 1) return false;
-  return Boolean(
-    session.supervisorEntryId &&
-    session.supervisorEntryId === exactEntries[0]!.id
-  );
-}
-
-export interface ManagedAgentProviderIdentity {
-  supervisorEntryId: string;
-  providerId: string;
-  label: string;
-  model: string | null;
-  accessibleLabel: string;
-  bindingState: DesktopSupervisorManifestEntry["agentSessionBindingState"];
-}
-
-export function managedAgentProviderIdentityForEntry(
-  entry: DesktopSupervisorManifestEntry | null | undefined,
-): ManagedAgentProviderIdentity | null {
-  if (!entry) return null;
-  const providerId = entry.provider.trim();
-  if (!providerId) return null;
-  const label = managedAgentProviderLabel(providerId);
-  const model = entry.model?.trim() || null;
-  return {
-    supervisorEntryId: entry.id,
-    providerId,
-    label,
-    model,
-    accessibleLabel: model ? `${label} · ${model}` : label,
-    bindingState: entry.agentSessionBindingState,
-  };
-}
-
-/**
- * Resolve provider presentation only after an exact daemon/session binding is
- * available. The Inspector must not infer a provider from a display name: two
- * supervised peers can intentionally share that name while using different
- * providers or generations.
- */
-export function managedAgentProviderIdentityForTarget(
-  entries: readonly DesktopSupervisorManifestEntry[],
-  sessions: readonly Pick<DesktopManagedAgentSession, "supervisorEntryId">[],
-  targetAgentSessionId: string | null | undefined,
-  knownSupervisorEntryIds: readonly string[] = [],
-): ManagedAgentProviderIdentity | null {
-  const exactEntries = exactSupervisorEntriesForTarget(
-    entries,
-    sessions,
-    targetAgentSessionId,
-    knownSupervisorEntryIds,
-  );
-  if (!exactEntries || exactEntries.length !== 1) return null;
-
-  const entry = exactEntries[0]!;
-  return managedAgentProviderIdentityForEntry(entry);
 }
 
 export function managedAgentProviderLabel(providerId: string): string {
@@ -380,6 +229,16 @@ export function supervisedAgentWorkIndicators(
     )
     .flatMap((entry) => {
       const turn = entry.roomAgentState!.turn;
+      // A terminal receipt can arrive before the active-turn projection clears.
+      // Do not keep saying "Writing" after this exact turn chose not to reply.
+      // Matching the native turn as well as the inbox preserves later retries.
+      const settled = entry.deliveryReceipts?.some(receipt =>
+        Boolean(turn.inboxItemId && turn.providerTurnId)
+        && receipt.inboxItemId === turn.inboxItemId
+        && receipt.providerTurnId === turn.providerTurnId
+        && receipt.sourceMessageId === turn.sourceMessageId
+        && (receipt.state.startsWith("acknowledged") || receipt.state.startsWith("cancelled")));
+      if (settled) return [];
       const turnStartedAt = currentRoomTurnStartedAt(entry);
       const turnStartedAtMs = Date.parse(turnStartedAt ?? "");
       const nativeActivityIsCurrent = entry.observedState === "working"
@@ -453,178 +312,6 @@ function roomTurnFallbackSummary(state: string): string {
   return "Thinking";
 }
 
-/** An agent waiting on its model provider is not working, and looks stuck
- * unless its owner is told. The adapter sends this as a `provider_event`,
- * which the daemon treats as ordinary activity; it is the one such event
- * shown. */
-const PROVIDER_RETRY_METHOD = "letagents/providerretry";
-const PROVIDER_RETRY_SUMMARY = /^The model provider returned an error\. Retrying \(attempt \d{1,3}\)\.$/;
-
-/** A Claude turn that stays open for background work it started is not thinking, and looks stuck unless its
- * owner is told what it waits for and for how long. The adapter sends this as a `provider_event` too. */
-const BACKGROUND_WORK_METHOD = "letagents/backgroundwork";
-const BACKGROUND_WORK_SUMMARY = /^(?:Waiting for (?:a sub-agent|sub-agents) to finish \((?:under 1 min|\d{1,4} min)\): "[^\n]{1,600}\.|Waiting up to \d{1,3} min for (?:a background command|background commands|background work): "[^\n]{1,400}\.|Waiting for Claude's answer about background work that ended (?:under 1 min|\d{1,4} min) ago\.)$/;
-
-/** Provider transport/account notifications remain in diagnostics, but they
- * are not evidence that an agent is doing work for the room. */
-export function isHumanVisibleSupervisorActivity(
-  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method">,
-): boolean {
-  const method = event.method.trim().toLowerCase();
-  if (
-    method === "account/ratelimits/updated"
-    || method === "account/ratelimitsupdated"
-    || method === "thread/read"
-  ) return false;
-  if (method === PROVIDER_RETRY_METHOD || method === BACKGROUND_WORK_METHOD) return true;
-  return event.kind !== "usage" && event.kind !== "provider_event";
-}
-
-/** Translate provider-native events into stable product language. The exact
- * provider method remains available in Activity/diagnostics, but Chat should
- * describe what the agent is doing rather than expose a protocol trace. */
-export function humanFacingSupervisorActivitySummary(
-  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method" | "summary">,
-): string {
-  const kind = event.kind.trim().toLowerCase();
-  const method = event.method.trim().toLowerCase();
-  if (method === PROVIDER_RETRY_METHOD) {
-    // Only the adapter's own sentence is shown. Anything else under this
-    // method gets fixed copy, so provider text cannot be shown here.
-    const summary = event.summary.trim();
-    return PROVIDER_RETRY_SUMMARY.test(summary) ? summary : "Waiting for the model provider";
-  }
-  if (method === BACKGROUND_WORK_METHOD) {
-    // The adapter's sentence, with the model's own short description of the work. Anything else gets fixed copy.
-    const summary = event.summary.trim();
-    return BACKGROUND_WORK_SUMMARY.test(summary) ? liveActivityEchoText(summary) : "Waiting for background work to finish";
-  }
-  if (method === "item/reasoning/summarytextdelta") {
-    // The Codex adapter places only the provider-approved reasoning summary in
-    // this field. Older/fallback daemon events contain the protocol label, so
-    // keep the calm generic copy until a real summary arrives.
-    const summary = event.summary.trim();
-    if (summary && !/^[\w-]+\s*·\s*item\/reasoning\/summarytextdelta$/i.test(summary)) {
-      return liveActivityEchoText(summary);
-    }
-    return "Thinking through the request";
-  }
-  if (method.includes("reasoning") || method.includes("thinking")) return "Thinking through the request";
-  if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
-  if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";
-  if (kind === "command_output" || /(?:command|process|terminal)/i.test(method)) return "Working in the project";
-  // The provider's own review decides these; nobody is being asked.
-  if (/(?:autoapprovalreview|guardianwarning)/.test(method)) return "Checking an action";
-  if (kind === "approval") return "Waiting for approval";
-  if (kind === "turn_lifecycle" || kind === "item_lifecycle") return "Thinking";
-  return liveActivityEchoText(event.summary);
-}
-
-/**
- * Managed session state is push-maintained and repaired by a bounded room-
- * shell reconciliation read. Assigning a freshly allocated but content-equal
- * array into reactive state would still re-render every dependent surface at
- * each repair. These helpers retain the current reference when content did
- * not change, keeping repair reads invisible to idle UI.
- */
-export function managedAgentSessionListsEqual(
-  a: DesktopManagedAgentSession[],
-  b: DesktopManagedAgentSession[],
-): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] !== b[index] && JSON.stringify(a[index]) !== JSON.stringify(b[index])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export function withRoomManagedAgentSessions(
-  current: DesktopManagedAgentSession[],
-  roomIdentifier: string,
-  incoming: DesktopManagedAgentSession[],
-): DesktopManagedAgentSession[] {
-  const next = [
-    ...current.filter((session) => !managedAgentSessionMatchesRoom(session, roomIdentifier)),
-    ...incoming,
-  ];
-  return managedAgentSessionListsEqual(current, next) ? current : next;
-}
-
-export function withUpsertedManagedAgentSession(
-  current: DesktopManagedAgentSession[],
-  session: DesktopManagedAgentSession,
-): DesktopManagedAgentSession[] {
-  const existing = current.find((entry) => entry.id === session.id);
-  if (existing && (existing === session || JSON.stringify(existing) === JSON.stringify(session))) {
-    return current;
-  }
-  return [session, ...current.filter((entry) => entry.id !== session.id)];
-}
-
-export function managedAgentSessionMatchesRoom(
-  session: Pick<DesktopManagedAgentSession, "roomIdentifier">,
-  roomIdentifier: string | null | undefined,
-): boolean {
-  const sessionRoom = normalizeManagedAgentRoomIdentifier(session.roomIdentifier);
-  const targetRoom = normalizeManagedAgentRoomIdentifier(roomIdentifier);
-  return Boolean(sessionRoom && targetRoom && sessionRoom === targetRoom);
-}
-
-export function managedAgentPermissionRequestTargetLabel(
-  request: Pick<DesktopManagedAgentPermissionRequest, "inputSummary" | "description">,
-  session: Pick<DesktopManagedAgentSession, "repoRootPath">,
-): string | null {
-  const target = String(request.inputSummary || request.description || "").trim();
-  if (!target) {
-    return null;
-  }
-  const repoRoot = String(session.repoRootPath || "").trim();
-  if (repoRoot && target === repoRoot) {
-    return ".";
-  }
-  if (repoRoot && target.startsWith(`${repoRoot}/`)) {
-    return target.slice(repoRoot.length + 1);
-  }
-  return target;
-}
-
-export function pendingManagedAgentPermissionApprovals(
-  sessions: readonly DesktopManagedAgentSession[],
-  roomIdentifier: string | null | undefined,
-): ManagedAgentPermissionApproval[] {
-  return sessions
-    .filter((session) => managedAgentSessionMatchesRoom(session, roomIdentifier))
-    .flatMap((session) => (session.pendingPermissionRequests ?? []).map((request) => ({
-      id: request.id,
-      session,
-      request,
-      displayName: managedAgentSessionDisplayName(session),
-      providerLabel: session.ideLabel || String(request.providerId || "Agent"),
-      title: request.title?.trim() || `Use ${request.toolName || "tool"}`,
-      toolName: request.toolName?.trim() || "Tool",
-      targetLabel: managedAgentPermissionRequestTargetLabel(request, session),
-      requestedAt: request.requestedAt || session.updatedAt,
-    })))
-    .sort((left, right) =>
-      left.requestedAt.localeCompare(right.requestedAt) ||
-      left.displayName.localeCompare(right.displayName) ||
-      left.id.localeCompare(right.id)
-    );
-}
-
-export interface ManagedAgentTargetKeys {
-  agentSessionId?: string | null;
-  agentKey?: string | null;
-  actorLabel?: string | null;
-  displayName?: string | null;
-  ideLabel?: string | null;
-  ownerAttribution?: string | null;
-  sender?: string | null;
-}
-
 export interface ManagedAgentWorkIndicator {
   id: string;
   displayName: string;
@@ -635,35 +322,18 @@ export interface ManagedAgentWorkIndicator {
   agentKey?: string | null;
   /** Exact activating room message; establishes causal order without comparing host clocks. */
   sourceMessageId?: string | null;
+  /** Routed participant whose native turn may still be held by the room. */
+  awaitingRoomTurn?: true;
   /** The agent is not working: it waits for the time of its automatic attempt. The row rests. */
   waiting?: true;
   /** The turn is held open for background work. Its answer exists, and its owner can end the wait. The row works: something runs. */
   waitsForBackgroundWork?: boolean;
+  /** Another member's agent, known only from room presence: shown as a label, with no control and no live stream. */
+  remote?: true;
 }
-
-/** Longest live-activity echo shown in the room work indicator. */
-export const LIVE_ACTIVITY_ECHO_MAX_LENGTH = 100;
 
 /** Default number of concurrent work indicators shown before collapsing. */
 export const WORK_INDICATOR_VISIBLE_LIMIT = 3;
-
-/**
- * Last-mile guard for the live-activity echo. The daemon already sanitizes and
- * redacts native activity, but the echo is human-facing in a shared room, so
- * collapse whitespace/control characters to a single line and length-bound it
- * to keep the indicator unobtrusive and prevent any multi-line payload from
- * widening the row.
- */
-export function liveActivityEchoText(summary: string | null | undefined): string {
-  const collapsed = (summary ?? "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!collapsed) return "Working in the room.";
-  if (collapsed.length <= LIVE_ACTIVITY_ECHO_MAX_LENGTH) return collapsed;
-  return `${collapsed.slice(0, LIVE_ACTIVITY_ECHO_MAX_LENGTH - 1).trimEnd()}…`;
-}
 
 /**
  * Retire progress only when the same exact agent has published after the room
@@ -675,6 +345,8 @@ export function workIndicatorSupersededByAgentMessage(
   indicator: ManagedAgentWorkIndicator,
   messages: readonly Pick<DesktopRoomMessage, "id" | "agentIdentity">[],
 ): boolean {
+  // A reply to an earlier request cannot finish this pending exchange.
+  if (indicator.awaitingRoomTurn) return false;
   const sourceMessageId = indicator.sourceMessageId?.trim() || null;
   if (!sourceMessageId) return false;
   const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
@@ -804,18 +476,6 @@ export function coalesceWorkIndicatorEchoes(
   return { state, indicators, hasPending };
 }
 
-export interface ManagedAgentPermissionApproval {
-  id: string;
-  session: DesktopManagedAgentSession;
-  request: DesktopManagedAgentPermissionRequest;
-  displayName: string;
-  providerLabel: string;
-  title: string;
-  toolName: string;
-  targetLabel: string | null;
-  requestedAt: string;
-}
-
 function specificAgentKey(value: string | null | undefined): string {
   const normalized = normalizeAgentKey(value);
   if (!normalized || !/[/:]/.test(normalized)) {
@@ -824,139 +484,12 @@ function specificAgentKey(value: string | null | undefined): string {
   return normalized;
 }
 
-export function managedAgentSessionMatchesTarget(
-  session: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName" | "ideLabel" | "ownerLabel">,
-  target: ManagedAgentTargetKeys,
-): boolean {
-  const sessionKeys = [
-    normalizeAgentKey(session.agentSessionId),
-    specificAgentKey(session.agentKey),
-    normalizeAgentKey(session.actorLabel),
-  ].filter(Boolean);
-  const targetKeys = [
-    normalizeAgentKey(target.agentSessionId),
-    specificAgentKey(target.agentKey),
-    normalizeAgentKey(target.actorLabel),
-  ].filter(Boolean);
-  if (sessionKeys.some((key) => targetKeys.includes(key))) {
-    return true;
-  }
-
-  const sessionDisplayName = normalizeAgentKey(session.displayName);
-  const targetDisplayName = normalizeAgentKey(target.displayName);
-  if (!sessionDisplayName || !targetDisplayName || sessionDisplayName !== targetDisplayName) {
-    return false;
-  }
-
-  const sessionIdeLabel = normalizeAgentKey(session.ideLabel);
-  const targetIdeLabel = normalizeAgentKey(target.ideLabel);
-  if (sessionIdeLabel || targetIdeLabel) {
-    return Boolean(sessionIdeLabel && targetIdeLabel && sessionIdeLabel === targetIdeLabel);
-  }
-
-  const sessionOwnerLabel = normalizeAgentKey(session.ownerLabel);
-  const targetOwnerAttribution = normalizeAgentKey(target.ownerAttribution);
-  return Boolean(
-    sessionOwnerLabel &&
-    targetOwnerAttribution &&
-    targetOwnerAttribution.includes(sessionOwnerLabel),
-  );
-}
-
-export function managedAgentSessionMatchesReasoning(
-  session: Pick<DesktopManagedAgentSession, "agentSessionId" | "reasoningSessionId">,
-  reasoning: Pick<DesktopReasoningSession, "id" | "agentSessionId"> | null | undefined,
-): boolean {
-  if (!reasoning) return false;
-  if (session.reasoningSessionId && session.reasoningSessionId === reasoning.id) return true;
-  return Boolean(session.agentSessionId && reasoning.agentSessionId && session.agentSessionId === reasoning.agentSessionId);
-}
-
-export interface ManagedAgentDetailSelection {
-  managedSessions: DesktopManagedAgentSession[];
-  supervisorEntries: DesktopSupervisorManifestEntry[];
-  providerIdentity: ManagedAgentProviderIdentity | null;
-  showExternalFallback: boolean;
-}
-
-/**
- * Behavioral projection used by the Agent Inspector. Keeping the complete
- * selection in one domain function makes exact binding, provider identity,
- * local-session state, and the external fallback impossible to drift apart.
- */
-export function managedAgentDetailSelection(
-  sessions: readonly DesktopManagedAgentSession[],
-  entries: readonly DesktopSupervisorManifestEntry[],
-  target: ManagedAgentTargetKeys | null | undefined,
-  reasoning: Pick<DesktopReasoningSession, "id" | "agentSessionId"> | null | undefined,
-  knownSupervisorEntryIds: readonly string[] = [],
-): ManagedAgentDetailSelection {
-  if (!target) {
-    return {
-      managedSessions: [],
-      supervisorEntries: [],
-      providerIdentity: null,
-      showExternalFallback: true,
-    };
-  }
-
-  const eligibleSessions = sessions.filter((session) =>
-    isVisibleManagedAgentSession(session) || Boolean(session.supervisorEntryId)
-  );
-  const managedSessions = eligibleSessions.filter((session) =>
-    managedAgentSessionMatchesTarget(session, target) ||
-    managedAgentSessionMatchesReasoning(session, reasoning) ||
-    managedAgentSessionMatchesSupervisorTarget(
-      session,
-      entries,
-      target.agentSessionId,
-      knownSupervisorEntryIds,
-    )
-  );
-
-  const exactEntries = exactSupervisorEntriesForTarget(
-    entries,
-    managedSessions,
-    target.agentSessionId,
-    knownSupervisorEntryIds,
-  );
-  const supervisorEntries = exactEntries
-    ? exactEntries.length === 1 ? exactEntries : []
-    : (() => {
-    const labels = new Set([
-      target.displayName,
-      target.sender,
-      target.actorLabel,
-      target.ideLabel,
-    ].filter(Boolean).map((value) => String(value).toLowerCase()));
-    return entries.filter((entry) => {
-      const displayName = entry.displayName.toLowerCase();
-      return labels.has(displayName) ||
-        [...labels].some((label) => label.startsWith(`${displayName} |`));
-    });
-    })();
-  const providerIdentity = managedAgentProviderIdentityForTarget(
-    entries,
-    managedSessions,
-    target.agentSessionId,
-    knownSupervisorEntryIds,
-  );
-
-  return {
-    managedSessions,
-    supervisorEntries,
-    providerIdentity,
-    showExternalFallback: managedSessions.length === 0 && supervisorEntries.length === 0,
-  };
-}
-
 export function isExternalMcpProviderReady(
   provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
   preflight: Pick<DesktopAgentProviderPreflight, "status" | "mcpStatus"> | null | undefined,
 ): boolean {
   return Boolean(
     provider &&
-    !hasDesktopManagedRuntime(provider) &&
     !hasSupervisedRuntime(provider) &&
     preflight?.status === "ready" &&
     preflight.mcpStatus === "installed",
@@ -966,77 +499,19 @@ export function isExternalMcpProviderReady(
 export function agentProviderNeedsDesktopRepo(
   provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
 ): boolean {
-  return hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider);
-}
-
-export const defaultCursorMcpPolicy: DesktopCursorMcpPolicy = "filter_letagents";
-
-export const cursorMcpPolicyOptions: Array<{
-  id: DesktopCursorMcpPolicy;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: "filter_letagents",
-    label: "Filter LetAgents",
-    description: "Use my MCPs except LetAgents.",
-  },
-  {
-    id: "normal",
-    label: "Normal Cursor MCPs",
-    description: "Use my normal Cursor MCP setup as-is.",
-  },
-  {
-    id: "none",
-    label: "No MCPs",
-    description: "Start Cursor with MCP tools disabled.",
-  },
-];
-
-export function cursorMcpPolicyDescription(
-  policy: DesktopCursorMcpPolicy | null | undefined,
-): string {
-  return cursorMcpPolicyOptions.find((option) => option.id === policy)?.description ??
-    cursorMcpPolicyOptions[0]?.description ??
-    "Use my MCPs except LetAgents.";
-}
-
-export function cursorMcpPolicyLabel(
-  policy: DesktopCursorMcpPolicy | null | undefined,
-): string {
-  return cursorMcpPolicyOptions.find((option) => option.id === policy)?.label ??
-    cursorMcpPolicyOptions[0]?.label ??
-    "Filter LetAgents";
-}
-
-export function shouldShowCursorMcpPolicySelector(
-  provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
-): boolean {
-  return provider?.id === "cursor" && hasDesktopManagedRuntime(provider);
+  return hasSupervisedRuntime(provider);
 }
 
 export function shouldShowOpenModelConfig(
   provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
 ): boolean {
-  return provider?.id === "open-model" && hasDesktopManagedRuntime(provider);
+  return provider?.id === "open-model" && hasSupervisedRuntime(provider);
 }
 
 export function shouldShowManagedModelSelector(
   provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
 ): boolean {
-  return Boolean(provider && (hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider)));
-}
-
-export function shouldShowDeliveryModeSelector(
-  provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
-): boolean {
-  // Providers without an external MCP join path (e.g. open-model) always
-  // deliver room events from the desktop app, so there is nothing to choose.
-  // Claude Code and Cursor have external MCP setup, but their supervised
-  // desktop runtimes only support desktop-delivered room events.
-  return provider?.id === "codex" &&
-    hasDesktopManagedRuntime(provider) &&
-    Boolean(provider?.capabilities.includes("external_mcp"));
+  return hasSupervisedRuntime(provider);
 }
 
 export function agentAuthCommand(
@@ -1152,53 +627,6 @@ export function agentSetupConfirmationMessage(
     return `LetAgents will install its managed ${name} execution engine on this machine after confirmation. External provider CLIs remain user-managed.`;
   }
   return `LetAgents will update ${name}'s agent app configuration to add the LetAgents connection after confirmation.`;
-}
-
-export function managedAgentSessionStatusLabel(
-  session: Pick<DesktopManagedAgentSession, "deliveryMode" | "status">,
-): string {
-  if (session.deliveryMode === "desktop_events" && session.status === "completed") {
-    return "Waiting for events";
-  }
-  if (session.status === "blocked") return "Needs attention";
-  return session.status.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-export function managedAgentStopResultMessage(
-  session: Pick<DesktopManagedAgentSession, "lastError" | "status">,
-): string {
-  if (session.lastError?.trim()) {
-    return safeUserVisibleErrorDetail(session.lastError, "The agent could not be stopped.");
-  }
-  if (session.status === "unknown") {
-    return "Codex turn state is unknown; refresh the agent to inspect it.";
-  }
-  if (session.status === "interrupted") {
-    return "Codex worker stopped.";
-  }
-  return "Codex turn stopped.";
-}
-
-export function managedAgentStopResultNeedsAttention(
-  session: Pick<DesktopManagedAgentSession, "lastError" | "status">,
-): boolean {
-  return Boolean(session.lastError?.trim() || session.status === "unknown");
-}
-
-export function managedAgentSessionDisplayName(
-  session: Pick<DesktopManagedAgentSession, "displayName" | "actorLabel" | "runtime" | "supervisorEntryId">,
-): string {
-  const chosenName = session.displayName?.trim() || session.actorLabel?.trim();
-  if (chosenName) {
-    return supervisedAgentDisplayLabel(chosenName, session.supervisorEntryId);
-  }
-
-  const runtime = session.runtime.trim();
-  if (runtime && runtime.toLowerCase() !== "codex" && !runtime.toLowerCase().startsWith("codex:")) {
-    return runtime;
-  }
-
-  return "Local agent";
 }
 
 export function managedAgentPermissionProfileStatusLabel(
@@ -1414,48 +842,6 @@ export function managedAgentPermissionProfileSelectionForProvider(
   return selected?.id ?? null;
 }
 
-export function managedAgentPermissionProfileLabel(
-  session: Pick<DesktopManagedAgentSession, "permissionProfile" | "permissionProfileId">,
-): string {
-  return session.permissionProfile?.label?.trim() || session.permissionProfileId.replace(/[_-]+/g, " ");
-}
-
-export function activeManagedAgentWorkIndicators(
-  sessions: readonly DesktopManagedAgentSession[],
-  roomIdentifier: string | null | undefined,
-): ManagedAgentWorkIndicator[] {
-  return sessions
-    .filter((session) =>
-      managedAgentSessionMatchesRoom(session, roomIdentifier) &&
-      Boolean(session.activeWork) &&
-      session.status === "running"
-    )
-    .map((session) => ({
-      id: `${session.id}:${session.activeWork?.eventId || session.activeWork?.startedAt || "work"}`,
-      displayName: managedAgentSessionDisplayName(session),
-      summary: session.activeWork?.summary?.trim() || "Working in the room.",
-      startedAt: session.activeWork?.startedAt || session.updatedAt,
-      agentSessionId: session.agentSessionId,
-      agentKey: session.agentKey,
-    }))
-    .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
-}
-
-export function mergeDesktopManagedAgentParticipants(
-  participants: readonly DesktopParticipantSummary[],
-  sessions: readonly DesktopManagedAgentSession[],
-  roomIdentifier: string | null | undefined,
-): DesktopParticipantSummary[] {
-  const merged = [...participants];
-  for (const session of visibleManagedAgentSessionsForRoom(sessions, roomIdentifier)) {
-    if (merged.some((participant) => participantMatchesManagedAgentSession(participant, session))) {
-      continue;
-    }
-    merged.push(desktopManagedAgentSessionToParticipant(session));
-  }
-  return merged;
-}
-
 /**
  * Daemon-inbox agents do not have to exist in the legacy managed-session
  * registry. Project the live supervisor truth into Chat as well as Activity,
@@ -1541,24 +927,48 @@ function supervisorOwnerLabelFromAgentKey(agentKey: string | null | undefined): 
   return normalized.slice(0, separator).trim() || null;
 }
 
-export function mergeDesktopManagedAgentPresence(
+/**
+ * Rows for the live strip from room presence: agents that work in this room
+ * and that this desktop does not run. The text is the line the agent's own
+ * daemon published (the same line its owner sees), else "Working". Local
+ * supervisor entries have rows of their own, so every agent with a local
+ * identity is left out, and so is every agent that already has a row.
+ */
+export function remoteAgentWorkIndicators(
   presenceEntries: readonly DesktopAgentPresence[],
-  sessions: readonly DesktopManagedAgentSession[],
-  roomIdentifier: string | null | undefined,
-): DesktopAgentPresence[] {
-  const merged = [...presenceEntries];
-  for (const session of visibleManagedAgentSessionsForRoom(sessions, roomIdentifier)) {
-    const syntheticPresence = desktopManagedAgentSessionToPresence(session);
-    const existingIndex = merged.findIndex((presence) =>
-      presenceMatchesManagedAgentSession(presence, session)
-    );
-    if (existingIndex === -1) {
-      merged.push(syntheticPresence);
-      continue;
-    }
-    merged[existingIndex] = mergeManagedAgentPresenceEntry(merged[existingIndex], syntheticPresence);
+  entries: readonly Pick<DesktopSupervisorManifestEntry, "agentKey" | "agentSessionId">[],
+  existing: readonly Pick<ManagedAgentWorkIndicator, "agentKey" | "agentSessionId">[] = [],
+  nowMs: number = Date.now(),
+): ManagedAgentWorkIndicator[] {
+  const localSessions = new Set<string>();
+  const localKeys = new Set<string>();
+  for (const local of [...entries, ...existing]) {
+    if (local.agentSessionId) localSessions.add(local.agentSessionId);
+    const key = normalizeAgentKey(local.agentKey);
+    if (key) localKeys.add(key);
   }
-  return merged;
+  const rows = new Map<string, ManagedAgentWorkIndicator>();
+  for (const presence of presenceEntries) {
+    const key = normalizeAgentKey(presence.agentKey);
+    const identity = key || presence.agentSessionId;
+    const heartbeatMs = Date.parse(presence.lastHeartbeatAt);
+    if (!identity || rows.has(identity)
+      || (presence.status !== "working" && presence.status !== "reviewing")
+      || !Number.isFinite(heartbeatMs) || nowMs - heartbeatMs > ACTIVE_AGENT_PRESENCE_WINDOW_MS
+      || (presence.agentSessionId && localSessions.has(presence.agentSessionId))
+      || (key && localKeys.has(key))) continue;
+    rows.set(identity, {
+      id: `remote:${identity}`,
+      displayName: presence.displayName?.trim() || presence.actorLabel,
+      summary: liveActivityEchoText(presence.statusText?.trim() || "Working"),
+      // Unknown: presence tells when the agent was last seen, not when its work started.
+      startedAt: "",
+      agentSessionId: presence.agentSessionId,
+      agentKey: presence.agentKey,
+      remote: true,
+    });
+  }
+  return [...rows.values()];
 }
 
 export function mergeReachableAgentPresenceParticipants(
@@ -1591,85 +1001,6 @@ export function mergeReachableAgentPresenceParticipants(
     merged[existingIndex] = mergeAgentPresenceParticipant(merged[existingIndex], presence);
   }
   return merged;
-}
-
-function visibleManagedAgentSessionsForRoom(
-  sessions: readonly DesktopManagedAgentSession[],
-  roomIdentifier: string | null | undefined,
-): DesktopManagedAgentSession[] {
-  return sessions.filter((session) =>
-    managedAgentSessionMatchesRoom(session, roomIdentifier)
-    && isDeliverableManagedAgentSession(session)
-  );
-}
-
-function desktopManagedAgentSessionToParticipant(
-  session: DesktopManagedAgentSession,
-): DesktopParticipantSummary {
-  const displayName = managedAgentSessionDisplayName(session);
-  const actorLabel = managedAgentSessionActorLabel(session);
-  const timestamp = managedAgentSessionTimestamp(session);
-  const activityState = managedAgentSessionActivityState(session);
-  return {
-    participantKey: `desktop-managed-agent:${managedAgentSessionStableKey(session)}`,
-    kind: "agent",
-    displayName,
-    actorLabel,
-    agentKey: session.agentKey || managedAgentSessionAgentKey(session),
-    githubLogin: null,
-    ownerLabel: session.ownerLabel || "Local desktop",
-    ideLabel: session.ideLabel || managedAgentSessionIdeLabel(session),
-    hiddenAt: null,
-    activityState,
-    lastSeenAt: timestamp,
-    lastRoomActivityAt: timestamp,
-    lastLiveHeartbeatAt: timestamp,
-    sourceFlags: ["delivery", "presence"],
-  };
-}
-
-function desktopManagedAgentSessionToPresence(
-  session: DesktopManagedAgentSession,
-): DesktopAgentPresence {
-  const displayName = managedAgentSessionDisplayName(session);
-  const actorLabel = managedAgentSessionActorLabel(session);
-  const timestamp = managedAgentSessionTimestamp(session);
-  const sessionId = session.agentSessionId || session.id;
-  const needsAttention = session.status === "blocked" || session.status === "unknown";
-  return {
-    roomId: session.roomIdentifier,
-    actorLabel,
-    agentKey: session.agentKey || managedAgentSessionAgentKey(session),
-    agentInstanceId: null,
-    agentSessionId: session.agentSessionId,
-    sessionKind: "worker",
-    runtime: session.runtime || session.providerId,
-    displayName,
-    ownerLabel: session.ownerLabel || "Local desktop",
-    ideLabel: session.ideLabel || managedAgentSessionIdeLabel(session),
-    repoBranch: session.repoBranch || null,
-    status: managedAgentPresenceStatus(session),
-    statusText: session.failure?.message || managedAgentSessionStatusLabel(session),
-    lastHeartbeatAt: timestamp,
-    freshness: needsAttention ? "stale" : "active",
-    activityState: needsAttention ? "offline" : managedAgentSessionActivityState(session),
-    sourceFlags: ["delivery", "presence"],
-    livenessObservation: {
-      roomId: session.roomIdentifier,
-      agentSessionId: sessionId,
-      source: "desktop_managed_agent",
-      hostId: session.id,
-      hostKind: "desktop",
-      hostLabel: "This desktop",
-      livenessCapability: session.deliveryMode === "desktop_events" ? "desktop events" : "mcp loop",
-      toolBridgeId: `desktop:${session.providerId}:${session.id}`,
-      lastObservedAt: timestamp,
-      lastToolCallAt: null,
-      detail: managedAgentRepoDetail(session),
-      createdAt: session.startedAt || timestamp,
-      updatedAt: timestamp,
-    },
-  };
 }
 
 function isReachableWorkerPresenceForRoom(
@@ -1781,119 +1112,6 @@ export function managedAgentRoomBranchMismatchLabel(
   return mismatch.actualBranch
     ? `Expected ${mismatch.expectedBranch}; agent is on ${mismatch.actualBranch}`
     : `Expected ${mismatch.expectedBranch}; agent branch is unknown`;
-}
-
-export function managedAgentRepoDetail(
-  session: Pick<DesktopManagedAgentSession, "repoBranch" | "repoRootPath">,
-  gitRoom?: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null,
-): string {
-  const branch = session.repoBranch?.trim();
-  const detail = branch ? `${branch} - ${session.repoRootPath}` : session.repoRootPath;
-  const mismatch = managedAgentRoomBranchMismatchLabel(session, gitRoom);
-  return mismatch ? `${detail} - ${mismatch}` : detail;
-}
-
-function mergeManagedAgentPresenceEntry(
-  existing: DesktopAgentPresence,
-  managed: DesktopAgentPresence,
-): DesktopAgentPresence {
-  const sourceFlags = Array.from(new Set([...existing.sourceFlags, ...managed.sourceFlags]));
-  return {
-    ...existing,
-    agentKey: existing.agentKey || managed.agentKey,
-    agentSessionId: existing.agentSessionId || managed.agentSessionId,
-    displayName: existing.displayName || managed.displayName,
-    ownerLabel: existing.ownerLabel || managed.ownerLabel,
-    ideLabel: existing.ideLabel || managed.ideLabel,
-    runtime: existing.runtime || managed.runtime,
-    repoBranch: existing.repoBranch || managed.repoBranch,
-    status: existing.status === "idle" && managed.status !== "idle" ? managed.status : existing.status,
-    statusText: existing.statusText || managed.statusText,
-    lastHeartbeatAt: latestTimestampString(existing.lastHeartbeatAt, managed.lastHeartbeatAt),
-    freshness: "active",
-    activityState: existing.activityState === "offline" ? managed.activityState : existing.activityState,
-    sourceFlags,
-    livenessObservation: existing.livenessObservation || managed.livenessObservation,
-  };
-}
-
-function participantMatchesManagedAgentSession(
-  participant: DesktopParticipantSummary,
-  session: DesktopManagedAgentSession,
-): boolean {
-  if (participant.kind !== "agent") return false;
-  if (sameNormalized(participant.actorLabel, session.actorLabel)) return true;
-  if (sameSpecificAgentKey(participant.agentKey, session.agentKey)) return true;
-  if (!sameNormalized(participant.displayName, managedAgentSessionDisplayName(session))) return false;
-  return Boolean(
-    sameNormalized(participant.ideLabel, session.ideLabel)
-    || sameNormalized(participant.ideLabel, managedAgentSessionIdeLabel(session))
-    || sameNormalized(participant.ownerLabel, session.ownerLabel)
-  );
-}
-
-function presenceMatchesManagedAgentSession(
-  presence: DesktopAgentPresence,
-  session: DesktopManagedAgentSession,
-): boolean {
-  if (presence.agentSessionId && session.agentSessionId && presence.agentSessionId === session.agentSessionId) {
-    return true;
-  }
-  if (sameNormalized(presence.actorLabel, session.actorLabel)) return true;
-  if (sameSpecificAgentKey(presence.agentKey, session.agentKey)) return true;
-  if (!sameNormalized(presence.displayName, managedAgentSessionDisplayName(session))) return false;
-  return Boolean(
-    sameNormalized(presence.ideLabel, session.ideLabel)
-    || sameNormalized(presence.ideLabel, managedAgentSessionIdeLabel(session))
-    || sameNormalized(presence.ownerLabel, session.ownerLabel)
-  );
-}
-
-function managedAgentSessionActorLabel(session: DesktopManagedAgentSession): string {
-  return session.actorLabel?.trim() || session.displayName?.trim() || managedAgentSessionDisplayName(session);
-}
-
-function managedAgentSessionAgentKey(session: DesktopManagedAgentSession): string {
-  const runtimeKey = normalizeAgentKey(session.runtime || session.providerId) || "agent";
-  return `desktop/${runtimeKey}/${managedAgentSessionStableKey(session)}`;
-}
-
-function managedAgentSessionIdeLabel(session: Pick<DesktopManagedAgentSession, "providerId" | "runtime">): string {
-  if (session.providerId === "codex") return "Codex";
-  if (session.providerId === "claude-code") return "Claude Code";
-  if (session.providerId === "open-model") return "Open Model";
-  return session.runtime || session.providerId;
-}
-
-function managedAgentPresenceStatus(
-  session: Pick<DesktopManagedAgentSession, "deliveryMode" | "status">,
-): DesktopAgentPresence["status"] {
-  if (session.status === "blocked" || session.status === "unknown") return "blocked";
-  if (session.status === "completed" && session.deliveryMode === "desktop_events") return "idle";
-  if (session.status === "completed") return "idle";
-  return "working";
-}
-
-function managedAgentSessionActivityState(
-  session: Pick<DesktopManagedAgentSession, "deliveryMode" | "status">,
-): DesktopAgentPresence["activityState"] {
-  return managedAgentPresenceStatus(session) === "idle" ? "away" : "active";
-}
-
-function managedAgentSessionTimestamp(
-  session: Pick<DesktopManagedAgentSession, "startedAt" | "updatedAt">,
-): string {
-  return session.updatedAt || session.startedAt || new Date(0).toISOString();
-}
-
-function managedAgentSessionStableKey(session: DesktopManagedAgentSession): string {
-  return normalizeAgentKey(
-    session.agentSessionId
-    || session.agentKey
-    || session.actorLabel
-    || session.displayName
-    || session.id,
-  ) || session.id;
 }
 
 function sameNormalized(left: string | null | undefined, right: string | null | undefined): boolean {

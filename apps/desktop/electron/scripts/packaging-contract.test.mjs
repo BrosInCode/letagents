@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { parse } from "yaml";
 import test from "node:test";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +14,43 @@ const repositoryRoot = resolve(desktopRoot, "../..");
 async function source(path) {
   return readFile(path, "utf8");
 }
+
+test("manual release builds never publish, even when dispatched on a release tag", async () => {
+  const workflow = parse(await source(join(repositoryRoot, ".github/workflows/desktop-release.yml")));
+  assert.equal(workflow.jobs.publish.if, "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')");
+  assert.equal(workflow.jobs.publish.needs, "build-macos");
+  assert.equal(workflow.jobs["build-macos"].permissions.contents, "read");
+  assert.doesNotMatch(workflow.jobs["build-macos"].steps.map(step => step.run ?? "").join("\n"), /aws s3|gh release|npm publish/);
+  assert.ok(workflow.jobs["build-macos"].steps.some(step => step.name === "Build, sign, notarize, and package"));
+  assert.ok(workflow.jobs["build-macos"].steps.some(step => step.name === "Upload release artifacts to this workflow"));
+});
+
+test("release ref validation accepts manual candidates while rejecting incorrect pushed tags and architectures", async () => {
+  const workflow = parse(await source(join(repositoryRoot, ".github/workflows/desktop-release.yml")));
+  const script = workflow.jobs["build-macos"].steps.find(step => step.name === "Validate release ref, version, and runner architecture").run;
+  const { version } = JSON.parse(await source(join(desktopRoot, "package.json")));
+  const temporary = await mkdtemp(join(tmpdir(), "letagents-release-ref-"));
+  try {
+    const cases = [
+      ["workflow_dispatch", "branch", "codex/candidate", process.arch, 0],
+      ["workflow_dispatch", "tag", `desktop-v${version}`, process.arch, 0],
+      ["push", "tag", `desktop-v${version}`, process.arch, 0],
+      ["push", "tag", "desktop-v0.0.0", process.arch, 1],
+      ["push", "branch", "staging", process.arch, 1],
+      ["workflow_dispatch", "branch", "codex/candidate", "wrong-architecture", 1],
+    ];
+    for (const [event, type, name, arch, status] of cases) {
+      const result = spawnSync("bash", ["-c", script], {
+        cwd: repositoryRoot,
+        env: { ...process.env, GITHUB_EVENT_NAME: event, GITHUB_REF_TYPE: type, GITHUB_REF_NAME: name, EXPECTED_ARCH: arch, GITHUB_ENV: join(temporary, "environment") },
+        encoding: "utf8",
+      });
+      assert.equal(result.status, status, `${event}:${type}:${name}:${arch}\n${result.stderr}`);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test("packaging preserves APNs plist behavior and rebrands every Electron helper", async () => {
   const [packager, smoke] = await Promise.all([
@@ -58,13 +98,15 @@ test("release DMGs are signed before notarization and Gatekeeper assessment", as
   const packager = await source(join(scriptsDirectory, "package-macos.mjs"));
   const signDmg = packager.indexOf('await execFileAsync("codesign", ["--sign", identity, "--force", "--timestamp", dmg]);');
   const verifyDmg = packager.indexOf('await execFileAsync("codesign", ["--verify", "--verbose=2", dmg]);');
-  const notarizeDmg = packager.indexOf("await notarize({ appPath: dmg, ...credentials });");
+  const notarizeDmg = packager.indexOf("await notarizeWithStapleRecovery({ appPath: dmg, ...credentials }, { notarize, execFile: execFileAsync });");
+  const validateDmg = packager.indexOf('await validateStapledTicket(dmg, { execFile: execFileAsync });');
   const assessDmg = packager.indexOf('"context:primary-signature"');
 
   assert.ok(signDmg >= 0, "the DMG must receive a Developer ID signature");
   assert.ok(verifyDmg > signDmg, "the DMG signature must be verified after signing");
   assert.ok(notarizeDmg > verifyDmg, "the signed DMG must be notarized after verification");
-  assert.ok(assessDmg > notarizeDmg, "Gatekeeper assessment must run after notarization");
+  assert.ok(validateDmg > notarizeDmg, "the stapled ticket must be validated after notarization and recovery");
+  assert.ok(assessDmg > validateDmg, "Gatekeeper assessment must run after ticket validation");
 });
 
 test("release workflow builds, attests, and publishes independent public R2 feeds", async () => {

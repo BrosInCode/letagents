@@ -22,7 +22,7 @@ const key = (name: string, extra = {}) => ({ key: name, preventDefault() {}, isC
 const flush = async () => { await nextTick(); await new Promise(resolve => setImmediate(resolve)); };
 function mount(t: { after: (fn: () => void) => void }) {
   const events: any[] = [], tasks: any[] = [];
-  const props = reactive({ attaching: false, attachmentDrafts: [] as any[], attachmentError: null, eventPreviews: [], messageNamespace: `slash-${++sequence}`, participants: [], pendingAttachmentDrafts: [] as any[], permissionApprovals: [], permissionError: null, replyTo: null as any, resolvingPermissionIds: {}, roomIdentifier: 'room-a', roomLoading: false, sendError: null, sending: false });
+  const props = reactive({ attaching: false, attachmentDrafts: [] as any[], attachmentError: null, eventPreviews: [], messageNamespace: `slash-${++sequence}`, participants: [], pendingAttachmentDrafts: [] as any[], replyTo: null as any, roomIdentifier: 'room-a', roomLoading: false, sendError: null, sending: false });
   let vm: any, search: any;
   const originalAddTask = ipc.room.addTask;
   ipc.room.addTask = async (...args: any[]) => { tasks.push(args); return { task: { id: 'task_1' } }; };

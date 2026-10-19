@@ -13,7 +13,7 @@ import type {
 import { buildRepoStatus } from "../../repo-status.js";
 import { workspaceRoot } from "../paths.js";
 import { startRepoStatusWatch, stopRepoStatusWatch } from "../repo-status-watch.js";
-import { connectProjectToRoom, createRepoRoomWorktree, openRepoRoomFromPath, pickRepoRoom } from "../rooms.js";
+import { connectProjectToRoom, createProjectRoom, createRepoRoomWorktree, openRepoRoomFromPath, pickNewProjectParent, pickRepoRoom } from "../rooms.js";
 import {
   listProjectBindings,
   migrateLegacyProjectBindings,
@@ -35,6 +35,12 @@ export function registerDesktopRepoIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle(
     "desktop:repos:pick-room",
     async (): Promise<DesktopRepoRoomSelection> => pickRepoRoom(),
+  );
+  targetIpcMain.handle("desktop:repos:pick-project-parent", async (): Promise<string | null> => pickNewProjectParent());
+  targetIpcMain.handle(
+    "desktop:repos:create-project",
+    async (_event, parentPath?: unknown, name?: unknown): Promise<DesktopRepoRoomSelection> =>
+      createProjectRoom(typeof parentPath === "string" ? parentPath : "", typeof name === "string" ? name : ""),
   );
   targetIpcMain.handle(
     "desktop:repos:open-room",

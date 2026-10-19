@@ -9,7 +9,7 @@ import type { ProviderPermissionRequest, ProviderPermissionObservation, Provider
 export type ProviderActionCapabilities = {
   execution?: NativeExecutionCapabilities;
   /** Explicit adapter admission for durable room-ingress ownership. */
-  deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
+  deliveryModes?: ReadonlyArray<"mcp_polling" | "daemon_inbox">;
   resume: boolean;
   midTurnInjection: boolean;
   transcriptAccess: boolean;
@@ -89,7 +89,7 @@ export function sameProviderActionConnectionSnapshot(
 }
 
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; /** The daemon's records say this process was started with its owner's own setup, or cannot say. Absent for an agent that never had it. */ ownerSetup?: true | "unknown" };
-export type ProviderActionSpawn = { onProgress?: () => void; /** The native process is up; the rest of startup is a remote model round trip. */ onNativeStarted?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; /** The owner lets this agent use their own provider setup. Never set for a rental. */ homeHarness?: true; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
+export type ProviderActionSpawn = { onProgress?: () => void; /** The native process is up; the rest of startup is a remote model round trip. */ onNativeStarted?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; /** The owner lets this agent use their own provider setup. Never set for a rental. */ homeHarness?: true; /** The owner says this Open Model agent's model reads images. */ imageInput?: true; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string; contextWindow?: number | null } };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; custodyLaunchAgentSessionId?: string; /** Owner-visible warnings from this launch, recorded in the agent's activity. */ launchNotices?: readonly string[]; /** This process was started with its owner's own setup. */ ownerSetup?: true; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 /** Validate death against the immutable handle/ref before retaining it as operational evidence. */
@@ -146,6 +146,26 @@ export type ProviderActionStreamEvent = {
   durablePayloadRef: string | null;
 };
 
+/** How a running provider takes images: bytes in memory, a daemon-owned file its own process reads, or not at all. */
+export type RoomTurnImageDelivery = "memory" | "file" | null;
+/** An image type every image-capable provider accepts. */
+export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * One file on the activating room message, as the daemon prepared it for this
+ * turn. The daemon alone downloads; an adapter never sees a bearer or a
+ * storage address, only bytes in memory or a daemon-owned file path.
+ */
+export type ProviderRoomTurnAttachment = {
+  /** 1-based position on the message. */
+  index: number;
+  fileName: string;
+  /** The sender's declared type; for an included image, the type its bytes show. */
+  mimeType: string;
+  sizeBytes: number | null;
+  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported" | "local_room_unsupported";
+  /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
+  image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
+};
 /**
  * One durable room delivery. The daemon owns retries and publication; the
  * provider adapter owns only this bounded turn on an already-running handle.
@@ -156,6 +176,9 @@ export type ProviderRoomTurnRequest = {
   activation: Record<string, unknown>;
   actionId: string;
   observedContext?: unknown[];
+  roomId?: string;
+  /** The activating message's files, prepared for this one turn. Never persisted. */
+  attachments?: ProviderRoomTurnAttachment[];
 };
 export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
@@ -266,6 +289,8 @@ export interface ProviderActionPort {
   inspectCustodialPollingActivation?(handle: ProviderActionHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
+  /** How this running runtime takes the activating message's images; absent or null means it cannot. */
+  roomTurnImageDelivery?(handle: ProviderActionHandle): Promise<RoomTurnImageDelivery>;
   /** Recover an intent journaled before dispatch, never by spawning a second child. */
   attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment>;
   resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle>;

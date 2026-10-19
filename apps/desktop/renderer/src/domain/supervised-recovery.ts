@@ -25,6 +25,10 @@ export interface SupervisedRecoveryLookup {
  * participant. Keeping the durable entry id lets the UI surface that change
  * without asking the user to press Start a second time.
  */
+/** Shown when the daemon could not be read; the runtime itself is untouched. */
+export const SUPERVISED_RUNTIME_READ_ERROR =
+  "Could not refresh the supervised runtime. Check the daemon connection; the existing runtime was not restarted.";
+
 export async function refreshSupervisedRuntimeEntry(
   client: Pick<SupervisedRecoveryClient, "listAgents">,
   roomIdentifier: string,
@@ -34,11 +38,7 @@ export async function refreshSupervisedRuntimeEntry(
     const entry = (await client.listAgents(roomIdentifier)).find((candidate) => candidate.id === entryId) || null;
     return { entry, error: null, cause: null };
   } catch (cause) {
-    return {
-      entry: null,
-      error: "Could not refresh the supervised runtime. Check the daemon connection; the existing runtime was not restarted.",
-      cause,
-    };
+    return { entry: null, error: SUPERVISED_RUNTIME_READ_ERROR, cause };
   }
 }
 

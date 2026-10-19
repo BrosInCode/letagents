@@ -5,6 +5,8 @@ import {
   agentInspectorProviderSupportsEffort,
   configurationDraft,
   configurationHasRuntimeLag,
+  IMAGE_INPUT_DESCRIPTION,
+  IMAGE_INPUT_TITLE,
   isStaleDaemonGenerationError,
   permissionPendingBadge,
   permissionTimingNote,
@@ -55,6 +57,55 @@ test("settings draft exposes only user-editable settings and makes saved/runtime
   assert.equal(agentInspectorProviderSupportsEffort("open-model"), false);
   assert.equal(agentInspectorProviderSupportsEffort("claude-code"), false);
   assert.equal(agentInspectorProviderSupportsEffort("cursor"), false);
+});
+
+test("settings draft keeps the image-input choice when the saved settings have one and omits it otherwise", () => {
+  for (const imageInput of [true, false]) {
+    const draft = configurationDraft({ ...configuration, imageInput });
+    assert.equal(Object.hasOwn(draft, "imageInput"), true, String(imageInput));
+    assert.equal(draft.imageInput, imageInput, "an explicit off is kept, not dropped");
+    assert.deepEqual(draft, {
+      model: "gpt-next",
+      reasoningEffort: "high",
+      charter: "Coordinate work.",
+      permissionProfileId: "read_only",
+      imageInput,
+    });
+  }
+  // An agent app that does not ask, or an older background service, leaves no key at all.
+  assert.equal(Object.hasOwn(configurationDraft(configuration), "imageInput"), false);
+  assert.equal(Object.hasOwn(configurationDraft({ ...configuration, imageInput: undefined }), "imageInput"), false);
+});
+
+test("the image-input choice travels in the saved snapshot and the saved response replaces the draft with it", () => {
+  const withChoice = { ...configuration, imageInput: false };
+  const initial: AgentInspectorConfigurationResource = {
+    status: "ready", configuration: withChoice, draft: { ...configurationDraft(withChoice), imageInput: true }, error: null,
+  };
+  const snapshot = snapshotConfigurationSave(initial, 2, 7);
+  assert.ok(snapshot);
+  assert.equal(snapshot.draft.imageInput, true, "the submitted draft carries the owner's edit");
+  assert.equal(snapshot.expectedRevision, 4);
+
+  const accepted = settleConfigurationUpdate(initial, 2, snapshot, { ...withChoice, imageInput: true, configRevision: 5 });
+  assert.equal(accepted.resource.draft?.imageInput, true);
+  assert.equal(accepted.resource.configuration?.imageInput, true);
+
+  // A newer local edit made while the save was in flight is not overwritten by the older response.
+  const edited = { ...initial, draft: { ...initial.draft!, imageInput: false } };
+  const preserved = settleConfigurationUpdate(edited, 3, snapshot, { ...withChoice, imageInput: true, configRevision: 5 });
+  assert.equal(preserved.resource.draft?.imageInput, false);
+  assert.equal(preserved.resource.configuration?.imageInput, true);
+
+  const withoutChoice = resource();
+  assert.equal(Object.hasOwn(snapshotConfigurationSave(withoutChoice, 1, 7)!.draft, "imageInput"), false);
+});
+
+test("the image-input switch says what it does and when it applies", () => {
+  assert.equal(IMAGE_INPUT_TITLE, "This model can read images");
+  assert.match(IMAGE_INPUT_DESCRIPTION, /the images that people attach to the message that wakes it/);
+  assert.match(IMAGE_INPUT_DESCRIPTION, /Turn it on only if your model accepts image input\./);
+  assert.match(IMAGE_INPUT_DESCRIPTION, /It applies the next time the agent starts\.$/);
 });
 
 test("configuration apply snapshots exact authority coordinates and preserves the local draft", () => {
@@ -186,7 +237,7 @@ test("a saved access level that has not reached the running agent is marked, and
   const badge = permissionPendingBadge("daemon_inbox");
   assert.equal(badge.label, "Settings pending");
   assert.equal(badge.title, "You changed this agent's access level. It applies when the current turn ends, or when the agent restarts.");
-  for (const mode of ["mcp_polling", "desktop_events", undefined]) {
+  for (const mode of ["mcp_polling", undefined]) {
     assert.equal(permissionPendingBadge(mode).label, "Settings pending");
     assert.equal(permissionPendingBadge(mode).title, "You changed this agent's access level. It applies the next time the agent starts.", String(mode));
   }
@@ -198,7 +249,7 @@ test("a saved access level that has not reached the running agent is marked, and
   assert.equal(permissionTimingNote("daemon_inbox", true),
     "Your new access level is saved. The agent switches to it when its current turn ends, or when it restarts.");
   // Any other agent gets it when it starts again, and nothing promises more.
-  for (const mode of ["mcp_polling", "desktop_events", undefined]) {
+  for (const mode of ["mcp_polling", undefined]) {
     assert.equal(permissionTimingNote(mode, false), "Choose what the agent can access the next time it starts.");
     assert.equal(permissionTimingNote(mode, true), "Your new access level is saved. The agent gets it the next time it starts.");
   }

@@ -1,4 +1,4 @@
-import { formatAttentionResponse, createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, type KnowledgeActor, type KnowledgeInput, type KnowledgePage, type KnowledgeRecord, type KnowledgeRevisionInput, type KnowledgeType } from '../../../../../shared/room-knowledge.mjs';
+import { formatAttentionRequest, formatAttentionResponse, createKnowledgeRecord, knowledgeId, reviseKnowledgeRecord, type KnowledgeActor, type KnowledgeInput, type KnowledgePage, type KnowledgeRecord, type KnowledgeRevisionInput, type KnowledgeType } from '../../../../../shared/room-knowledge.mjs';
 import { getLocalKnowledge, initializeRoomKnowledge, listLocalKnowledge, localKnowledgeHistory, saveLocalKnowledge } from '../../../../../shared/local-room-knowledge.mjs';
 import type { DesktopAttentionRoom, DesktopAttentionTask, DesktopNeedsYou } from '../../ipc-types/knowledge.js';
 import { apiFetch, readStoredAuth } from '../auth.js';
@@ -26,6 +26,14 @@ async function localActor(): Promise<KnowledgeActor> {
 }
 async function flushResponses(roomId: string) {
   const db = await getLocalChatDatabase(); initializeRoomKnowledge(db);
+  // A request is shown in the room before any answer to it. No publisher key:
+  // the notice wakes no agent.
+  for (const row of db.prepare('SELECT value FROM local_room_knowledge_request_outbox WHERE room_id = ? ORDER BY rowid').all(roomId)) {
+    const record = JSON.parse(String(row.value)) as KnowledgeRecord;
+    await addLocalChatMessage(roomId, { sender: record.author.label, source: 'agent', text: formatAttentionRequest(record),
+      idempotency_key: `attention-request:${record.id}` });
+    db.prepare('DELETE FROM local_room_knowledge_request_outbox WHERE room_id = ? AND id = ?').run(roomId, record.id);
+  }
   const rows = db.prepare('SELECT value FROM local_room_knowledge_outbox WHERE room_id = ?').all(roomId);
   for (const row of rows) {
     const record = JSON.parse(String(row.value)) as KnowledgeRecord;
@@ -45,19 +53,25 @@ export async function getDesktopKnowledge(roomIdentifier: string, type: Knowledg
 export async function createDesktopKnowledge(roomIdentifier: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }): Promise<KnowledgeRecord> {
   const room = await target(roomIdentifier);
   if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(path(room.id, type), { method: 'POST', body: JSON.stringify(input) })).record;
-  return saveLocalKnowledge(await getLocalChatDatabase(), createKnowledgeRecord(room.id, type, input, await localActor()));
+  const record = saveLocalKnowledge(await getLocalChatDatabase(), createKnowledgeRecord(room.id, type, input, await localActor()));
+  if (type === 'attention') await flushResponses(room.id);
+  return record;
 }
 export async function reviseDesktopKnowledge(roomIdentifier: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput): Promise<KnowledgeRecord> {
   const room = await target(roomIdentifier); knowledgeId(id);
-  if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(`${path(room.id, type)}/${id}${type === 'attention' ? '/respond' : ''}`, { method: type === 'attention' ? 'POST' : 'PATCH', body: JSON.stringify(input) })).record;
+  // Closing a request sends no text: a person closes it without a decision.
+  const close = type === 'attention' && input.close === true;
+  const revision: KnowledgeRevisionInput = close ? { expected_version: input.expected_version, close: true } : input;
+  if (!room.local) return (await apiFetch<{ record: KnowledgeRecord }>(`${path(room.id, type)}/${id}${type === 'attention' ? close ? '/close' : '/respond' : ''}`, { method: type === 'attention' ? 'POST' : 'PATCH', body: JSON.stringify(revision) })).record;
   const db = await getLocalChatDatabase();
   const old = getLocalKnowledge(db, room.id, id);
   if (!old || old.type !== type) throw new Error('Record not found.');
   const actor = await localActor();
-  if (type === 'attention' && old.response?.actor.id === actor.id && old.response.body === input.response?.trim() && old.version === input.expected_version + 1) {
+  if (type === 'attention' && old.response?.actor.id === actor.id && Boolean(old.response.closed) === close
+    && (close || old.response.body === input.response?.trim()) && old.version === input.expected_version + 1) {
     await flushResponses(room.id); return old;
   }
-  const record = saveLocalKnowledge(db, reviseKnowledgeRecord(old, input, actor), input.expected_version);
+  const record = saveLocalKnowledge(db, reviseKnowledgeRecord(old, revision, actor), input.expected_version);
   if (type === 'attention') await flushResponses(room.id);
   return record;
 }
@@ -106,7 +120,9 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
     return listLocalRoomEntries({ linkedIdentity: 'cloud' });
   });
   const queue = [...new Map(accountRooms.flatMap(room => [room, ...room.focusRooms]).map(room => [room.roomIdentifier, room])).values()];
-  const result: DesktopNeedsYou = { rooms: [], failures: [], cloudUnavailable, limited: accountRooms.length >= 100, signedOut: !auth.token };
+  // A focus room may carry its repo room's GitHub events; the Inbox shows each event once.
+  const parents = new Map(accountRooms.flatMap(room => room.focusRooms.map(focus => [focus.roomIdentifier, room.roomIdentifier] as const)));
+  const result: DesktopNeedsYou = { rooms: [], failures: [], cloudUnavailable, limited: accountRooms.length >= 100, signedOut: !auth.token, updatesIncluded: includeUpdates };
   const now = Date.now();
   // Bound concurrency; never load full room snapshots just to build an inbox.
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
@@ -121,7 +137,8 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
         const page = attention.status === 'fulfilled' ? attention.value : { records: [], truncated: false, tasks: [] };
         result.rooms.push({ ...page, tasks: page.tasks ?? [], updates: updates.status === 'fulfilled' ? updates.value : undefined,
           boardIntents: boardIntents.status === 'fulfilled' ? boardIntents.value : undefined,
-          roomIdentifier: room.roomIdentifier, displayName: room.displayName } satisfies DesktopAttentionRoom);
+          roomIdentifier: room.roomIdentifier, displayName: room.displayName,
+          ...(parents.has(room.roomIdentifier) ? { parentRoomIdentifier: parents.get(room.roomIdentifier) } : {}) } satisfies DesktopAttentionRoom);
       } catch { result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName }); }
     }
   }));

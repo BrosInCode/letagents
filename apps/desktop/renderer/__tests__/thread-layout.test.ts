@@ -29,6 +29,8 @@ describe("inline room thread layout", () => {
     assert.ok(panel.indexOf('class="room-thread-latest"') > panel.indexOf('class="room-thread-composer-footer"'));
     const latest = styles.match(/\.room-thread-latest\s*\{([^}]*)\}/)?.[1] || "";
     assert.doesNotMatch(latest, /position:\s*(absolute|fixed)/);
+    assert.match(latest, /visibility:\s*hidden/);
+    assert.match(panel, /<button type="button" class="room-thread-latest"[^>]*:disabled="!isScrolledUp"[^>]*:aria-hidden="!isScrolledUp"/);
   });
   it("leaves horizontal code scrolling available and honors reduced motion", () => {
     assert.doesNotMatch(styles, /overflow-x:\s*(?:hidden|clip)/);

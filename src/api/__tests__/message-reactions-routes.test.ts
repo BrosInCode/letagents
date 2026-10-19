@@ -26,11 +26,12 @@ const { createRoomEventBroker, MESSAGE_CREATED_EVENT_KINDS } = await import('../
 const room = 'github.com/org/repo';
 type Auth = 'session' | 'owner_token' | 'agent_session' | null;
 
-function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: number } = {}) {
+function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: number; registeredAgent?: boolean; agentRoom?: string; hiddenTarget?: boolean; disabled?: boolean } = {}) {
   const routes: Array<{ method: string; path: RegExp | string; handler: Function }> = [];
   // message number -> emoji -> account ids, in reaction order
   const stored = new Map<number, Map<string, string[]>>([[7, new Map()]]);
   const invalidated: string[] = [];
+  const agentWrites: unknown[] = [];
   const viewerReads: Array<[string, string, number, number]> = [];
   const summarize = (messageNumber: number): MessageReaction[] =>
     Array.from(stored.get(messageNumber) ?? [], ([emoji, accounts]) => ({
@@ -49,7 +50,9 @@ function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: 
     },
     queueMessageReactionInvalidation: (roomId: string) => { invalidated.push(roomId); },
     messageReactionStore: {
-      add: async ({ messageNumber, accountId, emoji }) => {
+      agentTargetVisible: async () => !options.hiddenTarget,
+      add: async ({ messageNumber, accountId, emoji, agent }) => {
+        if (agent) { agentWrites.push({ accountId, agent }); if (options.disabled) return "disabled"; }
         if (options.storeFails) throw options.storeFails;
         const reactions = stored.get(messageNumber);
         if (!reactions) return 'message_not_found';
@@ -87,6 +90,8 @@ function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: 
     const req = {
       params: Object.fromEntries(matches.slice(1).map((value, index) => [index, decodeURIComponent(value)])),
       query,
+      body: {},
+      agentSession: options.registeredAgent ? { room_id: options.agentRoom ?? room, agent_key: "agent-ada", owner_account_id: "emmy", actor_label: "Ada", display_name: "Ada", agent_session_id: "session-ada", session_kind: "worker" } : undefined,
       authKind: auth ?? undefined,
       sessionAccount: auth === 'session' || auth === 'owner_token' ? { account_id: 'emmy', login: 'Emmy' } : null,
       headers: {},
@@ -96,7 +101,7 @@ function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: 
     return res;
   }
   const reactionPath = (message: string, emoji: string) => `/rooms/${room}/messages/${message}/reactions/${encodeURIComponent(emoji)}`;
-  return { request, reactionPath, invalidated, routes, viewerReads };
+  return { request, reactionPath, invalidated, routes, viewerReads, agentWrites };
 }
 
 test('shared rules: exactly one emoji is a reaction', () => {
@@ -139,9 +144,11 @@ test('shared rules: the label names the viewer first and counts the rest', () =>
   assert.equal(describeMessageReaction(reaction(2, reactor('ada', 'Ada'), reactor('emmy')), 'emmy'), 'You and Ada reacted with 👍');
   assert.equal(
     describeMessageReaction(reaction(6, reactor('a', 'Ada'), reactor('b', 'Bea'), reactor('c', 'Cy'), reactor('d', 'Di')), null),
-    'Ada, Bea, Cy and 3 others reacted with 👍',
+    'Ada, Bea, Cy, Di and 2 others reacted with 👍',
   );
   assert.equal(describeMessageReaction(reaction(4, reactor('a', 'Ada'), reactor('b', 'Bea'), reactor('c', 'Cy')), null), 'Ada, Bea, Cy and 1 other reacted with 👍');
+  assert.equal(describeMessageReaction(reaction(5, reactor('a', 'Ada'), reactor('agent:b', 'GroveSage (agent)'), reactor('agent:c', 'CrestBay (agent)'), reactor('d', 'Di')), 'emmy', true),
+    'You, Ada, GroveSage (agent), CrestBay (agent) and Di reacted with 👍', 'a viewer outside the supplied list does not hide the human or agent names');
   assert.equal(viewerReactedWith(reaction(1, reactor('ada')), ''), false);
   assert.equal(viewerReactedWith(null, 'ada'), false);
 });
@@ -177,19 +184,19 @@ test('a person adds and removes a reaction; each real change invalidates the roo
   assert.deepEqual(api.invalidated, [room, room]);
 });
 
-test('only a signed-in person can react: agents and anonymous callers are refused', async () => {
+test('unregistered agents and anonymous callers cannot impersonate human reactors', async () => {
   const api = harness();
-  for (const [auth, code] of [['owner_token', 403], ['agent_session', 403], [null, 401]] as const) {
+  for (const [auth, code] of [['owner_token', 403], ['agent_session', 401], [null, 401]] as const) {
     for (const method of ['put', 'delete']) {
       const res = await api.request(method, api.reactionPath('msg_7', '👍'), auth);
       assert.equal(res.code, code, `${method} as ${auth}`);
-      assert.equal(res.body.code, 'person_required');
+      if (auth !== 'agent_session') assert.equal(res.body.code, 'person_required');
     }
   }
   assert.deepEqual(api.invalidated, []);
-  // Worker bearers are stopped earlier still: no reaction route is in their allowlist.
-  assert.equal(requiredAgentSessionRouteCapability('PUT', api.reactionPath('msg_7', '👍')), null);
-  assert.equal(requiredAgentSessionRouteCapability('DELETE', api.reactionPath('msg_7', '👍')), null);
+  // Worker writes are now allowed only through the authenticated agent-identity handler.
+  assert.equal(requiredAgentSessionRouteCapability('PUT', api.reactionPath('msg_7', '👍')), 'messages.write');
+  assert.equal(requiredAgentSessionRouteCapability('DELETE', api.reactionPath('msg_7', '👍')), 'messages.write');
   assert.equal(requiredAgentSessionRouteCapability('GET', `/rooms/${room}/messages/reactions`), null);
 });
 
@@ -306,4 +313,16 @@ test('a reaction change reaches streams as a pointer-only invalidation', async (
   messagesOnly.close();
   broker.close();
   assert.equal(messageReactionEvents.listenerCount('message_reactions:invalidated'), 0);
+});
+
+test('registered agent reactions use server identity and fail closed for scope, visibility or flag', async () => {
+  const api = harness({registeredAgent:true});
+  const result = await api.request('put', api.reactionPath('msg_7', '👍'), 'agent_session');
+  assert.equal(result.code, 200);
+  assert.deepEqual(api.agentWrites, [{accountId:'emmy', agent:{key:'agent-ada',name:'Ada'}}]);
+  for (const [options, status] of [[{agentRoom:'other'},401],[{hiddenTarget:true},404],[{disabled:true},403]] as const) {
+    const refused = harness({registeredAgent:true,...options});
+    assert.equal((await refused.request('put', refused.reactionPath('msg_7','👍'), 'agent_session')).code, status);
+    assert.deepEqual(refused.invalidated, []);
+  }
 });

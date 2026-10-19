@@ -66,6 +66,7 @@
               v-if="showOpenModelConfig"
               v-model:base-url="openModelBaseUrl"
               v-model:model="openModelModel"
+              v-model:context-window="openModelContextWindow"
               v-model:api-key="openModelApiKey"
               :has-api-key="Boolean(openModelStatus?.hasApiKey)"
               :saving="savingOpenModelSettings"
@@ -101,11 +102,6 @@
               @update:charter="supervisedCharter = $event"
               @select-permission="selectPermissionProfile"
             />
-            <AddAgentManagedSessions
-              :room-identifier="roomIdentifier"
-              :provider-id="selectedProviderId"
-              :room-git-room="roomGitRoom"
-            />
             <AddAgentSupervisedLaunch
               :controller="supervisedUi"
             />
@@ -114,12 +110,9 @@
 
             <template #actions>
               <AddAgentActionBar
-                :room-identifier="roomIdentifier"
                 :provider-id="selectedProviderId"
                 :provider="selectedProvider"
                 :preflight="preflight"
-                :permission-profile="selectedPermissionProfile"
-                :launch-mode="launchMode"
                 :setup-busy="setupBusy"
           :setup-action-label="preflight?.nextAction === 'install_runtime' || preflight?.nextAction === 'install_mcp_bridge'
             ? setupActionButtonText(preflight.nextAction)
@@ -139,7 +132,7 @@
                   : null"
                 :permission-warning="selectedPermissionProfileWarning"
                 :supervised="supervisedUi"
-                :charter-missing="launchMode === 'supervised' && !supervisedCharter.trim()"
+                :charter-missing="!supervisedCharter.trim()"
                 @setup-action="runSetupAction"
                 @copy-auth-command="copyAgentAuthCommand"
                 @copy-install-command="copyAgentAuthCommand(installCommand)"
@@ -162,7 +155,6 @@
 <script setup lang="ts">
 import { X } from "@lucide/vue";
 import { nextTick, ref, watch } from "vue";
-import AddAgentManagedSessions from "./add-agent/AddAgentManagedSessions.vue";
 import AddAgentActionBar from "./add-agent/AddAgentActionBar.vue";
 import AddAgentProviderRail from "./add-agent/AddAgentProviderRail.vue";
 import AddAgentSetupStatus from "./add-agent/AddAgentSetupStatus.vue";
@@ -216,5 +208,5 @@ async function handleRecoverSupervisedLaunch(): Promise<void> {
   dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]')?.focus();
 }
 
-const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
+const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 </script>

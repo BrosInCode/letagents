@@ -5,19 +5,13 @@ import type {
   DesktopAgentProviderModelOption,
   DesktopAgentProviderModelsResult,
   DesktopAgentProviderModelSource,
-  DesktopCursorMcpPolicy,
   DesktopGitRoomInfo,
-  DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
   DesktopOpenModelSettingsStatus,
 } from "../../../../../../electron/ipc-types";
-import {
-  defaultCursorMcpPolicy,
-  managedAgentPermissionProfileSelectionForProvider,
-  shouldShowDeliveryModeSelector,
-} from "../../../../domain/managed-agents";
+import { managedAgentPermissionProfileSelectionForProvider } from "../../../../domain/managed-agents";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { contextualAddAgentError, type AddAgentFeedbackTone } from "./add-agent-errors";
 
@@ -36,7 +30,6 @@ interface ConfigurationBindings {
   selectedPermissionProfile: ComputedRef<DesktopManagedAgentPermissionProfile | null>;
   showOpenModelConfig: ComputedRef<boolean>;
   showModelSelector: ComputedRef<boolean>;
-  showEffortSelector: ComputedRef<boolean>;
   providerModelOptions: ComputedRef<DesktopAgentProviderModelOption[]>;
   selectedModel: ComputedRef<string | null>;
   selectedModelSource: ComputedRef<DesktopAgentProviderModelSource | null>;
@@ -46,13 +39,12 @@ interface ConfigurationBindings {
 }
 
 export function useAddAgentConfiguration() {
-  const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
-  const launchMode = ref<"legacy" | "supervised">("supervised");
   const supervisedCharter = ref(defaultSupervisedCharter);
-  const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
   const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
   const openModelBaseUrl = ref("");
   const openModelModel = ref("");
+  const openModelContextWindow = ref("");
+  watch([openModelBaseUrl, openModelModel], () => { openModelContextWindow.value = ""; }, { flush: "sync" });
   const openModelApiKey = ref("");
   const openModelError = ref<string | null>(null);
   const savingOpenModelSettings = ref(false);
@@ -64,9 +56,6 @@ export function useAddAgentConfiguration() {
   const selectedEffort = ref<DesktopManagedAgentEffort | "">("");
   const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
   const selectedPermissionProfileIdsByProvider = ref<
-    Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
-  >({});
-  const selectedSupervisedPermissionProfileIdsByProvider = ref<
     Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
   >({});
   const repoLessSupervisedSelections = new Map<string, DesktopManagedAgentPermissionProfileId>();
@@ -119,6 +108,7 @@ export function useAddAgentConfiguration() {
         openModelStatus.value = status;
         openModelBaseUrl.value = status.baseUrl;
         openModelModel.value = status.model;
+        openModelContextWindow.value = status.contextWindow == null ? "" : String(status.contextWindow);
         if (status.error) {
           openModelError.value = contextualAddAgentError(
             "Couldn't read Open Model settings",
@@ -163,7 +153,6 @@ export function useAddAgentConfiguration() {
           roomIdentifier: bindings.roomIdentifier(),
           roomGitRoom: bindings.roomGitRoom(),
           repoRootPath: bindings.repoRootPath(),
-          cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
           model: bindings.selectedModel.value,
           modelSource: bindings.selectedModelSource.value,
           effort: selectedEffort.value || null,
@@ -207,6 +196,7 @@ export function useAddAgentConfiguration() {
     async function applyOpenModelSettings(input: {
       baseUrl?: string | null;
       model?: string | null;
+      contextWindow?: number | null;
       apiKey?: string | null;
     }): Promise<void> {
       if (openModelWrite) return openModelWrite;
@@ -222,6 +212,7 @@ export function useAddAgentConfiguration() {
           openModelStatus.value = status;
           openModelBaseUrl.value = status.baseUrl;
           openModelModel.value = status.model;
+          openModelContextWindow.value = status.contextWindow == null ? "" : String(status.contextWindow);
           openModelApiKey.value = "";
           if (status.error) {
             openModelError.value = `${contextualAddAgentError(
@@ -258,6 +249,7 @@ export function useAddAgentConfiguration() {
       return applyOpenModelSettings({
         baseUrl: openModelBaseUrl.value.trim() || null,
         model: openModelModel.value.trim() || null,
+        contextWindow: openModelContextWindow.value.trim() ? Number(openModelContextWindow.value) : null,
         ...(apiKey ? { apiKey } : {}),
       });
     }
@@ -290,14 +282,8 @@ export function useAddAgentConfiguration() {
         : "";
     }
     function syncPermissionProfileSelection(): void {
-      const supervised = launchMode.value === "supervised";
       const permissionProfiles = bindings.selectedPermissionProfiles.value;
-      const selections = supervised
-        ? selectedSupervisedPermissionProfileIdsByProvider.value
-        : selectedPermissionProfileIdsByProvider.value;
-      const repoLess = supervised
-        && bindings.roomGitRoom() == null
-        && !bindings.repoRootPath()?.trim();
+      const repoLess = bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim();
       const repoLessSelectionKey = repoLess && bindings.selectedProviderId.value
         ? `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`
         : null;
@@ -319,42 +305,26 @@ export function useAddAgentConfiguration() {
           bindings.selectedProvider.value
             ? { ...bindings.selectedProvider.value, permissionProfiles }
             : null,
-          selections,
-          supervised && bindings.selectedProviderId.value === "cursor"
-            ? "sandboxed_write"
-            : null,
+          selectedPermissionProfileIdsByProvider.value,
+          bindings.selectedProviderId.value === "cursor" ? "sandboxed_write" : null,
         );
       selectedPermissionProfileId.value = nextId;
       if (bindings.selectedProviderId.value && nextId && !repoLess) {
-        if (supervised) {
-          selectedSupervisedPermissionProfileIdsByProvider.value = {
-            ...selectedSupervisedPermissionProfileIdsByProvider.value,
-            [bindings.selectedProviderId.value]: nextId,
-          };
-        } else {
-          selectedPermissionProfileIdsByProvider.value = {
-            ...selectedPermissionProfileIdsByProvider.value,
-            [bindings.selectedProviderId.value]: nextId,
-          };
-        }
+        selectedPermissionProfileIdsByProvider.value = {
+          ...selectedPermissionProfileIdsByProvider.value,
+          [bindings.selectedProviderId.value]: nextId,
+        };
       }
     }
     function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
       if (profile.status !== "available") return;
       selectedPermissionProfileId.value = profile.id;
       if (bindings.selectedProviderId.value) {
-        if (launchMode.value === "supervised") {
-          if (bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim()) {
-            repoLessSupervisedSelections.set(
-              `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`,
-              profile.id,
-            );
-          } else {
-            selectedSupervisedPermissionProfileIdsByProvider.value = {
-              ...selectedSupervisedPermissionProfileIdsByProvider.value,
-              [bindings.selectedProviderId.value]: profile.id,
-            };
-          }
+        if (bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim()) {
+          repoLessSupervisedSelections.set(
+            `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`,
+            profile.id,
+          );
         } else {
           selectedPermissionProfileIdsByProvider.value = {
             ...selectedPermissionProfileIdsByProvider.value,
@@ -362,9 +332,6 @@ export function useAddAgentConfiguration() {
           };
         }
       }
-    }
-    function syncDeliveryModeSelection(): void {
-      if (!shouldShowDeliveryModeSelector(bindings.selectedProvider.value)) deliveryMode.value = "desktop_events";
     }
     function invalidateRequests(): void {
       configurationVersion += 1;
@@ -379,16 +346,12 @@ export function useAddAgentConfiguration() {
       resetModelSelection();
     }
 
-    watch(
-      () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value, launchMode.value] as const,
-      () => {
-        if (bindings.open() && bindings.selectedProviderId.value) {
-          void loadProviderModels();
-          bindings.requestPreflight();
-        }
-      },
-    );
-    watch(launchMode, syncPermissionProfileSelection, { flush: "sync" });
+    watch(selectedPermissionProfileId, () => {
+      if (bindings.open() && bindings.selectedProviderId.value) {
+        void loadProviderModels();
+        bindings.requestPreflight();
+      }
+    });
     watch(
       () => [
         bindings.repoRootPath(),
@@ -409,11 +372,6 @@ export function useAddAgentConfiguration() {
         bindings.requestPreflight({ debounce: true });
       }
     });
-    watch(selectedEffort, () => {
-      if (bindings.open() && bindings.selectedProviderId.value && bindings.showEffortSelector.value) {
-        bindings.requestPreflight();
-      }
-    });
 
     return {
       loadOpenModelSettings,
@@ -425,7 +383,6 @@ export function useAddAgentConfiguration() {
       handleEffortValue,
       syncPermissionProfileSelection,
       selectPermissionProfile,
-      syncDeliveryModeSelection,
       invalidateRequests,
       resetModelSelection,
       resetTransientState,
@@ -433,13 +390,11 @@ export function useAddAgentConfiguration() {
   }
 
   return {
-    deliveryMode,
-    launchMode,
     supervisedCharter,
-    selectedCursorMcpPolicy,
     openModelStatus,
     openModelBaseUrl,
     openModelModel,
+    openModelContextWindow,
     openModelApiKey,
     openModelError,
     savingOpenModelSettings,
@@ -450,7 +405,6 @@ export function useAddAgentConfiguration() {
     customModelId,
     selectedEffort,
     selectedPermissionProfileId,
-    selectedPermissionProfileIdsByProvider,
     resetModelSelection,
     consumeSupervisedCharter,
     bind,

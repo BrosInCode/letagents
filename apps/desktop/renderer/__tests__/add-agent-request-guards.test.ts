@@ -23,7 +23,7 @@ function provider(id: "codex" | "cursor"): DesktopAgentProvider {
     id,
     name: id === "codex" ? "Codex" : "Cursor",
     description: "Agent provider",
-    capabilities: ["desktop_managed_runtime"],
+    capabilities: ["supervised_runtime"],
     runtimeCommand: id,
     mcpTargetId: id,
     permissionProfiles: [],
@@ -37,7 +37,6 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   let laterPreflight: Promise<DesktopAgentProviderPreflight> | null = null;
   let focusListener: (() => void) | undefined;
-  const launchMode = ref<"legacy" | "supervised">("legacy");
   Object.assign(globalThis, {
     window: {
       clearTimeout: () => undefined,
@@ -86,15 +85,11 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
     expectedWorktreeBranch: computed(() => null),
     authCommand: computed(() => null),
     externalJoinPrompt: computed(() => null),
-    selectedCursorMcpPolicy: ref("filter_letagents"),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
-    selectedEffort: ref(""),
-    launchMode,
     loadOpenModelSettings: async () => undefined,
     loadProviderModels: async () => undefined,
     syncPermissionProfileSelection: () => undefined,
-    syncDeliveryModeSelection: () => undefined,
     invalidateConfigurationRequests: () => undefined,
     resetConfigurationModelSelection: () => undefined,
     resetConfigurationTransientState: () => undefined,
@@ -188,8 +183,12 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   await retry;
   assert.equal(preflightInputs.at(-1)?.refreshEnvironment, true);
   assert.equal(preflightInputs.at(-1)?.refreshModels, true);
+  for (const input of preflightInputs) {
+    assert.equal("launchMode" in input, false, "preflight never names a launch mode");
+    assert.equal("cursorMcpPolicy" in input, false, "preflight never carries a Cursor MCP policy");
+    assert.equal("effort" in input, false, "preflight never reads the effort, so it never carries it");
+  }
 
-  launchMode.value = "supervised";
   setup.secureStorageStatus.value = { available: false, detail: "Locked" } as never;
   actions.armSecureStorageFocusRecheck();
   const beforeFocus = preflightCalls;
@@ -229,7 +228,6 @@ test("configuration invalidation rejects a stale model-catalog response", async 
     selectedPermissionProfile: computed(() => null),
     showOpenModelConfig: computed(() => false),
     showModelSelector: computed(() => true),
-    showEffortSelector: computed(() => true),
     providerModelOptions: computed(() => configuration.providerModels.value?.models ?? []),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
@@ -253,7 +251,7 @@ test("configuration invalidation rejects a stale model-catalog response", async 
   assert.equal(configuration.providerModels.value, null);
 });
 
-test("Cursor defaults to supervision and retains legacy permission compatibility", async () => {
+test("Cursor defaults to sandboxed writes and keeps repo-less authority separate", async () => {
   const configuration = useAddAgentConfiguration();
   const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("cursor");
   const roomIdentifier = ref("room-1");
@@ -290,7 +288,6 @@ test("Cursor defaults to supervision and retains legacy permission compatibility
     ),
     showOpenModelConfig: computed(() => false),
     showModelSelector: computed(() => false),
-    showEffortSelector: computed(() => false),
     providerModelOptions: computed(() => []),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
@@ -299,18 +296,10 @@ test("Cursor defaults to supervision and retains legacy permission compatibility
     onMessage: () => undefined,
   });
 
-  assert.equal(configuration.launchMode.value, "supervised");
   actions.syncPermissionProfileSelection();
   assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");
 
-  configuration.launchMode.value = "supervised";
-  assert.equal(configuration.selectedPermissionProfileId.value, "sandboxed_write");
   actions.selectPermissionProfile(profiles[2]!);
-  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
-
-  configuration.launchMode.value = "legacy";
-  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
-  configuration.launchMode.value = "supervised";
   assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
 
   repoRootPath.value = null;
@@ -360,9 +349,8 @@ test("Codex in a room with no project is offered Read-only first, and can start 
   const repoRootPath = ref<string | null>(null);
   // The real catalog, presented as Add Agent presents it for a supervised agent.
   const catalog = listManagedAgentPermissionProfiles("codex");
-  const selectedPermissionProfiles = computed(() => configuration.launchMode.value === "supervised"
-    ? catalog.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: Boolean(repoRootPath.value) }))
-    : catalog);
+  const selectedPermissionProfiles = computed(() =>
+    catalog.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: Boolean(repoRootPath.value) })));
   const selectedPermissionProfile = computed(() =>
     selectedPermissionProfiles.value.find((profile) => profile.id === configuration.selectedPermissionProfileId.value) ?? null);
   const actions = configuration.bind({
@@ -376,7 +364,6 @@ test("Codex in a room with no project is offered Read-only first, and can start 
     selectedPermissionProfile,
     showOpenModelConfig: computed(() => false),
     showModelSelector: computed(() => false),
-    showEffortSelector: computed(() => false),
     providerModelOptions: computed(() => []),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
@@ -386,7 +373,6 @@ test("Codex in a room with no project is offered Read-only first, and can start 
   });
 
   // No project: a scratch folder is not a trusted boundary, so the most restrictive level is the one offered.
-  configuration.launchMode.value = "supervised";
   actions.syncPermissionProfileSelection();
   assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
   // Start is enabled only for a level that is available. Before Codex had Read-only this choice was
@@ -404,80 +390,6 @@ test("Codex in a room with no project is offered Read-only first, and can start 
   actions.syncPermissionProfileSelection();
   assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
   assert.equal(catalog.find((profile) => profile.isDefault)?.id, "full_access");
-
-  // A legacy agent still has no Read-only: the level stays unavailable there, selected or not.
-  repoRootPath.value = null;
-  configuration.launchMode.value = "legacy";
-  actions.syncPermissionProfileSelection();
-  assert.equal(selectedPermissionProfiles.value.find((profile) => profile.id === "read_only")?.status, "gated");
-  assert.notEqual(selectedPermissionProfile.value?.id === "read_only" && selectedPermissionProfile.value.status === "available", true);
-});
-
-test("Codex keeps legacy and supervised ask-before-write selections independent", () => {
-  const configuration = useAddAgentConfiguration();
-  const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("codex");
-  const legacyProfiles: DesktopAgentProvider["permissionProfiles"] = [
-    {
-      id: "full_access", label: "Full access", description: "Trusted repo access.",
-      status: "available", risk: "high", detail: null, isDefault: true,
-    },
-    {
-      id: "ask_before_write", label: "Ask before writes", description: "Requires approval.",
-      status: "gated", risk: "medium", detail: "Supervised only.", isDefault: false,
-    },
-  ];
-  const selectedPermissionProfiles = computed(() => legacyProfiles.map((profile) =>
-    configuration.launchMode.value === "supervised" && profile.id === "ask_before_write"
-      ? { ...profile, status: "available" as const }
-      : profile
-  ));
-  const selectedProvider = computed<DesktopAgentProvider>(() => ({
-    ...provider("codex"),
-    permissionProfiles: legacyProfiles,
-    defaultPermissionProfileId: "full_access",
-  }));
-  const actions = configuration.bind({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomGitRoom: () => null,
-    repoRootPath: () => "/repo",
-    selectedProviderId,
-    selectedProvider,
-    selectedPermissionProfiles,
-    selectedPermissionProfile: computed(() =>
-      selectedPermissionProfiles.value.find(
-        (profile) => profile.id === configuration.selectedPermissionProfileId.value,
-      ) ?? null
-    ),
-    showOpenModelConfig: computed(() => false),
-    showModelSelector: computed(() => false),
-    showEffortSelector: computed(() => false),
-    providerModelOptions: computed(() => []),
-    selectedModel: computed(() => null),
-    selectedModelSource: computed(() => null),
-    requestPreflight: () => undefined,
-    runPreflight: async () => undefined,
-    onMessage: () => undefined,
-  });
-
-  actions.syncPermissionProfileSelection();
-  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
-
-  configuration.launchMode.value = "supervised";
-  const supervisedAsk = selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write");
-  assert.equal(supervisedAsk?.status, "available");
-  actions.selectPermissionProfile(supervisedAsk!);
-  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
-
-  configuration.launchMode.value = "legacy";
-  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
-  const legacyAsk = selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write");
-  assert.equal(legacyAsk?.status, "gated");
-  actions.selectPermissionProfile(legacyAsk!);
-  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
-
-  configuration.launchMode.value = "supervised";
-  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
 });
 
 test("closing the modal does not unlock a second Open Model write", async () => {
@@ -492,7 +404,8 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     window: {
       letagentsDesktop: {
         openModel: {
-          saveSettings: () => {
+          saveSettings: (input: { contextWindow: number | null }) => {
+            assert.equal(input.contextWindow, 262144);
             saves += 1;
             return pendingSave.promise;
           },
@@ -506,7 +419,7 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     id: "open-model",
     name: "Open Model",
     description: "Bring your own model",
-    capabilities: ["desktop_managed_runtime"],
+    capabilities: ["supervised_runtime"],
     runtimeCommand: "codex",
     mcpTargetId: "open-model",
     permissionProfiles: [],
@@ -523,7 +436,6 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     selectedPermissionProfile: computed(() => null),
     showOpenModelConfig: computed(() => true),
     showModelSelector: computed(() => false),
-    showEffortSelector: computed(() => false),
     providerModelOptions: computed(() => []),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
@@ -532,6 +444,8 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     onMessage: () => undefined,
   });
 
+  configuration.openModelModel.value = "glm-5.3";
+  configuration.openModelContextWindow.value = "262144";
   const first = actions.saveOpenModelSettings();
   actions.resetTransientState();
   const second = actions.saveOpenModelSettings();
@@ -541,6 +455,16 @@ test("closing the modal does not unlock a second Open Model write", async () => 
   pendingSave.resolve({ baseUrl: "http://localhost:11434", model: "qwen", hasApiKey: false, error: null });
   await Promise.all([first, second]);
   assert.equal(configuration.savingOpenModelSettings.value, false);
+});
+
+test("Open Model context overrides clear when the endpoint or model changes", () => {
+  const configuration = useAddAgentConfiguration();
+  configuration.openModelContextWindow.value = "262144";
+  configuration.openModelModel.value = "different-model";
+  assert.equal(configuration.openModelContextWindow.value, "");
+  configuration.openModelContextWindow.value = "262144";
+  configuration.openModelBaseUrl.value = "https://different.example/v1";
+  assert.equal(configuration.openModelContextWindow.value, "");
 });
 
 test("closing the modal does not unlock duplicate provider setup side effects", async () => {
@@ -573,15 +497,11 @@ test("closing the modal does not unlock duplicate provider setup side effects", 
     expectedWorktreeBranch: computed(() => null),
     authCommand: computed(() => null),
     externalJoinPrompt: computed(() => null),
-    selectedCursorMcpPolicy: ref("filter_letagents"),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
-    selectedEffort: ref(""),
-    launchMode: ref("legacy"),
     loadOpenModelSettings: async () => undefined,
     loadProviderModels: async () => undefined,
     syncPermissionProfileSelection: () => undefined,
-    syncDeliveryModeSelection: () => undefined,
     invalidateConfigurationRequests: () => undefined,
     resetConfigurationModelSelection: () => undefined,
     resetConfigurationTransientState: () => undefined,
@@ -641,7 +561,6 @@ test("successful secure-storage recovery clears only its own stale warning", asy
     },
   });
   let open = true;
-  const launchMode = ref<"legacy" | "supervised">("supervised");
   const setup = useAddAgentSetup();
   const selectedProvider = computed(() => provider("codex"));
   const actions = setup.bind({
@@ -654,15 +573,11 @@ test("successful secure-storage recovery clears only its own stale warning", asy
     expectedWorktreeBranch: computed(() => null),
     authCommand: computed(() => null),
     externalJoinPrompt: computed(() => null),
-    selectedCursorMcpPolicy: ref("filter_letagents"),
     selectedModel: computed(() => null),
     selectedModelSource: computed(() => null),
-    selectedEffort: ref(""),
-    launchMode,
     loadOpenModelSettings: async () => undefined,
     loadProviderModels: async () => undefined,
     syncPermissionProfileSelection: () => undefined,
-    syncDeliveryModeSelection: () => undefined,
     invalidateConfigurationRequests: () => undefined,
     resetConfigurationModelSelection: () => undefined,
     resetConfigurationTransientState: () => undefined,
@@ -688,5 +603,233 @@ test("successful secure-storage recovery clears only its own stale warning", asy
   await actions.runPreflight();
   assert.equal(setup.setupMessage.value, "An unrelated provider warning");
   open = false;
+  actions.resetTransientState();
+});
+
+test("changing the effort does not run preflight, while a model change still does", async () => {
+  Object.assign(globalThis, {
+    window: { clearTimeout: () => undefined, setTimeout: () => 1, letagentsDesktop: {} },
+  });
+  const configuration = useAddAgentConfiguration();
+  const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("codex");
+  const selectedProvider = computed(() => provider("codex"));
+  let preflightRequests = 0;
+  const actions = configuration.bind({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProviderId,
+    selectedProvider,
+    selectedPermissionProfiles: computed(() => selectedProvider.value.permissionProfiles),
+    selectedPermissionProfile: computed(() => null),
+    showOpenModelConfig: computed(() => false),
+    showModelSelector: computed(() => true),
+    providerModelOptions: computed(() => []),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    requestPreflight: () => { preflightRequests += 1; },
+    runPreflight: async () => undefined,
+    onMessage: () => undefined,
+  });
+
+  configuration.selectedEffort.value = "high";
+  await nextTick();
+  actions.handleEffortValue("low");
+  await nextTick();
+  actions.handleEffortValue("");
+  await nextTick();
+  assert.equal(configuration.selectedEffort.value, "");
+  assert.equal(preflightRequests, 0, "preflight never reads the effort, so an effort change must not run it");
+
+  configuration.selectedModelMode.value = "option";
+  await nextTick();
+  assert.equal(preflightRequests, 1, "a model change still re-runs preflight");
+});
+
+/** Add Agent setup wired to a preflight IPC that answers only when the test resolves a call. */
+function preflightBurstHarness() {
+  const calls: DesktopAgentProviderPreflightInput[] = [];
+  const providerIds: string[] = [];
+  const results: Array<ReturnType<typeof deferred<DesktopAgentProviderPreflight>>> = [];
+  Object.assign(globalThis, {
+    window: {
+      clearTimeout: () => undefined,
+      setTimeout: () => 1,
+      addEventListener: () => undefined,
+      letagentsDesktop: {
+        supervisorGrant: { getStorageStatus: async () => ({ available: true }) },
+        workers: {
+          runAgentProviderPreflight: (providerId: string, input: DesktopAgentProviderPreflightInput) => {
+            providerIds.push(providerId);
+            calls.push(input);
+            const result = deferred<DesktopAgentProviderPreflight>();
+            results.push(result);
+            return result.promise;
+          },
+        },
+      },
+    },
+  });
+  const model = ref<string | null>(null);
+  const setup = useAddAgentSetup();
+  const actions = setup.bind({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProvider: computed(() => provider("codex")),
+    selectedPermissionProfile: computed(() => null),
+    expectedWorktreeBranch: computed(() => null),
+    authCommand: computed(() => null),
+    externalJoinPrompt: computed(() => null),
+    selectedModel: computed(() => model.value),
+    selectedModelSource: computed(() => (model.value ? "custom" : null)),
+    loadOpenModelSettings: async () => undefined,
+    loadProviderModels: async () => undefined,
+    syncPermissionProfileSelection: () => undefined,
+    invalidateConfigurationRequests: () => undefined,
+    resetConfigurationModelSelection: () => undefined,
+    resetConfigurationTransientState: () => undefined,
+    onDetectRecoverableLaunch: () => undefined,
+    onResetSupervisedLaunch: () => undefined,
+    onCleanupSupervisedLaunch: () => undefined,
+    onResetStartingAgent: () => undefined,
+    onChooseWorktree: () => undefined,
+  });
+  setup.providers.value = [provider("codex")];
+  setup.selectedProviderId.value = "codex";
+  const readyPreflight = (message: string): DesktopAgentProviderPreflight => ({
+    providerId: "codex",
+    status: "ready",
+    canStart: true,
+    message,
+    detail: null,
+    nextAction: null,
+    version: "1",
+    mcpStatus: "installed",
+  });
+  const settle = async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await nextTick();
+  };
+  return { setup, actions, calls, providerIds, results, model, readyPreflight, settle };
+}
+
+test("identical preflight requests in one burst share one IPC call and a changed request issues another", async () => {
+  const { setup, actions, calls, results, model, readyPreflight, settle } = preflightBurstHarness();
+
+  actions.requestPreflight();
+  actions.requestPreflight();
+  assert.equal(calls.length, 1, "two identical requests in one burst make one IPC call");
+  assert.equal("effort" in calls[0]!, false, "preflight does not send the effort");
+  results[0]!.resolve(readyPreflight("First"));
+  await settle();
+  assert.equal(setup.preflight.value?.message, "First", "the one shared call delivers the result");
+  assert.equal(setup.loadingPreflight.value, false);
+
+  actions.requestPreflight();
+  assert.equal(calls.length, 2, "once the first request has finished, an identical request runs again");
+  results[1]!.resolve(readyPreflight("Second"));
+  await settle();
+  assert.equal(setup.preflight.value?.message, "Second");
+
+  void actions.runPreflight();
+  void actions.runPreflight();
+  assert.equal(calls.length, 3, "direct runPreflight calls with the same request also share one IPC call");
+
+  model.value = "gpt-5-custom";
+  actions.requestPreflight();
+  assert.equal(calls.length, 4, "a changed request issues a second IPC call");
+  assert.equal(calls[3]!.model, "gpt-5-custom");
+  assert.equal(calls[3]!.modelSource, "custom");
+
+  void actions.runPreflight({ refreshEnvironment: true });
+  void actions.runPreflight({ refreshEnvironment: true });
+  assert.equal(calls.length, 6, "Check again is never shared, so each click reaches the main process");
+  assert.equal(calls[5]!.refreshEnvironment, true);
+  void actions.runPreflight({ refreshModels: true });
+  assert.equal(calls.length, 7, "a model refresh is never shared either");
+  for (const result of results) result.resolve(readyPreflight("Done"));
+  await settle();
+  actions.resetTransientState();
+});
+
+test("a preflight request shared with an in-flight run still shows loading and still delivers its result", async () => {
+  const { setup, actions, calls, results, readyPreflight, settle } = preflightBurstHarness();
+
+  // Opening the modal: the provider sync starts a run, then watchers ask again.
+  const first = actions.runPreflight();
+  actions.requestPreflight();
+  actions.requestPreflight();
+  assert.equal(calls.length, 1, "the watcher requests share the run that is in flight");
+  assert.equal(setup.loadingPreflight.value, true, "the shared check is still shown as loading");
+  results[0]!.resolve(readyPreflight("Shared with a run"));
+  await first;
+  await settle();
+  assert.equal(setup.preflight.value?.message, "Shared with a run", "the shared result is assigned");
+  assert.equal(setup.loadingPreflight.value, false);
+  actions.resetTransientState();
+});
+
+test("two identical back-to-back preflight requests still show loading and still deliver one result", async () => {
+  const { setup, actions, calls, results, readyPreflight, settle } = preflightBurstHarness();
+
+  actions.requestPreflight();
+  actions.requestPreflight();
+  assert.equal(calls.length, 1);
+  assert.equal(setup.loadingPreflight.value, true, "the shared check is still shown as loading");
+  results[0]!.resolve(readyPreflight("Shared pair"));
+  await settle();
+  assert.equal(setup.preflight.value?.message, "Shared pair", "the shared result is assigned");
+  assert.equal(setup.loadingPreflight.value, false);
+  actions.resetTransientState();
+});
+
+test("switching provider during an in-flight preflight does not adopt it, and the old result never lands", async () => {
+  const { setup, actions, calls, providerIds, results, readyPreflight, settle } = preflightBurstHarness();
+  setup.providers.value = [provider("codex"), provider("cursor")];
+
+  void actions.runPreflight();
+  assert.deepEqual(providerIds, ["codex"]);
+
+  // Away and back: the request is identical to the one in flight, but it
+  // belongs to an older provider selection and must not be shared.
+  actions.selectProvider("cursor");
+  actions.selectProvider("codex");
+  void actions.runPreflight();
+  assert.equal(calls.length, 2, "a request made after a provider switch is not served by the older request");
+  assert.deepEqual(providerIds, ["codex", "codex"]);
+
+  results[0]!.resolve(readyPreflight("Old selection"));
+  await settle();
+  assert.equal(setup.preflight.value, null, "the result of the older selection never lands");
+  assert.equal(setup.loadingPreflight.value, true, "the newer request is still loading");
+
+  results[1]!.resolve(readyPreflight("Current selection"));
+  await settle();
+  assert.equal(setup.preflight.value?.message, "Current selection");
+  assert.equal(setup.loadingPreflight.value, false);
+  actions.resetTransientState();
+});
+
+test("switching to another provider during an in-flight preflight issues its own request", async () => {
+  const { setup, actions, calls, providerIds, results, readyPreflight, settle } = preflightBurstHarness();
+  setup.providers.value = [provider("codex"), provider("cursor")];
+
+  void actions.runPreflight();
+  actions.selectProvider("cursor");
+  void actions.runPreflight();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(providerIds, ["codex", "cursor"]);
+
+  results[0]!.resolve(readyPreflight("Codex result"));
+  await settle();
+  assert.equal(setup.preflight.value, null, "the result of the previous provider never lands");
+
+  results[1]!.resolve({ ...readyPreflight("Cursor result"), providerId: "cursor" });
+  await settle();
+  assert.equal(setup.preflight.value?.message, "Cursor result");
+  assert.equal(setup.loadingPreflight.value, false);
   actions.resetTransientState();
 });

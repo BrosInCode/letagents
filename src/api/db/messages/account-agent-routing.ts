@@ -7,13 +7,14 @@ import {
 } from "../../../shared/activation-routing.js";
 import { db } from "../client.js";
 import {
+  jev_routing_jobs,
   message_agent_receipts,
   messages,
   room_agent_sessions,
   task_leases,
 } from "../schema.js";
 import type { MessageAccountAgentRouting, MessageRow } from "../types.js";
-import { RequestValidationError } from "../../validation-error.js";
+import { MessageRoutingPendingError, RequestValidationError } from "../../validation-error.js";
 import { parseScopedId } from "../utils.js";
 import { getGlobalMessageThreadRoutingMembers } from "./thread-routing-membership.js";
 
@@ -159,6 +160,65 @@ export async function getBoundedActiveWorkLeaseOwners(
      LIMIT 2
   `);
   return result.rows;
+}
+
+/**
+ * A human can move an answered top-level question into its first thread.
+ * Only its captured recipients may follow; names and today's room population
+ * cannot expand that audience. Check the persisted follow-up too, including
+ * visibility set by a transactional creation hook. This does not change
+ * thread membership.
+ */
+export async function getHumanThreadRootRecipientOwners(
+  executor: Pick<AccountAgentRoutingExecutor, "execute">,
+  roomId: string,
+  rootNumber: number,
+  followUpNumber: number,
+  currentAgentKeys: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  if (!currentAgentKeys.length) return new Map();
+  if (currentAgentKeys.length > MAX_ACCOUNT_ROUTING_TARGETS) {
+    throw new RequestValidationError("Thread recipient lookup exceeds the routing bound.");
+  }
+  const result = await executor.execute<{
+    agent_key: string | null; owner_account_id: string | null; routing_pending: boolean | null;
+  }>(sql`
+    SELECT receipt.agent_key, captured.owner_account_id,
+           (job.state <> 'completed' AND job.plan->>'mode' = 'active') AS routing_pending
+      FROM ${messages} AS root
+      JOIN ${messages} AS follow_up
+        ON follow_up.room_id = root.room_id AND follow_up.number = ${followUpNumber}
+          AND follow_up.visibility IS NULL AND follow_up.rental_session_id IS NULL
+      LEFT JOIN ${jev_routing_jobs} AS job
+        ON job.room_id = root.room_id AND job.message_number = root.number
+      LEFT JOIN ${message_agent_receipts} AS receipt
+        ON receipt.message_room_id = root.room_id AND receipt.message_number = root.number
+          AND receipt.room_id = root.room_id
+          AND receipt.agent_key IN (
+            SELECT value FROM jsonb_array_elements_text(${JSON.stringify(currentAgentKeys)}::jsonb)
+          )
+      LEFT JOIN ${room_agent_sessions} AS captured
+        ON captured.session_id = receipt.agent_session_id
+          AND captured.room_id = receipt.room_id AND captured.agent_key = receipt.agent_key
+          AND captured.session_kind = 'worker'
+     WHERE root.room_id = ${roomId} AND root.number = ${rootNumber}
+       AND root.source = 'browser' AND root.publisher_account_id IS NOT NULL
+       AND root.publisher_agent_key IS NULL AND root.thread_root_number IS NULL
+       AND (root.agent_prompt_kind IS DISTINCT FROM 'auto' OR BTRIM(root.text) <> '')
+       AND root.visibility IS NULL AND root.rental_session_id IS NULL
+     LIMIT ${currentAgentKeys.length + 1}
+  `);
+  if (result.rows.some(row => row.routing_pending)) throw new MessageRoutingPendingError();
+  const owners = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const row of result.rows) {
+    if (!row.agent_key || !row.owner_account_id || ambiguous.has(row.agent_key)) continue;
+    if (owners.has(row.agent_key) && owners.get(row.agent_key) !== row.owner_account_id) {
+      owners.delete(row.agent_key);
+      ambiguous.add(row.agent_key);
+    } else owners.set(row.agent_key, row.owner_account_id);
+  }
+  return owners;
 }
 
 /** Bounded send-time conversation focus, derived solely from captured receipts. */

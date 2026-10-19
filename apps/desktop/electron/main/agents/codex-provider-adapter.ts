@@ -2,7 +2,7 @@ import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/roo
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { ProviderUsageTracker, readCodexUsageTail } from "./provider-usage.js";
 import type { ProviderUsage } from "../../../shared/provider-usage.js";
@@ -86,6 +86,7 @@ import {
   type ProviderTurnControlOptions,
   ProviderTurnControlError,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnResult,
   type ProviderRoomTurnOptions,
@@ -676,16 +677,49 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
 }
 
 function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown> {
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
+    let deadlineExpired = false;
+    let killedAtDeadline = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
-      encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+      encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 64 * 1024,
       // The read-only contract probe needs neither user auth nor daemon authority.
       env: { ELECTRON_RUN_AS_NODE: "1", ...(isLocalRoomApi(apiUrl) ? { LETAGENTS_API_URL: LOCAL_ROOM_API_ORIGIN } : {}) },
     }, (error, stdout) => {
-      if (error) return reject(new Error("The verified LetAgents MCP runtime contract could not be read."));
+      if (deadline) clearTimeout(deadline);
+      if (error) {
+        // Never expose stderr, paths, environment or the child-process Error message.
+        const code = typeof error.code === "number" ? error.code : "unavailable";
+        const signal = error.signal === "SIGKILL" ? "SIGKILL" : error.signal ? "other" : "none";
+        const failure = new Error(`The verified LetAgents MCP runtime contract could not be read. Exit: ${code}; signal: ${signal}; killed: ${Boolean(error.killed)}; elapsed: ${Date.now() - startedAt}ms; output: ${Buffer.byteLength(stdout)} bytes.`);
+        // Retain the successful deadline-kill gate. A delayed exit notification
+        // cannot prove which SIGKILL caused termination; retries still require
+        // a fresh valid contract. Other observed failures remain fail-closed.
+        if (killedAtDeadline && error.signal === "SIGKILL" && error.code == null) {
+          Object.assign(failure, { transientProviderStart: true });
+        }
+        return reject(failure);
+      }
+      if (deadlineExpired) {
+        // Timeout cleanup can discard unread stdout from a child that already
+        // exited successfully while this process's event loop was delayed.
+        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its eight-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
+      }
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
     });
+    deadline = setTimeout(() => {
+      // Record the deadline before destroying pipes, even if the child has
+      // already exited. Preserve an already observed unsuccessful exit.
+      deadlineExpired = child.signalCode === null && (child.exitCode === null || child.exitCode === 0);
+      // Match execFile's timeout cleanup: a descendant must not keep the
+      // callback waiting by retaining the probe's output pipes.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (child.exitCode === null && child.signalCode === null) killedAtDeadline = child.kill("SIGKILL");
+    }, 8_000);
+    deadline.unref();
     child.stdin?.end();
   });
 }
@@ -1035,16 +1069,26 @@ function exactPermissionItemKey(threadId: string, turnId: string, itemId: string
   return JSON.stringify([threadId, turnId, itemId]);
 }
 
-function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
+/**
+ * Codex's own process reads a local image, outside the agent's sandbox, and
+ * resizes it before it enters the thread history. The daemon staged the file
+ * and keeps it until this turn has ended. Each image follows a short label.
+ */
+function roomTurnImageInput(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
+  return includedRoomTurnImages(request.attachments).flatMap(image => image.path ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}`, text_elements: [] },
+    { type: "localImage", path: image.path },
+  ] : []);
+}
+
+function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest, context = formatRoomTurnContext(request)): string {
   return [
     ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...context,
   ].join("\n");
 }
 
@@ -1261,6 +1305,7 @@ class CodexProviderHandle implements ProviderHandle {
   /** The one pending read after the thread reported `systemError`. */
   systemErrorReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
+  readonly roomContext = new RoomTurnContextCache();
   providerContinuationId: string;
 
   constructor(
@@ -1278,6 +1323,7 @@ class CodexProviderHandle implements ProviderHandle {
     this.usage = new ProviderUsageTracker(providerContinuationId);
     this.execution = new ProviderExecutionObserver(now);
     client.onDisconnect(() => {
+      this.roomContext.reset();
       this.permissionFileChangeProposals.clear();
       if (this.nativeRuntimeUnavailable) return;
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
@@ -1369,6 +1415,7 @@ class CodexProviderHandle implements ProviderHandle {
     }
     this.terminalTurns.clear();
     this.roomTurnResults.clearAll();
+    this.roomContext.reset();
     this.providerContinuationId = providerContinuationId;
     this.invalidatePermissions();
   }
@@ -1908,7 +1955,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // A cached handle state or an active thread with no visible turn cannot
       // certify idle. Even a valid empty list requires the thread itself to
       // be between turns.
-      if (!isCodexThreadBetweenTurns(extractThreadStatus(read.thread))) return { state: "unknown" };
+      const status = extractThreadStatus(read.thread);
+      if (status === "notLoaded") {
+        // A handoff may find the saved thread unloaded. Do not cold-resume it
+        // with process defaults just to stop the old runtime. Prove the exact
+        // app-server has no loaded threads, in addition to terminal history.
+        const loaded = recordValue(await handle.client.request<unknown>(
+          "thread/loaded/list", { limit: 1 }, { timeoutMs: 2_000 },
+        ));
+        if (!current() || !Array.isArray(loaded?.data) || loaded.data.length !== 0
+          || loaded.nextCursor !== null) return { state: "unknown" };
+      } else if (!isCodexThreadBetweenTurns(status)) return { state: "unknown" };
       return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
     } catch {
       // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
@@ -2062,6 +2119,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
 
+  /**
+   * Codex's own process reads a local image and resizes it before it enters
+   * the thread history; a data URL would stay there at full size.
+   */
+  roomTurnImageDelivery(): RoomTurnImageDelivery {
+    return "file";
+  }
+
   /** Execute one durable inbox item on this exact app-server/thread only. */
   async runRoomTurn(
     providerHandle: ProviderHandle,
@@ -2088,15 +2153,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
     await options.beforeNativeDispatch?.();
     assertRuntimeAvailable();
     handle.roomTurnResults.beginTurnStart(handle.providerContinuationId);
+    const context = handle.roomContext.prepare(request, continuation);
     let started: TurnStartResult;
     try {
       started = await handle.client.request<TurnStartResult>("turn/start", {
         ...turnPolicy,
         threadId: handle.providerContinuationId,
-        input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
+        input: [{ type: "text", text: boundedRoomTurnPrompt(request, context.lines), text_elements: [] }, ...roomTurnImageInput(request)],
       });
     } catch (error) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      handle.roomContext.reset();
       if (isMissingContinuation(error, handle.providerContinuationId)) {
         throw new ProviderContinuationMissingError(handle.providerContinuationId);
       }
@@ -2105,6 +2172,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const turnId = started.turn?.id?.trim();
     if (!turnId) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      handle.roomContext.reset();
       throw new Error("Codex did not acknowledge the bounded room turn.");
     }
     handle.roomTurnResults.bindTurnStart(handle.providerContinuationId, turnId);
@@ -2116,11 +2184,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // not retain that completed turn for a later unrelated invocation.
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      handle.roomContext.reset();
       throw error;
     }
     handle.setLiveState("working");
-    const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+    try {
+      const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
+      const result = await this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+      if ((result.outcome === "reply" || result.outcome === "no_reply")
+        && handle.providerContinuationId === continuation && handle.client.currentConnectionId() === rpcConnection
+        && sameProviderConnectionIdentity(handle.providerConnection, connection) && !options.detachSignal?.aborted) context.commit();
+      else handle.roomContext.reset();
+      return result;
+    } catch (error) {
+      handle.roomContext.reset();
+      throw error;
+    }
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
@@ -2130,6 +2209,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
+    handle.roomContext.reset();
     const turnId = request.providerTurnId.trim();
     if (!turnId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery requires an exact persisted turn id.");
     handle.roomTurnResults.track(handle.providerContinuationId, turnId);
@@ -2770,6 +2850,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
             ...codexThreadConfig(readOnlyLevel, effort),
           });
         } catch (error) {
+          if (errorMessage(error) === `thread ${resumeRef.providerContinuationId} already has an active writer`) {
+            throw new Error(
+              "This agent's saved Codex conversation is being used by another running Codex session. "
+              + "Resume this agent after that session has stopped using the conversation. LetAgents will not interrupt it.",
+            );
+          }
           if (!isMethodNotFound(error)) throw error;
           this.resumeSupported = false;
           throw new Error(
@@ -2863,7 +2949,6 @@ export class CodexProviderAdapter implements ProviderAdapter {
         roomIdentifier: req.roomId,
         joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
         cwd: req.cwd,
-        deliveryMode: req.deliveryMode ?? "mcp_polling",
         stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
         token: makeCodexStopToken(),
         suggestedDisplayName: req.agentDisplayName.trim(),
@@ -3291,6 +3376,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.usage.codex(notification.method, notification.params, this.deps.now());
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
+    if (exactThreadId === handle.providerContinuationId && (
+      notification.method === "thread/compacted"
+      || (["item/started", "item/completed"].includes(notification.method)
+        && recordValue(recordValue(notification.params)?.item)?.type === "contextCompaction")
+    )) handle.roomContext.reset();
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
     this.observePermissionFileChangeProposal(handle, notification);
     const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);

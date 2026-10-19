@@ -25,6 +25,7 @@ import {
   sensitiveCodexAppServerEnvValues,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { cachedProbe, clearProbeCache, probeKey } from "./provider-probe-cache.js";
 import {
   openCodeInstallCommand,
   resolveOpenCodeBinary,
@@ -181,7 +182,8 @@ async function codexPreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   const runtimeEnv = desktopRuntimeEnvironment();
   const resolvedCommand = resolveCodexExecutable({ env: runtimeEnv });
-  const versionResult = await execFileWithTimeout(resolvedCommand, ["--version"], { timeoutMs, env: runtimeEnv });
+  const versionResult = await cachedProbe(probeKey(resolvedCommand, ["--version"]), () =>
+    execFileWithTimeout(resolvedCommand, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
   }
@@ -199,7 +201,8 @@ async function codexPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(resolvedCommand, ["login", "status"], { timeoutMs, env: runtimeEnv });
+  const authResult = await cachedProbe(probeKey(resolvedCommand, ["login", "status"]), () =>
+    execFileWithTimeout(resolvedCommand, ["login", "status"], { timeoutMs, env: runtimeEnv }));
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -213,21 +216,8 @@ async function codexPreflight(
     };
   }
 
-  // Supervised Codex installs an exact, bounded MCP override for each launch.
-  // Only the compatibility runtime depends on the user's global connection.
-  if (input.launchMode !== "supervised" && mcpStatus !== "installed") {
-    return {
-      providerId: provider.id,
-      status: "bridge_required",
-      canStart: false,
-      message: "Codex needs the LetAgents connection.",
-      detail: "Install or repair the Codex connection so the local agent can act in rooms.",
-      nextAction: "install_mcp_bridge",
-      version,
-      mcpStatus,
-    };
-  }
-
+  // Supervised Codex installs an exact, bounded MCP override for each launch,
+  // so it does not depend on the user's global Codex connection.
   if (!input.repoRootPath?.trim() && !input.roomOnly) {
     return {
       providerId: provider.id,
@@ -261,7 +251,8 @@ async function claudeCodePreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   const runtimeEnv = desktopRuntimeEnvironment();
   const command = resolveClaudeCodeExecutable(runtimeEnv, provider.runtimeCommand || "claude");
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
   }
@@ -279,7 +270,7 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const versionReadiness = inspectClaudeCodeVersion(version ?? "", input.launchMode === "supervised" ? claudeApprovalProfileLabel(input.permissionProfileId) : null);
+  const versionReadiness = inspectClaudeCodeVersion(version ?? "", claudeApprovalProfileLabel(input.permissionProfileId));
   if (!versionReadiness.supported) {
     return {
       providerId: provider.id,
@@ -292,7 +283,8 @@ async function claudeCodePreflight(
       mcpStatus,
     };
   }
-  const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs, env: runtimeEnv });
+  const authResult = await cachedProbe(probeKey(command, ["auth", "status"]), () =>
+    execFileWithTimeout(command, ["auth", "status"], { timeoutMs, env: runtimeEnv }));
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -338,7 +330,8 @@ async function openModelPreflight(
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const command = resolveOpenCodeBinary();
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs }));
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -423,10 +416,15 @@ export async function runDesktopAgentProviderPreflight(
   options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   if (input.refreshEnvironment) {
+    // "Check again": the user may have installed or signed in since the last
+    // probe. Clear again after the refresh, because a preflight that ran in the
+    // meantime may have memoised answers from the old environment.
+    clearProbeCache();
     await refreshDesktopShellEnvironment();
     if (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1") {
       await supervisorDaemonClient.restartForEnvironmentRefresh();
     }
+    clearProbeCache();
   } else {
     await desktopShellEnvironmentReady();
   }
@@ -435,17 +433,10 @@ export async function runDesktopAgentProviderPreflight(
   const withManagedRuntimeValidation = async (
     result: DesktopAgentProviderPreflight,
   ): Promise<DesktopAgentProviderPreflight> => {
-    if (
-      !result.canStart
-      || (
-        !provider.capabilities.includes("desktop_managed_runtime")
-        && !provider.capabilities.includes("supervised_runtime")
-      )
-    ) {
+    if (!result.canStart || !provider.capabilities.includes("supervised_runtime")) {
       return result;
     }
-    if (input.launchMode !== "legacy" && !isDesktopSmokeCheck()
-      && !(await supervisorDaemonClient.isRuntimeEnvironmentCurrent())) {
+    if (!isDesktopSmokeCheck() && !(await supervisorDaemonClient.isRuntimeEnvironmentCurrent())) {
       return {
         ...result,
         status: "config_required",
@@ -507,38 +498,23 @@ export async function runDesktopAgentProviderPreflight(
     const smokeHasWorkspace = Boolean(input.repoRootPath?.trim()) || Boolean(input.roomOnly);
     return withManagedRuntimeValidation({
       providerId: provider.id,
-      status: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      )
+      status: provider.capabilities.includes("supervised_runtime")
         ? smokeHasWorkspace
           ? "ready"
           : "repo_required"
         : "ready",
-      canStart: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      ) && smokeHasWorkspace,
-      message: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      )
+      canStart: provider.capabilities.includes("supervised_runtime") && smokeHasWorkspace,
+      message: provider.capabilities.includes("supervised_runtime")
         ? smokeHasWorkspace
           ? `${provider.name} is ready to start.`
           : `Choose a local repository before starting ${provider.name}.`
         : `${provider.name} is connected to LetAgents.`,
-      detail: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      )
+      detail: provider.capabilities.includes("supervised_runtime")
         ? smokeHasWorkspace
           ? "The desktop can launch and supervise this local provider."
           : "A supervised agent needs a local repo or worktree for code actions."
         : "Open this agent app, then ask it to join this room through LetAgents.",
-      nextAction: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      ) && !smokeHasWorkspace
+      nextAction: provider.capabilities.includes("supervised_runtime") && !smokeHasWorkspace
         ? "choose_repo"
         : null,
       version: provider.id === "codex" ? "codex smoke" : null,
@@ -612,7 +588,24 @@ async function installOpenCodeRuntime(
   };
 }
 
+/**
+ * A setup action changes what the probes report. The memo is cleared before
+ * and after it: a preflight can run while an install is in progress and
+ * memoise the old answer, and the clear after the action forgets that too.
+ */
 export async function runDesktopAgentProviderSetup(
+  providerId: DesktopAgentProviderId,
+  input: DesktopAgentProviderSetupInput,
+): Promise<DesktopAgentProviderSetupResult> {
+  clearProbeCache();
+  try {
+    return await performDesktopAgentProviderSetup(providerId, input);
+  } finally {
+    clearProbeCache();
+  }
+}
+
+async function performDesktopAgentProviderSetup(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderSetupInput,
 ): Promise<DesktopAgentProviderSetupResult> {

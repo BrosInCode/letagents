@@ -30,7 +30,7 @@ const {
 } = await import("../main/agents/managed-agent-commit-identity.js");
 const { getDesktopAuthStatus, signOutDesktopAuth } = await import("../main/auth.js");
 const { minimalOpenCodeEnvironment } = await import("../main/agents/opencode-launch-contract.js");
-const { cursorDaemonChildEnv, runCursorTurn } = await import("../main/agents/cursor-runner.js");
+const { cursorDaemonChildEnv } = await import("../main/agents/cursor-runner.js");
 
 const FAKE_ACCOUNT = { provider: "github", providerUserId: "424242", login: "octo-fake" };
 const FAKE_IDENTITY = { name: "octo-fake", email: "424242+octo-fake@users.noreply.github.com" };
@@ -315,24 +315,6 @@ test("a work attempt resolves the identity, and a rental never does", async () =
     assert.deepEqual(await managedCommitEnvironmentFor({ cwd: repo }), FAKE_GIT_ENV, "a legacy launch");
     assert.deepEqual(await managedCommitEnvironmentFor({ cwd: repo, supervisorEntryId: "supervised_rental_fake" }), {});
     assert.deepEqual(await managedCommitEnvironmentFor(null), {});
-  });
-});
-
-test("a legacy Cursor turn runs with the identity resolved for its workspace", async () => {
-  await withScratchOwner(async (repo) => {
-    const directory = fixture("legacy-cursor");
-    const report = join(directory, "env.json");
-    const bin = join(directory, "cursor-agent");
-    writeFileSync(bin, [
-      "#!/usr/bin/env node",
-      `require("node:fs").writeFileSync(${JSON.stringify(report)}, JSON.stringify({`,
-      "  author: process.env.GIT_AUTHOR_EMAIL ?? null, committer: process.env.GIT_COMMITTER_NAME ?? null }));",
-      "process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'fake-session' }) + '\\n');",
-      "",
-    ].join("\n"), { mode: 0o755 });
-    const result = await runCursorTurn({ prompt: "fake", cwd: repo, cursorBin: bin });
-    assert.equal(result.status, "success", result.error ?? "");
-    assert.deepEqual(JSON.parse(readFileSync(report, "utf8")), { author: FAKE_IDENTITY.email, committer: FAKE_IDENTITY.name });
   });
 });
 

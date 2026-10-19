@@ -18,6 +18,7 @@ import {
   PROCESS_ENDED_DURING_TURN,
   ProviderTurnControlError,
   type ProviderHandle,
+  type ProviderRoomTurnRequest,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
@@ -75,6 +76,7 @@ function createHarness() {
   let assistantText = "OpenCode bounded reply.";
   let includeAssistantText = true;
   let holdTurnOpen = false;
+  let configBody: Record<string, unknown> = { model: "letagents-open-model/qwen/qwen3-coder" };
   let nativeStatus: Record<string, unknown> = { type: "busy" };
   let statusReads = 0;
   let statusReadsHeldAfterAbort = 0;
@@ -114,6 +116,7 @@ function createHarness() {
     discoverRuntimeConnection: async () => null,
     async fetch(input, init) {
       const url = new URL(input);
+      if (url.pathname.endsWith("/models")) return json({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] });
       const authorization = new Headers(init?.headers).get("authorization");
       assert.match(authorization ?? "", /^Basic /);
       if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
@@ -159,9 +162,7 @@ function createHarness() {
           headers: { "content-type": "text/event-stream" },
         });
       }
-      if (url.pathname === "/config") {
-        return json({ model: "letagents-open-model/qwen/qwen3-coder" });
-      }
+      if (url.pathname === "/config") return json(configBody);
       if (url.pathname === "/session" && init?.method === "POST") {
         const id = nextSession === 1 ? "session-open-model-1" : `session-open-model-${nextSession}`;
         nextSession += 1;
@@ -268,6 +269,9 @@ function createHarness() {
       holdTurnOpen = true;
       transcriptWhileBusy = true;
     },
+    becomeIdleWithoutEvent() {
+      holdTurnOpen = false;
+    },
     /** OpenCode is waiting out a backoff before it re-sends a failed model request. */
     holdTurnInRetry() {
       holdTurnOpen = true;
@@ -294,6 +298,10 @@ function createHarness() {
     },
     setStreamEvents(events: Array<Record<string, unknown>>) {
       streamEvents = events;
+    },
+    /** What a running OpenCode serves from `/config`. */
+    setConfig(value: Record<string, unknown>) {
+      configBody = value;
     },
     setPromptFailure(error: Error) {
       promptFailure = error;
@@ -331,6 +339,7 @@ function spawnRequest(overrides: Partial<ProviderSpawnRequest> = {}): ProviderSp
       apiKey: "provider-api-key-must-stay-out-of-config",
       baseUrl: "https://openrouter.ai/api/v1",
       model: "qwen/qwen3-coder",
+      contextWindow: 262144,
     },
     ...overrides,
   };
@@ -590,7 +599,7 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
   await assert.rejects(adapter.spawn(spawnRequest({
     workAttemptId: "typed-non-daemon",
     lifecycleAuthorityMode: "typed",
-    deliveryMode: "desktop_events",
+    deliveryMode: "mcp_polling",
   })), /Typed Open Model lifecycle authority requires daemon-inbox delivery/);
   assert.equal(harness.launches.length, 1);
 });
@@ -839,6 +848,148 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   assert.deepEqual(lifecycleFrames.map((event) => event.nativeEventId),
     lifecycleFacts.map((event) => event.fact.nativeEventId),
     "typed and legacy shadow witnesses use the same exact native checkpoints");
+});
+
+/** A PNG signature and a few more bytes, as a view into a larger buffer the way a download slice would be. */
+function pngView() {
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250, 251]);
+  const backing = new Uint8Array([9, 9, ...bytes, 9]);
+  return { bytes, view: backing.subarray(2, 2 + bytes.length) };
+}
+
+function imageTurn(png = pngView()): ProviderRoomTurnRequest {
+  return {
+    inboxItemId: "inbox-open-model-images",
+    actionId: "action-open-model-images",
+    sourceMessage: { id: "message-1", text: "What is in these?" },
+    activation: { decision: "activate" },
+    attachments: [
+      { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "not_image" },
+      { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: png.bytes.length, status: "image",
+        image: { mimeType: "image/png", data: png.view } },
+      { index: 3, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-2.png" } },
+    ],
+  };
+}
+
+function launchedModalities(harness: ReturnType<typeof createHarness>) {
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+    provider: Record<string, { models: Record<string, { modalities?: unknown }> }>;
+  };
+  return config.provider["letagents-open-model"]!.models["qwen/qwen3-coder"]!.modalities;
+}
+
+test("Open Model sends included images as labelled data-URL file parts when its owner says the model reads images", async () => {
+  const { adapter, handle, harness } = await spawnAdapter({ imageInput: true });
+  assert.deepEqual(launchedModalities(harness), { input: ["text", "image"], output: ["text"] },
+    "the runtime is started with image input for this model");
+  assert.equal(adapter.roomTurnImageDelivery(handle), "memory");
+  const png = pngView();
+
+  const result = await adapter.runRoomTurn(handle, imageTurn(png));
+
+  assert.equal(result.outcome, "reply");
+  assert.equal(harness.promptBodies.length, 1);
+  const [prompt, ...rest] = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
+  assert.equal(prompt!.type, "text");
+  assert.match(String(prompt!.text), /Included after this text as image 1\./);
+  assert.match(String(prompt!.text), /Attachment 1: "notes\.pdf" \(application\/pdf, 500 bytes\)\. Not shown: only images/);
+  assert.deepEqual(rest, [
+    { type: "text", text: 'Image 1: "shot \\"1\\".png"' },
+    { type: "file", mime: "image/png", filename: 'shot "1".png', url: `data:image/png;base64,${Buffer.from(png.bytes).toString("base64")}` },
+  ], "only the image with bytes in memory is sent, after its label; the view's own bytes only");
+  assert.equal(JSON.stringify(rest).includes("notes.pdf"), false, "a file that is not an image is only a note in the text");
+  assert.equal(JSON.stringify(rest).includes("/scratch/turn-1"), false, "a file path is never sent to OpenCode");
+});
+
+test("Open Model sends only the prompt text, even when attachments carry bytes, unless its owner says the model reads images", async () => {
+  for (const overrides of [{}, { imageInput: false }] as Array<Partial<ProviderSpawnRequest>>) {
+    const { adapter, handle, harness } = await spawnAdapter(overrides);
+    assert.equal(launchedModalities(harness), undefined, "the runtime is not told this model reads images");
+    assert.equal(adapter.roomTurnImageDelivery(handle), null);
+
+    await adapter.runRoomTurn(handle, imageTurn());
+
+    const parts = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
+    assert.equal(parts.length, 1, "a model that cannot read images gets no file part");
+    assert.equal(parts[0]!.type, "text");
+    assert.equal(JSON.stringify(parts).includes("data:image"), false);
+  }
+});
+
+test("Open Model sends no image parts when the turn has no included image bytes", async () => {
+  const { adapter, handle, harness } = await spawnAdapter({ imageInput: true });
+  await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-open-model-no-bytes", actionId: "action-open-model-no-bytes",
+    sourceMessage: {}, activation: {},
+    attachments: [
+      { index: 1, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
+      { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
+    ],
+  });
+  assert.equal((harness.promptBodies[0]!.parts as unknown[]).length, 1);
+});
+
+test("Open Model image delivery follows its own current handle and nothing else", async () => {
+  const withImages = await spawnAdapter({ imageInput: true });
+  const without = await spawnAdapter({ imageInput: false });
+  assert.equal(withImages.adapter.roomTurnImageDelivery(withImages.handle), "memory");
+  assert.equal(without.adapter.roomTurnImageDelivery(without.handle), null);
+  assert.equal(withImages.adapter.roomTurnImageDelivery(without.handle), null, "a handle this adapter does not hold is not trusted");
+  assert.equal(withImages.adapter.roomTurnImageDelivery({ workAttemptId: "unknown" } as ProviderHandle), null);
+});
+
+test("Open Model reattaches with image input exactly as the running runtime was configured", async () => {
+  const born = await spawnAdapter({ imageInput: true });
+  const launched = JSON.parse(born.harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  const reattach = async (served: Record<string, unknown>) => {
+    born.harness.setConfig(served);
+    const replacement = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot: born.runtimeRoot,
+      dependencies: born.harness.dependencies,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+    });
+    const attached = await replacement.attach({
+      workAttemptId: born.handle.workAttemptId,
+      providerContinuationId: born.handle.providerContinuationId!,
+      providerConnection: null,
+    });
+    assert.ok(attached && !("state" in attached));
+    return { replacement, attached };
+  };
+
+  const same = await reattach(launched);
+  assert.equal(same.replacement.roomTurnImageDelivery(same.attached), "memory", "the served configuration lists image input");
+  await same.replacement.runRoomTurn(same.attached, imageTurn());
+  const parts = born.harness.promptBodies.at(-1)!.parts as Array<Record<string, unknown>>;
+  assert.deepEqual(parts.slice(1).map(part => part.type), ["text", "file"]);
+
+  // A runtime started before the owner turned image input on keeps its old configuration.
+  const old = await reattach({ model: "letagents-open-model/qwen/qwen3-coder" });
+  assert.equal(old.replacement.roomTurnImageDelivery(old.attached), null);
+  const before = born.harness.promptBodies.length;
+  await old.replacement.runRoomTurn(old.attached, imageTurn());
+  assert.equal((born.harness.promptBodies.at(-1)!.parts as unknown[]).length, 1);
+  assert.equal(born.harness.promptBodies.length, before + 1);
+
+  // The spawn request's setting does not outlive the runtime: a runtime that was started without image input stays without.
+  const plain = await spawnAdapter({ imageInput: false });
+  plain.harness.setConfig(JSON.parse(plain.harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}"));
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode", runtimeRoot: plain.runtimeRoot, dependencies: plain.harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100,
+  });
+  const attached = await replacement.attach({
+    workAttemptId: plain.handle.workAttemptId,
+    providerContinuationId: plain.handle.providerContinuationId!,
+    providerConnection: null,
+  });
+  assert.ok(attached && !("state" in attached));
+  assert.equal(replacement.roomTurnImageDelivery(attached), null);
 });
 
 test("Open Model does not mint lifecycle evidence when native prompt dispatch is rejected", async () => {
@@ -3908,6 +4059,30 @@ test("Open Model session errors do not invent an exact typed or legacy terminal"
   assert.equal(stream.some((event) => event.lifecycleProjectionOnly && event.nativeLifecyclePhase === "turn_terminal"), false);
 });
 
+test("an idle session error cannot publish an earlier tool step before its failure is persisted", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([(turnId) => {
+    const earlier = assistantWithTool(turnId, "earlier", 10, { status: "completed", input: {}, output: "done" });
+    earlier.parts.push({ id: "progress", type: "text", text: "Checking the files." });
+    return [earlier, { info: { id: "failed-not-yet-persisted", role: "assistant", parentID: turnId, time: { created: 20 } }, parts: [] }];
+  }]);
+  const initial = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, { inboxItemId: "error-race", sourceMessage: {}, activation: {}, actionId: "error-race" });
+  await initial;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  // Native error delivery can make status idle before the failed assistant is saved.
+  harness.becomeIdleWithoutEvent();
+  harness.sendEvent({ type: "session.error", properties: { sessionID: handle.providerContinuationId,
+    error: { name: "APIError", data: { statusCode: 403, message: "Forbidden" } } } });
+  const result = await turn;
+  assert.equal(result.outcome, "unreadable");
+  assert.equal(result.text, null);
+  assert.equal(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
+});
+
 test("an Open Model turn whose last step ended on tool calls is recorded as ended once its session reports idle", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
@@ -4392,6 +4567,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
     discoverRuntimeConnection: async () => null,
     async fetch(input, init) {
       const url = new URL(input);
+      if (url.pathname.endsWith("/models")) return json({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] });
       const process = processes.find((candidate) => candidate.port === Number(url.port));
       if (!process?.alive) throw refused();
       if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
@@ -4897,4 +5073,92 @@ test("an Open Model agent whose background service restarted in the middle of it
     assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
     await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending after that");
   } finally { await agent.cleanup(); }
+});
+
+
+test("Open Model launch passes discovered model-specific limits to OpenCode", async () => {
+  const credential = { ...spawnRequest().providerCredential!, contextWindow: undefined };
+  const { harness } = await spawnAdapter({ providerCredential: credential });
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT!);
+  assert.deepEqual(config.provider["letagents-open-model"].models[credential.model].limit, { context: 262144, output: 8192 });
+});
+
+test("Open Model observes overflow compaction until the replay answers, without publishing an unreadable result", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const session = handle.providerContinuationId!;
+  const events: ProviderStreamEvent[] = [];
+  const terminals: ProviderRoomTurnResult[] = [];
+  let phase: "overflow" | "compacting" | "done" = "overflow";
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([(turnId) => {
+    const messages = compactedTurnTranscript(turnId, { replay: true, sessionID: session,
+      after: [assistantMessage("msg_replay", "msg_answer", 40, "Recovered answer.")] });
+    if (phase === "overflow") return messages.slice(0, 2);
+    if (phase === "compacting") {
+      messages[3]!.info.time = { created: 21 };
+      messages[3]!.parts = [];
+      return messages.slice(0, 4);
+    }
+    return messages;
+  }]);
+  let progress!: () => void;
+  const compacting = new Promise<void>((resolve) => { progress = resolve; });
+  adapter.onStream(handle, (event) => {
+    events.push(event);
+    if (event.method === "letagents/compaction" && event.summary === "Compacting conversation") progress();
+  });
+  const initial = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, { inboxItemId: "overflow", sourceMessage: {}, activation: {}, actionId: "overflow" },
+    { checkpointTerminalResult: async (result) => { terminals.push(result); } });
+  await initial;
+  const overflowRead = harness.nextMessageRead();
+  harness.sendEvent({ type: "session.error", properties: { sessionID: session,
+    error: { name: "ContextOverflowError", data: { message: "input exceeds context length" } } } });
+  await overflowRead;
+  assert.equal(terminals.length, 0);
+  phase = "compacting";
+  harness.sendEvent({ type: "message.updated", properties: { info: { id: "msg_summary", role: "assistant",
+    parentID: "msg_compaction", summary: true, mode: "compaction", sessionID: session, time: { created: 21 } } } });
+  await compacting;
+  assert.equal(adapter.compactionProgress(handle.workAttemptId)?.state, "compacting");
+  assert.equal(terminals.length, 0, "compaction is still part of the original turn");
+  phase = "done";
+  harness.completeTurn();
+  const result = await turn;
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Recovered answer.");
+  assert.equal(terminals.length, 1);
+  assert.equal(adapter.compactionProgress(handle.workAttemptId), null);
+  assert.equal(harness.promptBodies.length, 1, "only OpenCode replays its own prompt");
+  assert.ok(events.some((event) => event.summary?.includes("context limit reached")));
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE-COMPACTION-SUMMARY/);
+});
+
+test("Open Model restores compaction progress on a result re-read and preserves a failed summary's error", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const turnId = "msg_existing";
+  let failed = false;
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([() => {
+    const messages = compactedTurnTranscript(turnId, { failedSummary: failed, sessionID: handle.providerContinuationId! }).slice(0, 4);
+    if (!failed) { messages[3]!.info.time = { created: 21 }; messages[3]!.parts = []; }
+    return messages;
+  }]);
+  let progress!: () => void;
+  const compacting = new Promise<void>((resolve) => { progress = resolve; });
+  adapter.onStream(handle, (event) => { if (event.summary === "Compacting conversation") progress(); });
+  const results: ProviderRoomTurnResult[] = [];
+  const turn = adapter.recoverRoomTurn(handle, { inboxItemId: "recover-compaction", providerTurnId: turnId },
+    { checkpointTerminalResult: async (result) => { results.push(result); } });
+  const failure = assert.rejects(turn, /too large/);
+  await compacting;
+  assert.equal(adapter.compactionProgress(handle.workAttemptId)?.state, "compacting");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  failed = true;
+  harness.completeTurn();
+  await failure;
+  assert.equal(results[0]?.outcome, "failed");
+  assert.match(results[0]?.outcome === "failed" ? results[0].error ?? "" : "", /too large/);
+  assert.equal(adapter.compactionProgress(handle.workAttemptId), null);
+  assert.equal(harness.promptBodies.length, 0);
 });

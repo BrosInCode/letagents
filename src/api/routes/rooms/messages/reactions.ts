@@ -11,6 +11,7 @@ import {
 import { db } from "../../../db/client.js";
 import {
   addMessageReaction,
+  canAgentReactToMessage,
   getMessageReactions,
   loadMessageReactions,
   loadViewerMessageReactions,
@@ -19,13 +20,15 @@ import {
 } from "../../../db/messages/reactions.js";
 import { formatMessageId, parseScopedId } from "../../../db/utils.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
-import { isAppSession } from "../../../request/app-session.js";
+import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
+import { isAppSession, isHumanAppWrite } from "../../../request/app-session.js";
 import { queueMessageReactionInvalidation } from "../../../server/events.js";
 import { resolveParticipantRoom, routeParam } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
 
 export interface MessageReactionStore {
   add: typeof addMessageReaction;
+  agentTargetVisible?: typeof canAgentReactToMessage;
   remove: typeof removeMessageReaction;
   forMessage(roomId: string, messageNumber: number): Promise<MessageReaction[]>;
   inRange(roomId: string, first: number, last: number): Promise<MessageReactionRead>;
@@ -35,6 +38,7 @@ export interface MessageReactionStore {
 
 const databaseStore: MessageReactionStore = {
   add: addMessageReaction,
+  agentTargetVisible: canAgentReactToMessage,
   remove: removeMessageReaction,
   forMessage: getMessageReactions,
   inRange: (roomId, first, last) => loadMessageReactions(db, roomId, { first, last }),
@@ -53,17 +57,19 @@ function fail(res: Response, error: unknown): void {
   res.status(500).json({ error: "Reactions could not be loaded or saved. Please retry." });
 }
 
-/**
- * A reaction carries the reactor's name, so only a signed-in person may leave
- * one. An agent holding its owner's token would otherwise react as the owner.
- */
-function requirePerson(req: AuthenticatedRequest, res: Response): string | null {
-  if (isAppSession(req)) return req.sessionAccount!.account_id;
-  res.status(req.authKind ? 403 : 401).json({
-    error: "Only a person signed in to LetAgents can react to a message.",
-    code: "person_required",
-  });
-  return null;
+type ReactionActor = { accountId: string; agent?: { key: string; name: string } };
+async function requireReactor(req: AuthenticatedRequest, res: Response, roomId: string): Promise<ReactionActor | null> {
+  if (isHumanAppWrite(req, req.body ?? {})) return { accountId: req.sessionAccount!.account_id };
+  if (req.authKind !== "agent_session" && !req.body?.agent_session_id) {
+    res.status(req.authKind ? 403 : 401).json({ error: "Sign in or use a registered worker to react.", code: "person_required" });
+    return null;
+  }
+  const resolved = await requireWorkerRequestAgentIdentity({ req, body: req.body ?? {}, room_id: roomId });
+  if (!resolved.ok) { res.status(resolved.status).json({ error: resolved.error }); return null; }
+  const identity = resolved.identity;
+  if (!identity.owner_account_id) { res.status(403).json({ error: "A room agent needs an account owner to react." }); return null; }
+  return { accountId: identity.owner_account_id,
+    agent: { key: identity.agent_key, name: identity.display_name || identity.actor_label } };
 }
 
 function emojiParam(req: AuthenticatedRequest, res: Response): string | null {
@@ -133,12 +139,12 @@ export function registerMessageReactionRoutes(
   async function mutate(
     req: AuthenticatedRequest,
     res: Response,
-    change: (target: { roomId: string; messageNumber: number; accountId: string; emoji: string }) => Promise<boolean | null>,
+    change: (target: ReactionActor & { roomId: string; messageNumber: number; emoji: string }) => Promise<boolean | null>,
   ): Promise<void> {
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
-    const accountId = requirePerson(req, res);
-    if (!accountId) return;
+    const actor = await requireReactor(req, res, project.id);
+    if (!actor) return;
 
     const messageNumber = parseScopedId(routeParam(req, 1), "msg");
     if (!messageNumber) {
@@ -149,7 +155,10 @@ export function registerMessageReactionRoutes(
     if (!emoji) return;
 
     try {
-      const changed = await change({ roomId: project.id, messageNumber, accountId, emoji });
+      if (actor.agent && !await (store.agentTargetVisible ?? canAgentReactToMessage)(project.id, messageNumber)) {
+        res.status(404).json({ error: MESSAGE_NOT_FOUND }); return;
+      }
+      const changed = await change({ roomId: project.id, messageNumber, ...actor, emoji });
       if (changed === null) return;
       if (changed) invalidate(project.id);
       const response: MessageReactionMutationResponse = {
@@ -167,6 +176,9 @@ export function registerMessageReactionRoutes(
 
   app.put(reactionPath, (req: AuthenticatedRequest, res) => mutate(req, res, async (target) => {
     const result = await store.add(target);
+    if (result === "disabled") {
+      res.status(403).json({ error: "Agent reactions are disabled in this room.", code: "expressions_disabled" }); return null;
+    }
     if (result === "message_not_found") {
       res.status(404).json({ error: MESSAGE_NOT_FOUND });
       return null;

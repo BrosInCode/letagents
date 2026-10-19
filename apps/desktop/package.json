@@ -2,7 +2,7 @@
   "name": "letagents-desktop",
   "productName": "LetAgents",
   "private": true,
-  "version": "0.1.117",
+  "version": "0.1.121",
   "description": "A desktop control plane for collaborating AI agents.",
   "license": "BUSL-1.1",
   "repository": {
@@ -12,7 +12,7 @@
   "type": "module",
   "letagentsRuntime": {
     "openCodeVersion": "1.18.20",
-    "mcpVersion": "0.12.36"
+    "mcpVersion": "0.12.39"
   },
   "main": "dist-electron/main.js",
   "scripts": {
@@ -32,7 +32,6 @@
     "package:mac": "npm run package:artifact && node electron/scripts/package-macos.mjs",
     "package:mac:local": "cross-env MACOS_SKIP_SIGNING=1 npm run package:mac",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
-    "screenshot:agent-detail": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT=/tmp/letagents-agent-detail-responsive.png electron .",
     "screenshot:board": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board.png electron .",
     "screenshot:board-tasks": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_FIXTURE=tasks LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board-tasks.png electron .",
     "screenshot:updates": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_UPDATES_SCREENSHOT=/tmp/letagents-desktop-updates.png electron .",
@@ -46,6 +45,7 @@
     "test:daemon": "node --import tsx --test --test-timeout=180000 daemon/__tests__/*.test.ts",
     "test:packaging": "node --test --test-timeout=600000 electron/scripts/*.test.mjs",
     "test:clean-home": "node electron/scripts/run-with-clean-home.mjs -- npm test",
+    "verify:mcp-runtime-digest": "node --import tsx electron/scripts/verify-mcp-runtime-digest.mjs",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },
@@ -56,7 +56,9 @@
     "@openrouter/ai-sdk-provider": "2.9.1",
     "ai": "6.0.214",
     "cuelume": "0.1.0",
+    "dompurify": "3.4.16",
     "electron-updater": "6.8.9",
+    "marked": "18.0.14",
     "undici": "7.29.1",
     "vue": "3.5.43",
     "zod": "4.4.3"

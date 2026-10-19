@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, foreignKey, index, integer, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import { accounts, rooms } from "./core.js";
 import { rentalVisibilityEnum } from "./rentals.js";
 
@@ -16,6 +17,7 @@ export const messages = pgTable(
     sender: text("sender").notNull(),
     text: text("text").notNull(),
     display_text: text("display_text"),
+    gif: jsonb("gif").$type<RoomGif>(),
     agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
     client_message_id: text("client_message_id"),
@@ -450,10 +452,21 @@ export const message_attachment_uploads = pgTable(
     attached_message_number: integer("attached_message_number"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     attached_at: timestamp("attached_at", { mode: "string", withTimezone: true }),
+    // Who staged the upload: an app/owner-token account or a worker agent
+    // session, never both. Rows from before ownership have neither.
+    uploader_account_id: text("uploader_account_id"),
+    uploader_agent_session_id: text("uploader_agent_session_id"),
   },
   (table) => ({
     room_idx: index("message_attachment_uploads_room_idx").on(table.room_id, table.created_at),
     object_key_idx: uniqueIndex("message_attachment_uploads_object_key_idx").on(table.object_key),
+    pending_expiry_idx: index("message_attachment_uploads_pending_expiry_idx")
+      .on(table.expires_at, table.upload_id)
+      .where(sql`${table.status} = 'pending'`),
+    single_uploader_check: check(
+      "message_attachment_uploads_single_uploader_check",
+      sql`${table.uploader_account_id} IS NULL OR ${table.uploader_agent_session_id} IS NULL`
+    ),
     status_check: check(
       "message_attachment_uploads_status_check",
       sql`${table.status} IN ('pending', 'attached')`
@@ -597,13 +610,15 @@ export const message_reactions = pgTable(
     account_id: text("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    agent_key: text("agent_key").notNull().default(""),
+    agent_name: text("agent_name"),
     emoji: text("emoji").notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     pk: primaryKey({
       name: "message_reactions_pk",
-      columns: [table.room_id, table.message_number, table.account_id, table.emoji],
+      columns: [table.room_id, table.message_number, table.account_id, table.agent_key, table.emoji],
     }),
     message_fk: foreignKey({
       name: "message_reactions_message_fk",
