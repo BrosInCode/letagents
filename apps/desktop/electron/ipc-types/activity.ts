@@ -121,6 +121,8 @@ export interface DesktopActivityEntry {
   participantActorLabel: string | null;
   participantAgentKey?: string | null;
   participantOwnerLabel: string | null;
+  /** GitHub login of a human participant. Null for agents and system senders. */
+  participantGithubLogin: string | null;
   participantIdeLabel: string | null;
   repoBranch: string | null;
   activityState: "active" | "away" | "offline" | null;

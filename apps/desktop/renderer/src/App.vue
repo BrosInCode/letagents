@@ -217,6 +217,7 @@
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           :attention="roomAttention"
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
+          @open-messages-with="openMessagesWithPerson"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
@@ -469,6 +470,8 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { provideAgentRoomAudience } from "./composables/useAgentRoomAudience";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
+import type { PersonTarget } from "./domain/person-target";
+import { openConversationWithPerson } from "./domain/open-conversation-with-person";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
@@ -617,6 +620,28 @@ const messagesUnread = ref(0);
 const openConversationId = ref<string | null>(null);
 const openConversationNonce = ref(0);
 function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
+/** Open the private conversation with a room participant. Create it if it does not exist yet. */
+async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
+  const viewerLogin = authStatus.value?.authenticated ? authStatus.value.account?.login ?? null : null;
+  const result = await openConversationWithPerson(target, viewerLogin, desktopIpc.conversations);
+  if (result.status === "self") {
+    pushActionToast("That is you.", "info");
+    return;
+  }
+  if (result.status === "not_found") {
+    pushActionToast(`${target.displayName} is not available for messages.`, "info");
+    return;
+  }
+  if (result.status === "ambiguous") {
+    pushActionToast("More than one account uses this login. Open Messages and search for the person.", "info");
+    return;
+  }
+  if (result.status === "failed") {
+    pushActionToast(result.message, "error");
+    return;
+  }
+  openMessages(result.conversationId);
+}
 const inboxSection = ref<InboxSection>('needs-you');
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
 useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
