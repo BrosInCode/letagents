@@ -6,157 +6,24 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspace-repository.mjs";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
-import {
-  ProviderContinuationMissingError,
-  PROCESS_ENDED_DURING_TURN,
-  sameProviderConnectionIdentity,
-  synthesizeTerminalPayload,
-  type ProviderActivityEvent,
-  type ProviderAdapter,
-  type ProviderAdapterCapabilities,
-  type ProviderAttachTerminal,
-  type ProviderConnectionRef,
-  type ProviderContinuationRef,
-  type ProviderContinuationRepairRequest,
-  type ProviderContinuationRepairResult,
-  type ProviderHandle,
-  type ProviderObservedState,
-  type ProviderRoomTurnOptions,
-  type ProviderRoomTurnRecoveryRequest,
-  type ProviderRoomTurnRequest,
-  type RoomTurnImageDelivery,
-  type ProviderRoomTurnResult,
-  type ProviderSpawnRequest,
-  type ProviderStopOptions,
-  type ProviderStreamEvent,
-  type ProviderTerminalPayload,
-  ProviderTurnControlError,
-  type ProviderTurnControlOptions,
-  type ProviderTurnControlResult,
-} from "./provider-adapter.js";
+import { ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderObservedState, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "./provider-adapter.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
-import {
-  DEFAULT_STOP_GRACE_MS,
-  defaultGetProcessIdentity,
-  defaultObserveProcessExit,
-  defaultSignalProcess,
-  delay,
-  redactCredentialText,
-  safeStreamPayload,
-  sameProcessBirthIdentity,
-  terminateFreshLaunch,
-  type ProviderProcessExit,
-} from "./provider-evidence.js";
-import {
-  credentialBoundaryPluginSource,
-  minimalOpenCodeEnvironment,
-  OPEN_MODEL_OPENCODE_PROVIDER_ID,
-  OPENCODE_SERVER_USERNAME,
-  openCodeAuthContent,
-  openCodeConfig,
-  parseConfiguredOpenModel,
-  parseConfiguredOpenModelImageInput,
-  seedOpenCodeConfigHome,
-  shieldOwnerInstructions,
-  supervisedOpenCodeMcpEnvironment,
-  workspaceOpenCodeEnvironment,
-  supervisedOpenCodePermissionProfileId,
-} from "./opencode-launch-contract.js";
+import { DEFAULT_STOP_GRACE_MS, defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, delay, redactCredentialText, safeStreamPayload, sameProcessBirthIdentity, terminateFreshLaunch, type ProviderProcessExit } from "./provider-evidence.js";
+import { credentialBoundaryPluginSource, minimalOpenCodeEnvironment, OPEN_MODEL_OPENCODE_PROVIDER_ID, OPENCODE_SERVER_USERNAME, openCodeAuthContent, openCodeConfig, parseConfiguredOpenModel, parseConfiguredOpenModelImageInput, seedOpenCodeConfigHome, shieldOwnerInstructions, supervisedOpenCodeMcpEnvironment, workspaceOpenCodeEnvironment, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { resolveOpenModelLimits } from "./open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
-import {
-  assistantsFor,
-  eventReferencesSession,
-  finalAssistantFor,
-  messageCompleted,
-  messageError,
-  messageFinishReason,
-  messageText,
-  mintNativeUserMessageId,
-  nativelyOrderedMessageId,
-  OpenCodePermissionReplyError,
-  OpenCodeServerClient,
-  parseOpenCodePermissionEvent,
-  record,
-  turnUserMessageIds,
-  type JsonRecord,
-  type OpenCodeEvent,
-  type OpenCodeMessage,
-  type OpenCodePart,
-  type OpenCodePermissionRequest,
-  type OpenCodePermissionTurnCorrelation,
-  type OpenCodeRuntimeAuth,
-} from "./opencode-server-client.js";
+import { assistantsFor, eventReferencesSession, finalAssistantFor, messageCompleted, messageError, messageFinishReason, messageText, mintNativeUserMessageId, nativelyOrderedMessageId, OpenCodePermissionReplyError, OpenCodeServerClient, parseOpenCodePermissionEvent, record, turnUserMessageIds, type JsonRecord, type OpenCodeEvent, type OpenCodeMessage, type OpenCodePart, type OpenCodePermissionRequest, type OpenCodePermissionTurnCorrelation, type OpenCodeRuntimeAuth } from "./opencode-server-client.js";
+import { CAPABILITIES, MAX_ASSISTANT_STEPS, NO_REPLY_SENTINEL, type OpenCodePermissionObservation, type OpenModelProviderAdapterDependencies, type OpenModelProviderAdapterOptions, SESSION_ORDERING_SCAN_LIMIT, START_TIMEOUT_MS, TURN_CONTROL_TIMEOUT_MS, TURN_TIMEOUT_MS } from "./open-model/types.js";
+export type { OpenModelProviderAdapterDependencies } from "./open-model/types.js";
+export type { OpenModelProviderAdapterOptions } from "./open-model/types.js";
+export type { OpenCodePermissionObservation } from "./open-model/types.js";
 
-const START_TIMEOUT_MS = 30_000;
-const TURN_TIMEOUT_MS = 30 * 60_000;
-const TURN_CONTROL_TIMEOUT_MS = 5_000;
-const MAX_ASSISTANT_STEPS = 32;
-const NO_REPLY_SENTINEL = "LETAGENTS_NO_ROOM_REPLY";
-// A session that ever received a user message outside OpenCode's ascending ID
-// scheme can never satisfy the native loop-exit predicate again; the whole
-// transcript must be scanned once before this process dispatches into it.
-const SESSION_ORDERING_SCAN_LIMIT = 4_096;
-
-export interface OpenModelProviderAdapterDependencies {
-  launch(input: {
-    binary: string;
-    args: string[];
-    cwd: string;
-    env: NodeJS.ProcessEnv;
-  }): { child: ChildProcess; exited: Promise<ProviderProcessExit> };
-  getProcessIdentity(pid: number): string | null | undefined;
-  observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
-  signalProcess(pid: number, signal: NodeJS.Signals): void;
-  allocatePort(): Promise<number>;
-  discoverRuntimeConnection(runtimeRoot: string): Promise<{ pid: number; url: string } | null>;
-  fetch(input: string, init?: RequestInit): Promise<Response>;
-  now(): string;
-  /** Null when Git, run with the launch's environment, takes the workspace as a repository. */
-  probeGit(workspace: string, environment: NodeJS.ProcessEnv): Promise<string | null>;
-}
-
-export interface OpenModelProviderAdapterOptions {
-  binary?: string;
-  runtimeRoot?: string;
-  dependencies?: Partial<OpenModelProviderAdapterDependencies>;
-  startTimeoutMs?: number;
-  turnTimeoutMs?: number;
-  turnControlTimeoutMs?: number;
-  maxAssistantSteps?: number;
-  stopGraceMs?: number;
-}
-
-const CAPABILITIES: ProviderAdapterCapabilities = {
-  deliveryModes: ["daemon_inbox"],
-  resume: true,
-  midTurnInjection: false,
-  // Open Model cannot resume an interrupted turn; corrections are delivered via
-  // stop-then-resend on the same OpenCode session.
-  midTurnCorrection: false,
-  transcriptAccess: true,
-  permissionPromptBridging: false,
-  survivesRestart: true,
-  turnControl: "native_interrupt",
-  continuationRepair: "same_process",
-  execution: {
-    controlProbe: "http",
-    approvals: { kinds: ["command", "file_change"], recovery: "native_instance_only", denyScope: "session" },
-  },
-};
-
-/** Native request data is host-ephemeral; it is never an execution fact or room projection. */
-export type OpenCodePermissionObservation =
-  | { type: "snapshot"; requests: OpenCodePermissionRequest[] }
-  | { type: "degraded" }
-  | { type: "unavailable"; reason: HardControlEvidence | "handle_replaced" };
 
 /**
  * OpenCode takes an image as a file part with a data URL, and resizes a large
@@ -580,15 +447,15 @@ class OpenModelHandle implements ProviderHandle {
 
 export class OpenModelProviderAdapter implements ProviderAdapter {
   readonly id = "open-model" as const;
-  private readonly binary: string;
-  private readonly deps: OpenModelProviderAdapterDependencies;
-  private readonly startTimeoutMs: number;
-  private readonly turnTimeoutMs: number;
-  private readonly turnControlTimeoutMs: number;
-  private readonly maxAssistantSteps: number;
-  private readonly stopGraceMs: number;
-  private readonly runtimeRoot: string;
-  private readonly handles = new Map<string, OpenModelHandle>();
+  protected readonly binary: string;
+  protected readonly deps: OpenModelProviderAdapterDependencies;
+  protected readonly startTimeoutMs: number;
+  protected readonly turnTimeoutMs: number;
+  protected readonly turnControlTimeoutMs: number;
+  protected readonly maxAssistantSteps: number;
+  protected readonly stopGraceMs: number;
+  protected readonly runtimeRoot: string;
+  protected readonly handles = new Map<string, OpenModelHandle>();
 
   constructor(options: OpenModelProviderAdapterOptions = {}) {
     this.binary = options.binary
@@ -614,7 +481,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       ? { state: "compacting", startedAt: handle.compaction.startedAt } : null;
   }
 
-  private observeCompaction(handle: OpenModelHandle, info: JsonRecord | null): void {
+  protected observeCompaction(handle: OpenModelHandle, info: JsonRecord | null): void {
     if (!info || info.sessionID !== undefined && info.sessionID !== handle.providerContinuationId) return;
     const active = info.summary === true && typeof info.id === "string" && !messageCompleted({ info });
     const previous = handle.compaction;
@@ -629,7 +496,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       payload: { state: active ? "compacting" : "ended" } });
   }
 
-  private async assertPriorStartupProcessGone(authPath: string): Promise<void> {
+  protected async assertPriorStartupProcessGone(authPath: string): Promise<void> {
     let control: OpenCodeRuntimeControl;
     try {
       control = await readRuntimeControl(authPath);
@@ -684,7 +551,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
    * This never fails the launch. A problem comes back as an owner-visible
    * launch notice, which the daemon records in the agent's activity.
    */
-  private async checkScratchWorkspaceBoundary(
+  protected async checkScratchWorkspaceBoundary(
     workspace: string,
     runtimeRoot: string,
     env: NodeJS.ProcessEnv,
@@ -696,7 +563,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return `Plugin boundary not in effect: ${problem}. OpenCode cannot see this room's workspace repository, so plugins in folders above the workspace can load into it.`;
   }
 
-  private async spawnWithRuntimeOwnership(
+  protected async spawnWithRuntimeOwnership(
     req: ProviderSpawnRequest,
     lifecycleAuthorityMode: NonNullable<ProviderSpawnRequest["lifecycleAuthorityMode"]>,
     credential: NonNullable<ProviderSpawnRequest["providerCredential"]>,
@@ -970,7 +837,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return handle;
   }
 
-  private async resolveAttachConnection(ref: ProviderContinuationRef): Promise<{
+  protected async resolveAttachConnection(ref: ProviderContinuationRef): Promise<{
     connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }> & {
       pid: number;
       processIdentity: string;
@@ -1167,7 +1034,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
    * error is the failure, and a turn that the session shows without either
    * was cut off by the exit. Nothing is recorded for the running session.
    */
-  private async readEarlierSessionTurn(handle: OpenModelHandle, sessionId: string, turnId: string): Promise<ProviderRoomTurnResult> {
+  protected async readEarlierSessionTurn(handle: OpenModelHandle, sessionId: string, turnId: string): Promise<ProviderRoomTurnResult> {
     if (!nativeExecutionId(sessionId) || !nativeExecutionId(turnId)) {
       throw new Error("Open Model turn recovery requires an exact session and turn.");
     }
@@ -1511,7 +1378,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private controlProof(handle: OpenModelHandle): ControlProbeResult | null {
+  protected controlProof(handle: OpenModelHandle): ControlProbeResult | null {
     if (handle.controlLoss) return { state: "lost", controlEvidence: handle.controlLoss };
     const identity = this.deps.getProcessIdentity(handle.pid);
     if (identity === undefined) return { state: "degraded" };
@@ -1520,12 +1387,12 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       ? null : { state: "lost", controlEvidence: "process_birth_changed" };
   }
 
-  private emitExecution(handle: OpenModelHandle, fact: NativeExecutionFact): void {
+  protected emitExecution(handle: OpenModelHandle, fact: NativeExecutionFact): void {
     handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined,
       handle.providerConnection.pid ?? undefined);
   }
 
-  private emitRuntimeReady(handle: OpenModelHandle): void {
+  protected emitRuntimeReady(handle: OpenModelHandle): void {
     this.emitExecution(handle, {
       domain: "runtime",
       kind: "state_changed",
@@ -1534,7 +1401,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private emitTurnActive(handle: OpenModelHandle, turnId: string): void {
+  protected emitTurnActive(handle: OpenModelHandle, turnId: string): void {
     if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)) return;
     const checkpoint = nativeLifecycleCheckpoint({
       provider: "open-model",
@@ -1551,7 +1418,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     this.emitLifecycleProjection(handle, "turn/started", checkpoint.nativeEventId, checkpoint.phase);
   }
 
-  private emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {
+  protected emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {
     if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)
       || (handle.observedTurn?.id === turnId && handle.observedTurn.terminal)) return;
     handle.observedTurn = { id: turnId, terminal: outcome };
@@ -1571,7 +1438,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     this.emitLifecycleProjection(handle, "turn/completed", checkpoint.nativeEventId, checkpoint.phase);
   }
 
-  private emitLifecycleProjection(
+  protected emitLifecycleProjection(
     handle: OpenModelHandle,
     method: "turn/started" | "turn/completed",
     nativeEventId: string,
@@ -1581,13 +1448,13 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       nativeEventId, nativeLifecyclePhase, lifecycleProjectionOnly: true });
   }
 
-  private required(handle: ProviderHandle): OpenModelHandle {
+  protected required(handle: ProviderHandle): OpenModelHandle {
     const current = this.handles.get(handle.workAttemptId);
     if (!current || current !== handle) throw new Error("Open Model handle is stale or foreign.");
     return current;
   }
 
-  private withContinuation(handle: OpenModelHandle, continuationId: string): OpenModelHandle {
+  protected withContinuation(handle: OpenModelHandle, continuationId: string): OpenModelHandle {
     const replacement = new OpenModelHandle(
       handle.workAttemptId,
       handle.pid,
@@ -1613,7 +1480,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
    * Failing with the continuation-missing contract routes the session through
    * the daemon's journaled repair, which replaces it before any model call.
    */
-  private async assertNativelyOrderedSession(handle: OpenModelHandle): Promise<void> {
+  protected async assertNativelyOrderedSession(handle: OpenModelHandle): Promise<void> {
     if (handle.nativeOrderingVerified) return;
     if (!await this.sessionNativelyOrdered(handle.client, handle.providerContinuationId)) {
       throw new ProviderContinuationMissingError(handle.providerContinuationId);
@@ -1621,7 +1488,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     handle.nativeOrderingVerified = true;
   }
 
-  private async sessionNativelyOrdered(
+  protected async sessionNativelyOrdered(
     client: OpenCodeServerClient,
     sessionId: string,
   ): Promise<boolean> {
@@ -1632,7 +1499,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private async awaitExactTurn(
+  protected async awaitExactTurn(
     handle: OpenModelHandle,
     turnId: string,
     signal?: AbortSignal,
@@ -1997,7 +1864,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
    * settles as the turn that stopped at its first denial would, so a task
    * owner's single follow-up turn is told the call was denied.
    */
-  private async endDeniedTurn(handle: OpenModelHandle, turnId: string): Promise<ProviderRoomTurnResult> {
+  protected async endDeniedTurn(handle: OpenModelHandle, turnId: string): Promise<ProviderRoomTurnResult> {
     try {
       await handle.client.abort(handle.providerContinuationId);
       await this.waitForSessionIdle(handle, this.turnControlTimeoutMs);
@@ -2012,7 +1879,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool };
   }
 
-  private async abortBoundedTurn(
+  protected async abortBoundedTurn(
     handle: OpenModelHandle,
     turnId: string,
     reason: OpenCodeBoundedTurnError,
@@ -2032,7 +1899,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     throw reason;
   }
 
-  private async waitForSessionIdle(
+  protected async waitForSessionIdle(
     handle: OpenModelHandle,
     timeoutMs: number,
   ): Promise<void> {
@@ -2051,7 +1918,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     throw new Error("OpenCode remained busy after native abort.");
   }
 
-  private emitMessageEvidence(
+  protected emitMessageEvidence(
     handle: OpenModelHandle,
     message: OpenCodeMessage | null,
     emittedLengths: Map<string, number>,
@@ -2080,7 +1947,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
    * payload instead. Deduped by (callID, status) because the full part is
    * re-sent on every transition and re-observed on reconnect.
    */
-  private emitToolCall(
+  protected emitToolCall(
     handle: OpenModelHandle,
     part: OpenCodePart,
     toolStatuses: Map<string, string>,
@@ -2138,7 +2005,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private emitTextDelta(
+  protected emitTextDelta(
     handle: OpenModelHandle,
     partId: string,
     delta: string,
@@ -2152,7 +2019,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private emitProviderRetry(handle: OpenModelHandle, turnId: string, retry: OpenCodeRetryStatus): void {
+  protected emitProviderRetry(handle: OpenModelHandle, turnId: string, retry: OpenCodeRetryStatus): void {
     // The provider's own words stay in the payload, for diagnostics only.
     // Credentials are redacted before the cut so a key cannot be split by it.
     const redaction = retry.message === null ? null : redactCredentialText(retry.message);
@@ -2176,7 +2043,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private emitStream(
+  protected emitStream(
     handle: OpenModelHandle,
     input: Pick<ProviderStreamEvent, "kind" | "method"> & Partial<Pick<ProviderStreamEvent,
       "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly">> & {
@@ -2221,7 +2088,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private async waitForHealth(
+  protected async waitForHealth(
     client: OpenCodeServerClient,
     exited: Promise<ProviderProcessExit>,
     deadline: number,
@@ -2244,13 +2111,13 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return false;
   }
 
-  private observeTerminal(handle: OpenModelHandle, exited: Promise<ProviderProcessExit>): void {
+  protected observeTerminal(handle: OpenModelHandle, exited: Promise<ProviderProcessExit>): void {
     void exited.then((exit) => {
       this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false), exit.type === "exit");
     });
   }
 
-  private finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean): void {
+  protected finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean): void {
     if (handle.terminal) return;
     if (this.handles.get(handle.workAttemptId) === handle) {
       const actual = this.deps.getProcessIdentity(handle.pid);
