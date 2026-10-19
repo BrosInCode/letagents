@@ -8,8 +8,11 @@ export const ASK_LINK_TTL_MS = 24 * 60 * 60_000;
 export const ASK_CLAIM_TTL_MS = 15 * 60_000;
 export const ASK_HOLD_TTL_MS = 24 * 60 * 60_000;
 export const ASK_PAUSE_TTL_MS = 24 * 60 * 60_000;
-/** A worker silent for this long counts as offline. */
-export const ASK_OFFLINE_AFTER_MS = 2 * 60_000;
+/**
+ * A worker silent for this long counts as offline. Idle agents long-poll for
+ * up to 3 minutes per request, so anything shorter would flap.
+ */
+export const ASK_OFFLINE_AFTER_MS = 5 * 60_000;
 export const ASK_OPEN_LIMIT = 5;
 export const ASK_NOTE_MAX = 500;
 

@@ -50,4 +50,19 @@ Four rules. Everything else follows from them.
 | Substitute not accepted in 24 h | Removed, link reopens if still valid | Asker only |
 | Usage stops being reported | Keeps working; after 30 min without a reading → `paused` | Both |
 
-Numbers: claim 15 min, offline before notice 2 min, no-usage pause 30 min, pause before end 24 h.
+Numbers: claim 15 min, offline before notice 5 min (idle agents long-poll for up to 3 min), no-usage pause 30 min, pause before end 24 h.
+
+## Build status
+
+**Built (branch `feat/ask-for-an-agent`):**
+- Server: asks table, lifecycle with every timeout, routes, one-room ask grants, room lines, sweep on the liveness tick.
+- Asker: "+" menu and `/ask`, the ask sheet with the room dropdown and new room, link card, the room bar (copy link, cancel, accept or remove a substitute, remove).
+- Giver: `letagents://ask/…` and web links, the giving screen (requested model and amount picked, custom amount, "Can't right now"), one-tap launch as a guest agent, pre-check of the remaining limit, the amount counter across resets, ending on amount used or real limit.
+- Web: `/ask/<token>` page with Open in LetAgents and the download.
+
+**Not built yet:**
+1. **Code access (D13).** Given agents get a scratch folder, so today they can chat and brainstorm but not work on the asker's repo. Next: connect the rental workspace (LetAgents-held clone, brokered file/command tools, proposals → PR) to ask sessions.
+2. **Claude Code and Codex as givers.** Only providers with a verified folder lock can be given; today that is Cursor's sandbox. Next: a verified lock for Claude Code (`srt`) and Codex (deny profile), then add them to the guest-safe list.
+3. **Ask for more (D38), Ask again (F6), goodbye summary (F8), first-time explainers (F11), the "Asked and given" inbox list (F5).**
+4. **The 30-minute no-usage pause** and the giver's "Sign in to Claude again" notice.
+5. A full manual run in the app with two accounts.

@@ -124,7 +124,7 @@ test("the sweep expires old links, frees stale claims, and pauses, resumes and e
   await pool!.query("UPDATE agent_asks SET claim_expires_at = now() - interval '1 second' WHERE id=$1", [stale.row.id]);
   const running = await ask(s);
   const { worker } = await launch(s, running.row);
-  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = now() - interval '5 minutes' WHERE session_id=$1", [worker.session_id]);
+  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = now() - interval '10 minutes' WHERE session_id=$1", [worker.session_id]);
 
   await asks!.sweepAgentAsks();
   assert.equal((await fresh(old.row.id)).state, "expired");
@@ -135,7 +135,7 @@ test("the sweep expires old links, frees stale claims, and pauses, resumes and e
   await asks!.sweepAgentAsks();
   assert.equal((await fresh(running.row.id)).state, "active");
 
-  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = now() - interval '5 minutes' WHERE session_id=$1", [worker.session_id]);
+  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = now() - interval '10 minutes' WHERE session_id=$1", [worker.session_id]);
   await asks!.sweepAgentAsks();
   await pool!.query("UPDATE agent_asks SET paused_at = now() - interval '25 hours' WHERE id=$1", [running.row.id]);
   await asks!.sweepAgentAsks();
