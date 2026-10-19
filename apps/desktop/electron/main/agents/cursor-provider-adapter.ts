@@ -34,16 +34,13 @@ import {
   type NativeExecutionSubscription,
   type ControlProbeResult,
 } from "./provider-adapter.js";
-import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
-import { nativeExecutionId, nativeLifecycleCheckpoint, type NativeLifecycleCheckpoint } from "./provider-execution-observer.js";
+import type { NativeLifecycleCheckpoint } from "./provider-execution-observer.js";
 import {
   CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
   CURSOR_MCP_CONNECTOR_PARENT,
   CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS,
-  MAX_CURSOR_SESSION_ID_LENGTH,
   MAX_DURABLE_TURN_TERMINAL_BYTES,
   TURN_START_TIMEOUT_MS,
-  CURSOR_SESSION_ID_PATTERN,
 } from "./cursor-provider-constants.js";
 import { createCursorRuntimeCustodyReader, safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
 import {
@@ -51,11 +48,6 @@ import {
   CursorTerminalAuthorityUnprovenError, cursorTerminalAuthorityProof, cursorAuthorityMessage,
   CursorRoomTurnRecoveryError, readBoundedCursorTurnFile,
 } from "./cursor-turn-settlement.js";
-import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
-import {
-  cursorNativeToolEnvelope,
-  cursorNativeToolTerminalResult,
-} from "./cursor-native-tool.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
@@ -120,6 +112,18 @@ import {
   requireCursorSessionId,
   usesExactScratchWorkspace,
 } from "./cursor/launch-arguments.js";
+import {
+  consumeLine,
+  interruptLiveDisplayTools,
+  observeNativeExecution,
+  observeNativeExit,
+  observeNativeRuntimeExit,
+  observeValidatedTurnTerminal,
+  publishActivity,
+  publishSafeStream,
+  publishStream,
+  sessionIdOf,
+} from "./cursor/stream-events.js";
 
 export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 
@@ -171,34 +175,6 @@ function cursorTurnLaunchAbort(signal?: AbortSignal): Promise<"aborted"> {
   });
 }
 
-function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind {
-  const type = typeof message.type === "string" ? message.type : "";
-  if (type === "assistant") return "text_delta";
-  // Cursor's documented `user` event is the prompt echo, not a tool result.
-  if (type === "user") return "provider_event";
-  if (type === "tool_call" || type === "tool_use" || type === "tool_use_summary") return "tool_lifecycle";
-  if (type === "result") return "turn_lifecycle";
-  if (type === "system") return "provider_event";
-  if (/error/i.test(type)) return "error";
-  return "provider_event";
-}
-
-function streamMethod(message: CursorStreamMessage): string {
-  const type = typeof message.type === "string" ? message.type : "unknown";
-  const subtype = typeof message.subtype === "string" ? message.subtype : null;
-  return subtype ? `${type}/${subtype}` : type;
-}
-
-function sessionIdOf(message: CursorStreamMessage): string | null {
-  if (typeof message.session_id !== "string") return null;
-  const sessionId = message.session_id.trim();
-  return sessionId
-    && sessionId.length <= MAX_CURSOR_SESSION_ID_LENGTH
-    && CURSOR_SESSION_ID_PATTERN.test(sessionId)
-    ? sessionId
-    : null;
-}
-
 // The empirically proven usage-limit signature (task_38 spike, msg_1708):
 // init observed, the stream stops with NO result event, the process exits
 // non-zero with no signal, and stderr carries the ActionRequiredError. This is
@@ -218,16 +194,16 @@ function isProviderQuotaExit(turn: LiveTurn, exit: ProviderProcessExit): boolean
 
 export class CursorProviderAdapter implements ProviderAdapter {
   readonly id = "cursor" as const;
-  private readonly cursorBin: string;
-  private readonly deps: CursorProviderAdapterDependencies;
-  private readonly activitySink?: (event: ProviderActivityEvent) => void;
-  private readonly streamSink?: (event: ProviderStreamEvent) => void;
-  private readonly turnStartTimeoutMs: number;
-  private readonly stopGraceMs: number;
-  private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
-  private readonly handles = new Map<string, CursorProviderHandle>();
-  private readonly readCursorUsage: ReturnType<typeof createCursorUsageReader>;
-  private readonly processCustody: ProviderProcessCustody;
+  readonly cursorBin: string;
+  readonly deps: CursorProviderAdapterDependencies;
+  readonly activitySink?: (event: ProviderActivityEvent) => void;
+  readonly streamSink?: (event: ProviderStreamEvent) => void;
+  readonly turnStartTimeoutMs: number;
+  readonly stopGraceMs: number;
+  readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
+  readonly handles = new Map<string, CursorProviderHandle>();
+  readonly readCursorUsage: ReturnType<typeof createCursorUsageReader>;
+  readonly processCustody: ProviderProcessCustody;
   readonly runtimeCustody: ReturnType<typeof createCursorRuntimeCustodyReader>;
 
   constructor(options: CursorProviderAdapterOptions = {}) {
@@ -647,7 +623,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       () => this.recoverOwnedRoomTurn(providerHandle, request, options));
   }
 
-  private async recoverOwnedRoomTurn(providerHandle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest,
+  async recoverOwnedRoomTurn(providerHandle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest,
     options: Parameters<CursorProviderAdapter["recoverRoomTurn"]>[2] = {}): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     const turnId = request.providerTurnId.trim();
@@ -815,7 +791,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return acceptedResult;
   }
 
-  private readDurableTurnTerminal(
+  readDurableTurnTerminal(
     handle: CursorProviderHandle,
     turnId: string,
   ): CursorTurnTerminal | null {
@@ -997,7 +973,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
    * does not promote the record to a recoverable room-turn terminal: without
    * init there is no provider continuation identity.
    */
-  private readTrustedPreInitTurnFailure(
+  readTrustedPreInitTurnFailure(
     turn: LiveTurn,
   ): { errorDetail: string } | null {
     if (!turn.statePath) return null;
@@ -1030,7 +1006,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return { errorDetail };
   }
 
-  private removeDurableTurnJournal(handle: CursorProviderHandle, turnId: string): void {
+  removeDurableTurnJournal(handle: CursorProviderHandle, turnId: string): void {
     const profile = handle.supervisedProfile;
     if (!profile) return;
     const statePath = join(
@@ -1165,7 +1141,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return result;
   }
 
-  private async start(
+  async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CursorProviderHandle> {
@@ -1267,7 +1243,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
    * spawn/poke callers get their handle back immediately, exactly like the
    * long-lived adapters.
    */
-  private async beginTurn(
+  async beginTurn(
     handle: CursorProviderHandle,
     prompt: string,
     resumeSessionId: string | null,
@@ -2174,7 +2150,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   }
 
   /** Await the turn's real exit and apply the honest end state. */
-  private async completeTurn(
+  async completeTurn(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     unsubscribe: () => void,
@@ -2323,7 +2299,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private readTrustedDurableTurnTerminal(
+  readTrustedDurableTurnTerminal(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): CursorTurnTerminal {
@@ -2372,7 +2348,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
    * reconciled through its durable journal. Wrapper/process exit is necessary
    * remote authority evidence, but is deliberately not this receipt.
    */
-  private async retireTurnWorkspaceGeneration(
+  async retireTurnWorkspaceGeneration(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     trustedRemoteAuthorityEvidence?: CursorTurnTerminal | true,
@@ -2404,7 +2380,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private restoreConversationNamespace(handle: CursorProviderHandle, generation: SupervisedWorkspaceGenerationHandle): void {
+  restoreConversationNamespace(handle: CursorProviderHandle, generation: SupervisedWorkspaceGenerationHandle): void {
     if (!handle.supervisedProfile || (generation.realWorkspace !== resolve(handle.cwd)
       && generation.realWorkspace !== realpathSync(handle.cwd))) {
       throw new CursorRoomTurnRecoveryError("Cursor conversation recovery does not match this attempt's workspace.");
@@ -2415,7 +2391,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       generation.liveWorkspace, generation.realWorkspace, continuation);
   }
 
-  private verifyRestingConversation(handle: CursorProviderHandle, settlement: CursorGenerationSettlement): void {
+  verifyRestingConversation(handle: CursorProviderHandle, settlement: CursorGenerationSettlement): void {
     if (!handle.supervisedProfile || settlement.provider_continuation_id !== handle.providerContinuationId) {
       throw new CursorRoomTurnRecoveryError("Cursor conversation settlement belongs to another continuation.");
     }
@@ -2427,7 +2403,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   /** Extend the exited wrapper's existing journal before its generation receipt
    * can be deleted. Native evidence stays intact; a crash after cleanup can
    * verify this exact settlement without treating a missing file as proof. */
-  private recordGenerationSettlement(handle: CursorProviderHandle, turnId: string, manifestPath: string,
+  recordGenerationSettlement(handle: CursorProviderHandle, turnId: string, manifestPath: string,
     phase: CursorGenerationSettlement["phase"]): CursorGenerationSettlement {
     if (!handle.supervisedProfile || !handle.providerContinuationId) throw new CursorRoomTurnRecoveryError("Cursor conversation settlement has no exact owner.");
     const path = join(handle.supervisedProfile.configDir,
@@ -2464,7 +2440,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return settlement;
   }
 
-  private async abandonTurnWorkspaceGeneration(
+  async abandonTurnWorkspaceGeneration(
     generation: SupervisedWorkspaceGenerationHandle,
   ): Promise<void> {
     const receipt = await generation.abandon();
@@ -2478,278 +2454,35 @@ export class CursorProviderAdapter implements ProviderAdapter {
     await this.deps.removeWorkspaceGenerationReceipt(receipt.manifestPath);
   }
 
-  private consumeLine(handle: CursorProviderHandle, turn: LiveTurn, line: string): void {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    let message: CursorStreamMessage | null = null;
-    if (trimmed.startsWith("{")) {
-      try {
-        const parsed: unknown = JSON.parse(trimmed);
-        message = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? parsed as CursorStreamMessage
-          : null;
-      } catch {
-        message = null;
-      }
-    }
-    if (!message) {
-      this.publishStream(handle, "stdout/raw", { line: trimmed }, "provider_event");
-      return;
-    }
-    const sessionId = sessionIdOf(message);
-    if (Object.hasOwn(message, "session_id") && !sessionId) {
-      handle.protocolError = true;
-      this.publishStream(handle, "session/invalid", {
-        reason: "provider emitted an invalid or option-shaped session identity",
-      }, "error");
-      this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
-      return;
-    }
-    const pendingContinuation = handle.providerContinuationId?.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX) === true;
-    if (sessionId && handle.providerContinuationId && !pendingContinuation && handle.providerContinuationId !== sessionId) {
-      // A stranger session must never silently become this lane's continuation
-      // (same rule as the Claude adapter's same-id assertion).
-      handle.protocolError = true;
-      this.publishStream(handle, "session/mismatch", {
-        expectedSessionId: handle.providerContinuationId,
-        observedSessionId: sessionId,
-      }, "error");
-      this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
-      return;
-    }
-    if (message.type === "result"
-      && (!turn.sawInit || !sessionId || sessionId !== handle.providerContinuationId)) {
-      handle.protocolError = true;
-      this.publishStream(handle, "result/session_invalid", {
-        reason: "Cursor result did not carry the exact verified turn session identity.",
-      }, "error");
-      this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
-      return;
-    }
-    const safeProviderPayload = safeStreamPayload(message);
-    const nativeLifecycle = this.observeNativeExecution(handle, turn, message, sessionId);
-    const duplicateInit = message.type === "system" && message.subtype === "init" && turn.sawInit;
-    // The daemon uses the first verified init as the per-turn display boundary.
-    // Preserve duplicate same-session init as diagnostics under a distinct
-    // method so it cannot erase assistant/tool output already shown this turn.
-    this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload,
-      cursorStreamKind(message), nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
-    const rawEventSequence = handle.streamSequence;
-    const type = typeof message.type === "string" ? message.type : "";
-    if (type === "system") {
-      // Readiness AND identity adoption are STRICT: only a genuine system/init
-      // event that carried a session id counts (msg_1807). Other events may
-      // carry session ids that are asserted against an established continuation
-      // above, but never establish one themselves.
-      if (message.subtype === "init") {
-        if (!sessionId) {
-          handle.protocolError = true;
-          this.publishStream(handle, "session/missing", {
-            reason: "init carried no session id",
-          }, "error");
-          this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
-          return;
-        }
-        if (!handle.protocolError) {
-          handle.providerContinuationId = sessionId;
-          turn.sawInit = true;
-        }
-      }
-      return;
-    }
-    // Display projections require the exact session established by init.
-    // Missing/foreign identities remain raw diagnostic evidence only.
-    if (turn.sawInit && sessionId && sessionId === handle.providerContinuationId) {
-      for (const projection of cursorLiveDisplayProjections(
-        safeProviderPayload.payload,
-        turn.controlTurnId,
-        String(rawEventSequence),
-      )) {
-        if (projection.method === "item/toolCall/updated") {
-          const callId = typeof projection.payload.callID === "string" ? projection.payload.callID : null;
-          if (callId) {
-            if (projection.payload.status === "running") {
-              if (turn.liveDisplayTools.has(callId)) continue;
-              turn.liveDisplayTools.set(callId, {
-                tool: typeof projection.payload.tool === "string" ? projection.payload.tool : "tool",
-                input: projection.payload.input ?? null,
-                completed: false,
-              });
-            } else {
-              const active = turn.liveDisplayTools.get(callId);
-              if (!active || active.completed || active.tool !== projection.payload.tool) continue;
-              active.completed = true;
-            }
-          }
-        }
-        this.publishStream(handle, projection.method, projection.payload, projection.kind);
-      }
-    }
-    if (type === "result") {
-      this.interruptLiveDisplayTools(handle, turn);
-      turn.sawResult = true;
-      turn.resultWasError = message.subtype !== "success" || message.is_error !== false;
-      turn.resultText = typeof message.result === "string" ? message.result : null;
-      turn.providerRequestId = typeof message.request_id === "string" && message.request_id.trim()
-        ? message.request_id.trim()
-        : null;
-      return;
-    }
-    if (type === "assistant" || type === "tool_call" || type === "tool_use" || type === "user") {
-      this.publishActivity(handle, {
-        source: "native_harness",
-        method: streamMethod(message),
-        summary: `Processing ${streamMethod(message)}`,
-        status: "working",
-        checking: "",
-        next_action: "",
-      });
-    }
+  consumeLine(handle: CursorProviderHandle, turn: LiveTurn, line: string): void {
+    return consumeLine(this, handle, turn, line);
   }
 
-  private interruptLiveDisplayTools(handle: CursorProviderHandle, turn: LiveTurn): void {
-    for (const [callID, tool] of turn.liveDisplayTools) {
-      if (tool.completed) continue;
-      this.publishStream(handle, "item/toolCall/updated", {
-        callID,
-        tool: tool.tool,
-        status: "interrupted",
-        input: tool.input,
-        output: null,
-        error: null,
-      }, "tool_lifecycle");
-    }
-    turn.liveDisplayTools.clear();
+  interruptLiveDisplayTools(handle: CursorProviderHandle, turn: LiveTurn): void {
+    return interruptLiveDisplayTools(this, handle, turn);
   }
 
-  private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): NativeLifecycleCheckpoint | null {
-    if (!sessionId || !nativeExecutionId(sessionId) || handle.protocolError) return null;
-    const replay = turn.executionTerminalCheckpoint;
-    if (replay) {
-      return message.type === "result"
-        && sessionId === replay.sessionId
-        && message.subtype === replay.subtype
-        && message.is_error === replay.isError
-        ? replay.nativeLifecycle : null;
-    }
-    if (turn.executionTurnFinished) return null;
-    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
-    const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
-    if (message.type === "system" && message.subtype === "init" && !turn.sawInit) {
-      const nativeLifecycle = nativeLifecycleCheckpoint({
-        provider: this.id,
-        workAttemptId: handle.workAttemptId,
-        phase: "turn_active",
-        providerContinuationId: sessionId,
-        providerTurnId: turn.controlTurnId,
-        nativeProcessPid: turn.pid,
-        nativeProcessIdentity: turn.processIdentity,
-      });
-      turn.executionContinuationId = sessionId;
-      emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
-      emit({ domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" });
-      emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
-        nativeEventId: nativeLifecycle.nativeEventId, ...nativeTurn });
-      return nativeLifecycle;
-    }
-    if (!turn.sawInit || sessionId !== handle.providerContinuationId) return null;
-    if (message.type === "result") {
-      if (typeof message.subtype !== "string" || !message.subtype
-        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return null;
-      const nativeLifecycle = nativeLifecycleCheckpoint({
-        provider: this.id,
-        workAttemptId: handle.workAttemptId,
-        phase: "turn_terminal",
-        providerContinuationId: sessionId,
-        providerTurnId: turn.controlTurnId,
-        nativeProcessPid: turn.pid,
-        nativeProcessIdentity: turn.processIdentity,
-        terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
-      });
-      turn.executionTerminalCheckpoint = {
-        sessionId,
-        subtype: message.subtype,
-        isError: message.is_error === true,
-        nativeLifecycle,
-      };
-      return nativeLifecycle;
-    }
-    const nativeTool = cursorNativeToolEnvelope(message as Record<string, unknown>);
-    if (!nativeTool) return null;
-    const { executionId, subtype, tool, operation } = nativeTool;
-    const identity = { domain: "execution" as const, executionId, operation, ...nativeTurn };
-    const prior = turn.executionTools.get(executionId);
-    if (subtype === "started" && !prior) {
-      // Native toolCallStarted precedes permission/spawn outcomes. It proves
-      // request identity, not that a process ran or a file was touched.
-      turn.executionTools.set(executionId, { tool, completed: false });
-    } else if (subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
-      const terminal = cursorNativeToolTerminalResult(nativeTool);
-      if (!terminal) return null;
-      prior.completed = true;
-      emit({
-        ...identity,
-        kind: "completed",
-        outcome: terminal.outcome,
-        ...(terminal.exitCode === undefined ? {} : { exitCode: terminal.exitCode }),
-        sideEffects: terminal.sideEffects,
-      });
-    }
-    return null;
+  observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): NativeLifecycleCheckpoint | null {
+    return observeNativeExecution(this, handle, turn, message, sessionId);
   }
 
-  private observeNativeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
-    if (exit.type !== "exit") return;
-    if (!turn.executionTurnFinished) {
-      this.observeValidatedTurnTerminal(handle, turn, turn.interruptRequested
-        ? "interrupted"
-        : turn.sawResult && turn.executionTerminalCheckpoint
-          ? turn.resultWasError ? "failed" : "completed"
-          : "lost");
-    }
-    this.observeNativeRuntimeExit(handle, turn, exit);
+  observeNativeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
+    return observeNativeExit(this, handle, turn, exit);
   }
 
-  private observeValidatedTurnTerminal(
+  observeValidatedTurnTerminal(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     outcome: "completed" | "failed" | "interrupted" | "lost",
   ): void {
-    if (turn.executionTurnFinished) return;
-    const sessionId = turn.executionContinuationId ?? handle.providerContinuationId;
-    if (nativeExecutionId(sessionId)) {
-      const nativeLifecycle = turn.executionTerminalCheckpoint?.nativeLifecycle ?? nativeLifecycleCheckpoint({
-        provider: this.id,
-        workAttemptId: handle.workAttemptId,
-        phase: "turn_terminal",
-        providerContinuationId: sessionId,
-        providerTurnId: turn.controlTurnId,
-        nativeProcessPid: turn.pid,
-        nativeProcessIdentity: turn.processIdentity,
-        terminalDiscriminator: outcome,
-      });
-      handle.execution.emit(outcome === "lost"
-        ? { domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
-          providerContinuationId: sessionId, providerTurnId: turn.controlTurnId,
-          nativeEventId: nativeLifecycle.nativeEventId }
-        : { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
-          sideEffects: "none", providerContinuationId: sessionId, providerTurnId: turn.controlTurnId,
-          nativeEventId: nativeLifecycle.nativeEventId }, turn.processIdentity, turn.pid);
-    }
-    turn.executionTools.clear();
-    turn.executionTurnFinished = true;
+    return observeValidatedTurnTerminal(this, handle, turn, outcome);
   }
 
-  private observeNativeRuntimeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
-    if (turn.executionRuntimeFinished) return;
-    const controlEvidence = exit.type === "exit" ? "process_exit" as const : "native_session_terminated" as const;
-    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
-    emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence });
-    emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence });
-    turn.executionRuntimeFinished = true;
+  observeNativeRuntimeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
+    return observeNativeRuntimeExit(this, handle, turn, exit);
   }
 
-  private rememberRoomTurnTerminal(
+  rememberRoomTurnTerminal(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     terminal: CursorTurnTerminal,
@@ -2772,7 +2505,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return terminal;
   }
 
-  private awaitRoomTurnTerminal(
+  awaitRoomTurnTerminal(
     completion: Promise<CursorTurnTerminal>,
     detachSignal?: AbortSignal,
   ): Promise<CursorTurnTerminal> {
@@ -2799,7 +2532,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     });
   }
 
-  private providerRoomTurnResult(
+  providerRoomTurnResult(
     turnId: string,
     terminal: CursorTurnTerminal,
     providerContinuationId: string,
@@ -2828,7 +2561,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   }
 
   /** Inspect the exact checkpointed wrapper without waiting or signalling it. */
-  private async observeRecordedTurnChild(
+  async observeRecordedTurnChild(
     connection: Extract<ProviderConnectionRef, { kind: "cursor_cli" }>,
   ): Promise<null> {
     if (!connection.processIdentity) {
@@ -2846,7 +2579,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     );
   }
 
-  private async terminateTurnChild(
+  async terminateTurnChild(
     pid: number,
     exited: Promise<ProviderProcessExit>,
     processIdentity?: string | null,
@@ -2894,7 +2627,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     await exited;
   }
 
-  private async readTerminatedTurnExit(turn: LiveTurn): Promise<ProviderProcessExit> {
+  async readTerminatedTurnExit(turn: LiveTurn): Promise<ProviderProcessExit> {
     if (turn.processIdentity === null) {
       return { type: "exit", code: null, signal: null };
     }
@@ -2907,14 +2640,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return turn.child.exited;
   }
 
-  private exactProcessStatus(pid: number, processIdentity: string): "exact" | "absent" | "ambiguous" {
+  exactProcessStatus(pid: number, processIdentity: string): "exact" | "absent" | "ambiguous" {
     const identity = this.deps.getProcessIdentity(pid);
     if (identity === undefined) return "ambiguous";
     if (identity === null || !sameProcessBirthIdentity(identity, processIdentity)) return "absent";
     return "exact";
   }
 
-  private signalExactProcess(
+  signalExactProcess(
     pid: number,
     processIdentity: string,
     signal: NodeJS.Signals,
@@ -2925,7 +2658,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return "signalled";
   }
 
-  private async awaitTurnTerminal(
+  async awaitTurnTerminal(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): Promise<ProviderTerminalPayload> {
@@ -2941,7 +2674,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return handle.terminal ?? this.finishAttempt(handle, exit);
   }
 
-  private async finishAfterVerifiedWrapperAbsence(
+  async finishAfterVerifiedWrapperAbsence(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): Promise<ProviderTerminalPayload> {
@@ -2958,7 +2691,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return this.finishAttempt(handle, { type: "exit", code: null, signal: null });
   }
 
-  private async awaitDeferredRoomTurnSettlement(
+  async awaitDeferredRoomTurnSettlement(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): Promise<void> {
@@ -2978,7 +2711,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private async settlePreparedTurnIdle(
+  async settlePreparedTurnIdle(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     exit: ProviderProcessExit,
@@ -3000,7 +2733,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private finishAttempt(
+  finishAttempt(
     handle: CursorProviderHandle,
     exit: ProviderProcessExit,
     forcedCause?: ProviderTerminalPayload["terminalCause"],
@@ -3009,7 +2742,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return this.commitAttemptTerminal(handle, this.synthesizeAttemptTerminal(handle, exit, forcedCause));
   }
 
-  private synthesizeAttemptTerminal(
+  synthesizeAttemptTerminal(
     handle: CursorProviderHandle,
     exit: ProviderProcessExit,
     forcedCause?: ProviderTerminalPayload["terminalCause"],
@@ -3037,7 +2770,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return terminal;
   }
 
-  private commitAttemptTerminal(
+  commitAttemptTerminal(
     handle: CursorProviderHandle,
     terminal: ProviderTerminalPayload,
   ): ProviderTerminalPayload {
@@ -3055,16 +2788,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return terminal;
   }
 
-  private publishStream(
+  publishStream(
     handle: CursorProviderHandle,
     method: string,
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
   ): void {
-    this.publishSafeStream(handle, method, safeStreamPayload(providerPayload), kind);
+    return publishStream(this, handle, method, providerPayload, kind);
   }
 
-  private publishSafeStream(
+  publishSafeStream(
     handle: CursorProviderHandle,
     method: string,
     safe: ReturnType<typeof safeStreamPayload>,
@@ -3072,28 +2805,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
     nativeEventId: string | null = null,
     nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
   ): void {
-    const event: ProviderStreamEvent = {
-      workAttemptId: handle.workAttemptId,
-      providerContinuationId: handle.providerContinuationId,
-      observedAt: this.deps.now(),
-      sequence: ++handle.streamSequence,
-      provider: this.id,
-      kind,
-      method,
-      ...(handle.liveTurn?.processIdentity
-        ? { nativeProcessIdentity: handle.liveTurn.processIdentity }
-        : {}),
-      ...(handle.liveTurn?.pid ? { nativeProcessPid: handle.liveTurn.pid } : {}),
-      ...(nativeEventId ? { nativeEventId } : {}),
-      ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
-      ...safe,
-      durablePayloadRef: null,
-    };
-    this.streamSink?.(event);
-    for (const listener of handle.streamListeners) listener(event);
+    return publishSafeStream(this, handle, method, safe, kind, nativeEventId, nativeLifecyclePhase);
   }
 
-  private publishActivity(
+  publishActivity(
     handle: CursorProviderHandle,
     input: {
       source: ProviderActivityEvent["source"];
@@ -3104,22 +2819,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       next_action: string;
     },
   ): void {
-    const event: ProviderActivityEvent = {
-      workAttemptId: handle.workAttemptId,
-      providerContinuationId: handle.providerContinuationId,
-      observedAt: this.deps.now(),
-      source: input.source,
-      method: input.method,
-      summary: input.summary,
-      status: input.status,
-      checking: input.checking,
-      nextAction: input.next_action,
-    };
-    this.activitySink?.(event);
-    for (const listener of handle.activityListeners) listener(event);
+    return publishActivity(this, handle, input);
   }
 
-  private requireHandle(handle: ProviderHandle): CursorProviderHandle {
+  requireHandle(handle: ProviderHandle): CursorProviderHandle {
     if (!(handle instanceof CursorProviderHandle)) {
       throw new Error("Provider handle does not belong to CursorProviderAdapter.");
     }
