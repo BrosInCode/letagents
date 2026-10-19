@@ -10,6 +10,7 @@ import type {
   Task,
 } from "../db.js";
 import type { MessageRecipientAgentTarget } from "../db/types.js";
+import type { ReasoningSessionKind } from "../db/schema.js";
 import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_AGENT_WORK,
@@ -51,7 +52,7 @@ export type RoomEvent =
     session: ReasoningSession;
     update: ReasoningSessionUpdate | null;
   }
-  | { kind: "reasoning_removed"; roomId: string; sessionId: string }
+  | { kind: "reasoning_removed"; roomId: string; sessionId: string; sessionKind: ReasoningSessionKind }
   | { kind: "artifact_updated"; roomId: string; artifact: RoomSharedArtifact | null }
   | { kind: "rental_activity_created"; roomId: string; activity: ActivityEvent }
   | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null }
@@ -270,8 +271,13 @@ export class RoomEventBroker {
       };
     });
     this.addSource(deps.reasoningEvents, "reasoning:removed", (payload) => {
-      const event = payload as { projectId: string; session_id: string };
-      return { kind: "reasoning_removed", roomId: event.projectId, sessionId: event.session_id };
+      const event = payload as { projectId: string; session_id: string; kind?: ReasoningSessionKind };
+      return {
+        kind: "reasoning_removed",
+        roomId: event.projectId,
+        sessionId: event.session_id,
+        sessionKind: event.kind === "live" ? "live" : "reasoning",
+      };
     });
     if (deps.artifactEvents) {
       this.addSource(deps.artifactEvents, "artifact:updated", (payload) => {

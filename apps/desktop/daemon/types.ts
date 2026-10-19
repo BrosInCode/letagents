@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.262";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.263";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -171,6 +171,13 @@ export type DaemonAgentConfiguration = {
    * the revisions, so never taken from the flat manifest.
    */
   image_input?: boolean;
+  /**
+   * Whether the owner shares this agent's live activity with the room; while
+   * "withdrawing", the room may still show earlier turns that the daemon must
+   * remove. Off unless the owner turns it on in the desktop app;
+   * database-owned, like the revisions, so never taken from the flat manifest.
+   */
+  live_sharing?: "off" | "on" | "withdrawing";
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */

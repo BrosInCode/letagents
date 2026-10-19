@@ -573,6 +573,7 @@ export function toReasoningSession(row: ReasoningSessionRow): ReasoningSession {
     anchor_message_id: row.anchor_message_id,
     actor_label: row.actor_label,
     agent_key: row.agent_key,
+    kind: row.kind ?? "reasoning",
     status: row.status,
     summary: row.summary,
     latest_payload: row.latest_payload,

@@ -428,7 +428,7 @@ export type ProviderRoomTurnAttachment = {
   /** The sender's declared type; for an included image, the type its bytes show. */
   mimeType: string;
   sizeBytes: number | null;
-  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported" | "local_room_unsupported";
+  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported";
   /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
   image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
 };

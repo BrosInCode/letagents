@@ -1,5 +1,6 @@
 import type { ProviderRoomTurnAttachment, ProviderRoomTurnRequest, RoomTurnImageMimeType } from "./provider-adapter.js";
 import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
+import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
 import { isDeepStrictEqual } from "node:util";
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -10,9 +11,9 @@ function isRoomMessage(value: Record<string, unknown>): boolean {
   return typeof value.id === "string" && /^msg_[1-9]\d*$/.test(value.id) && typeof value.text === "string";
 }
 
-/** Preserve conversation content and unknown fields; omit only known UI summaries. */
+/** Preserve conversation content and unknown fields; omit only known UI summaries and inline file bytes. */
 function conversationMessage(message: unknown): unknown {
-  const value = record(message);
+  const value = record(withoutInlineFileBytes(message));
   if (!value) return message;
   const { activation: _activation, ...context } = value;
   if (!isRoomMessage(context)) return context;
@@ -43,7 +44,7 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   const supplied = [...context, source].map(record).filter((value): value is Record<string, unknown> => value !== null && isRoomMessage(value));
   const reference = (value: unknown): unknown => {
     const quote = record(conversationMessage(value));
-    if (!quote || !isRoomMessage(quote)) return value;
+    if (!quote || !isRoomMessage(quote)) return withoutInlineFileBytes(value);
     // A reference may contain fewer fields than a full message. Do not erase
     // a different edit, author, GIF, attachment or other substantive field.
     const candidates = supplied.filter(message => message.id === quote.id);
@@ -78,7 +79,7 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   return [
     `Recent bounded room context: ${JSON.stringify(context.map(compact))}`,
     `Source message: ${JSON.stringify(compact(source))}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    `Activation: ${JSON.stringify(withoutInlineFileBytes(request.activation))}`,
     ...formatRoomTurnAttachments(request.attachments),
   ];
 }
@@ -121,7 +122,6 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
       case "too_large": return `- ${name} Not shown: it is larger than the 10 MB image limit.`;
       case "turn_limit": return `- ${name} Not shown: the images of this message reached the 20 MB limit for one turn.`;
       case "provider_unsupported": return `- ${name} Not shown: this agent cannot view images. If its content matters, ask the sender to describe it.`;
-      case "local_room_unsupported": return `- ${name} Not shown: images in local rooms do not reach agents yet.`;
       default: return `- ${name} Not shown: it could not be downloaded.`;
     }
   });

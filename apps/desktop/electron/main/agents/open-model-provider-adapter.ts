@@ -501,18 +501,18 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   const failure = messageError(message);
   if (!failure) return null;
   const status = failure.statusCode ? ` (HTTP ${failure.statusCode})` : "";
-  if (failure.statusCode === 402) {
-    return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then retry the unfinished work in LetAgents.`;
-  }
-  if (failure.statusCode === 403) {
-    // A forbidden response can require account attestation or model access,
-    // not a different API key. Preserve the provider's actionable explanation
-    // without publishing credentials or arbitrary provider-supplied URLs.
+  if (failure.statusCode === 402 || failure.statusCode === 403) {
+    // A 402 can announce a promotion ending rather than insufficient credit;
+    // a 403 can require account attestation or model access. Preserve the
+    // explanation without credentials or arbitrary provider-supplied URLs.
     const detail = redactCredentialText(failure.message ?? "").value
       .replace(/https?:\/\/\S+/gi, "provider settings")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 320);
+    if (failure.statusCode === 402) {
+      return `Open Model request was rejected by the provider${status}${detail ? `: ${detail}` : ". The provider did not include an explanation."}`;
+    }
     return `Open Model access was denied by the provider${status}${detail ? `: ${detail}` : ". Check the provider's account requirements and model permissions, then retry the unfinished work in LetAgents."}`;
   }
   if (failure.statusCode === 401) {

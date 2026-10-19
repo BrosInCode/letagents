@@ -87,7 +87,7 @@ test("the responsive host has an exact 920px nonmodal boundary and compact acces
 test("the participant surface links to published progress and offers no local stop, retry or permission controls", async () => {
   const surface = await readFile(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue", import.meta.url), "utf8");
   assert.match(surface, /emit\('open-reasoning', reasoning\.id\)/);
-  assert.match(surface, /const emit = defineEmits<\{\s*close: \[\];\s*"open-reasoning": \[sessionId: string\];\s*\}>\(\)/);
+  assert.match(surface, /const emit = defineEmits<\{\s*close: \[\];\s*"open-reasoning": \[sessionId: string\];\s*"reveal-live-request": \[messageId: string\];\s*\}>\(\)/);
   assert.doesNotMatch(surface, /desktopIpc|ManagedAgentChangeSummaryCard|getManagedAgentChangeSummary|session-updated/);
 });
 

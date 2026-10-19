@@ -13,6 +13,7 @@
         @action="forwardAction($event, 'wide')"
         @retry="retryStatus"
         @open-reasoning="emit('open-reasoning', $event)"
+        @reveal-live-request="emit('reveal-live-request', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -39,6 +40,7 @@
         @action="forwardAction($event, 'compact')"
         @retry="retryStatus"
         @open-reasoning="emit('open-reasoning', $event)"
+        @reveal-live-request="emit('reveal-live-request', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -73,6 +75,7 @@ import {
 } from "../../../../domain/agent-inspector-participant";
 import { agentInspectorSignal, sharedAgentInspectorPresentation } from "../../../../domain/agent-inspector-presentation";
 import { latestReasoningSessionForExactIdentity } from "../../../../domain/reasoning";
+import { sharedLiveViewForAgent } from "../../../../domain/agent-inspector-shared-live";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
 import AgentInspectorParticipantSurface from "./AgentInspectorParticipantSurface.vue";
@@ -109,6 +112,8 @@ const props = defineProps<{
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
   reasoningSessions: readonly DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room. */
+  liveActivitySessions?: readonly DesktopReasoningSession[];
   correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const emit = defineEmits<{
@@ -131,6 +136,7 @@ const emit = defineEmits<{
   retire: [];
   purge: [];
   "open-reasoning": [sessionId: string];
+  "reveal-live-request": [messageId: string];
   retry: [];
 }>();
 
@@ -140,6 +146,10 @@ const surfaceComponent = ref<{ focusInitial: () => void; containsFocus: () => bo
 const participantProjection = computed(() => projectAgentInspectorParticipant(props.selection));
 const participantReasoning = computed(() => participantProjection.value
   ? latestReasoningSessionForExactIdentity(props.selection, props.reasoningSessions)
+  : null);
+// Another member's agent: its turn, when its owner shares live activity with the room.
+const participantLiveView = computed(() => participantProjection.value
+  ? sharedLiveViewForAgent(props.selection.agentKey, props.liveActivitySessions ?? [])
   : null);
 const surfaceKind = computed(() => props.projection ? "projection" : participantProjection.value ? "participant" : "status");
 const surfaceComponentType = computed<Component>(() => props.projection
@@ -195,6 +205,7 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       roomIdentifier: props.roomIdentifier,
       requestVersion: props.requestVersion,
       reasoning: participantReasoning.value,
+      liveView: participantLiveView.value,
     };
   }
   return { ...statusPresentation.value, compact: compactPresentation };

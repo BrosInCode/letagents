@@ -3399,7 +3399,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.262");
+    assert.equal(status.implementationVersion, "2.0.263");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3839,6 +3839,59 @@ test("saved permission list and revoke use the real enrolled signer", async () =
     ]);
     await assert.rejects(client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 }, () => { throw new Error("Sender changed"); }), /Sender changed/);
     assert.equal(operations.length, 2);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("sharing an agent's live activity is sent only as a request the app signed, and reads as off from an older service", async () => {
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  const configuration = (sharing: Record<string, unknown>) => ({
+    entry_id: "agent", daemon_generation: 7, provider: "codex", model: null, reasoning_effort: null, charter: "help",
+    permission_profile_id: "full_access", supervised_permission_profiles: [], provider_launch_policy: {},
+    config_revision: 2, runtime_configuration_revision: 2, ...sharing,
+  });
+  const operations: unknown[] = [];
+  let reply: unknown = null;
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope);
+    assert.ok(authenticated, "the daemon's own verifier accepts the app's signature for this operation");
+    operations.push(authenticated);
+    return reply;
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer });
+  try {
+    reply = { outcome: "updated", configuration: configuration({ share_live_activity: true, live_sharing_availability: "available" }) };
+    const on = await client.setAgentLiveSharing({ entryId: "agent", daemonGeneration: 7, enabled: true });
+    assert.deepEqual(on.outcome === "updated" && on.configuration.liveSharing, { enabled: true, availability: "available" });
+    assert.deepEqual(operations, [{ operation: "set_live_sharing", input: { entryId: "agent", daemonGeneration: 7, enabled: true } }]);
+    assert.equal(wire.requests.some((request) => request.method === "supervisor.update_agent_configuration"), false,
+      "it never travels as the unsigned settings update");
+    reply = { outcome: "invalid", error: "Not available for this agent." };
+    assert.deepEqual(await client.setAgentLiveSharing({ entryId: "agent", daemonGeneration: 7, enabled: true }),
+      { outcome: "invalid", error: "Not available for this agent." });
+    for (const sharing of [{}, { share_live_activity: true }, { share_live_activity: true, live_sharing_availability: "elsewhere" }]) {
+      reply = { outcome: "updated", configuration: configuration(sharing) };
+      const read = await client.setAgentLiveSharing({ entryId: "agent", daemonGeneration: 7, enabled: false });
+      assert.equal(read.outcome === "updated" && Object.hasOwn(read.configuration, "liveSharing"), false, "an older or unknown service offers no switch");
+    }
+    reply = { outcome: "updated", configuration: configuration({ share_live_activity: "true", live_sharing_availability: "available" }) };
+    const unclear = await client.setAgentLiveSharing({ entryId: "agent", daemonGeneration: 7, enabled: true });
+    assert.equal(unclear.outcome === "updated" && unclear.configuration.liveSharing?.enabled, false, "anything but an exact true reads as off");
+
+    const sent = operations.length;
+    for (const malformed of [
+      { entryId: "agent", daemonGeneration: 7 },
+      { entryId: "agent", daemonGeneration: 7, enabled: "true" },
+      { entryId: "", daemonGeneration: 7, enabled: true },
+      { entryId: "agent", daemonGeneration: 7, enabled: true, expectedRevision: 1 },
+    ]) await assert.rejects(client.setAgentLiveSharing(malformed as never));
+    await assert.rejects(client.setAgentLiveSharing({ entryId: "agent", daemonGeneration: 7, enabled: true },
+      () => { throw new Error("Sender changed"); }), /Sender changed/);
+    assert.equal(operations.length, sent);
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
