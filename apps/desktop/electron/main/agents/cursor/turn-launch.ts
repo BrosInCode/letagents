@@ -12,7 +12,7 @@ import type { ProviderContinuationRef, ProviderRoomTurnOptions, ProviderSpawnReq
 import { safeCursorTerminalErrorDetail } from "../cursor-provider-evidence.js";
 import { CursorRoomTurnRecoveryError } from "../cursor-turn-settlement.js";
 import { removeCursorTurnRuntimeDataDir } from "../cursor-sandbox-policy.js";
-import type { CursorCliChild } from "../cursor-turn-launcher.js";
+import type { CursorCliChild } from "./turn-launcher.js";
 import { attestProviderSpawnPolicy } from "../provider-spawn-configuration.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";

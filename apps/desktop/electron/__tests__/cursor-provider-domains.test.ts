@@ -28,7 +28,7 @@ const adapterModuleSources = [
   "turn-recovery", "workspace-generation",
 ].map((name) => read(`../main/agents/cursor/${name}.ts`));
 const identitySource = read("../main/agents/cursor-identity.ts");
-const launcherSource = read("../main/agents/cursor-turn-launcher.ts");
+const launcherSource = read("../main/agents/cursor/turn-launcher.ts");
 const sandboxSource = read("../main/agents/cursor-sandbox-policy.ts");
 
 test("Cursor's public adapter facade preserves the extracted runtime identities", () => {
@@ -58,8 +58,10 @@ test("Cursor native launch, identity, and sandbox authority remain bounded domai
 
 test("extracted Cursor domains do not import the adapter state machine", () => {
   for (const source of [identitySource, launcherSource, sandboxSource]) {
-    assert.doesNotMatch(source, /from "\.\/cursor-provider-adapter\.js"/);
+    assert.doesNotMatch(source, /from "\.\.?\/cursor-provider-adapter\.js"/);
   }
+  // The launcher now sits beside the adapter modules in cursor/.
+  assert.doesNotMatch(launcherSource, /from "\.\/(provider-adapter|index)\.js"/);
 });
 
 function read(relativePath: string): string {

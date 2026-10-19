@@ -9,4 +9,4 @@ export {
   CursorIdentityAuthRequiredError,
   CursorTeamManagedIdentityError,
 } from "../cursor-identity.js";
-export { cursorCliEnv, defaultLaunchTurn, type CursorCliChild } from "../cursor-turn-launcher.js";
+export { cursorCliEnv, defaultLaunchTurn, type CursorCliChild } from "./turn-launcher.js";

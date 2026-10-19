@@ -3,7 +3,7 @@
 import { writeFileSync } from "node:fs";
 import type { ProviderActivityEvent, ProviderStreamEvent } from "../provider-adapter.js";
 import { assertCursorPersonalIdentity } from "../cursor-identity.js";
-import { defaultLaunchTurn, type CursorCliChild } from "../cursor-turn-launcher.js";
+import { defaultLaunchTurn, type CursorCliChild } from "./turn-launcher.js";
 import { defaultGetProcessIdentity, defaultSignalProcess } from "../provider-evidence.js";
 import {
   bindCursorSupervisedIdentity,

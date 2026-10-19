@@ -11,7 +11,7 @@ import type {
   ProviderTerminalPayload,
 } from "../provider-adapter.js";
 import { ProviderExecutionObserver, type NativeLifecycleCheckpoint } from "../provider-execution-observer.js";
-import type { CursorCliChild } from "../cursor-turn-launcher.js";
+import type { CursorCliChild } from "./turn-launcher.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import type { CursorManagedProfile } from "../cursor-managed-profile.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
