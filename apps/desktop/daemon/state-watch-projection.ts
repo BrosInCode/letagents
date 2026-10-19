@@ -1,5 +1,57 @@
 import type { DaemonActivityEvent, DaemonManifestEntryView } from "./types.js";
 
+type DeliveryReceipt = NonNullable<DaemonManifestEntryView["delivery_receipts"]>[number];
+type DeliveryReceiptPhase = DeliveryReceipt["timeline"][number]["phase"];
+
+/**
+ * The delivery-timeline phases the room-level state channel carries.
+ *
+ * Every room-level reader of a receipt's timeline looks for one of these and
+ * for nothing else:
+ * - `turn_started`: when the current turn began (renderer `agent-inspector.ts`
+ *   `turnStartedAt`, `managed-agents.ts` `currentRoomTurnStartedAt`; both take
+ *   the latest one of the current turn's receipt);
+ * - `conversation_restored`: whether a missing conversation was restored, with
+ *   its sequence and detail (`agent-inspector.ts` `continuationRecovery`).
+ *
+ * The full timeline of one message stays on the channels scoped to one agent:
+ * `manifest.list` and `supervisor.get_agent_inspector_detail` (the Inspector
+ * "Delivery timeline" and the message outcome duration read that detail).
+ */
+export const STATE_WATCH_RECEIPT_TIMELINE_PHASES: ReadonlySet<DeliveryReceiptPhase> = new Set<DeliveryReceiptPhase>([
+  "turn_started",
+  "conversation_restored",
+]);
+
+/**
+ * Keep, in order, only the timeline events of the phases above. The timeline
+ * stays an array on every receipt: the desktop client drops a receipt without
+ * one.
+ */
+export function projectStateWatchReceipts(
+  receipts: readonly DeliveryReceipt[] | undefined,
+): DeliveryReceipt[] | undefined {
+  if (!receipts) return undefined;
+  return receipts.map((receipt) => ({ ...receipt, timeline: projectStateWatchTimeline(receipt.timeline ?? []) }));
+}
+
+/**
+ * Trimmed timelines by the frozen timeline they were cut from. The read model
+ * hands out the same frozen timeline on every wake that reuses its inbox
+ * inputs, so such a wake trims nothing again. A frozen array cannot change, so
+ * its trim cannot go stale; the map holds nothing once the timeline is gone.
+ */
+const trimmedFrozenTimelines = new WeakMap<DeliveryReceipt["timeline"], DeliveryReceipt["timeline"]>();
+
+function projectStateWatchTimeline(timeline: DeliveryReceipt["timeline"]): DeliveryReceipt["timeline"] {
+  const frozen = Object.isFrozen(timeline);
+  const kept = frozen ? trimmedFrozenTimelines.get(timeline) : undefined;
+  if (kept) return kept;
+  const trimmed = timeline.filter((event) => STATE_WATCH_RECEIPT_TIMELINE_PHASES.has(event.phase));
+  if (frozen) trimmedFrozenTimelines.set(timeline, Object.freeze(trimmed) as DeliveryReceipt["timeline"]);
+  return trimmed;
+}
+
 /**
  * How many activity summaries the room-level state channel carries per entry.
  *
@@ -39,7 +91,9 @@ export function projectStateWatchActivity(
 
 /**
  * Project a manifest read model into the shape the room-level state channel
- * publishes. Every other entry field is carried through unchanged: the launch
+ * publishes: activity trimmed to summaries, and each delivery receipt's
+ * timeline trimmed to the phases above. Every other field, and every other
+ * field of a receipt, is carried through unchanged: the launch
  * journey, supervised-launch phases, and Inspector projections derive from
  * `condition`, `last_error`, `ready_reached_at`, `provider_ref`, liveness, and
  * room agent state, none of which this touches.
@@ -48,6 +102,10 @@ export function projectStateWatchEntries(
   entries: readonly DaemonManifestEntryView[],
 ): DaemonManifestEntryView[] {
   return entries.map((entry) => (
-    entry.activity === undefined ? entry : { ...entry, activity: projectStateWatchActivity(entry.activity) }
+    entry.activity === undefined && entry.delivery_receipts === undefined ? entry : {
+      ...entry,
+      ...(entry.activity === undefined ? {} : { activity: projectStateWatchActivity(entry.activity) }),
+      ...(entry.delivery_receipts === undefined ? {} : { delivery_receipts: projectStateWatchReceipts(entry.delivery_receipts) }),
+    }
   ));
 }
