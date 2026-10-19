@@ -518,11 +518,16 @@ async function statIdentity(path: string, content: boolean): Promise<string> {
  */
 async function resolvedOrigin(rootPath: string): Promise<string | null> {
   const result = await runGit(rootPath, ["remote", "get-url", "origin"]);
-  if (result.code === 0) {
-    const raw = result.stdout.trim();
+  return encodeOrigin(result.code === 0 ? { stdout: result.stdout } : { code: result.code, stderr: result.stderr });
+}
+
+/** One encoding for both reads: the normalized room and the raw URL, or "no-origin". */
+function encodeOrigin(read: { stdout: string } | { code: unknown; stderr: unknown }): string | null {
+  if ("stdout" in read) {
+    const raw = read.stdout.trim();
     return raw ? JSON.stringify([normalizeGitRemoteToRoomIdentifier(raw), raw]) : null;
   }
-  return result.code === 2 && /no such remote/i.test(result.stderr) ? "no-origin" : null;
+  return read.code === 2 && /no such remote/i.test(String(read.stderr ?? "")) ? "no-origin" : null;
 }
 
 const GIT_CONFIG_INCLUDE = /^\s*\[\s*include(?:if)?\b/im;
@@ -635,7 +640,12 @@ async function validateProjectBinding(
     const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
     if (!comparison.matches && !gitSetup) return null;
     if (!comparison.shouldUpgrade && !gitSetup) {
-      if (fingerprint && volumes && origin) rememberValidatedBinding(binding, fingerprint, volumes, origin);
+      // Store only when the origin read before validation is the one the
+      // validation itself used. An origin can flip back and forth, so a
+      // mismatch here means the decision was made on a different origin.
+      if (fingerprint && volumes && origin && derived.origin === origin) {
+        rememberValidatedBinding(binding, fingerprint, volumes, origin);
+      }
       return binding;
     }
     try {
@@ -658,11 +668,25 @@ async function validateProjectBinding(
 async function deriveFilesystemContext(rootPath: string): Promise<{
   context: DesktopProjectBindingContext;
   source: DesktopProjectBindingSource;
+  /** The origin this derivation actually used (encodeOrigin), or null if unknown. */
+  origin: string | null;
 }> {
-  const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
+  let origin: string | null = null;
+  const resolved = await resolveRoomIdentifierFromPath(rootPath, {
+    ignoreConfiguredRoom: true,
+    onOriginRemoteRead: (read) => {
+      if ("stdout" in read) {
+        origin = encodeOrigin(read);
+      } else {
+        const error = read.error as { code?: unknown; stderr?: unknown };
+        origin = encodeOrigin({ code: error?.code, stderr: error?.stderr });
+      }
+    },
+  });
   return {
     context: { roomIdentifier: resolved.roomIdentifier, gitRoom: resolved.gitRoom },
     source: resolved.source || "local_folder",
+    origin,
   };
 }
 

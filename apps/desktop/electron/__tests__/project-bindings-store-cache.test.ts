@@ -229,6 +229,55 @@ test("an include set through GIT_CONFIG_* variables cannot keep a stale origin",
   }
 });
 
+test("an origin that flips back during validation is never stored in the memo", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-origin-race-"));
+  const root = join(temporary, "repo");
+  mkdirSync(root);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+  const inc = join(temporary, "inc");
+  const flag = join(temporary, "flag");
+  const bin = join(temporary, "bin");
+  mkdirSync(bin);
+  const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
+  // A racing writer: right after the first `remote get-url` of an armed
+  // pass (the pre-read), it switches the included origin back to good.
+  writeFileSync(join(bin, "git"), [
+    "#!/bin/sh",
+    `${JSON.stringify(realGit)} "$@"`,
+    "rc=$?",
+    `if [ "$1 $2" = "remote get-url" ] && [ -f ${JSON.stringify(flag)} ]; then rm -f ${JSON.stringify(flag)}; cp ${JSON.stringify(`${inc}.good`)} ${JSON.stringify(inc)}; fi`,
+    "exit $rc",
+    "",
+  ].join("\n"));
+  chmodSync(join(bin, "git"), 0o755);
+  const previousPath = process.env.PATH;
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  resetProjectBindingsStoreCachesForTest();
+  const counts = projectBindingValidationCountsForTest;
+  try {
+    writeFileSync(`${inc}.good`, goodOrigin);
+    writeFileSync(inc, goodOrigin);
+    // Same-line include: the memo is allowed, so only the origin check guards it.
+    execFileSync("sh", ["-c", `printf '[core] [include] path = ${inc}\\n' >> .git/config`], { cwd: root });
+    process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+    await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    assert.equal((await listProjectBindings(storeOptions)).length, 1);
+
+    writeFileSync(inc, evilOrigin);
+    writeFileSync(flag, "");
+    // Pre-read sees evil (memo miss); validation then sees good and passes.
+    assert.equal((await listProjectBindings(storeOptions)).length, 1, "the armed pass validated the good origin");
+    writeFileSync(inc, evilOrigin);
+    const memo = counts.memo;
+    assert.deepEqual(await listProjectBindings(storeOptions), [], "the evil origin is never served from the memo");
+    assert.equal(counts.memo - memo, 0, "no memo hit");
+  } finally {
+    process.env.PATH = previousPath;
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("a new folder around the same Git directory is caught by the root identity", async () => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-root-"));
   const root = hostedRepo(temporary);
