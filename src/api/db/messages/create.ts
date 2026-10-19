@@ -5,8 +5,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   assertAttachmentTotalByteSize,
+  type MessageAttachmentUploader,
   type NormalizedMessageAttachmentReference,
 } from "../../messages/attachments.js";
+import { messageAttachmentUploadUsableBy } from "./attachments.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
@@ -151,6 +153,8 @@ export interface AddMessageOptions {
   reply_to_message_id?: string | null;
   thread_root_message_id?: string | null;
   attachments?: NormalizedMessageAttachmentReference[];
+  /** The request credential; only its own (or unowned legacy) uploads attach. */
+  attachment_uploader?: MessageAttachmentUploader | null;
   gif?: RoomGif | null;
   client_message_id?: string | null;
   publisher_agent_key?: string | null;
@@ -406,6 +410,7 @@ export async function addMessageWithCreateStatus(
             inArray(message_attachment_uploads.upload_id, uploadIds),
             eq(message_attachment_uploads.status, "pending"),
             sql`${message_attachment_uploads.expires_at} > ${createdMessage.timestamp}`,
+            messageAttachmentUploadUsableBy(options?.attachment_uploader),
           ),
         )
         .returning(messageAttachmentUploadSelection);

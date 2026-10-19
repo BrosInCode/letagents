@@ -1,5 +1,5 @@
 import { ClaudeCompaction, type ClaudeStartupDeadline } from "./claude-compaction.js";
-import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -29,6 +29,7 @@ import {
   type ProviderRoomTurnOptions,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
@@ -530,11 +531,21 @@ function assistantTextOf(message: ClaudeStreamMessage): string | null {
   return text || null;
 }
 
-function userStreamJsonLine(text: string, uuid?: string): string {
+/**
+ * Claude Code takes base64 image blocks in a stream-json user message and
+ * resizes them itself. Each image follows a short label that names it, in the
+ * order the prompt's attachment notes number them.
+ */
+function userStreamJsonLine(text: string, uuid?: string, attachments?: ProviderRoomTurnRequest["attachments"]): string {
+  const images = includedRoomTurnImages(attachments).flatMap(image => image.data ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}` },
+    { type: "image", source: { type: "base64", media_type: image.mimeType,
+      data: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64") } },
+  ] : []);
   return JSON.stringify({
     type: "user",
     ...(uuid ? { uuid } : {}),
-    message: { role: "user", content: [{ type: "text", text }] },
+    message: { role: "user", content: [{ type: "text", text }, ...images] },
   });
 }
 
@@ -1511,6 +1522,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     };
   }
 
+  /** Claude Code takes base64 image blocks on stdin and resizes them itself. */
+  roomTurnImageDelivery(): RoomTurnImageDelivery {
+    return "memory";
+  }
+
   async runRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -1544,7 +1560,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       handle.executionTools.clear();
       const context = handle.roomContext.prepare(request, handle.providerContinuationId);
       try {
-        handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request, context.lines), turnId));
+        handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request, context.lines), turnId, request.attachments));
       } catch (error) {
         // The exact id is durable, but the native write did not occur. Release
         // the local waiter and fail this continuation so recovery/reconcile can

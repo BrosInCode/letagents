@@ -1392,6 +1392,34 @@ test("GIF publication falls back to text only on a known pre-commit disabled res
   } finally { globalThis.fetch = previousFetch; }
 });
 
+test("a worker stages a reply attachment with its own bearer, and the reply carries the upload id", async () => {
+  const previousFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; authorization: string | null; body: unknown }> = [];
+  try {
+    globalThis.fetch = (async (url, init) => {
+      const headers = new Headers(init?.headers);
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body ? Buffer.from(init.body as Uint8Array).toString() : null;
+      calls.push({ url: String(url), method: init?.method ?? "GET", authorization: headers.get("authorization"), body });
+      if (String(url).endsWith("/attachments/uploads")) {
+        return new Response(JSON.stringify({ upload_id: "upl_9", upload_url: "https://storage.test/put", method: "PUT", headers: { "Content-Type": "image/png" } }), { status: 201 });
+      }
+      if (String(url).startsWith("https://storage.test/")) return new Response(null, { status: 200 });
+      return new Response(JSON.stringify({ id: "msg_6", room_id: "github.com/org/repo" }), { status: 200 });
+    }) as typeof fetch;
+    const room = { roomId: "github.com/org/repo", apiUrl: "https://letagents.test", bearer: "worker-token", signal: new AbortController().signal };
+    assert.deepEqual(await productionSupervisedDeliveryHttp.stageAttachment!({ ...room, fileName: "shot.png", mimeType: "image/png", bytes: Buffer.from("png") }), { uploadId: "upl_9" });
+    await productionSupervisedDeliveryHttp.publish({ ...room, text: "Done.", clientMessageId: "reply-1", attachments: [{ upload_id: "upl_9" }], replyTo: null, threadRootId: null });
+    assert.deepEqual(calls.map(({ url, method, authorization }) => [url, method, authorization]), [
+      ["https://letagents.test/rooms/github.com/org/repo/attachments/uploads", "POST", "Bearer worker-token"],
+      ["https://storage.test/put", "PUT", null],
+      ["https://letagents.test/rooms/github.com/org/repo/messages", "POST", "Bearer worker-token"],
+    ]);
+    assert.deepEqual(calls[0]!.body, { filename: "shot.png", content_type: "image/png", byte_size: 3 });
+    assert.equal(calls[1]!.body, "png");
+    assert.deepEqual((calls[2]!.body as { attachments: unknown }).attachments, [{ upload_id: "upl_9" }]);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("production publication requires a nonempty canonical id in the requested room", async () => {
   const previousFetch = globalThis.fetch;
   try {
@@ -9791,7 +9819,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
 
     const currentEffect = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
-      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "allowed" }, mutation: true,
     });
     assert.equal(currentEffect.ok, true, currentEffect.error);
     const effectId = String((currentEffect.result as { effect_id: string }).effect_id);
@@ -9802,7 +9830,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     assert.equal(completedEffect.ok, true, completedEffect.error);
     const exactRetry = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
-      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "allowed" }, mutation: true,
     });
     assert.equal(exactRetry.ok, true, exactRetry.error);
     assert.deepEqual(exactRetry.result, { state: "completed", result: { delivered: true }, room_id: entry.room_id },
@@ -9810,7 +9838,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
 
     const interruptedMutationParams = {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-uncertain",
-      tool_name: "send_message", input: { text: "send at most once" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "send at most once" }, mutation: true,
     };
     const interruptedMutation = await daemonRequest(
       paths.socketPath, "supervisor.prepare_bounded_effect", interruptedMutationParams,
@@ -9910,7 +9938,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     };
     const checkpointFailureParams = {
       ...executeParams, mcp_request_id: "effect-success-checkpoint-failure",
-      tool_name: "send_message", input: { text: "external effect succeeds once" },
+      tool_name: "send_message", input: { reply_to: "other-message", text: "external effect succeeds once" },
     };
     const checkpointFailure = await daemonRequest(
       paths.socketPath,

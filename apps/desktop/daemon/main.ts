@@ -1,10 +1,11 @@
 import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, type DaemonMaintenanceService } from "./maintenance-service.js";
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
 import { AgentStreamRegistry } from "./agent-stream-registry.js";
+import { ReplyAttachmentSpool } from "./reply-attachment-spool.js";
 import { BoundedEffectCoordinator } from "./bounded-effect-coordinator.js";
 import { ContinuationRepairCoordinator } from "./continuation-repair-coordinator.js";
 import {
@@ -72,6 +73,7 @@ import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-au
 import { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { RoomTurnAttachmentStager } from "./room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-lifecycle-coordinator.js";
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
@@ -96,6 +98,7 @@ export {
   continuationRepairExhaustionNeedsPersistence,
   continuationRepairMissingContinuation,
 } from "./continuation-repair-policy.js";
+
 export type { DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -104,6 +107,9 @@ type RecoveryClock = {
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout; sleep?: (delayMs: number) => Promise<void>; random?: () => number;
 };
+/** Copies for replies that never published are removed after this long. */
+const REPLY_ATTACHMENT_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
+
 export class SupervisorDaemon {
   private readonly stateDatabasePath: string;
   private readonly singleton: DaemonSingleton;
@@ -127,9 +133,14 @@ export class SupervisorDaemon {
   private readonly executionDelegations: ExecutionDelegationCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
+  /** Daemon-owned copies of files agents attach to their final replies. */
+  private readonly replyAttachmentSpool: ReplyAttachmentSpool;
+  private replyAttachmentSweep: NodeJS.Timeout | null = null;
   private readonly continuationRepairs: ContinuationRepairCoordinator;
   private readonly roomMoves: RoomMoveCoordinator;
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
+  /** Images on the message that wakes an agent, staged for one turn under the daemon's own folder. */
+  private readonly roomTurnAttachments: RoomTurnAttachmentStager;
   private readonly supervisedDeliveryLifecycle: SupervisedDeliveryLifecycleCoordinator;
   private readonly turnControls: TurnControlCoordinator;
   private readonly roomDeliveryControl: RoomDeliveryControl;
@@ -234,6 +245,7 @@ export class SupervisorDaemon {
       nowMs: () => this.nowMs(),
     });
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
+    this.roomTurnAttachments = new RoomTurnAttachmentStager(join(root, "room-turn-attachments"));
     const gitCommand = createGitCommand(root);
     this.gitCommand = gitCommand;
     this.durability = new WorkDurabilityStore(
@@ -298,6 +310,7 @@ export class SupervisorDaemon {
     this.supervisedInbox = new SupervisedAgentInboxStore(
       paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId), /* schemaPrepared */ true,
     );
+    this.replyAttachmentSpool = new ReplyAttachmentSpool(join(dirname(paths.manifestPath), "reply-attachments"));
     this.convergencePacer = new ConvergencePacer({ nowMs: recoveryClock.nowMs, random: recoveryClock.random,
       hasPendingWork: async (entryId) => { const head = await this.supervisedInbox.head(entryId); return Boolean(head && head.state !== "blocked"); },
     });
@@ -621,6 +634,8 @@ export class SupervisorDaemon {
         },
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
+        this.replyAttachmentSpool,
+        this.roomTurnAttachments,
       ) : null;
     this.readModel = new DaemonReadModel({
       readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
@@ -836,6 +851,10 @@ export class SupervisorDaemon {
         fenceAdmittedTransitionCommit: (commit) => this.fenceAdmittedTransitionCommit(commit),
       },
       policy: { structuredRoomTurnCompletion },
+      replyAttachments: {
+        snapshot: (input) => this.replyAttachmentSpool.snapshot(input),
+        keepOnly: (inboxItemId, spoolIds) => this.replyAttachmentSpool.keepOnly(inboxItemId, spoolIds),
+      },
     });
     this.hostApprovals = createHostApprovalBridge({
       store: this.store, inbox: this.supervisedInbox, provider: this.providerPort,
@@ -964,6 +983,11 @@ export class SupervisorDaemon {
   async start(storage: StateRecoveryBootstrap = {}): Promise<void> {
     assertMacOS(this.platform);
     await this.singleton.acquire();
+    // Copies for replies that never published (no_reply, a lost or refused turn) are not needed after two days.
+    const sweepReplyAttachments = () => void this.replyAttachmentSpool.sweep(REPLY_ATTACHMENT_RETENTION_MS).catch(() => undefined);
+    sweepReplyAttachments();
+    this.replyAttachmentSweep = setInterval(sweepReplyAttachments, 60 * 60 * 1000);
+    this.replyAttachmentSweep.unref();
     try {
       this.maintenance = await openDaemonMaintenance({
         singleton: this.singleton, store: this.store, socket: this.socket,
@@ -1023,6 +1047,8 @@ export class SupervisorDaemon {
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
     await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
+    // Images an earlier process staged for turns that have long ended.
+    void this.roomTurnAttachments.sweep();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
       if (await this.store.unresolvedDeliveryDrain(entry.id) || await this.store.unresolvedPollingActivation(entry.id)) {
@@ -1042,6 +1068,7 @@ export class SupervisorDaemon {
     // open socket would keep the process alive.
     this.handoffScheduled = true;
     let executionDelegationDrain: Promise<void> | undefined;
+    if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
     await runEveryStopStep([
       () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
       () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
@@ -1083,6 +1110,7 @@ export class SupervisorDaemon {
   private async stopForHandoff(): Promise<void> {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
+    if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
     this.workerRuntimeCustody.destroyAllCredentials();
     this.convergencePacer.close();
     this.wakeRoomMoveReconciliationWaiters();

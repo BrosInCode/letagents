@@ -59,4 +59,6 @@ export const messageAttachmentUploadSelection = {
   attached_message_number: message_attachment_uploads.attached_message_number,
   created_at: message_attachment_uploads.created_at,
   attached_at: message_attachment_uploads.attached_at,
+  uploader_account_id: message_attachment_uploads.uploader_account_id,
+  uploader_agent_session_id: message_attachment_uploads.uploader_agent_session_id,
 };

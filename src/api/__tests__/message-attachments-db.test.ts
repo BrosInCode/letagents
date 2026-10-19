@@ -18,6 +18,7 @@ const pool = dbClientModule?.pool;
 const addMessage = dbModule?.addMessage;
 const addMessageWithCreateStatus = dbModule?.addMessageWithCreateStatus;
 const createMessageAttachmentUpload = dbModule?.createMessageAttachmentUpload;
+const deletePendingMessageAttachmentUpload = dbModule?.deletePendingMessageAttachmentUpload;
 const createProjectWithName = dbModule?.createProjectWithName;
 const getMessageAttachment = dbModule?.getMessageAttachment;
 const getMessageAttachmentUpload = dbModule?.getMessageAttachmentUpload;
@@ -70,6 +71,7 @@ test(
     await createMessageAttachmentUpload({
       upload_id: "upl_1234567890abcdef",
       room_id: room.id,
+      uploader: null,
       filename: "notes.txt",
       content_type: "text/plain",
       byte_size: Buffer.byteLength("attachment contents"),
@@ -124,6 +126,7 @@ test(
     await createMessageAttachmentUpload({
       upload_id: "upl_idempotent_retry",
       room_id: room.id,
+      uploader: null,
       filename: "diagram.png",
       content_type: "image/png",
       byte_size: 42,
@@ -181,6 +184,7 @@ test(
     await createMessageAttachmentUpload({
       upload_id: "upl_attachment_only_visibility",
       room_id: room.id,
+      uploader: null,
       filename: "notes.txt",
       content_type: "text/plain",
       byte_size: 5,
@@ -261,7 +265,7 @@ test("desktop submission retry is immutable across owners, text, thread, and att
   const room = await createProjectWithName!("desktop-outbox-replay");
   const root = await addMessage!(room.id, "Human", "Root", { source: "browser" });
   await createMessageAttachmentUpload!({
-    upload_id: "upl_desktop_outbox", room_id: room.id, filename: "note.txt", content_type: "text/plain", byte_size: 3,
+    upload_id: "upl_desktop_outbox", room_id: room.id, uploader: null, filename: "note.txt", content_type: "text/plain", byte_size: 3,
     storage_provider: "s3", bucket: "letagents-test", object_key: "test/outbox/note.txt",
     expires_at: new Date(Date.now() + 60_000).toISOString(),
   });
@@ -299,7 +303,7 @@ for (const stage of ["attachments", "thread-read", "routing"] as const) {
       'test/publication', 'publication', 'Publication', $2, 'Human', 'Codex', NOW(), NOW(), NOW())`, [room.id, account.id]);
     const root = await addMessage!(room.id, "human", "root", { source: "browser" });
     await createMessageAttachmentUpload({
-      upload_id: "upl_publication_failure", room_id: room.id, filename: "notes.txt", content_type: "text/plain",
+      upload_id: "upl_publication_failure", room_id: room.id, uploader: null, filename: "notes.txt", content_type: "text/plain",
       byte_size: 4, storage_provider: "s3", bucket: "test", object_key: "notes", expires_at: new Date(Date.now() + 60_000).toISOString(),
     });
     const published: unknown[] = [];
@@ -346,3 +350,265 @@ for (const stage of ["attachments", "thread-read", "routing"] as const) {
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM messages WHERE room_id = $1 AND client_message_id IS NOT NULL', [room.id])).rows[0].count, 1);
   });
 }
+
+function stagedUpload(roomId: string, uploadId: string, overrides: {
+  uploader?: { account_id: string | null; agent_session_id: string | null } | null;
+  expires_at?: string;
+} = {}) {
+  return createMessageAttachmentUpload!({
+    upload_id: uploadId,
+    room_id: roomId,
+    uploader: overrides.uploader ?? null,
+    filename: "notes.txt",
+    content_type: "text/plain",
+    byte_size: 5,
+    storage_provider: "s3",
+    bucket: "letagents-test",
+    object_key: `rooms/${roomId}/uploads/${uploadId}/notes.txt`,
+    expires_at: overrides.expires_at ?? new Date(Date.now() + 60_000).toISOString(),
+  });
+}
+
+const accountA = { account_id: "acct_a", agent_session_id: null };
+const accountB = { account_id: "acct_b", agent_session_id: null };
+const sessionA = { account_id: null, agent_session_id: "sess_a" };
+const sessionB = { account_id: null, agent_session_id: "sess_b" };
+
+test("only the uploader can attach its upload; unowned legacy uploads stay open to the room", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const room = await createProjectWithName!("upload-owner-claim");
+  await stagedUpload(room.id, "upl_owner_account_a", { uploader: accountA });
+  await stagedUpload(room.id, "upl_owner_session_a", { uploader: sessionA });
+  await stagedUpload(room.id, "upl_owner_legacy_row");
+
+  const attach = (uploadId: string, uploader: typeof accountA | typeof sessionA | null) =>
+    addMessage!(room.id, "sender", "see attached", {
+      source: "browser",
+      attachments: [{ upload_id: uploadId }],
+      attachment_uploader: uploader,
+    });
+
+  for (const [uploadId, uploader] of [
+    ["upl_owner_account_a", accountB],
+    ["upl_owner_account_a", sessionA],
+    ["upl_owner_account_a", null],
+    ["upl_owner_session_a", sessionB],
+    ["upl_owner_session_a", { account_id: "sess_a", agent_session_id: null }],
+    ["upl_owner_session_a", null],
+  ] as const) {
+    await assert.rejects(attach(uploadId, uploader), /attachment upload not found or expired/);
+  }
+  assert.equal((await getMessageAttachmentUpload!(room.id, "upl_owner_account_a"))?.status, "pending");
+  assert.equal((await getMessageAttachmentUpload!(room.id, "upl_owner_session_a"))?.status, "pending");
+
+  assert.equal((await attach("upl_owner_account_a", accountA)).attachments.length, 1);
+  assert.equal((await attach("upl_owner_session_a", sessionA)).attachments.length, 1);
+  assert.equal((await attach("upl_owner_legacy_row", accountB)).attachments.length, 1);
+
+  const owned = await getMessageAttachmentUpload!(room.id, "upl_owner_session_a");
+  assert.equal(owned?.uploader_agent_session_id, "sess_a");
+  assert.equal(owned?.uploader_account_id, null);
+});
+
+test("a rejected attachment rolls back the whole send, including the uploads it did own", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const room = await createProjectWithName!("upload-owner-mixed");
+  await stagedUpload(room.id, "upl_mixed_own_upload", { uploader: accountA });
+  await stagedUpload(room.id, "upl_mixed_other_upload", { uploader: accountB });
+
+  await assert.rejects(addMessage!(room.id, "sender", "two files", {
+    source: "browser",
+    attachments: [{ upload_id: "upl_mixed_own_upload" }, { upload_id: "upl_mixed_other_upload" }],
+    attachment_uploader: accountA,
+  }), /attachment upload not found or expired/);
+  assert.equal((await getMessageAttachmentUpload!(room.id, "upl_mixed_own_upload"))?.status, "pending");
+  assert.equal((await getMessages!(room.id)).messages.length, 0);
+});
+
+test("only the uploader can discard its pending upload", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const room = await createProjectWithName!("upload-owner-discard");
+  await stagedUpload(room.id, "upl_discard_account_a", { uploader: accountA });
+  await stagedUpload(room.id, "upl_discard_session_a", { uploader: sessionA });
+  await stagedUpload(room.id, "upl_discard_legacy_row");
+
+  assert.equal(await deletePendingMessageAttachmentUpload!(room.id, "upl_discard_account_a", accountB), undefined);
+  assert.equal(await deletePendingMessageAttachmentUpload!(room.id, "upl_discard_account_a", null), undefined);
+  assert.equal(await deletePendingMessageAttachmentUpload!(room.id, "upl_discard_session_a", sessionB), undefined);
+  assert.ok(await getMessageAttachmentUpload!(room.id, "upl_discard_account_a"));
+  assert.ok(await getMessageAttachmentUpload!(room.id, "upl_discard_session_a"));
+
+  assert.equal((await deletePendingMessageAttachmentUpload!(room.id, "upl_discard_account_a", accountA))?.upload_id, "upl_discard_account_a");
+  assert.equal((await deletePendingMessageAttachmentUpload!(room.id, "upl_discard_session_a", sessionA))?.upload_id, "upl_discard_session_a");
+  assert.equal((await deletePendingMessageAttachmentUpload!(room.id, "upl_discard_legacy_row", null))?.upload_id, "upl_discard_legacy_row");
+  assert.equal(await getMessageAttachmentUpload!(room.id, "upl_discard_account_a"), undefined);
+});
+
+test("an upload row cannot name both an account and an agent session", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const room = await createProjectWithName!("upload-owner-check");
+  await stagedUpload(room.id, "upl_check_both_owner", { uploader: accountA });
+  await assert.rejects(
+    pool!.query(
+      "UPDATE message_attachment_uploads SET uploader_agent_session_id = 'sess_a' WHERE upload_id = 'upl_check_both_owner'",
+    ),
+    /message_attachment_uploads_single_uploader_check/,
+  );
+});
+
+const cleanupModule = () => import("../server/attachment-upload-cleanup.js");
+
+test("expired pending uploads and their objects are removed; a failed object keeps its row for the next pass", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const { cleanupExpiredAttachmentUploadsOnce, ATTACHMENT_UPLOAD_CLEANUP_BATCH, ATTACHMENT_UPLOAD_CLEANUP_GRACE_MS } =
+    await cleanupModule();
+  const room = await createProjectWithName!("upload-cleanup");
+  const now = Date.now();
+  const longExpired = new Date(now - ATTACHMENT_UPLOAD_CLEANUP_GRACE_MS - 60 * 60_000).toISOString();
+  const expiredCount = ATTACHMENT_UPLOAD_CLEANUP_BATCH + 5;
+  for (let index = 0; index < expiredCount; index++) {
+    await stagedUpload(room.id, `upl_cleanup_expired_${String(index).padStart(3, "0")}`, {
+      uploader: accountA,
+      expires_at: longExpired,
+    });
+  }
+  // Inside the grace window, still live, and already attached: all kept.
+  await stagedUpload(room.id, "upl_cleanup_in_grace", {
+    expires_at: new Date(now - ATTACHMENT_UPLOAD_CLEANUP_GRACE_MS + 60_000).toISOString(),
+  });
+  await stagedUpload(room.id, "upl_cleanup_still_live", { uploader: accountA });
+  await stagedUpload(room.id, "upl_cleanup_attached", { uploader: accountA });
+  await addMessage!(room.id, "sender", "attached", {
+    source: "browser",
+    attachments: [{ upload_id: "upl_cleanup_attached" }],
+    attachment_uploader: accountA,
+  });
+  await pool!.query(
+    "UPDATE message_attachment_uploads SET expires_at = $1 WHERE upload_id = 'upl_cleanup_attached'",
+    [longExpired],
+  );
+
+  const state = { cursor: null };
+  const disabled = await cleanupExpiredAttachmentUploadsOnce({
+    now: () => now,
+    storageConfigured: () => false,
+    deleteObject: async () => assert.fail("no object deletes without storage"),
+  }, state);
+  assert.deepEqual(disabled, { deleted: 0, object_failures: 0 });
+
+  const deletedKeys: string[] = [];
+  const first = await cleanupExpiredAttachmentUploadsOnce({
+    now: () => now,
+    storageConfigured: () => true,
+    deleteObject: async ({ object_key }) => {
+      if (object_key.includes("upl_cleanup_expired_003")) throw new Error("storage unavailable");
+      deletedKeys.push(object_key);
+    },
+  }, state);
+  assert.deepEqual(first, { deleted: expiredCount - 1, object_failures: 1 });
+  assert.equal(deletedKeys.length, expiredCount - 1);
+  assert.ok(deletedKeys.every((key) => key.includes("upl_cleanup_expired_")));
+  assert.equal(state.cursor, null, "a finished pass starts over next time");
+
+  const remaining = async () => (await pool!.query<{ upload_id: string }>(
+    "SELECT upload_id FROM message_attachment_uploads WHERE room_id = $1 ORDER BY upload_id",
+    [room.id],
+  )).rows.map((row) => row.upload_id);
+  assert.deepEqual(await remaining(), [
+    "upl_cleanup_attached",
+    "upl_cleanup_expired_003",
+    "upl_cleanup_in_grace",
+    "upl_cleanup_still_live",
+  ]);
+
+  const retried = await cleanupExpiredAttachmentUploadsOnce({
+    now: () => now,
+    storageConfigured: () => true,
+    deleteObject: async () => {},
+  }, state);
+  assert.deepEqual(retried, { deleted: 1, object_failures: 0 });
+  assert.deepEqual(await remaining(), ["upl_cleanup_attached", "upl_cleanup_in_grace", "upl_cleanup_still_live"]);
+});
+
+test("a cleanup tick stops at its batch cap, and the next tick resumes past rows that keep failing", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const { cleanupExpiredAttachmentUploadsOnce, ATTACHMENT_UPLOAD_CLEANUP_BATCH, MAX_ATTACHMENT_UPLOAD_CLEANUP_BATCHES_PER_TICK } =
+    await cleanupModule();
+  const room = await createProjectWithName!("upload-cleanup-cap");
+  const perTick = ATTACHMENT_UPLOAD_CLEANUP_BATCH * MAX_ATTACHMENT_UPLOAD_CLEANUP_BATCHES_PER_TICK;
+  const base = Date.now() - 3 * 60 * 60_000;
+  for (let index = 0; index < perTick + 10; index++) {
+    await stagedUpload(room.id, `upl_cleanup_cap_${String(index).padStart(3, "0")}`, {
+      expires_at: new Date(base + index * 1000).toISOString(),
+    });
+  }
+  // The oldest perTick objects can never be deleted.
+  const failing = (key: string) => Number(key.match(/upl_cleanup_cap_(\d+)/)?.[1]) < perTick;
+  const state = { cursor: null };
+  const deps = {
+    now: () => Date.now(),
+    storageConfigured: () => true,
+    deleteObject: async ({ object_key }: { object_key: string }) => {
+      if (failing(object_key)) throw new Error("access denied");
+    },
+  };
+
+  assert.deepEqual(await cleanupExpiredAttachmentUploadsOnce(deps, state), { deleted: 0, object_failures: perTick });
+  assert.equal((state.cursor as { upload_id: string } | null)?.upload_id, `upl_cleanup_cap_${String(perTick - 1).padStart(3, "0")}`);
+  assert.deepEqual(await cleanupExpiredAttachmentUploadsOnce(deps, state), { deleted: 10, object_failures: 0 });
+  assert.equal(state.cursor, null);
+  const { rows } = await pool!.query<{ count: number }>(
+    "SELECT count(*)::int AS count FROM message_attachment_uploads WHERE room_id = $1",
+    [room.id],
+  );
+  assert.equal(rows[0].count, perTick);
+});
+
+test("cleanup keeps a row a send attached meanwhile, and an aborted tick stops between objects", {
+  concurrency: false,
+  skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+}, async () => {
+  const { cleanupExpiredAttachmentUploadsOnce } = await cleanupModule();
+  const room = await createProjectWithName!("upload-cleanup-race");
+  const longExpired = (offset: number) => new Date(Date.now() - 3 * 60 * 60_000 + offset).toISOString();
+  await stagedUpload(room.id, "upl_cleanup_race_claimed", { expires_at: longExpired(0) });
+  await stagedUpload(room.id, "upl_cleanup_race_second", { expires_at: longExpired(1000) });
+  await stagedUpload(room.id, "upl_cleanup_race_third", { expires_at: longExpired(2000) });
+
+  const abort = new AbortController();
+  const seen: string[] = [];
+  const result = await cleanupExpiredAttachmentUploadsOnce({
+    now: () => Date.now(),
+    storageConfigured: () => true,
+    deleteObject: async ({ object_key }, { signal }) => {
+      assert.equal(signal, abort.signal);
+      seen.push(object_key);
+      if (object_key.includes("upl_cleanup_race_claimed")) {
+        // A send with a clock skewed by over an hour claimed the row while its
+        // object was being deleted. The row must survive (it now backs a
+        // message); its bytes are gone, which the grace window makes unreachable in practice.
+        await pool!.query("UPDATE message_attachment_uploads SET status = 'attached' WHERE upload_id = 'upl_cleanup_race_claimed'");
+      } else {
+        abort.abort();
+      }
+    },
+  }, { cursor: null }, abort.signal);
+
+  assert.deepEqual(result, { deleted: 1, object_failures: 0 });
+  assert.equal(seen.length, 2, "the tick stopped once aborted");
+  assert.equal((await getMessageAttachmentUpload!(room.id, "upl_cleanup_race_claimed"))?.status, "attached");
+  assert.equal(await getMessageAttachmentUpload!(room.id, "upl_cleanup_race_second"), undefined);
+  assert.ok(await getMessageAttachmentUpload!(room.id, "upl_cleanup_race_third"));
+});

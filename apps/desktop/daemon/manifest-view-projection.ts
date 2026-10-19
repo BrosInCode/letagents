@@ -81,7 +81,7 @@ export function projectDeliveryTurn(
   if (!head) return { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null };
   // A persisted dispatch marker is recovery evidence, not proof that this
   // daemon is currently running the provider turn.
-  if (!activeTurn || activeTurn.inboxItemId !== head.inbox_item_id) {
+  if (head.state === "result_recovery" || !activeTurn || activeTurn.inboxItemId !== head.inbox_item_id) {
     return {
       state: head.state === "blocked" ? "failed" : head.state === "result_recovery" ? "retrying" : "idle",
       inbox_item_id: head.inbox_item_id,

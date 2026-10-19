@@ -468,9 +468,16 @@ async function hydrateMessageRows(
 
   const messageNumbers = rows.map((row) => row.number);
   for (const number of messageNumbers) {
+    // Older rows copied each image into data_url as well as the file. A row
+    // with a file URL is shown and published from that file, so its inline
+    // copy is never read and stays out of every message page.
     const attachments = database
       .prepare(`
-        SELECT *
+        SELECT room_id, message_number, attachment_id, file_name, mime_type, size_bytes,
+               url, download_url,
+               CASE WHEN url LIKE 'file:%' THEN NULL ELSE data_url END AS data_url,
+               CASE WHEN url LIKE 'file:%' THEN NULL ELSE content_base64 END AS content_base64,
+               created_at
         FROM local_chat_attachments
         WHERE room_id = ? AND message_number = ?
         ORDER BY created_at ASC

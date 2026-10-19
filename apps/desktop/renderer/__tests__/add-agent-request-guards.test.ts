@@ -404,7 +404,8 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     window: {
       letagentsDesktop: {
         openModel: {
-          saveSettings: () => {
+          saveSettings: (input: { contextWindow: number | null }) => {
+            assert.equal(input.contextWindow, 262144);
             saves += 1;
             return pendingSave.promise;
           },
@@ -443,6 +444,8 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     onMessage: () => undefined,
   });
 
+  configuration.openModelModel.value = "glm-5.3";
+  configuration.openModelContextWindow.value = "262144";
   const first = actions.saveOpenModelSettings();
   actions.resetTransientState();
   const second = actions.saveOpenModelSettings();
@@ -452,6 +455,16 @@ test("closing the modal does not unlock a second Open Model write", async () => 
   pendingSave.resolve({ baseUrl: "http://localhost:11434", model: "qwen", hasApiKey: false, error: null });
   await Promise.all([first, second]);
   assert.equal(configuration.savingOpenModelSettings.value, false);
+});
+
+test("Open Model context overrides clear when the endpoint or model changes", () => {
+  const configuration = useAddAgentConfiguration();
+  configuration.openModelContextWindow.value = "262144";
+  configuration.openModelModel.value = "different-model";
+  assert.equal(configuration.openModelContextWindow.value, "");
+  configuration.openModelContextWindow.value = "262144";
+  configuration.openModelBaseUrl.value = "https://different.example/v1";
+  assert.equal(configuration.openModelContextWindow.value, "");
 });
 
 test("closing the modal does not unlock duplicate provider setup side effects", async () => {
