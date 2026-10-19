@@ -1152,6 +1152,7 @@ export class SupervisorGrantCoordinator {
         apiKey: settings.apiKey,
         baseUrl: settings.baseUrl,
         model,
+        ...(model === settings.model && settings.contextWindow != null ? { contextWindow: settings.contextWindow } : {}),
         daemonGeneration,
       });
       if (credential !== "installed") {

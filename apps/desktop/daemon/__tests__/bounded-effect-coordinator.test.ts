@@ -45,7 +45,7 @@ function executeInput(overrides: Partial<ExecuteBoundedToolInput> = {}): Execute
     ...coordinates,
     mcpRequestId: "request-a",
     toolName: "send_message",
-    input: { text: "hello" },
+    input: { reply_to: "other-message", text: "hello" },
     ...overrides,
   };
 }
@@ -75,7 +75,7 @@ function effect(overrides: Partial<SupervisedEffectRecord> = {}): SupervisedEffe
     provider_turn_id: "turn-a",
     mcp_request_id: "request-a",
     tool_name: "send_message",
-    request: { text: "hello" },
+    request: { reply_to: "other-message", text: "hello" },
     mutation: true,
     state: "prepared",
     result: null,
@@ -409,6 +409,12 @@ test("prepare preserves idempotent terminal, uncertain, duplicate, and final-ans
   );
 
   for (const [toolName, input] of [
+    ["send_message", { text: "answer" }],
+    ["send_message", { reply_to: "", text: "answer" }],
+    ["send_message", { reply_to: "  ", text: "answer" }],
+    ["send_message", { thread_parent_id: "  ", text: "answer" }],
+    ["send_message", { thread_parent_id: "  ", reply_to: "source-a", text: "answer" }],
+    ["send_message", { reply_to: " source-a ", text: "answer" }],
     ["send_message", { reply_to: "source-a", text: "answer" }],
     ["send_message", { thread_parent_id: "source-a", text: "answer" }],
     ["send_thread_message", { thread_parent_id: "source-a", text: "answer" }],
@@ -423,6 +429,30 @@ test("prepare preserves idempotent terminal, uncertain, duplicate, and final-ans
     });
     assert.equal(finalAnswer.events.includes("journal:mark"), false);
     assert.deepEqual(finalAnswer.capturedPrepare?.request, input, "the exact reply choice remains durably journaled");
+  }
+});
+
+test("untargeted room answers use final publication instead of sending an answer followed by a recap", async () => {
+  for (const provider of ["codex", "claude-code", "open-model", "cursor"]) {
+    const state = harness({ provider });
+    const input = executeInput({ input: { room_id: "room-a", text: "The actual answer." } });
+    const result = await state.subject.execute(input) as { result: { structuredContent: Record<string, unknown> } };
+    assert.equal(result.result.structuredContent.code, "USE_FINAL_ANSWER", provider);
+    assert.match(String(result.result.structuredContent.instruction), provider === "cursor" ? /complete_room_turn/ : /final answer/);
+    assert.equal(state.events.includes("runtime:execute"), false, `${provider}: no first post for a final recap to duplicate`);
+    assert.equal(state.events.includes("journal:mark"), false, `${provider}: the intercepted send never starts`);
+    assert.deepEqual(await state.subject.execute(input), result, `${provider}: retrying the intercepted send stays intercepted`);
+  }
+
+  for (const [toolName, input] of [
+    ["send_message", { reply_to: "other-message", text: "A separate reply." }],
+    ["send_message", { thread_parent_id: "  ", reply_to: " other-message ", text: "A separate reply." }],
+    ["send_message", { thread_parent_id: "other-message", text: "A separate thread reply." }],
+    ["send_thread_message", { thread_parent_id: "other-message", text: "A separate thread reply." }],
+  ] as const) {
+    const state = harness();
+    await state.subject.execute(executeInput({ toolName, input }));
+    assert.equal(state.events.includes("runtime:execute"), true, `${toolName}: deliberate replies to other messages still send`);
   }
 });
 
@@ -773,6 +803,8 @@ const roomToolCall = (toolName: string) => ({
   toolName,
   input: toolName === "set_reply_thread" ? {}
     : toolName === "set_reply_gif" ? { gif: { provider: "giphy", id: "example", title: "A small win" } }
+    : toolName === "send_message" ? { reply_to: "other-message", text: "hello" }
+    : toolName === "send_thread_message" ? { thread_parent_id: "other-message", text: "hello" }
     : toolName === "join_room" ? { name: "room-b" } : { text: "hello" },
 });
 const READ_ONLY_REFUSAL = (toolName: string) => new RegExp(`^Error: Read-only access does not allow the room tool "${toolName}"\\. This agent can read the room and post in it\\. `

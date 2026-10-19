@@ -8855,3 +8855,167 @@ test("Cursor usage rejects another account and discards a read after the exact h
   assert.equal(await pending, null);
   assert.equal(await adapter.readUsage(handle), null);
 });
+
+function stagedImageAttachments(folder: string) {
+  return [
+    { index: 1, fileName: "screen.png", mimeType: "image/png", sizeBytes: 12, status: "image" as const,
+      image: { mimeType: "image/png" as const, path: join(folder, "1.png") } },
+    { index: 2, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 5, status: "not_image" as const },
+  ];
+}
+
+test("a Cursor room turn names its staged images in the prompt and may only read their folder", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-images-"));
+  try {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    assert.equal(adapter.roomTurnImageDelivery(), "file");
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const pending = adapter.runRoomTurn(handle, { ...roomTurnRequest(), attachments: stagedImageAttachments(folder) });
+    await waitFor(() => harness.children[0]?.isReleased === true);
+    const launch = harness.launches[0]!;
+    const prompt = launch.args.at(-1)!;
+    assert.ok(prompt.includes([
+      `- Attachment 1: "screen.png" (image/png, 12 bytes). Included after this text as image 1.`,
+      `- Attachment 2: "notes.pdf" (application/pdf, 5 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.`,
+      "The attached images are files on this machine. Open each one with your file-reading tool to see it before you answer:",
+      `- Image 1 ("screen.png"): ${join(folder, "1.png")}`,
+    ].join("\n")), prompt.slice(-800));
+    const variants = [folder, realpathSync(folder)];
+    for (const path of variants) {
+      assert.equal(launch.allowedReadSubpaths?.includes(path), true, `read ${path}`);
+      assert.equal(launch.deniedWriteSubpaths?.includes(path), true, `no write ${path}`);
+      assert.equal(launch.deniedExecSubpaths?.includes(path), true, `no exec ${path}`);
+      assert.equal(launch.allowedWriteSubpaths?.includes(path) ?? false, false, `not writable ${path}`);
+    }
+    harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "seen", session_id: "sess-cursor-1" });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await withLoopAlive(pending);
+
+    // The read permission belongs to that one launch: the next turn on the same lane has none of it.
+    const next = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "inbox_cursor_2", actionId: "action_cursor_2" }));
+    await waitFor(() => harness.children[1]?.isReleased === true);
+    const nextLaunch = harness.launches[1]!;
+    assert.doesNotMatch(nextLaunch.args.at(-1)!, /Open each one with your file-reading tool/);
+    for (const path of variants) {
+      for (const list of [nextLaunch.allowedReadSubpaths, nextLaunch.deniedWriteSubpaths, nextLaunch.deniedExecSubpaths]) {
+        assert.equal(list?.includes(path) ?? false, false, `the next launch does not carry ${path}`);
+      }
+    }
+    harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false, result: "next", session_id: "sess-cursor-1" });
+    harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await withLoopAlive(next);
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("a staged image folder replaced by a link is never named or opened to the sandbox", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-image-link-"));
+  try {
+    const target = join(root, "home-like");
+    mkdirSync(target);
+    const linked = join(root, "turn-linked");
+    symlinkSync(target, linked);
+    const prompt = boundedCursorRoomTurnPrompt({ ...roomTurnRequest(), attachments: stagedImageAttachments(linked) }, "cursor:turn");
+    assert.doesNotMatch(prompt, /Open each one with your file-reading tool/);
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await adapter.spawn(daemonSpawnRequest({ permissionProfileId: "sandboxed_write", launchPolicy: { force: true, sandbox: "enabled" } }));
+    const pending = adapter.runRoomTurn(handle, { ...roomTurnRequest(), attachments: stagedImageAttachments(linked) });
+    await waitFor(() => harness.children[0]?.isReleased === true);
+    const launch = harness.launches[0]!;
+    for (const path of [linked, target, realpathSync(target)]) {
+      assert.equal(launch.allowedReadSubpaths?.includes(path) ?? false, false, `not readable ${path}`);
+    }
+    harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "seen", session_id: "sess-cursor-1" });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await withLoopAlive(pending);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a Cursor prompt without staged images gets no image lines", async () => {
+  const prompt = boundedCursorRoomTurnPrompt(roomTurnRequest(), "cursor:turn");
+  assert.doesNotMatch(prompt, /Open each one with your file-reading tool/);
+  const unstaged = boundedCursorRoomTurnPrompt({ ...roomTurnRequest(), attachments: [
+    { index: 1, fileName: "screen.png", mimeType: "image/png", sizeBytes: 12, status: "provider_unsupported" },
+  ] }, "cursor:turn");
+  assert.match(unstaged, /Not shown: this agent cannot view images/);
+  assert.doesNotMatch(unstaged, /Open each one with your file-reading tool/);
+});
+
+test("under the real sandbox a Cursor turn reads its staged image but cannot write there or read another turn's images", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-image-sandbox-"));
+  try {
+    const workspace = join(root, "workspace");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const executable = join(root, "fake-cursor-agent");
+    const stagedRoot = join(root, "room-turn-attachments");
+    const ownFolder = join(stagedRoot, "turn-own");
+    const otherFolder = join(stagedRoot, "turn-other");
+    initializeGitWorkspace(workspace);
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    mkdirSync(ownFolder, { recursive: true, mode: 0o700 });
+    mkdirSync(otherFolder, { recursive: true, mode: 0o700 });
+    writeFileSync(join(ownFolder, "1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), { mode: 0o600 });
+    writeFileSync(join(otherFolder, "1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]), { mode: 0o600 });
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const prompt = process.argv[process.argv.length - 1];
+const image = /- Image 1 \\("screen.png"\\): (.+)$/m.exec(prompt)[1];
+function attempt(run) { try { return { ok: true, value: run() }; } catch (error) { return { ok: false, code: error.code }; } }
+const outcome = {
+  read: attempt(() => fs.readFileSync(image).length),
+  write: attempt(() => fs.writeFileSync(path.join(path.dirname(image), "planted.txt"), "x")),
+  replace: attempt(() => fs.writeFileSync(image, "x")),
+  other: attempt(() => fs.readFileSync(${JSON.stringify(join(otherFolder, "1.png"))}).length),
+};
+${cursorConversationStoreFixtureSource("sess-image-sandbox")}
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-image-sandbox" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-image-sandbox" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      cwd: workspace,
+      workAttemptId: "wa-image-sandbox",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, {
+      ...roomTurnRequest({ inboxItemId: "inbox-image-sandbox" }), attachments: stagedImageAttachments(ownFolder),
+    }));
+    const outcome = JSON.parse(result.text!) as Record<string, { ok: boolean; value?: number; code?: string }>;
+    assert.deepEqual(outcome.read, { ok: true, value: 8 }, "the staged image is readable");
+    assert.equal(outcome.write?.ok, false, "nothing can be planted next to it");
+    assert.equal(outcome.replace?.ok, false, "the image itself cannot be replaced");
+    assert.equal(outcome.other?.ok, false, "another turn's images stay unreadable");
+    assert.deepEqual(readdirSync(ownFolder), ["1.png"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

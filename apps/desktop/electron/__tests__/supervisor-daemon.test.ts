@@ -1511,6 +1511,8 @@ async function startWireDaemon(
   const maintenance = { unresponsive: false, id: null as string | null };
   const negotiation = { delayMs: 0, error: null as string | null };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
+  // Extra wire fields a test wants the configuration replies to carry, such as an agent app that asks for image input.
+  const configurationExtras: { value: Record<string, unknown> } = { value: {} };
   const capturedEnvironment = supervisorDaemonSpawnEnvironment();
   const compatibilityFingerprint: { value: string | null } = {
     value: capturedEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
@@ -1593,9 +1595,9 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.get_agent_inspector_detail") {
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "supervisor.get_agent_configuration") {
-        result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
+        result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1, ...configurationExtras.value };
       } else if (request.method === "supervisor.update_agent_configuration") {
-        result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
+        result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1, ...configurationExtras.value } };
       } else if (request.method === "supervisor.apply_agent_configuration") {
         responseDelayMs = configurationApplyResponseDelayMs;
         result = { outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" };
@@ -1645,7 +1647,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation };
+  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -2008,6 +2010,75 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
     await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedConfigurationRevision: 0 }), /exact typed/);
     await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_invalid", daemonGeneration: 39, expectedConfigurationRevision: 2 }), /invalid configuration apply result/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("saving an agent's settings sends the image-input choice only when the draft has one", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const base = { model: "local-model", reasoningEffort: null, charter: "help", permissionProfileId: "full_access" } as const;
+    const sentConfigurations = () => wire.requests.filter((request) => request.method === "supervisor.update_agent_configuration").map((request) => request.params!.configuration);
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 1, configuration: { ...base, imageInput: true } });
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 2, configuration: { ...base, imageInput: false } });
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 3, configuration: { ...base } });
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 4, configuration: { ...base, imageInput: undefined } });
+    // A value that is not a real boolean is never forwarded as a choice.
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 5, configuration: { ...base, imageInput: "true" } as never });
+    const sent = sentConfigurations();
+    assert.equal(sent.length, 5);
+    assert.deepEqual(sent[0], { model: "local-model", reasoning_effort: null, charter: "help", permission_profile_id: "full_access", image_input: true });
+    assert.deepEqual(sent[1], { model: "local-model", reasoning_effort: null, charter: "help", permission_profile_id: "full_access", image_input: false },
+      "an explicit off is sent, so the owner can turn the choice back off");
+    for (const configuration of sent.slice(2)) {
+      assert.deepEqual(configuration, { model: "local-model", reasoning_effort: null, charter: "help", permission_profile_id: "full_access" });
+      assert.equal(Object.hasOwn(configuration, "image_input"), false);
+    }
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("an agent's image-input choice is read only when the background service says its agent app asks", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const update = async (expectedRevision: number) => {
+      const result = await client.updateAgentConfiguration({
+        entryId: "agent_1", daemonGeneration: 39, expectedRevision,
+        configuration: { model: null, reasoningEffort: null, charter: "help", permissionProfileId: "full_access" },
+      });
+      assert.equal(result.outcome, "updated");
+      return result.outcome === "updated" ? result.configuration : assert.fail("expected an updated configuration");
+    };
+
+    // An older background service says nothing about image input: no key at all, not "off".
+    assert.equal(Object.hasOwn(await client.getAgentConfiguration("agent_1", 39), "imageInput"), false);
+    assert.equal(Object.hasOwn(await update(1), "imageInput"), false);
+
+    wire.configurationExtras.value = { image_input_available: true, image_input: true };
+    assert.equal((await client.getAgentConfiguration("agent_1", 39)).imageInput, true);
+    assert.equal((await update(1)).imageInput, true);
+
+    wire.configurationExtras.value = { image_input_available: true, image_input: false };
+    assert.equal((await client.getAgentConfiguration("agent_1", 39)).imageInput, false);
+
+    // Available but unreadable reads as off, and the key stays present so the switch is offered.
+    for (const unreadable of [undefined, null, "true", 1]) {
+      wire.configurationExtras.value = { image_input_available: true, image_input: unreadable };
+      const configuration = await client.getAgentConfiguration("agent_1", 39);
+      assert.equal(Object.hasOwn(configuration, "imageInput"), true, String(unreadable));
+      assert.equal(configuration.imageInput, false, String(unreadable));
+    }
+
+    // Without an exact `image_input_available: true` the value is ignored, even when it says on.
+    for (const available of [undefined, false, "true", 1, null]) {
+      wire.configurationExtras.value = { image_input_available: available, image_input: true };
+      assert.equal(Object.hasOwn(await client.getAgentConfiguration("agent_1", 39), "imageInput"), false, String(available));
+      assert.equal(Object.hasOwn(await update(1), "imageInput"), false, String(available));
+    }
+    wire.configurationExtras.value = { image_input: true };
+    assert.equal(Object.hasOwn(await client.getAgentConfiguration("agent_1", 39), "imageInput"), false, "a bare image_input is not an offer");
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
@@ -3328,7 +3399,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.261");
+    assert.equal(status.implementationVersion, "2.0.263");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

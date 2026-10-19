@@ -260,6 +260,8 @@ export interface ProviderSpawnRequest {
    * rental, and every adapter refuses it for one.
    */
   homeHarness?: boolean;
+  /** The owner says this agent's model reads images. Only Open Model reads it; off unless exactly `true`. */
+  imageInput?: boolean;
   /** Exact configuration snapshot selected before this native runtime starts. */
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -296,6 +298,7 @@ export interface ProviderSpawnRequest {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
   };
 }
 
@@ -409,6 +412,26 @@ export interface ProviderStreamEvent {
   durablePayloadRef: string | null;
 }
 
+/** How a running provider takes images: bytes in memory, a daemon-owned file its own process reads, or not at all. */
+export type RoomTurnImageDelivery = "memory" | "file" | null;
+/** An image type every image-capable provider accepts. */
+export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * One file on the activating room message, as the daemon prepared it for this
+ * turn. The daemon alone downloads; an adapter never sees a bearer or a
+ * storage address, only bytes in memory or a daemon-owned file path.
+ */
+export type ProviderRoomTurnAttachment = {
+  /** 1-based position on the message. */
+  index: number;
+  fileName: string;
+  /** The sender's declared type; for an included image, the type its bytes show. */
+  mimeType: string;
+  sizeBytes: number | null;
+  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported";
+  /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
+  image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
+};
 /** A single daemon-owned inbox item executed on an existing provider thread. */
 export interface ProviderRoomTurnRequest {
   /** Authoritative inbox scope; message IDs alone are only unique within a Room. */
@@ -418,6 +441,8 @@ export interface ProviderRoomTurnRequest {
   activation: Record<string, unknown>;
   actionId: string;
   observedContext?: unknown[];
+  /** The activating message's files, prepared by the daemon for this one turn. Never persisted. */
+  attachments?: ProviderRoomTurnAttachment[];
 }
 
 export type ProviderRoomTurnResult =
@@ -592,6 +617,8 @@ export interface ProviderAdapter {
 
   /** Run one bounded room turn without launching or replacing the provider. */
   runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
+  /** How this running handle takes the activating message's images; absent or null means it cannot. */
+  roomTurnImageDelivery?(handle: ProviderHandle): RoomTurnImageDelivery;
   /** Recover only a persisted exact native turn; it must not start another turn. */
   recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;

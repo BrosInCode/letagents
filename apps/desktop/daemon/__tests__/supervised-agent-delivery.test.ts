@@ -19,6 +19,7 @@ import {
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
+import { RoomAttachmentDownloadError, RoomTurnAttachmentStager, STAGED_FOLDER_MAX_AGE_MS } from "../room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
 import {
   claudeApiFailureClass, defaultFollowUpDelayMs, followUpOrigin, FOLLOW_UP_REASONS, FOLLOW_UP_UNCERTAIN_RESOLVED_DETAIL, MAX_AUTOMATIC_FOLLOW_UPS, NO_REPLY_FOLLOW_UP_DETAIL, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL,
@@ -4078,7 +4079,7 @@ test("each re-block of a still unreadable turn is recorded, including after Retr
     assert.equal(receipt.state, "blocked");
     assert.deepEqual(receipt.timeline.slice(-4).map((event) => event.phase),
       ["blocked", "queued", "result_unreadable", "blocked"]);
-    assert.match(receipt.timeline.at(-1)!.detail ?? "", /re-read and was not rerun/);
+    assert.match(receipt.timeline.at(-1)!.detail ?? "", /No new model turn was started/);
     assert.equal(runs, 1, "Retry re-reads the completed turn and never reruns it");
     assert.equal(recoveries, 3);
     assert.deepEqual(saidSavedAsUnreadable, [true, undefined, true],
@@ -8965,3 +8966,155 @@ for (const race of ["retry", "arrival", "successor"] as const) {
     } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
   });
 }
+
+const STAGED_PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+const imageMessage = (id: string, attachments: unknown[]) => ({ id, text: "What is wrong on this screen?", attachments,
+  activation: { for_current_agent: { decision: "activate", reason: "mention" } } });
+const pngAttachment = (id: string) => ({ id, filename: "screen.png", content_type: "image/png", byte_size: STAGED_PNG.byteLength,
+  download_url: `/rooms/room/messages/msg_5/attachments/${id}` });
+const withAttachmentStager = (store: SupervisedAgentInboxStore, port: ProviderActionPort, http: ConstructorParameters<typeof SupervisedAgentDelivery>[2], stager: RoomTurnAttachmentStager) =>
+  new SupervisedAgentDelivery(store, port, http, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, stager);
+
+test("the activating message's images reach that turn only, and a staged file stays until the turn ends", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const stagedRoot = join(root, "room-turn-attachments");
+  const downloads: Array<{ messageId: string; attachmentId: string; bearer: string }> = [];
+  const seen: Array<{ status: string; path?: string; existed: boolean }> = [];
+  const finishTurn = deferred<void>();
+  const turnRunning = deferred<void>();
+  const port = { ...provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    for (const file of request.attachments ?? []) {
+      seen.push({ status: file.status, path: file.image?.path,
+        existed: Boolean(file.image?.path && await readFile(file.image.path).then(() => true, () => false)) });
+    }
+    turnRunning.resolve();
+    await finishTurn.promise;
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), roomTurnImageDelivery: async () => "file" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1"),
+      { id: "att_2", filename: "log.txt", content_type: "text/plain", byte_size: 4 }])] }),
+    downloadAttachment: async (input) => { downloads.push({ messageId: input.messageId, attachmentId: input.attachmentId, bearer: input.bearer }); return STAGED_PNG; },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(stagedRoot));
+  try {
+    const polled = delivery.poll(agent);
+    await turnRunning.promise;
+    assert.deepEqual(seen.map(file => [file.status, file.existed]), [["image", true], ["not_image", false]]);
+    assert.deepEqual(downloads, [{ messageId: "msg_5", attachmentId: "att_1", bearer: "memory" }], "only the image is downloaded, with the worker bearer");
+    finishTurn.resolve();
+    await polled;
+    for (let attempt = 0; attempt < 50 && (await readdir(stagedRoot)).length; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(await readdir(stagedRoot), [], "the staged file is removed once the turn has ended");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    const detail = await store.detail(agent.agentId, agent.roomId, "msg_5");
+    assert.ok(!JSON.stringify(detail.prepared_context).includes(stagedRoot), "no staged path is saved with the turn");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a refused attachment download leaves the room accepted and the turn runs with a note", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-refused-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const statuses: string[][] = [];
+  const port = { ...provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    statuses.push((request.attachments ?? []).map(file => file.status));
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), roomTurnImageDelivery: async () => "memory" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")])] }),
+    // What an older server that does not grant workers the route answers.
+    downloadAttachment: async () => { throw new RoomAttachmentDownloadError("unavailable"); },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+  try {
+    await delivery.poll(agent);
+    assert.deepEqual(statuses, [["unavailable"]]);
+    assert.equal(delivery.roomRefusesAccess(agent.agentId), false);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("an agent whose provider takes no images downloads nothing and is told so", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-unsupported-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const statuses: string[][] = [];
+  let downloads = 0;
+  const delivery = withAttachmentStager(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    statuses.push((request.attachments ?? []).map(file => file.status));
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")]), imageMessage("msg_6", [])] }),
+    downloadAttachment: async () => { downloads++; return STAGED_PNG; },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+  try {
+    await delivery.poll(agent);
+    await delivery.poll(agent);
+    assert.deepEqual(statuses, [["provider_unsupported"], []]);
+    assert.equal(downloads, 0);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("recovering a saved turn never downloads its images again", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-recovery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let downloads = 0;
+  const recoveryRequests: unknown[] = [];
+  const port = { ...provider(async (_handle, request, options) => {
+    assert.equal(request.attachments?.[0]?.status, "image");
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("saved-turn");
+    return { turnId: "saved-turn", outcome: "unreadable", text: null, evidence: "none" };
+  }, async (_handle, request) => {
+    recoveryRequests.push(request);
+    return { turnId: "saved-turn", outcome: "no_reply", text: null, evidence: "transcript" };
+  }), roomTurnImageDelivery: async () => "memory" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")])] }),
+    downloadAttachment: async () => { downloads++; return STAGED_PNG; },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+  try {
+    await delivery.poll(agent);
+    assert.equal(downloads, 1, "only the first dispatch downloads");
+    assert.equal(recoveryRequests.length, 1);
+    assert.equal((recoveryRequests[0] as Record<string, unknown>).attachments, undefined);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a turn whose observation ends early keeps its staged file for the native turn until the sweep", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-detached-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const stagedRoot = join(root, "room-turn-attachments");
+  let now = Date.now();
+  const stager = new RoomTurnAttachmentStager(stagedRoot, () => now);
+  let stagedPath: string | undefined;
+  const port = { ...provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("native-turn");
+    stagedPath = request.attachments?.[0]?.image?.path;
+    // What Codex does when its observation detaches: the native turn goes on.
+    throw new Error("Codex room-turn observation detached.");
+  }, async () => ({ turnId: "native-turn", outcome: "no_reply", text: null, evidence: "transcript" })),
+  roomTurnImageDelivery: async () => "file" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")])] }),
+    downloadAttachment: async () => STAGED_PNG,
+    publish: async () => { throw new Error("no reply expected"); },
+  }, stager);
+  try {
+    await delivery.poll(agent);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(stagedPath, "the provider was given a staged file");
+    assert.deepEqual(await readFile(stagedPath!), Buffer.from(STAGED_PNG), "the file outlives the detached observation");
+    now += STAGED_FOLDER_MAX_AGE_MS + 60_000;
+    await stager.sweep();
+    assert.deepEqual(await readdir(stagedRoot), [], "the age sweep removes it once no turn can still read it");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});

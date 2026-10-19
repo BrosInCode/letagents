@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.261";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.263";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -165,6 +165,12 @@ export type DaemonAgentConfiguration = {
   delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
+  /**
+   * The owner says this agent's model reads images. Only an Open Model agent
+   * uses it; it applies the next time the agent starts. Inspector-owned, like
+   * the revisions, so never taken from the flat manifest.
+   */
+  image_input?: boolean;
   /**
    * Whether the owner shares this agent's live activity with the room; while
    * "withdrawing", the room may still show earlier turns that the daemon must

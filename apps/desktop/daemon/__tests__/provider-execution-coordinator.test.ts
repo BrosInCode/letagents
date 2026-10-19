@@ -2016,6 +2016,83 @@ test("resume after a crashed generation names the frozen lifecycle authority of 
     "a daemon-inbox resume carries the typed birth instead of defaulting to typed_shadow");
 });
 
+const imageInputHandles = { codex: returnedHandle, "claude-code": claudeHandle, "open-model": openModelHandle } as const;
+
+async function launchWithImageChoice(providerId: keyof typeof imageInputHandles, imageInput: boolean | undefined): Promise<ProviderActionSpawn> {
+  let request: ProviderActionSpawn | null = null;
+  const runtime = harness({
+    entry: { ...baseEntry(), provider: providerId, delivery_mode: "daemon_inbox" },
+    provider: provider({ spawn: async input => { request = input; return imageInputHandles[providerId]; } }),
+  });
+  if (imageInput !== undefined) {
+    const readConfiguration = runtime.options.store.getAgentConfiguration;
+    runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, image_input: imageInput });
+  }
+  await runtime.coordinator.converge("agent-1");
+  assert.ok(request, `${providerId} launched`);
+  return request;
+}
+
+test("a launch tells the provider that an Open Model agent's model reads images only when its owner said so", async () => {
+  const on = await launchWithImageChoice("open-model", true);
+  assert.equal(on.imageInput, true);
+  assert.equal(on.provider, "open-model");
+  assert.equal(Object.hasOwn(on, "homeHarness"), false, "the image choice is not the owner's own setup");
+
+  const off = await launchWithImageChoice("open-model", false);
+  assert.equal(Object.hasOwn(off, "imageInput"), false, "off leaves the key out, so the launch is exactly as before");
+
+  const unsaid = await launchWithImageChoice("open-model", undefined);
+  assert.equal(Object.hasOwn(unsaid, "imageInput"), false, "an agent whose stored configuration has no value launches as before");
+  assert.deepEqual({ ...on, imageInput: undefined, onProgress: undefined, onNativeStarted: undefined },
+    { ...off, imageInput: undefined, onProgress: undefined, onNativeStarted: undefined }, "nothing else about the launch changes");
+});
+
+test("a launch never carries the image choice for an agent app other than Open Model, whatever is stored", async () => {
+  for (const providerId of ["codex", "claude-code"] as const) {
+    const request = await launchWithImageChoice(providerId, true);
+    assert.equal(request.provider, providerId);
+    assert.equal(Object.hasOwn(request, "imageInput"), false, providerId);
+  }
+});
+
+test("a resumed Open Model launch carries the image choice as a fresh one does", async () => {
+  for (const imageInput of [true, false]) {
+    const requests: ProviderActionSpawn[] = [];
+    const runtime = harness({
+      entry: {
+        ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", observed_state: "failed",
+        provider_ref: {
+          work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+          provider_continuation_id: "continuation-1", provider_connection: openModelHandle.providerConnection!,
+        },
+      },
+      frozenAuthorityMode: "typed",
+      provider: provider({
+        capabilities: async () => ({
+          deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+          transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
+        }),
+        attach: async () => null,
+        resume: async (_ref, request) => { requests.push(request); return openModelHandle; },
+      }),
+    });
+    const readConfiguration = runtime.options.store.getAgentConfiguration;
+    runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, image_input: imageInput });
+    runtime.executionGenerations.push({
+      execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1,
+      terminal: runtime.options.terminalPayload({ ...terminal(openModelHandle), exitCode: 1, terminalCause: "crashed" }, "test"),
+    });
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(requests.length, 1, `image choice ${imageInput}: the saved conversation was resumed`);
+    assert.equal(Object.hasOwn(requests[0]!, "imageInput"), imageInput);
+    if (imageInput) assert.equal(requests[0]!.imageInput, true);
+  }
+});
+
 test("a successful grant-bound resume resets scheduler retry budgets", async () => {
   const runtime = ownedRecoveryHarness();
   const crash = { ...terminal(returnedHandle), exitCode: 1, terminalCause: "crashed" as const };

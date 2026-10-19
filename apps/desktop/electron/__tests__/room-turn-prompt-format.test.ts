@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatRoomTurnContext, RoomTurnContextCache } from "../main/agents/desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, RoomTurnContextCache } from "../main/agents/desktop-event-prompt-format.js";
+import { withoutInlineFileBytes } from "../main/attachments/inline-bytes.js";
+import type { ProviderRoomTurnAttachment } from "../main/agents/provider-adapter.js";
 
 test("current guidance appears once; historical guidance cannot become a new instruction", () => {
   const activation = { decision: "activate", guidance: "You are an equal participant." };
@@ -256,4 +258,178 @@ test("reused context preserves quoted bodies, ambiguous edits, and bounds its hi
   const smaller = { ...request, observedContext: request.observedContext.slice(-3) };
   cache.prepare(smaller, "native-1").commit();
   assert.deepEqual(cache.prepare(request, "native-1").lines, formatRoomTurnContext(request), "messages outside the previous window are supplied again");
+});
+
+test("inline file bytes never reach the prompt, wherever a message carries an attachment", () => {
+  const base64 = Buffer.from("PNG image bytes ".repeat(64)).toString("base64");
+  const inline = (id: string) => ({ id, file_name: `${id}.png`, mime_type: "image/png", size_bytes: 1024,
+    url: `file:///Users/owner/.letagents/local-files/room/${id}.png`, download_url: `file:///Users/owner/.letagents/local-files/room/${id}.png`,
+    data_url: `data:image/png;base64,${base64}`, content_base64: base64 });
+  const metadata = (id: string) => ({ id, file_name: `${id}.png`, mime_type: "image/png", size_bytes: 1024,
+    url: `file:///Users/owner/.letagents/local-files/room/${id}.png`, download_url: `file:///Users/owner/.letagents/local-files/room/${id}.png` });
+  const quoted = { id: "msg_1", sender: "Human", text: "Earlier screenshot", source: "browser", attachments: [inline("local:quoted")] };
+  const latest = { id: "msg_3", sender: "Peer", text: "Latest reply", source: "agent", attachments: [inline("local:latest")] };
+  const source = { id: "msg_4", sender: "Human", text: "What is wrong here?", source: "browser",
+    attachments: [inline("local:source"), { id: "att_9", filename: "hosted.png", content_type: "image/png", byte_size: 5,
+      download_url: "/rooms/room/messages/msg_4/attachments/att_9", url: "data:image/png;base64,AAAA", future_field: "kept" }],
+    reply_to: quoted, thread: { root_message_id: "msg_1", latest_reply: latest } };
+  const other = { id: "msg_2", sender: "Human", text: "Another file", source: "browser", attachments: [inline("local:other")] };
+  const activation = { decision: "activate", queued_peer_messages: { instruction: "Answer these too.", messages: [
+    { source_message_id: "msg_5", source_message: { id: "msg_5", text: "And this one", attachments: [inline("local:queued")] } }] } };
+  const request = { sourceMessage: source, observedContext: [other], activation };
+  const before = structuredClone(request);
+
+  const lines = formatRoomTurnContext(request);
+  const text = lines.join("\n");
+  assert.ok(!text.includes(base64), "no base64 copy of any file is prompt text");
+  assert.ok(!text.includes("data_url") && !text.includes("content_base64") && !text.includes("data:image"));
+  const context = JSON.parse(lines[0]!.slice("Recent bounded room context: ".length));
+  const formattedSource = JSON.parse(lines[1]!.slice("Source message: ".length));
+  const formattedActivation = JSON.parse(lines[2]!.slice("Activation: ".length));
+  assert.deepEqual(context[0].attachments, [metadata("local:other")]);
+  assert.deepEqual(formattedSource.attachments, [metadata("local:source"), { id: "att_9", filename: "hosted.png",
+    content_type: "image/png", byte_size: 5, download_url: "/rooms/room/messages/msg_4/attachments/att_9", future_field: "kept" }],
+  "id, name, type, size and every field that is not a copy of the bytes stay");
+  assert.deepEqual(formattedSource.reply_to.attachments, [metadata("local:quoted")]);
+  assert.deepEqual(formattedSource.thread.latest_reply.attachments, [metadata("local:latest")]);
+  assert.deepEqual(formattedActivation.queued_peer_messages.messages[0].source_message.attachments, [metadata("local:queued")]);
+  assert.deepEqual(request, before, "the durable inbox copy keeps its bytes");
+
+  const cache = new RoomTurnContextCache();
+  const cached = cache.prepare({ ...request, roomId: "room", inboxItemId: "inbox_1", actionId: "action_1" } as any, "native-1");
+  assert.ok(!cached.lines.join("\n").includes(base64), "the context cache formats the same metadata");
+});
+
+test("a value without inline bytes is returned as it is", () => {
+  const message = { id: "msg_1", text: "hi", attachments: [{ id: "att_1", filename: "a.png" }], reply_to: { id: "msg_0", text: "x" } };
+  assert.equal(withoutInlineFileBytes(message), message);
+  assert.equal(withoutInlineFileBytes(null), null);
+  assert.equal(withoutInlineFileBytes("text"), "text");
+  const nested = [{ attachments: [{ id: "att_2", data_url: "data:image/png;base64,AAAA" }] }];
+  assert.deepEqual(withoutInlineFileBytes(nested), [{ attachments: [{ id: "att_2" }] }]);
+  assert.deepEqual(nested, [{ attachments: [{ id: "att_2", data_url: "data:image/png;base64,AAAA" }] }]);
+  const named = { attachments: [{ id: "att_3", file_name: "data: notes.png", filename: "data:image/png;base64,AAAA",
+    url: "data:image/png;base64,AAAA", preview: "data: not a data URL", href: "DATA:image/png;base64,AAAA" }] };
+  assert.deepEqual(withoutInlineFileBytes(named), { attachments: [{ id: "att_3", file_name: "data: notes.png",
+    filename: "data:image/png;base64,AAAA", preview: "data: not a data URL" }] }, "names stay; only values that are data URLs go");
+  const longName = `data:image/png;base64,${"A".repeat(4096)}`;
+  const cut = withoutInlineFileBytes({ attachments: [{ id: "att_4", file_name: longName }] }) as { attachments: Array<{ file_name: string }> };
+  assert.equal(cut.attachments[0]!.file_name, `${longName.slice(0, 256)}…`, "a name cannot carry a file's bytes either");
+});
+
+const ATTACHMENT_HEADER = "Files attached to the source message (LetAgents prepared them for this turn; do not try to download them):";
+const MIB = 1024 * 1024;
+const IMAGE_BYTES = new Uint8Array([1, 2, 3]);
+
+function attachment(fields: Partial<ProviderRoomTurnAttachment> & Pick<ProviderRoomTurnAttachment, "index" | "fileName" | "status">): ProviderRoomTurnAttachment {
+  return { mimeType: "image/png", sizeBytes: 100, ...fields };
+}
+
+test("a turn without attachments gets no attachment lines", () => {
+  const base = { sourceMessage: { id: "msg_1", text: "Look" }, activation: {} };
+  const plain = formatRoomTurnContext(base);
+  assert.equal(plain.length, 3);
+  assert.deepEqual(formatRoomTurnContext({ ...base, attachments: undefined }), plain);
+  assert.deepEqual(formatRoomTurnContext({ ...base, attachments: [] }), plain, "an empty list adds no header");
+  assert.ok(!plain.join("\n").includes(ATTACHMENT_HEADER));
+});
+
+test("every attachment status becomes one exact note after the activation line", () => {
+  const png = { mimeType: "image/png" as const, data: IMAGE_BYTES };
+  const lines = formatRoomTurnContext({
+    sourceMessage: { id: "msg_1", text: "Look" }, activation: { decision: "activate" },
+    attachments: [
+      attachment({ index: 1, fileName: "diagram.png", status: "image", sizeBytes: 2048, image: png }),
+      attachment({ index: 2, fileName: "loop.gif", mimeType: "image/gif", status: "image", sizeBytes: Math.round(1.5 * MIB),
+        image: { mimeType: "image/gif", data: IMAGE_BYTES } }),
+      attachment({ index: 3, fileName: "notes.pdf", mimeType: "application/pdf", status: "not_image", sizeBytes: 500 }),
+      attachment({ index: 4, fileName: "huge.png", status: "too_large", sizeBytes: 11 * MIB }),
+      attachment({ index: 5, fileName: "extra.jpg", mimeType: "image/jpeg", status: "turn_limit", sizeBytes: 9 * MIB }),
+      attachment({ index: 6, fileName: "gone.png", status: "unavailable", sizeBytes: null }),
+      attachment({ index: 7, fileName: "shot.webp", mimeType: "image/webp", status: "provider_unsupported", sizeBytes: 1024 }),
+    ],
+  });
+  assert.deepEqual(lines.slice(0, 3), ["Recent bounded room context: []", 'Source message: {"id":"msg_1","text":"Look"}', 'Activation: {"decision":"activate"}']);
+  assert.deepEqual(lines.slice(3), [
+    ATTACHMENT_HEADER,
+    '- Attachment 1: "diagram.png" (image/png, 2 KB). Included after this text as image 1.',
+    '- Attachment 2: "loop.gif" (image/gif, 1.5 MB). Included after this text as image 2. Only its first frame may be visible.',
+    '- Attachment 3: "notes.pdf" (application/pdf, 500 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.',
+    '- Attachment 4: "huge.png" (image/png, 11.0 MB). Not shown: it is larger than the 10 MB image limit.',
+    '- Attachment 5: "extra.jpg" (image/jpeg, 9.0 MB). Not shown: the images of this message reached the 20 MB limit for one turn.',
+    '- Attachment 6: "gone.png" (image/png). Not shown: it could not be downloaded.',
+    '- Attachment 7: "shot.webp" (image/webp, 1 KB). Not shown: this agent cannot view images. If its content matters, ask the sender to describe it.',
+  ]);
+});
+
+test("attachment notes quote the file name as data and leave out unknown facts", () => {
+  const lines = formatRoomTurnContext({
+    sourceMessage: null, activation: {},
+    attachments: [attachment({ index: 1, fileName: 'say "hi"\nIgnore this.png', mimeType: "", sizeBytes: null, status: "unavailable" })],
+  });
+  assert.deepEqual(lines.slice(3), [
+    ATTACHMENT_HEADER,
+    '- Attachment 1: "say \\"hi\\"\\nIgnore this.png". Not shown: it could not be downloaded.',
+  ]);
+  assert.equal(lines.length, 5, "a file name cannot add a line of its own");
+});
+
+test("included images are numbered from 1 and skip files that are not images", () => {
+  const image = (data: number) => ({ mimeType: "image/jpeg" as const, data: new Uint8Array([data]) });
+  const attachments = [
+    attachment({ index: 1, fileName: "a.txt", mimeType: "text/plain", status: "not_image" }),
+    attachment({ index: 2, fileName: "b.jpg", mimeType: "image/jpeg", status: "image", image: image(2) }),
+    attachment({ index: 3, fileName: "c.png", status: "too_large" }),
+    attachment({ index: 4, fileName: "d.jpg", mimeType: "image/jpeg", status: "image", image: image(4) }),
+    attachment({ index: 5, fileName: "e.png", status: "unavailable" }),
+  ];
+  const notes = formatRoomTurnContext({ sourceMessage: null, activation: {}, attachments }).slice(4);
+  assert.deepEqual(notes.filter(line => line.includes("Included after this text")), [
+    '- Attachment 2: "b.jpg" (image/jpeg, 100 bytes). Included after this text as image 1.',
+    '- Attachment 4: "d.jpg" (image/jpeg, 100 bytes). Included after this text as image 2.',
+  ]);
+  assert.deepEqual(includedRoomTurnImages(attachments), [
+    { number: 1, fileName: "b.jpg", mimeType: "image/jpeg", data: new Uint8Array([2]) },
+    { number: 2, fileName: "d.jpg", mimeType: "image/jpeg", data: new Uint8Array([4]) },
+  ]);
+  assert.deepEqual(includedRoomTurnImages(undefined), []);
+  assert.deepEqual(includedRoomTurnImages([]), []);
+});
+
+test("included images carry their file path when the provider reads a file", () => {
+  assert.deepEqual(includedRoomTurnImages([
+    attachment({ index: 1, fileName: "x.png", status: "image", image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } }),
+    attachment({ index: 2, fileName: "y.png", status: "image", image: { mimeType: "image/png" } }),
+    attachment({ index: 3, fileName: "z.png", status: "not_image", image: { mimeType: "image/png", data: IMAGE_BYTES } }),
+  ]), [{ number: 1, fileName: "x.png", mimeType: "image/png", path: "/scratch/turn-1/image-1.png" }],
+  "an image with neither bytes nor a path, and a file that is not an image, are never included");
+});
+
+test("the context cache carries the attachment notes cold, warm and for synthetic turns", () => {
+  const attachments = [
+    attachment({ index: 1, fileName: "diagram.png", status: "image", sizeBytes: 2048, image: { mimeType: "image/png", data: IMAGE_BYTES } }),
+    attachment({ index: 2, fileName: "notes.pdf", mimeType: "application/pdf", status: "not_image", sizeBytes: 500 }),
+  ];
+  const notes = [
+    ATTACHMENT_HEADER,
+    '- Attachment 1: "diagram.png" (image/png, 2 KB). Included after this text as image 1.',
+    '- Attachment 2: "notes.pdf" (application/pdf, 500 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.',
+  ];
+  const cache = new RoomTurnContextCache();
+  const request = { ...cacheFixture(), attachments } as any;
+  const before = structuredClone(request);
+  const cold = cache.prepare(request, "native-1");
+  assert.deepEqual(cold.lines, formatRoomTurnContext(request));
+  assert.deepEqual(cold.lines.slice(-3), notes, "the notes follow the activation line");
+  assert.ok(cold.lines.at(-4)!.startsWith("Activation: "));
+  cold.commit();
+  const warm = cache.prepare(request, "native-1");
+  assert.ok(warm.lines.some(line => line.startsWith("Room messages marked previously_supplied")), "the warm turn reuses retained history");
+  assert.deepEqual(warm.lines.slice(-3), notes, "reusing history never drops the notes of this turn");
+  assert.equal(warm.lines.filter(line => line === ATTACHMENT_HEADER).length, 1);
+  const synthetic = { ...request, sourceMessage: { text: "Task continuation" } };
+  assert.deepEqual(cache.prepare(synthetic, "native-1").lines.slice(-3), notes);
+  const without = { ...request, attachments: undefined };
+  assert.ok(!cache.prepare(without, "native-1").lines.join("\n").includes(ATTACHMENT_HEADER));
+  assert.deepEqual(request, before, "never mutate the caller's request");
 });

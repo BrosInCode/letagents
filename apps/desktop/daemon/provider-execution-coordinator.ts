@@ -103,6 +103,8 @@ export type ProviderExecutionConfiguration = {
   provider_launch_policy: unknown;
   config_revision: number;
   runtime_configuration_revision: number;
+  /** The owner says this Open Model agent's model reads images. Absent is off. */
+  image_input?: boolean;
 };
 
 export type ProviderExecutionStore = {
@@ -1799,6 +1801,8 @@ export class ProviderExecutionCoordinator {
         : "git_worktree",
       launchPolicy: launchSnapshot.launchPolicy,
       ...(launchSnapshot.homeHarness ? { homeHarness: true as const } : {}),
+      // Read when the runtime starts: OpenCode learns a model takes images from its launch configuration.
+      ...(launchSnapshot.provider === "open-model" && launchConfiguration.image_input === true ? { imageInput: true as const } : {}),
       provider: launchSnapshot.provider,
       model: launchSnapshot.model,
       reasoningEffort: launchSnapshot.reasoningEffort,
@@ -1821,6 +1825,8 @@ export class ProviderExecutionCoordinator {
           apiKey: openModelCredential.apiKey,
           baseUrl: openModelCredential.baseUrl,
           model: launchSnapshot.model?.trim() || openModelCredential.model,
+          ...((!launchSnapshot.model?.trim() || launchSnapshot.model.trim() === openModelCredential.model)
+            && openModelCredential.contextWindow != null ? { contextWindow: openModelCredential.contextWindow } : {}),
         },
       } : {}),
     };

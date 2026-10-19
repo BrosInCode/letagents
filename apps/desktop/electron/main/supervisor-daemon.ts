@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.261";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.263";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -1303,6 +1303,7 @@ export class SupervisorDaemonClient {
     const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
       model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
       permission_profile_id: input.configuration.permissionProfileId,
+      ...(typeof input.configuration.imageInput === "boolean" ? { image_input: input.configuration.imageInput } : {}),
     } });
     if (result.outcome === "invalid") {
       if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
@@ -1583,6 +1584,7 @@ export class SupervisorDaemonClient {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
     daemonGeneration: number;
   }): Promise<"installed" | "stale"> {
     if (!input.baseUrl.trim() || !input.model.trim()) {
@@ -1597,6 +1599,7 @@ export class SupervisorDaemonClient {
         api_key: input.apiKey,
         base_url: input.baseUrl,
         model: input.model,
+        ...(input.contextWindow != null ? { context_window: input.contextWindow } : {}),
         daemon_generation: input.daemonGeneration,
       },
     );
@@ -2313,7 +2316,9 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
     permissionProfileId: value.permission_profile_id as string | null,
     supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
     providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number,
-    ...mapHomeHarness(value), ...mapLiveSharing(value) };
+    ...mapHomeHarness(value),
+    // Only an agent app that asks has the choice; anything unreadable is off.
+    ...(value.image_input_available === true ? { imageInput: value.image_input === true } : {}), ...mapLiveSharing(value) };
 }
 
 /** Absent from an older background service, and anything unreadable is off. */

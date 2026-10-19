@@ -188,8 +188,8 @@ test("an agent that fetches its own messages, or a rented agent, cannot share it
   });
 });
 
-test("a schema 49 database gains the live sharing column off for every existing agent", async () => {
-  assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 50, "the live sharing column shipped in schema v50");
+test("a schema 50 database gains the live sharing column off for every existing agent", async () => {
+  assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 51, "the live sharing column shipped in schema v51");
   const root = await mkdtemp(join(tmpdir(), "letagents-live-sharing-schema-"));
   const databasePath = join(root, "daemon-state.sqlite");
   try {
@@ -197,11 +197,14 @@ test("a schema 49 database gains the live sharing column off for every existing 
     await original.write(0, [agent("agent_1"), agent("agent_2")]);
     await original.close();
     const old = new DatabaseSync(databasePath);
-    old.exec("ALTER TABLE agent_configurations DROP COLUMN live_sharing; UPDATE manifest_metadata SET schema_version=49; PRAGMA user_version=49");
+    // Schema v50 has the image input column and no live sharing column.
+    old.exec("ALTER TABLE agent_configurations DROP COLUMN live_sharing; UPDATE manifest_metadata SET schema_version=50; PRAGMA user_version=50");
+    old.exec("UPDATE agent_configurations SET image_input=1 WHERE agent_id='agent_1'");
     old.close();
     const migrated = new ManifestStore(databasePath);
     try {
       assert.equal((await migrated.getAgentConfiguration("agent_1"))?.live_sharing, "off");
+      assert.equal((await migrated.getAgentConfiguration("agent_1"))?.image_input, true, "the v50 image input choice survives the upgrade");
       assert.equal((await migrated.getAgentConfiguration("agent_2"))?.live_sharing, "off");
       assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_1", enabled: true }), "on");
       assert.equal(await migrated.setAgentLiveSharing({ agentId: "agent_2", enabled: false }), "off", "an agent that never shared has nothing to remove");

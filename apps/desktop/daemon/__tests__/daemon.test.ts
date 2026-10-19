@@ -9820,7 +9820,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
 
     const currentEffect = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
-      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "allowed" }, mutation: true,
     });
     assert.equal(currentEffect.ok, true, currentEffect.error);
     const effectId = String((currentEffect.result as { effect_id: string }).effect_id);
@@ -9831,7 +9831,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     assert.equal(completedEffect.ok, true, completedEffect.error);
     const exactRetry = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
-      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "allowed" }, mutation: true,
     });
     assert.equal(exactRetry.ok, true, exactRetry.error);
     assert.deepEqual(exactRetry.result, { state: "completed", result: { delivered: true }, room_id: entry.room_id },
@@ -9839,7 +9839,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
 
     const interruptedMutationParams = {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-uncertain",
-      tool_name: "send_message", input: { text: "send at most once" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "send at most once" }, mutation: true,
     };
     const interruptedMutation = await daemonRequest(
       paths.socketPath, "supervisor.prepare_bounded_effect", interruptedMutationParams,
@@ -9939,7 +9939,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     };
     const checkpointFailureParams = {
       ...executeParams, mcp_request_id: "effect-success-checkpoint-failure",
-      tool_name: "send_message", input: { text: "external effect succeeds once" },
+      tool_name: "send_message", input: { reply_to: "other-message", text: "external effect succeeds once" },
     };
     const checkpointFailure = await daemonRequest(
       paths.socketPath,
