@@ -44,7 +44,11 @@ function event(sequence: number, status: DaemonActivityEvent["status"] = "workin
 }
 
 /** Real store, real authority lanes and coordinator; the batch timer is driven by hand. */
-async function harness(options: { closeTimeoutMs?: number } = {}) {
+async function harness(options: {
+  closeTimeoutMs?: number;
+  /** Runs before each commit attempt; may wait or throw. */
+  beforeCommit?: (items: readonly { agentId: string; event: DaemonActivityEvent }[]) => Promise<void>;
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "letagents-activity-batch-"));
   const path = join(root, "daemon-state.sqlite");
   const store = new ManifestStore(path);
@@ -63,6 +67,7 @@ async function harness(options: { closeTimeoutMs?: number } = {}) {
   const batcher = new ActivityWriteBatcher({
     serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
     commit: async (items) => {
+      await options.beforeCommit?.(items);
       commits.push(items.length);
       const next = await store.recordActivityBatch(authority.generation, items, (commit) => authority.fenceDaemonCommit(commit));
       authority.generation = next.generation;
@@ -332,4 +337,54 @@ test("a window flush after authority is lost drops the batch and never rejects",
     assert.deepEqual(h.commits, []);
     assert.deepEqual(h.committedActivity("a"), []);
   } finally { await h.cleanup(); }
+});
+
+test("a failed batch is retried event by event, so one bad event costs only itself", async () => {
+  let failBatches = true;
+  const h = await harness({
+    beforeCommit: async (items) => {
+      // A batch-wide failure (as SQLITE_BUSY or a constraint would cause), and
+      // one event that fails even on its own.
+      if (failBatches && items.length > 1) throw new Error("database is busy");
+      if (items.some((item) => item.agentId === "b" && item.event.sequence === 2)) throw new Error("constraint failed");
+    },
+  });
+  try {
+    await h.coordinator.appendNativeActivity("a", event(1), false);
+    await h.coordinator.appendNativeActivity("b", event(1), false);
+    await h.coordinator.appendNativeActivity("b", event(2), false);
+    await h.coordinator.appendNativeActivity("a", event(2), false);
+    await h.fireWindow();
+    assert.deepEqual(h.commits, [1, 1, 1], "each event retried once on its own; the bad one never reached the store");
+    assert.deepEqual(h.committedActivity("a"), [1, 2]);
+    assert.deepEqual(h.committedActivity("b"), [1]);
+    assert.equal(h.diagnostics.length, 1);
+    assert.equal(h.diagnostics[0]!.dropped, 1);
+    assert.match(String(h.diagnostics[0]!.error), /constraint failed/);
+    failBatches = false;
+  } finally { await h.cleanup(); }
+});
+
+test("close waits for a batch already in flight inside another mutation", async () => {
+  let releaseCommit!: () => void;
+  let commitStarted!: () => void;
+  const started = new Promise<void>((resolve) => { commitStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  const h = await harness({ beforeCommit: async () => { commitStarted(); await gate; } });
+  try {
+    await h.coordinator.appendNativeActivity("a", event(1), false);
+    // Another mutation flushes first; its batch is now in flight and nothing is pending.
+    const mutation = h.authority.serializeManifestMutation(async () => "done");
+    await started;
+    assert.equal(h.batcher.size, 1);
+    let closed = false;
+    const closing = h.batcher.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false, "close does not return while the batch is in flight");
+    releaseCommit();
+    await closing;
+    assert.equal(await mutation, "done");
+    assert.deepEqual(h.committedActivity("a"), [1], "the in-flight batch committed before close returned");
+    assert.deepEqual(h.diagnostics, []);
+  } finally { releaseCommit?.(); await h.cleanup(); }
 });

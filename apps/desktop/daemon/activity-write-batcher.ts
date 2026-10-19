@@ -29,8 +29,17 @@ export type ActivityWriteBatcherOptions = {
   serialize<T>(operation: () => Promise<T>): Promise<T>;
   /** Write one batch in one transaction and accept its manifest generation. */
   commit(items: readonly ActivityWrite[]): Promise<void>;
-  /** A batch that could not be written. Its events are dropped, as a failed single write was. */
+  /**
+   * Events that could not be written. After a failed batch each event is
+   * retried once on its own, so one bad event costs only itself, as a failed
+   * single write did; what still fails is dropped and reported here.
+   */
   diagnostic?(error: unknown, dropped: number): void;
+  /**
+   * False for an error that no retry can fix, such as lost authority: the
+   * batch is then dropped without per-event retries. Default: retry.
+   */
+  retryable?(error: unknown): boolean;
   windowMs?: number;
   maxEvents?: number;
   closeTimeoutMs?: number;
@@ -62,6 +71,8 @@ export class ActivityWriteBatcher {
   private inFlight: ActivityWrite[] = [];
   private timer: unknown = null;
   private closed = false;
+  /** The flush running now, possibly inside another mutation's lane turn. */
+  private current: Promise<void> | null = null;
   private readonly windowMs: number;
   private readonly maxEvents: number;
   private readonly closeTimeoutMs: number;
@@ -156,7 +167,14 @@ export class ActivityWriteBatcher {
    * first. A batch that fails is dropped and reported; it never fails the
    * mutation that asked for the flush.
    */
-  async flushInLane(): Promise<void> {
+  flushInLane(): Promise<void> {
+    const run = this.writePending();
+    this.current = run;
+    void run.finally(() => { if (this.current === run) this.current = null; });
+    return run;
+  }
+
+  private async writePending(): Promise<void> {
     this.cancelTimer();
     while (!this.closed && this.pending.length) {
       const batch = this.pending.splice(0, this.maxEvents);
@@ -164,11 +182,35 @@ export class ActivityWriteBatcher {
       try {
         await this.options.commit(batch);
       } catch (error) {
-        this.options.diagnostic?.(error, batch.length);
+        await this.retryEachOnce(batch, error);
       } finally {
         this.inFlight = [];
       }
     }
+  }
+
+  /** Still inside the lane, with the same commit (and fence) as the batch. */
+  private async retryEachOnce(batch: ActivityWrite[], batchError: unknown): Promise<void> {
+    if (batch.length === 1 || this.options.retryable?.(batchError) === false) {
+      this.options.diagnostic?.(batchError, batch.length);
+      return;
+    }
+    let failed = 0;
+    let lastError: unknown = batchError;
+    for (const item of batch) {
+      try {
+        await this.options.commit([item]);
+      } catch (error) {
+        failed += 1;
+        lastError = error;
+        if (this.options.retryable?.(error) === false) {
+          const rest = batch.length - batch.indexOf(item) - 1;
+          this.options.diagnostic?.(error, failed + rest);
+          return;
+        }
+      }
+    }
+    if (failed) this.options.diagnostic?.(lastError, failed);
   }
 
   /**
@@ -183,7 +225,10 @@ export class ActivityWriteBatcher {
     let timedOut = false;
     let timeout: unknown = null;
     await Promise.race([
-      this.flush(),
+      // A batch may be in flight inside another mutation's lane turn while
+      // nothing is pending: wait for it too, so its commit is queued before
+      // the caller releases authority.
+      (async () => { await this.current?.catch(() => undefined); await this.flush(); })(),
       new Promise<void>((resolve) => {
         timeout = this.setTimer(() => { timedOut = true; resolve(); }, this.closeTimeoutMs);
         (timeout as { unref?: () => void }).unref?.();

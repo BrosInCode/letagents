@@ -8907,6 +8907,46 @@ test("a handoff fence refuses new activity but still writes activity admitted be
   }
 });
 
+test("a batch waiting for the commit lane when a handoff starts still commits its admitted events", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const internals = daemon as unknown as {
+    handoffScheduled: boolean;
+    authority: { serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> };
+    activityWrites: { flush(): Promise<void>; size: number };
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  const idle: DaemonActivityEvent = { observed_at: new Date().toISOString(), sequence: 1, provider: "codex", kind: "turn_lifecycle", method: "turn/completed", summary: "Turn ended", status: "idle", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null };
+  let releaseLane!: () => void;
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, observed_state: "working", workspace_path: "/tmp/work" } });
+    await internals.manifestAdministration.appendNativeActivity(entry.id, idle, false);
+    // Hold the commit lane so the batch waits inside it, then start a handoff.
+    let laneHeld!: () => void;
+    const held = new Promise<void>((resolve) => { laneHeld = resolve; });
+    const lane = internals.authority.serializeManifestCommit(() => new Promise<void>((resolve) => { releaseLane = resolve; laneHeld(); }));
+    await held;
+    const flushed = internals.activityWrites.flush();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    internals.handoffScheduled = true;
+    releaseLane();
+    await lane;
+    await flushed;
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      const saved = (await inspection.getEntry(entry.id))!;
+      assert.deepEqual(saved.activity?.map((event) => event.sequence), [1], "the pre-fence event was not dropped");
+      assert.equal(saved.observed_state, "idle", "the successor does not start from a stale working state");
+    } finally { await inspection.close(); }
+  } finally {
+    releaseLane?.();
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("daemon ingress redacts provider credentials before manifest, DTO, and audit persistence", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };

@@ -215,13 +215,20 @@ export class SupervisorDaemon {
     this.activityWrites = new ActivityWriteBatcher({
       serialize: (operation) => this.authority.serializeManifestMutationWithoutFlush(operation),
       commit: async (items) => {
-        // Events admitted before a handoff fence are admitted state: they may
-        // still commit while this daemon owns the singleton, like an admitted
-        // transition. New admissions are refused once the fence is up.
-        const next = await this.store.recordActivityBatch(this.manifestGeneration, items, (commit) =>
-          this.handoffScheduled ? this.fenceAdmittedTransitionCommit(commit) : this.fenceDaemonCommit(commit));
+        // Every batch holds only events admitted before any handoff fence
+        // (admission refuses later ones), so it is admitted state and always
+        // uses the admitted-state fence: it commits while this daemon still
+        // owns the singleton, even if a handoff began while it waited for the
+        // commit lane, and never once the singleton is lost.
+        const next = await this.store.recordActivityBatch(this.manifestGeneration, items,
+          (commit) => this.fenceAdmittedTransitionCommit(commit));
         this.manifestGeneration = next.generation;
+        if (next.skipped > 0) {
+          console.warn("[activity_batch]", JSON.stringify({ skipped: next.skipped, written: next.written,
+            reason: "entry gone or sequence no longer newer" }));
+        }
       },
+      retryable: (error) => !(error instanceof DaemonFenceLostError),
       diagnostic: (error, dropped) => console.warn("[activity_batch]", JSON.stringify({ dropped, error: String(error) })),
     });
     // Every other manifest mutation writes pending activity first, so it reads
