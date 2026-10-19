@@ -1,4 +1,16 @@
-/** Version transitions from v24 on, each owned by a sibling store's schema. */
+/**
+ * Version transitions from v24 on, each owned by a sibling store's schema.
+ *
+ * Where new code goes: a new schema version's migration goes in
+ * storage-migrations.ts (with its dispatch in schema.ts createSchema and the
+ * DAEMON_STATE_SCHEMA_VERSION bump in shared.ts); a change
+ * to the current shape goes in shapes-v17-current.ts. The other shapes-*.ts
+ * files hold frozen historical versions and change only to fix a repair bug.
+ * shapes-v4-v7.ts owns the plain apply/validate shapes for v4 to v7;
+ * shapes-v6-v9.ts owns v8 and v9 plus the v6/v7 repair paths
+ * (repairAndValidateV6Shape/V7Shape, bounded delivery, secret scrub) that
+ * call into those v6/v7 shapes, so the two names overlap at v6 and v7.
+ */
 import { applyManagedLaunchContractSchema } from "../managed-launch-contract.js";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migrateExecutionStorageV23ToV24, migrateExecutionStorageV24ToV25, validateRuntimeFailureEffectMigrationSource } from "../execution-storage-schema.js";

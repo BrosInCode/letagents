@@ -1,4 +1,16 @@
-/** Manifest shapes (v2, v3), legacy presence normalization and column helpers. */
+/**
+ * Manifest shapes (v2, v3), legacy presence normalization and column helpers.
+ *
+ * Where new code goes: a new schema version's migration goes in
+ * storage-migrations.ts (with its dispatch in schema.ts createSchema and the
+ * DAEMON_STATE_SCHEMA_VERSION bump in shared.ts); a change
+ * to the current shape goes in shapes-v17-current.ts. The other shapes-*.ts
+ * files hold frozen historical versions and change only to fix a repair bug.
+ * shapes-v4-v7.ts owns the plain apply/validate shapes for v4 to v7;
+ * shapes-v6-v9.ts owns v8 and v9 plus the v6/v7 repair paths
+ * (repairAndValidateV6Shape/V7Shape, bounded delivery, secret scrub) that
+ * call into those v6/v7 shapes, so the two names overlap at v6 and v7.
+ */
 import type { DatabaseSync } from "node:sqlite";
 import { type Row, parseJson, run, schemaMethods } from "./shared.js";
 
