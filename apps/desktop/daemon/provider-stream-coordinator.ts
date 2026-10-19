@@ -144,6 +144,11 @@ export function lifecycleLocalConformanceEligibility(
 
 export type ProviderStreamManifest = {
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  /**
+   * The same entry as getEntry, read for every stream event. It may share its
+   * activity events between reads, so they are read only, never changed.
+   */
+  getRecentEntry?(entryId: string): Promise<DaemonManifestEntry | undefined>;
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   updateEntry(
     entryId: string,
@@ -1306,7 +1311,7 @@ export class ProviderStreamCoordinator {
       return;
     }
     const { entryId, handle, executionGenerationId } = installation;
-    const entry = await this.options.manifest.getEntry(entryId);
+    const entry = await (this.options.manifest.getRecentEntry?.(entryId) ?? this.options.manifest.getEntry(entryId));
     const observedLifecycle = providerStreamLifecycle(event, entry?.delivery_mode === "daemon_inbox");
     if (!entry || !this.entryMatchesInstallation(entry, installation)
       || !this.isCurrentInstallation(installation)) {

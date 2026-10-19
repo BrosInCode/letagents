@@ -1,6 +1,7 @@
 import type { DaemonAuthority } from "./daemon-authority.js";
 import type { ManifestActivityBatch } from "./manifest-administration-coordinator.js";
 import { ManifestConflictError, type ActivityWrite, type ManifestStore } from "./manifest-store.js";
+import { RecentActivityWindows } from "./recent-activity-windows.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import type { DaemonActivityEvent, DaemonManifest, DaemonManifestEntry } from "./types.js";
 
@@ -71,7 +72,7 @@ export async function commitActivityBatch(input: {
   expectedGeneration: number;
   fence: (commit: () => Promise<void>) => Promise<void>;
   mayWrite: (agentId: string) => boolean;
-}): Promise<{ generation: number; written: number; skipped: number; retriedAfterConflict: boolean }> {
+}): Promise<Awaited<ReturnType<ManifestStore["recordActivityBatch"]>> & { retriedAfterConflict: boolean }> {
   try {
     const result = await input.store.recordActivityBatch(input.expectedGeneration, input.items, input.fence, input.mayWrite);
     return { ...result, retriedAfterConflict: false };
@@ -363,15 +364,19 @@ export class ActivityWriteBatcher {
  *   and never once the singleton is lost;
  * - a retiring daemon's provider birth record is never overwritten by older
  *   activity (mayWrite);
- * - the provider stream's own reads (overlayEntry, overlayManifest) see the
- *   events it admitted that are still pending, since it classifies the next
- *   event from its entry's recent activity.
+ * - the provider stream's own reads (overlayEntry, overlayManifest,
+ *   readRecentEntry) see the events it admitted that are still pending, since
+ *   it classifies the next event from its entry's recent activity;
+ * - readRecentEntry keeps each entry's stored activity in memory
+ *   (RecentActivityWindows), adds what the batches commit, and checks it
+ *   against the database on every read.
  * stop() and stopForHandoff() close it before the singleton is released and
  * the stores close (stopForHandoff first of all, so admitted activity orders
  * before the handoff's own last writes).
  */
 export class DaemonActivityWrites extends ActivityWriteBatcher {
   readonly admission: ManifestActivityBatch;
+  private readonly windows: RecentActivityWindows;
 
   constructor(ports: {
     authority: DaemonAuthority;
@@ -389,6 +394,10 @@ export class DaemonActivityWrites extends ActivityWriteBatcher {
           fence: (commit) => ports.admittedFence(commit), mayWrite: (agentId) => this.mayWrite(agentId),
         });
         ports.authority.generation = next.generation;
+        // Another writer committed first; its change is found by the next
+        // read's check, but no window needs to survive it.
+        if (next.retriedAfterConflict) this.windows.forget();
+        else this.windows.committed(next.events);
         if (next.skipped > 0 || next.retriedAfterConflict) {
           warn({ skipped: next.skipped, written: next.written, retriedAfterConflict: next.retriedAfterConflict,
             reason: "entry gone, entry retired by a handoff birth, or sequence no longer newer" });
@@ -396,6 +405,7 @@ export class DaemonActivityWrites extends ActivityWriteBatcher {
       },
       diagnostic: (error, dropped) => warn({ dropped, error: String(error) }),
     });
+    this.windows = new RecentActivityWindows({ store: ports.store, overlay: (entry) => this.overlay(entry) });
     ports.authority.setPendingWriteFlush(() => this.flushInLane());
     ports.store.setPendingActivityState((agentId) => this.pendingState(agentId));
     this.admission = {
@@ -406,6 +416,25 @@ export class DaemonActivityWrites extends ActivityWriteBatcher {
       pendingState: (entryId) => this.pendingState(entryId),
       admit: (item) => this.admit(item),
     };
+  }
+
+  /**
+   * The same entry as overlayEntry(store.getEntry(entryId)), for the provider
+   * stream's per-event read: its stored activity comes from memory when the
+   * database shows it unchanged. Its activity events are shared and frozen.
+   */
+  readRecentEntry(entryId: string): Promise<DaemonManifestEntry | undefined> {
+    return this.windows.read(entryId);
+  }
+
+  override retireEntry(entryId: string): void {
+    super.retireEntry(entryId);
+    this.windows.forget(entryId);
+  }
+
+  override async close(): Promise<void> {
+    await super.close();
+    this.windows.forget();
   }
 
   async overlayEntry(entry: Promise<DaemonManifestEntry | undefined>): Promise<DaemonManifestEntry | undefined> {

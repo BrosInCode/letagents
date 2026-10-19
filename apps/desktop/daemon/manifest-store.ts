@@ -117,6 +117,13 @@ export type ActivityWrite = {
   runtimeUpdate: ActivityRuntimeUpdate | null;
   limit: number;
 };
+/** One event a batch wrote, exactly as a later full read returns it. */
+export type CommittedActivityWrite = { agentId: string; event: DaemonActivityEvent; limit: number; bytes: number };
+/**
+ * The shape of one entry's whole stored activity, read from the activity
+ * index without payloads: enough to tell whether a copy of it is current.
+ */
+export type ActivityShape = { count: number; sequenceTotal: number; firstSequence: number | null };
 type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string; image_input: boolean; live_sharing: LiveSharingState };
 export type LiveSharingState = "off" | "on" | "withdrawing";
 /** Anything but a known state reads as off. */
@@ -192,6 +199,29 @@ function json(value: unknown): string {
 
 function parseJson<T>(value: unknown): T {
   return JSON.parse(String(value)) as T;
+}
+
+function activityEventFromRow(event: Row, payload: unknown): DaemonActivityEvent {
+  return {
+    observed_at: String(event.observed_at), sequence: Number(event.sequence), provider: String(event.provider),
+    kind: String(event.kind), method: String(event.method), summary: String(event.summary),
+    status: String(event.status) as DaemonActivityEvent["status"], payload,
+    payload_truncated: bool(event.payload_truncated), payload_redacted: bool(event.payload_redacted),
+    durable_payload_ref: nullableString(event.durable_payload_ref),
+  };
+}
+
+/**
+ * A JSON-normalized event as appendActivityEvent stores it and a full read
+ * returns it. Its payload is already a JSON value, so it is kept as is.
+ */
+function committedActivityEvent(event: DaemonActivityEvent): DaemonActivityEvent {
+  return activityEventFromRow({
+    observed_at: event.observed_at, sequence: event.sequence, provider: event.provider, kind: event.kind,
+    method: event.method, summary: event.summary, status: event.status,
+    payload_truncated: Number(event.payload_truncated), payload_redacted: Number(event.payload_redacted),
+    durable_payload_ref: event.durable_payload_ref,
+  } as Row, event.payload);
 }
 
 function normalizeManifestEntry(entry: DaemonManifestEntry): DaemonManifestEntry {
@@ -278,6 +308,10 @@ const MANIFEST_READS = {
     NULL AS payload_json, payload_truncated, payload_redacted, durable_payload_ref
     FROM activity_events WHERE agent_id = ? ORDER BY sequence DESC, sort_order DESC LIMIT ?`,
   lastSequence: "SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1",
+  // TOTAL, not SUM: a sum of large sequences must never fail the read.
+  activityShape: `SELECT COUNT(*) AS count, TOTAL(sequence) AS sequence_total,
+    (SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order LIMIT 1) AS first_sequence
+    FROM activity_events WHERE agent_id = ?`,
   stages: "SELECT stage FROM turn_control_stages WHERE agent_id = ? ORDER BY sort_order",
   completedActions: `SELECT action_id FROM reconciliation_completed_actions
     WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?`,
@@ -325,6 +359,21 @@ export class ManifestStore {
   async getEntry(agentId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId, activityMode);
+  }
+
+  /**
+   * One entry as getEntry(agentId, "summary") reads it, and the shape of its
+   * whole activity, from the same snapshot. Reads no payloads.
+   */
+  async getEntrySummaryWithActivityShape(agentId: string): Promise<{ entry: DaemonManifestEntry; activityShape: ActivityShape } | undefined> {
+    const database = await this.getDatabase();
+    const entry = this.readEntryFromDatabase(database, agentId, "summary");
+    if (!entry) return undefined;
+    const row = this.reads.get(database, "activityShape").get(agentId, agentId) as Row;
+    return { entry, activityShape: {
+      count: Number(row.count), sequenceTotal: Number(row.sequence_total),
+      firstSequence: row.first_sequence == null ? null : Number(row.first_sequence),
+    } };
   }
 
   async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
@@ -2758,21 +2807,25 @@ export class ManifestStore {
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     /** Checked inside the transaction; an event of an entry it refuses is skipped. */
     mayWrite?: (agentId: string) => boolean,
-  ): Promise<{ generation: number; written: number; skipped: number }> {
-    const normalized = items.map((item) => ({ ...item, event: parseJson<DaemonActivityEvent>(json(item.event)) }));
+  ): Promise<{ generation: number; written: number; skipped: number; events: CommittedActivityWrite[] }> {
+    const normalized = items.map((item) => {
+      const encoded = json(item.event);
+      return { ...item, event: parseJson<DaemonActivityEvent>(encoded), bytes: encoded.length };
+    });
     const result = await this.writeTargeted(expectedGeneration, (database) => {
-      let written = 0;
+      const written: CommittedActivityWrite[] = [];
       for (const item of normalized) {
         if (mayWrite && !mayWrite(item.agentId)) continue;
         const latest = this.reads.get(database, "lastSequence").get(item.agentId) as Row | undefined;
         if (latest && item.event.sequence <= Number(latest.sequence)) continue;
         if (!this.applyActivityRuntime(database, item.agentId, item.runtimeUpdate)) continue;
         this.appendActivityEvent(database, item.agentId, item.event, item.limit);
-        written += 1;
+        written.push({ agentId: item.agentId, event: committedActivityEvent(item.event), limit: item.limit, bytes: item.bytes });
       }
       return written;
     }, commitFence);
-    return { generation: result.generation, written: result.value, skipped: items.length - result.value };
+    return { generation: result.generation, written: result.value.length,
+      skipped: items.length - result.value.length, events: result.value };
   }
 
   private applyActivityRuntime(database: DatabaseSync, agentId: string, runtimeUpdate: ActivityRuntimeUpdate | null): boolean {
@@ -3272,13 +3325,7 @@ export class ManifestStore {
       ? (this.reads.get(database, "activitySummary")
         .all(agentId, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT) as Row[]).reverse()
       : this.reads.get(database, "activity").all(agentId) as Row[];
-    const activity = activityRows.map((event): DaemonActivityEvent => ({
-      observed_at: String(event.observed_at), sequence: Number(event.sequence), provider: String(event.provider),
-      kind: String(event.kind), method: String(event.method), summary: String(event.summary),
-      status: String(event.status) as DaemonActivityEvent["status"], payload: parseJson(event.payload_json),
-      payload_truncated: bool(event.payload_truncated), payload_redacted: bool(event.payload_redacted),
-      durable_payload_ref: nullableString(event.durable_payload_ref),
-    }));
+    const activity = activityRows.map((event) => activityEventFromRow(event, parseJson(event.payload_json)));
     const stages = (this.reads.get(database, "stages").all(agentId) as Row[]).map((stage) => String(stage.stage)) as DaemonTurnControlEffect["stages"];
     const completedActions = (this.reads.get(database, "completedActions").all(agentId, MAX_PROJECTED_COMPLETED_ACTION_IDS) as Row[])
       .map((action) => String(action.action_id)).reverse();

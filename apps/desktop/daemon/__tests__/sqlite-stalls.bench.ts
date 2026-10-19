@@ -18,7 +18,12 @@
  * DaemonAuthority lanes).
  *
  * Modes: unbatched (one commit per activity event, as before batching),
- * default (the daemon's batched activity writes), and two attribution-only
+ * default (the daemon's batched activity writes), stream (default plus the
+ * provider stream's own work for each event before admission: its read of the
+ * entry's recent activity, the classification of the event against it, and
+ * its redaction of the event, as the daemon wires it with its in-memory recent
+ * activity windows), stream-full-read (stream, but each read is the full entry
+ * read the stream made before those windows), and two attribution-only
  * modes on the unbatched path that change durability and must never ship:
  * no-checkpoint (wal_autocheckpoint = 0) and sync-off (synchronous = OFF).
  * `commits*` modes time single commits on a raw daemon connection.
@@ -34,6 +39,7 @@ import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { ManifestStore } from "../manifest-store.js";
 import { openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
 import { ActivityWriteBatcher } from "../activity-write-batcher.js";
+import { RecentActivityWindows } from "../recent-activity-windows.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
@@ -41,6 +47,7 @@ import { ManifestAdministrationCoordinator } from "../manifest-administration-co
 import { projectDaemonCreateRequestReplayParameters } from "../manifest-entry-projection.js";
 import { deriveProviderConfigurationSnapshot } from "../provider-configuration.js";
 import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
+import { isSupervisedQuietPollContinuation } from "../provider-stream-policy.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
 
 const mode = process.argv[2] ?? "default";
@@ -49,6 +56,17 @@ const AGENTS = 8;
 const SEED_PUBLICATIONS = 40_000;
 
 type Op = { kind: string; start: number; end: number; checkpointed: boolean };
+
+/** CPU time of the admission steps, by step, whatever operation they ran in. */
+const steps = new Map<string, number[]>();
+function timed<T>(step: string, operation: () => T): T {
+  const start = performance.now();
+  try { return operation(); } finally {
+    const list = steps.get(step) ?? [];
+    list.push(performance.now() - start);
+    steps.set(step, list);
+  }
+}
 
 function agentEntry(index: number): DaemonManifestEntry {
   const id = `agent_${index}`;
@@ -147,9 +165,12 @@ async function main(): Promise<void> {
       commit: (items) => run("activity batch commit", async () => {
         const next = await store.recordActivityBatch(authority.generation, items, (commit) => authority.fenceDaemonCommit(commit));
         authority.generation = next.generation;
+        windows.committed(next.events);
       }),
     });
     authority.setPendingWriteFlush(() => batcher.flushInLane());
+    const windows = new RecentActivityWindows({ store, overlay: (entry) => batcher.overlay(entry) });
+    const streaming = mode === "stream" || mode === "stream-full-read";
     const coordinator = new ManifestAdministrationCoordinator({
       store,
       authority: {
@@ -164,11 +185,11 @@ async function main(): Promise<void> {
         projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
         deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
         permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
-        sanitizeActivity: sanitizeDaemonActivityEvent,
+        sanitizeActivity: (event) => timed("admission sanitize", () => sanitizeDaemonActivityEvent(event)),
         safeErrorDetail: schedulerErrorDetail,
       },
       convergence: { request: () => {} },
-      ...(mode === "default" ? { activity: {
+      ...(mode === "default" || streaming ? { activity: {
         serializeAdmission: <T>(operation: () => Promise<T>) => batcher.serializeAdmission(operation),
         pendingState: (entryId: string) => batcher.pendingState(entryId),
         admit: (item: Parameters<ActivityWriteBatcher["admit"]>[0]) => batcher.admit(item),
@@ -189,7 +210,21 @@ async function main(): Promise<void> {
       // ~40 activity events/s across the agents, some with large tool output.
       const agent = tick % AGENTS;
       const size = tick % 10 === 0 ? 24_000 : 1_500;
-      await run("activity", () => coordinator.appendNativeActivity(`agent_${agent}`, event(++sequences[agent], size), false));
+      const raw = event(++sequences[agent], size);
+      let admitted = raw;
+      if (streaming) {
+        // ProviderStreamCoordinator.handleInstalled before it admits the event.
+        await run("stream read", async () => {
+          const start = performance.now();
+          const entry = mode === "stream"
+            ? await windows.read(`agent_${agent}`)
+            : batcher.overlay(await store.getEntry(`agent_${agent}`));
+          steps.set("stream read", [...(steps.get("stream read") ?? []), performance.now() - start]);
+          timed("stream classify", () => isSupervisedQuietPollContinuation(raw, entry?.activity ?? []));
+        });
+        await run("stream sanitize", () => { admitted = timed("stream sanitize", () => sanitizeDaemonActivityEvent(raw)); });
+      }
+      await run("activity", () => coordinator.appendNativeActivity(`agent_${agent}`, admitted, false));
       if (tick % 20 === 0) await run("publication", () => publish(agent));
       if (tick % 4 === 0) await run("watch_state", () => store.load("summary"));
       if (tick % 20 === 10) await run("manifest.list", () => store.load("full"));
@@ -232,6 +267,11 @@ async function main(): Promise<void> {
       walBytesAtEnd: wal,
       writesWithCheckpoint: { count: checkpointOps.length, p50: +percentile(checkpointOps, 0.5).toFixed(2), max: +(checkpointOps.at(-1) ?? 0).toFixed(2) },
       writesWithoutCheckpoint: { count: plainWrites.length, p50: +percentile(plainWrites, 0.5).toFixed(2), p99: +percentile(plainWrites, 0.99).toFixed(2) },
+      stepMs: Object.fromEntries([...steps].map(([step, list]) => {
+        const sorted = [...list].sort((a, b) => a - b);
+        return [step, { count: list.length, totalMs: Math.round(list.reduce((total, value) => total + value, 0)),
+          p50: +percentile(sorted, 0.5).toFixed(3), p99: +percentile(sorted, 0.99).toFixed(3), max: +(sorted.at(-1) ?? 0).toFixed(2) }];
+      })),
       stallMsByCause: Object.fromEntries([...byCause].map(([cause, value]) => [cause, { count: value.count, ms: Math.round(value.ms) }])),
       ops: opStats,
     }, null, 2));
