@@ -503,6 +503,8 @@ createSchema(database: DatabaseSync): void {
 export interface DaemonStateSchema extends MigrationsV1ToV12, MigrationsV13ToV24, StorageMigrations, RuntimeBirthRepairs, ShapesV11V12, ShapesV13ToV16, ShapesV17ToCurrent, ShapesV6ToV9, ShapesV4ToV7, ShapesV2V3 {}
 for (const methods of [migrationsV1ToV12, migrationsV13ToV24, storageMigrations, runtimeBirthRepairs, shapesV11V12, shapesV13ToV16, shapesV17ToCurrent, shapesV6ToV9, shapesV4ToV7, shapesV2V3]) {
   for (const [name, value] of Object.entries(methods)) {
+    // Two modules defining one name would silently keep the later definition.
+    if (name in DaemonStateSchema.prototype) throw new Error(`DaemonStateSchema method ${name} is defined twice.`);
     Object.defineProperty(DaemonStateSchema.prototype, name, { value, writable: true, configurable: true, enumerable: false });
   }
 }
