@@ -10,6 +10,7 @@
  * - turn-control.ts: Turn-control preparation, target checkpoints and commit.
  * - cursor-turns.ts: Cursor prepared-turn and provider-state checkpoints.
  * - activity.ts: Batch entry replacement and removal, runtime configuration, activity writes and workplace liveness.
+ * - persistence.ts: Connection lifecycle: close, the guarded write, database open and schema, legacy JSON import.
  *
  * Where new code goes: a ManifestStore method goes in the module of its concern
  * (see the module list in store.ts); shared row helpers and types go in shared.ts.
@@ -17,16 +18,15 @@
  */
 import { PreparedReadStatements } from "../prepared-reads.js";
 import type { DatabaseSync } from "node:sqlite";
-import { chmod, readFile, rename } from "node:fs/promises";
-import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
+import { chmod } from "node:fs/promises";
 import { assertNoPollingActivation } from "../custodial-polling-activation.js";
 import { assertNoDeliveryDrain } from "../delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "../reconciler-state.js";
 import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "../state-watch-projection.js";
 import { pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import { projectDaemonManifestEntry, type DaemonManifestDomainProjection } from "../manifest-entry-projection.js";
-import type { DaemonAgentConfiguration, DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, DaemonProviderRuntimeReference, DaemonTurnControlEffect, ExecutionTerminalPayload, ReconciliationNotice, ReconciliationState } from "../types.js";
-import { type StoredManifest, type Row, liveSharingState, type PreMembershipRoomMoveCancellation, ManifestConflictError, checksum, bool, nullableString, nullableNumber, json, parseJson, activityEventFromRow, importedWithoutHomeHarness, canonicalManifestEntry, run, MANIFEST_READS } from "./shared.js";
+import type { DaemonAgentConfiguration, DaemonManifestEntry, DaemonProviderConnection, DaemonProviderRuntimeReference, DaemonTurnControlEffect, ExecutionTerminalPayload, ReconciliationNotice, ReconciliationState } from "../types.js";
+import { type Row, liveSharingState, type PreMembershipRoomMoveCancellation, ManifestConflictError, bool, nullableString, nullableNumber, json, parseJson, activityEventFromRow, canonicalManifestEntry, run, MANIFEST_READS } from "./shared.js";
 import { entryReads } from "./entry-reads.js";
 import { approvals } from "./approvals.js";
 import { deliveryAndPolling } from "./delivery-and-polling.js";
@@ -35,6 +35,7 @@ import { entriesAndRecovery } from "./entries-and-recovery.js";
 import { turnControl } from "./turn-control.js";
 import { cursorTurns } from "./cursor-turns.js";
 import { activity } from "./activity.js";
+import { persistence } from "./persistence.js";
 
 /**
  * SQLite-backed durable state for the daemon's compatibility manifest.
@@ -63,171 +64,6 @@ export class ManifestStore {
   static async ensureDatabase(path: string): Promise<void> {
     const store = new ManifestStore(path);
     try { await store.load(); } finally { await store.close(); }
-  }
-
-  async close(): Promise<void> {
-    this.closed = true;
-    await this.writes;
-    await this.initializing?.catch(() => undefined);
-    this.reads.clear();
-    this.database?.close();
-    this.database = null;
-    this.initializing = null;
-  }
-
-  async write(
-    expectedGeneration: number,
-    entries: DaemonManifest["entries"],
-    commitFence?: (commit: () => Promise<void>) => Promise<void>,
-    roomMoveCancellation?: PreMembershipRoomMoveCancellation,
-  ): Promise<DaemonManifest> {
-    return this.serialize(async () => {
-      const database = await this.getDatabase();
-      const normalizedEntries = entries.map(canonicalManifestEntry);
-      let committed = false;
-      let transactionOpen = false;
-      try {
-        const commit = async () => {
-          if (committed) throw new Error("Manifest transaction was already committed.");
-          database.exec("BEGIN IMMEDIATE");
-          transactionOpen = true;
-          const result = database.prepare(`
-            UPDATE manifest_metadata SET generation = generation + 1
-            WHERE singleton = 1 AND generation = ?
-          `).run(expectedGeneration);
-          if (Number(result.changes) !== 1) {
-            const current = Number((this.reads.get(database, "generation").get() as Row).generation);
-            throw new ManifestConflictError(`Manifest generation ${current} does not match expected ${expectedGeneration}.`);
-          }
-          if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
-          this.replaceEntries(database, normalizedEntries);
-          database.exec("COMMIT");
-          transactionOpen = false;
-          committed = true;
-        };
-        if (commitFence) await commitFence(commit);
-        else await commit();
-        if (!committed) throw new Error("Manifest commit fence returned without committing the transaction.");
-
-        const persistedEntries = normalizedEntries.map((entry) => {
-          const persisted = this.readEntryFromDatabase(database, entry.id);
-          if (!persisted) throw new Error(`Daemon manifest entry disappeared after full replacement: ${entry.id}`);
-          return persisted;
-        });
-        const returnedEntries = persistedEntries.map((entry) => entry.reconciliation
-          ? {
-            ...entry,
-            reconciliation: {
-              ...entry.reconciliation,
-              completed_action_ids: entry.reconciliation.completed_action_ids.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS),
-            },
-          }
-          : entry);
-        const manifest: DaemonManifest = { generation: expectedGeneration + 1, entries: returnedEntries };
-        return manifest;
-      } catch (error) {
-        if (transactionOpen) {
-          try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
-        }
-        throw error;
-      }
-    });
-  }
-
-  async getDatabase(): Promise<DatabaseSync> {
-    if (this.closed) throw new Error("ManifestStore is closed.");
-    if (this.database) return this.database;
-    if (!this.initializing) this.initializing = this.initialize();
-    return this.initializing;
-  }
-
-  async initialize(): Promise<DatabaseSync> {
-    let database: DatabaseSync | null = null;
-    try {
-      database = this.schemaPrepared
-        ? await openPreparedDaemonStateDatabase(this.path)
-        : await openDaemonStateDatabase(this.path, async (opened) => {
-          await this.secureDatabaseFiles();
-          this.createSchema(opened);
-        });
-      await this.importLegacyManifest(database);
-      this.database = database;
-      return database;
-    } catch (error) {
-      database?.close();
-      this.initializing = null;
-      throw error;
-    }
-  }
-
-  createSchema(database: DatabaseSync): void {
-    new DaemonStateSchema(this.schemaInitializationHook).createSchema(database);
-  }
-  async importLegacyManifest(database: DatabaseSync): Promise<void> {
-    if (!this.legacyJsonPath) return;
-    const migrationKey = `legacy-json:${this.legacyJsonPath}`;
-    const failed = database.prepare("SELECT reason, quarantined_path FROM migration_failures WHERE migration_key = ?").get(migrationKey) as Row | undefined;
-    if (failed) throw new Error(`Legacy daemon manifest migration is blocked after validation failure (${String(failed.reason)}); quarantined at ${String(failed.quarantined_path)}.`);
-    const existing = database.prepare("SELECT checksum FROM migration_records WHERE migration_key = ?").get(migrationKey) as Row | undefined;
-    if (existing) {
-      await this.retainLegacyBackup(String(existing.checksum));
-      return;
-    }
-
-    let source: string;
-    try {
-      source = await readFile(this.legacyJsonPath, "utf8");
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
-    }
-
-    let stored: StoredManifest;
-    try {
-      stored = JSON.parse(source) as StoredManifest;
-      if (!stored.manifest || stored.checksum !== checksum(stored.manifest)) throw new Error("checksum mismatch");
-    } catch (error) {
-      const quarantinedPath = `${this.legacyJsonPath}.corrupt-${Date.now()}`;
-      run(database.prepare("INSERT OR REPLACE INTO migration_failures(migration_key, reason, failed_at, quarantined_path) VALUES (?, ?, ?, ?)"), migrationKey, String(error), new Date().toISOString(), quarantinedPath);
-      await rename(this.legacyJsonPath, quarantinedPath);
-      throw new Error(`Legacy daemon manifest failed checksum validation: ${String(error)}`);
-    }
-
-    database.exec("BEGIN IMMEDIATE");
-    try {
-      const current = Number((this.reads.get(database, "generation").get() as Row).generation);
-      const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_identities").get() as Row).count);
-      if (current !== 0 || count !== 0) throw new Error("Refusing to import a legacy manifest into non-empty daemon state.");
-      // An imported file is not the desktop app's signed choice, so no
-      // imported agent starts with its owner's own setup turned on.
-      this.replaceEntries(database, stored.manifest.entries.map(importedWithoutHomeHarness).map((entry) =>
-        entry.provider === "codex" && entry.provider_ref
-          ? { ...entry, desired_state: "stopped" as const }
-          : entry), false);
-      run(database.prepare("UPDATE manifest_metadata SET generation = ? WHERE singleton = 1"), stored.manifest.generation);
-      run(database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)"), migrationKey, stored.checksum, new Date().toISOString());
-      database.exec("COMMIT");
-    } catch (error) {
-      try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
-      throw error;
-    }
-    await this.retainLegacyBackup(stored.checksum);
-  }
-
-  async retainLegacyBackup(expectedChecksum: string): Promise<void> {
-    if (!this.legacyJsonPath) return;
-    let source: string;
-    try {
-      source = await readFile(this.legacyJsonPath, "utf8");
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
-    }
-    const stored = JSON.parse(source) as StoredManifest;
-    if (stored.checksum !== expectedChecksum || !stored.manifest || checksum(stored.manifest) !== expectedChecksum) {
-      throw new Error("Refusing to retain a legacy manifest backup whose checksum differs from the imported source.");
-    }
-    await rename(this.legacyJsonPath, `${this.legacyJsonPath}.migrated-backup`);
   }
 
   replaceEntries(database: DatabaseSync, entries: DaemonManifestEntry[], initializeNewMintStates = true): void {
@@ -775,8 +611,9 @@ type EntriesAndRecoveryMethods = typeof entriesAndRecovery;
 type TurnControlMethods = typeof turnControl;
 type CursorTurnsMethods = typeof cursorTurns;
 type ActivityMethods = typeof activity;
-export interface ManifestStore extends EntryReadsMethods, ApprovalsMethods, DeliveryAndPollingMethods, RoomMovesAndPurgesMethods, EntriesAndRecoveryMethods, TurnControlMethods, CursorTurnsMethods, ActivityMethods {}
-for (const methods of [entryReads, approvals, deliveryAndPolling, roomMovesAndPurges, entriesAndRecovery, turnControl, cursorTurns, activity]) {
+type PersistenceMethods = typeof persistence;
+export interface ManifestStore extends EntryReadsMethods, ApprovalsMethods, DeliveryAndPollingMethods, RoomMovesAndPurgesMethods, EntriesAndRecoveryMethods, TurnControlMethods, CursorTurnsMethods, ActivityMethods, PersistenceMethods {}
+for (const methods of [entryReads, approvals, deliveryAndPolling, roomMovesAndPurges, entriesAndRecovery, turnControl, cursorTurns, activity, persistence]) {
   for (const [name, value] of Object.entries(methods)) {
     // Two modules defining one name would silently keep the later definition.
     if (name in ManifestStore.prototype) throw new Error(`ManifestStore method ${name} is defined twice.`);
