@@ -180,3 +180,16 @@ export async function setRoomExpressionsEnabled(roomId: string, enabled: boolean
     .onConflictDoUpdate({ target: room_settings.room_id,
       set: { expressions_enabled: enabled, updated_at: sql`now()` } });
 }
+
+/** History summaries are on by default: a room with no row has them on. */
+export async function getRoomHistorySummaryEnabled(roomId: string): Promise<boolean> {
+  const [row] = await db.select({ enabled: room_settings.history_summary_enabled })
+    .from(room_settings).where(eq(room_settings.room_id, roomId));
+  return row?.enabled !== false;
+}
+
+export async function setRoomHistorySummaryEnabled(roomId: string, enabled: boolean): Promise<void> {
+  await db.insert(room_settings).values({ room_id: roomId, history_summary_enabled: enabled })
+    .onConflictDoUpdate({ target: room_settings.room_id,
+      set: { history_summary_enabled: enabled, updated_at: sql`now()` } });
+}
