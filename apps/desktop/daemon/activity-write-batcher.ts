@@ -1,5 +1,8 @@
+import type { DaemonAuthority } from "./daemon-authority.js";
+import type { ManifestActivityBatch } from "./manifest-administration-coordinator.js";
 import { ManifestConflictError, type ActivityWrite, type ManifestStore } from "./manifest-store.js";
-import type { DaemonActivityEvent, DaemonManifestEntry } from "./types.js";
+import { DaemonFenceLostError } from "./singleton.js";
+import type { DaemonActivityEvent, DaemonManifest, DaemonManifestEntry } from "./types.js";
 
 /**
  * How long an admitted activity event may wait for others before its batch is
@@ -344,5 +347,73 @@ export class ActivityWriteBatcher {
     if (this.timer === null) return;
     this.clearTimer(this.timer);
     this.timer = null;
+  }
+}
+
+/**
+ * The daemon's batched activity writes, wired as the composition root needs
+ * them:
+ * - every other manifest mutation writes pending activity first, so it reads
+ *   and orders after every event admitted before it;
+ * - a durable-idle check never passes while a newer working event is pending;
+ * - admission refuses new events once the handoff (or stop) fence is up;
+ * - every batch holds only events admitted before that fence, so it always
+ *   uses the admitted-state fence: it commits while this daemon still owns the
+ *   singleton, even if a handoff began while it waited for the commit lane,
+ *   and never once the singleton is lost;
+ * - a retiring daemon's provider birth record is never overwritten by older
+ *   activity (mayWrite);
+ * - the provider stream's own reads (overlayEntry, overlayManifest) see the
+ *   events it admitted that are still pending, since it classifies the next
+ *   event from its entry's recent activity.
+ * stop() and stopForHandoff() close it before the singleton is released and
+ * the stores close (stopForHandoff first of all, so admitted activity orders
+ * before the handoff's own last writes).
+ */
+export class DaemonActivityWrites extends ActivityWriteBatcher {
+  readonly admission: ManifestActivityBatch;
+
+  constructor(ports: {
+    authority: DaemonAuthority;
+    store: ManifestStore;
+    isHandoffScheduled(): boolean;
+    admittedFence(commit: () => Promise<void>): Promise<void>;
+    warn?(detail: Record<string, unknown>): void;
+  }) {
+    const warn = ports.warn ?? ((detail) => console.warn("[activity_batch]", JSON.stringify(detail)));
+    super({
+      serialize: (operation) => ports.authority.serializeManifestMutationWithoutFlush(operation),
+      commit: async (items) => {
+        const next = await commitActivityBatch({
+          store: ports.store, items, expectedGeneration: ports.authority.generation,
+          fence: (commit) => ports.admittedFence(commit), mayWrite: (agentId) => this.mayWrite(agentId),
+        });
+        ports.authority.generation = next.generation;
+        if (next.skipped > 0 || next.retriedAfterConflict) {
+          warn({ skipped: next.skipped, written: next.written, retriedAfterConflict: next.retriedAfterConflict,
+            reason: "entry gone, entry retired by a handoff birth, or sequence no longer newer" });
+        }
+      },
+      diagnostic: (error, dropped) => warn({ dropped, error: String(error) }),
+    });
+    ports.authority.setPendingWriteFlush(() => this.flushInLane());
+    ports.store.setPendingActivityState((agentId) => this.pendingState(agentId));
+    this.admission = {
+      serializeAdmission: (operation) => this.serializeAdmission(async () => {
+        if (ports.isHandoffScheduled()) throw new DaemonFenceLostError("Supervisor handoff fenced new daemon activity.");
+        return operation();
+      }),
+      pendingState: (entryId) => this.pendingState(entryId),
+      admit: (item) => this.admit(item),
+    };
+  }
+
+  async overlayEntry(entry: Promise<DaemonManifestEntry | undefined>): Promise<DaemonManifestEntry | undefined> {
+    return this.overlay(await entry);
+  }
+
+  async overlayManifest(pending: Promise<DaemonManifest>): Promise<DaemonManifest> {
+    const manifest = await pending;
+    return { ...manifest, entries: manifest.entries.map((entry) => this.overlay(entry)) };
   }
 }
