@@ -391,6 +391,11 @@ export interface SupervisorDaemonLifecycleOptions {
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
   now?: () => Date;
+  /**
+   * How long a verified-ready status answers `ensureRunning` without a new
+   * negotiation. Default 2000 ms. Zero turns the cache off.
+   */
+  readyStatusTtlMs?: number;
 }
 
 export function supervisorDaemonSpawnEnvironment(
@@ -446,8 +451,9 @@ const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
 /** State and runtime identity must agree even when retaining a daemon's provider environment. */
 export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessEnv>): string {
   const home = env.HOME ?? homedir();
-  const effective: NodeJS.ProcessEnv = {
-    ...env,
+  // Read only the keys that enter the hash. Copying all of `process.env` for
+  // every call cost about 190 us and ran on every supervisor request.
+  const effective: Partial<Record<(typeof SUPERVISOR_COMPATIBILITY_KEYS)[number], string | undefined>> = {
     HOME: home,
     LETAGENTS_API_URL: env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     // MCP consumes a nonempty state path verbatim, unlike the desktop chat paths.
@@ -456,6 +462,9 @@ export function supervisorCompatibilityFingerprint(env: Readonly<NodeJS.ProcessE
     LETAGENTS_LOCAL_FILES_DIR: env.LETAGENTS_LOCAL_FILES_DIR?.trim() || join(home, ".letagents", "local-files"),
     LETAGENTS_LOCAL_PROFILE_PATH: env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() || join(home, ".letagents", "local-profile.json"),
     LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() || join(home, ".letagents", "chat-storage.json"),
+    LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY: env.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY,
+    LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256: env.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256,
+    LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV: env.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV,
   };
   return createHash("sha256")
     .update(JSON.stringify(SUPERVISOR_COMPATIBILITY_KEYS.map((key) => [key, effective[key] ?? null])))
@@ -478,6 +487,22 @@ export class SupervisorDaemonClient {
   readonly socketPath: string;
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
+  /**
+   * Short-lived answer for `ensureRunning`.
+   *
+   * Problem: every supervisor IPC (list-agents, state push, inspector poll every
+   * 5 s, approvals) ran a full negotiation: a maintenance-file read, an
+   * environment copy with two SHA-256 fingerprints, and a `daemon.negotiate`
+   * request on a new socket.
+   * Rule: after a negotiation that proved the daemon ready and current, reuse
+   * that status for `readyStatusTtlMs`.
+   * Invalidation: any lost connection, timeout or disconnect, daemon exit, a
+   * disconnect seen by the observer, a handoff, a maintenance request, an
+   * application-update step, or an environment refresh clears it at once.
+   * A held maintenance status is never cached.
+   */
+  private readyStatus: { status: DesktopSupervisorDaemonStatus; expiresAt: number } | null = null;
+  private readonly readyStatusTtlMs: number;
   private applicationUpdateHandoff: Promise<void> | null = null;
   private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdatePrepared = false;
@@ -506,6 +531,7 @@ export class SupervisorDaemonClient {
     if (this.applicationUpdatePrepared) return Promise.reject(new Error("The application update is already being installed."));
     if (this.maintenanceOperation) return this.maintenanceOperation;
     this.maintenanceRequested = true;
+    this.invalidateReadyStatus();
     for (const cancel of this.maintenanceRequests) cancel();
     const operation = withDaemonMaintenanceOperation(async owner => {
       const hold = await owner.read();
@@ -618,6 +644,7 @@ export class SupervisorDaemonClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
+    this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
       const child = spawn(process.execPath, [scriptPath], {
         cwd,
@@ -640,13 +667,31 @@ export class SupervisorDaemonClient {
     }
     if (this.environmentRefreshHandoff) return this.environmentRefreshHandoff;
     if (!this.ensureOperation) {
+      const cached = this.readyStatus;
+      if (cached && Date.now() < cached.expiresAt && !this.drainingCurrentDaemon
+        && !this.maintenanceOperation && (!this.ownedDaemon || this.ownedDaemon.ready)) {
+        return Promise.resolve(cached.status);
+      }
+      this.readyStatus = null;
       this.ensureOperation = Promise.resolve(startupPreparation)
         .then(() => desktopShellEnvironmentReady())
         .then(() => this.ensureRunningOnce())
-        .then((status) => this.rememberReadyStatus(status))
+        .then((status) => this.cacheReadyStatus(this.rememberReadyStatus(status)))
         .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  private cacheReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
+    if (this.readyStatusTtlMs > 0 && !this.maintenanceRequested && !status.maintenanceHoldId
+      && !this.applicationUpdateHandoff && !this.applicationUpdatePrepared) {
+      this.readyStatus = { status, expiresAt: Date.now() + this.readyStatusTtlMs };
+    }
+    return status;
+  }
+
+  private invalidateReadyStatus(): void {
+    this.readyStatus = null;
   }
 
   /** Join startup already registered by the app without starting another service. */
@@ -856,6 +901,7 @@ export class SupervisorDaemonClient {
    * generations during normal startup reconciliation.
    */
   prepareForApplicationUpdate(): Promise<void> {
+    this.invalidateReadyStatus();
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Application update handoff currently requires macOS."));
@@ -876,6 +922,7 @@ export class SupervisorDaemonClient {
   /** Restore the current app's daemon only when Squirrel failed to take over. */
   resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
     this.applicationUpdatePrepared = false;
+    this.invalidateReadyStatus();
     return this.ensureRunning();
   }
 
@@ -892,8 +939,9 @@ export class SupervisorDaemonClient {
         if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
           throw new Error("Supervisor startup is paused while LetAgents installs an application update.");
         }
+        this.invalidateReadyStatus();
         this.ensureOperation = this.ensureRunningOnce(true)
-          .then((status) => this.rememberReadyStatus(status))
+          .then((status) => this.cacheReadyStatus(this.rememberReadyStatus(status)))
           .finally(() => { this.ensureOperation = null; });
         return this.ensureOperation;
       })().finally(() => {
@@ -1763,6 +1811,7 @@ export class SupervisorDaemonClient {
     child.once("error", (error) => {
       // An error after a successful spawn may be an IPC/signalling error,
       // not process death. A failed spawn has no native PID to preserve.
+      this.invalidateReadyStatus();
       if (childPid === null && this.ownedDaemon === owned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_spawn_error",
@@ -1771,6 +1820,7 @@ export class SupervisorDaemonClient {
       });
     });
     child.once("exit", (exitCode, signal) => {
+      this.invalidateReadyStatus();
       if (this.ownedDaemon === owned) this.ownedDaemon = null;
       appendDaemonLifecycleEvent(this.lifecycleLogPath, {
         event: "daemon_exited",
@@ -1797,6 +1847,7 @@ export class SupervisorDaemonClient {
   }
 
   private async drainCurrentDaemon(daemonVersion: number): Promise<void> {
+    this.invalidateReadyStatus();
     this.drainingCurrentDaemon = true;
     for (const ready of this.startupApprovalWaiters) ready();
     try {
@@ -1913,6 +1964,7 @@ export class SupervisorDaemonClient {
   }
 
   private recordAttachedDaemonDisconnect(): void {
+    this.invalidateReadyStatus();
     const observation = this.attachedDaemonObservation;
     if (!observation) return;
     const current = this.observeRetiredDaemon(observation.identity);
@@ -2124,6 +2176,8 @@ export class SupervisorDaemonClient {
         if (onAbort) signal?.removeEventListener("abort", onAbort);
         this.maintenanceRequests.delete(cancelForMaintenance);
         socket.destroy();
+        if (error && (isConnectionUnavailable(error) || error instanceof SupervisorDaemonRequestTimeoutError
+          || /disconnected before replying/.test(error.message))) this.invalidateReadyStatus();
         if (error) reject(error); else resolve(value as T);
       };
       const cancelForMaintenance = () => finish(new Error(DAEMON_MAINTENANCE_MESSAGE));

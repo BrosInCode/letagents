@@ -228,7 +228,7 @@ function decryptTokenFromStorage(
   } catch {
     // Keep the entire read retryable. A partially decrypted session must not
     // enter the cache or overwrite unreadable ciphertext during account refresh.
-    throw new Error("System credential storage is temporarily unavailable.");
+    throw new AuthStorageUnavailableError("System credential storage is temporarily unavailable.");
   }
 }
 
@@ -265,6 +265,30 @@ function emptyStoredAuth(): StoredDesktopAuth {
  */
 let cachedAuth: StoredDesktopAuth | null = null;
 let authGeneration = 0;
+/**
+ * Short negative cache for a failed credential decrypt only.
+ *
+ * Problem: when the Keychain is locked or fails, nothing is cached, so every
+ * concurrent `apiFetch` retried the decrypt (a prompt storm).
+ * Rule: after a decrypt failure, answer "signed out" without another decrypt for
+ * `decryptFailureTtlMs` (default 2 s). Other failures (disk errors, bad JSON) are
+ * not covered and still retry at once. A successful read, any write, sign-out, or
+ * any change of `authGeneration` clears it. It never holds a token, so it cannot
+ * keep anyone signed in.
+ */
+let decryptFailureUntil = 0;
+let decryptFailureTtlMs = 2_000;
+class AuthStorageUnavailableError extends Error {}
+
+function bumpAuthGeneration(): number {
+  decryptFailureUntil = 0;
+  return ++authGeneration;
+}
+
+export function setStoredAuthDecryptFailureTtlMsForTest(ms: number): void {
+  decryptFailureTtlMs = ms;
+  decryptFailureUntil = 0;
+}
 let authMutation: Promise<unknown> = Promise.resolve();
 
 // Keep filesystem mutations ordered, including cancellation during a write.
@@ -278,6 +302,7 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
   if (cachedAuth) {
     return cachedAuth;
   }
+  if (Date.now() < decryptFailureUntil) return emptyStoredAuth();
   const generation = authGeneration;
   try {
     const raw = await readFile(getAuthStorePath(), "utf8");
@@ -294,8 +319,12 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
       savedAt: parsed.savedAt || new Date(0).toISOString(),
     };
     if (generation === authGeneration) cachedAuth = storedAuth;
+    decryptFailureUntil = 0;
     return storedAuth;
   } catch (error) {
+    if (error instanceof AuthStorageUnavailableError && generation === authGeneration) {
+      decryptFailureUntil = Date.now() + decryptFailureTtlMs;
+    }
     // Only a missing file (= signed out) is a cacheable outcome. A transient
     // read failure (EPERM/EIO disk hiccup at startup, etc.) must NOT latch the
     // app signed-out until restart — leave the cache cold so the next call
@@ -331,6 +360,7 @@ async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
   // readStoredAuth (e.g. the Authorization header on the next apiFetch) reflects
   // this mutation without another disk read + keychain decrypt.
   cachedAuth = { ...nextAuth };
+  decryptFailureUntil = 0;
   await mirrorAgentCommitAccount(nextAuth.account);
 }
 
@@ -368,7 +398,7 @@ async function updateStoredAuth(
 }
 
 export async function clearStoredAuth(): Promise<void> {
-  ++authGeneration;
+  bumpAuthGeneration();
   return serializeAuthMutation(async () => {
     await rm(getAuthStorePath(), { force: true });
     // Sign-out must also remove the token used by subsequent API requests.
@@ -564,7 +594,7 @@ export async function apiFetch<T>(
 export async function startDeviceAuthFlow(
   roomIdentifier?: string | null,
 ): Promise<DesktopAuthStartResult> {
-  const generation = ++authGeneration;
+  const generation = bumpAuthGeneration();
   const trimmedRoomIdentifier = roomIdentifier?.trim() || null;
   const verifier = randomBytes(32).toString("hex");
   const path = "/auth/app/start";
@@ -590,7 +620,7 @@ export async function startDeviceAuthFlow(
 }
 
 export async function cancelDeviceAuthFlow(): Promise<DesktopAuthStatus> {
-  const generation = ++authGeneration;
+  const generation = bumpAuthGeneration();
   const storedAuth = await updateStoredAuth({ pendingDeviceAuth: null, appLoginVerifier: null }, generation);
   return buildAuthStatus({ storedAuth });
 }
@@ -696,7 +726,7 @@ async function exchangeDeviceAuthFlow(
         await revokeAuthTokens([response.app_session, response.agent_token]);
         return stalePollResult();
       }
-      ++authGeneration;
+      bumpAuthGeneration();
       authAuthorizedHandler?.();
       return {
         status: "authorized",

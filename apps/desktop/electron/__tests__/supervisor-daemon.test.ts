@@ -861,7 +861,7 @@ test("socket readiness timeout preserves the original child and releases it only
   let server: Server | null = null;
   const children: ChildProcess[] = [];
   const client = new SupervisorDaemonClient({
-    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
+    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25, readyStatusTtlMs: 0, // this test checks every negotiation
     spawnDaemon: () => {
       const child = new EventEmitter() as ChildProcess;
       children.push(child);
@@ -891,6 +891,44 @@ test("socket readiness timeout preserves the original child and releases it only
     assert.equal(children.length, 2, "losing a ready child's socket still does not prove process exit");
   } finally {
     await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a ready daemon answers repeated ensureRunning calls from a short cache that failures and expiry clear", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 51);
+  const negotiations = () => wire.requests.filter(request => request.method === "daemon.negotiate").length;
+  const spawnDaemon = () => { throw new Error("healthy daemon must be reused"); };
+  let wireOpen = true;
+  try {
+    const uncached = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 0, spawnDaemon });
+    for (let index = 0; index < 10; index += 1) await uncached.ensureRunning();
+    const before = negotiations();
+    console.log(`item4 per 10 ensureRunning calls: negotiations before cache=${before}`);
+    assert.equal(before, 10);
+
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 200, spawnDaemon });
+    const first = await client.ensureRunning();
+    const afterFirst = negotiations();
+    for (let index = 0; index < 9; index += 1) assert.equal((await client.ensureRunning()).generation, first.generation);
+    console.log(`item4 per 10 ensureRunning calls: negotiations with cache=${negotiations() - afterFirst + 1}`);
+    assert.equal(negotiations(), afterFirst, "nine calls inside the window cost no negotiation");
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+    await client.ensureRunning();
+    assert.equal(negotiations(), afterFirst + 1, "an expired entry negotiates again");
+
+    await closeServer(wire.server, env.socketPath);
+    wireOpen = false;
+    await assert.rejects(client.list(), /ENOENT|ECONNREFUSED/, "the lost connection reaches the caller");
+    await assert.rejects(client.ensureRunning(), /healthy daemon must be reused/, "the failure cleared the cached ready status");
+  } finally {
+    if (wireOpen) await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
@@ -2156,7 +2194,7 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
     activity: [],
   });
   try {
-    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 0, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
     const recovered = await client.recoverAgentRuntime("agent_dead");
     assert.equal(recovered.id, "agent_dead");
     assert.equal(recovered.observedState, "starting");
@@ -2308,7 +2346,7 @@ test("production create durably proves no mint, grant-only purge survives restar
     await daemon.start();
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
-      daemonScriptPath,
+      daemonScriptPath, readyStatusTtlMs: 0, // the test restarts the daemon behind the client
       spawnDaemon: () => { throw new Error("the real in-process daemon must be reused"); },
     });
     const createInput = {

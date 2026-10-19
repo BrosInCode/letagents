@@ -1,6 +1,7 @@
 import { reactive } from "vue";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
 import { desktopIpc } from "../../../../ipc";
+import { reuseUnchanged } from "../../../../domain/reuse-unchanged";
 
 export interface HostApprovalRoomState {
   approvals: DesktopHostApproval[];
@@ -28,6 +29,51 @@ const EMPTY_ROOM: Readonly<HostApprovalRoomState> = Object.freeze({
 const CHANGED_REQUEST = /refresh the approval|approval was refreshed|approval changed|different decision is already recorded/i;
 let generation = 0;
 
+/** Poll cadence. Fast while a request needs an answer, slow when the room is quiet. */
+export const HOST_APPROVAL_ACTIVE_POLL_MS = 3_000;
+export const HOST_APPROVAL_IDLE_POLL_MS = 15_000;
+/** When each room's last listing began; the state-push throttle reads it. */
+const lastReadStartedAt = new Map<string, number>();
+/** Composer ticks (every HOST_APPROVAL_ACTIVE_POLL_MS) seen since each room's last listing began. */
+const ticksSinceRead = new Map<string, number>();
+
+/**
+ * Called once per composer tick. Returns true when a listing is due.
+ *
+ * Each listing costs main a storage lookup, two daemon requests and a signature.
+ * List on every tick (3 s) only while an approval is open, a decision is in
+ * flight, an unresolved or unavailable card is shown, or the last listing failed. Otherwise list on every fifth tick (15 s).
+ * A supervisor state push also asks for a listing (`watchHostApprovalPushes`),
+ * so a new request does not wait for the slow tick. Counting ticks, not clock
+ * time, keeps the cadence tied to the timer that drives it.
+ */
+export function hostApprovalPollDue(roomIdentifier: string): boolean {
+  const ticks = (ticksSinceRead.get(roomIdentifier) ?? Infinity) + 1;
+  ticksSinceRead.set(roomIdentifier, ticks);
+  if (!lastReadStartedAt.has(roomIdentifier)) return true;
+  const state = rooms.get(roomIdentifier);
+  const needsAnswer = !state || state.busy !== null || state.stale || state.error !== null
+    || state.approvals.some(approval => approval.status === "pending" || approval.status === "decision_recorded"
+      || approval.status === "unavailable" || approval.status === "uncertain");
+  return ticks >= (needsAnswer ? 1 : HOST_APPROVAL_IDLE_POLL_MS / HOST_APPROVAL_ACTIVE_POLL_MS);
+}
+
+/**
+ * Refresh the room's approvals when the supervisor pushes state that includes
+ * this room's agents. At most one listing per active poll period, so a busy
+ * agent never makes this faster than the old 3 s poll. Returns the unsubscribe.
+ */
+export function watchHostApprovalPushes(roomIdentifier: string): () => void {
+  const subscribe = desktopIpc.supervisor?.onState;
+  if (!subscribe || !roomIdentifier) return () => undefined;
+  return subscribe((snapshot) => {
+    if (!snapshot.entries.length) return;
+    const last = lastReadStartedAt.get(roomIdentifier);
+    if (last !== undefined && Date.now() - last < HOST_APPROVAL_ACTIVE_POLL_MS) return;
+    void refreshHostApprovals(roomIdentifier);
+  }, roomIdentifier);
+}
+
 /**
  * One request across presentations: main mints a new presentation ID when it
  * re-presents the same request, so rows and order follow the request instead.
@@ -51,6 +97,8 @@ export function resetHostApprovals(): void {
   rooms.clear();
   mutations.clear();
   pendingReads.clear();
+  lastReadStartedAt.clear();
+  ticksSinceRead.clear();
 }
 
 function roomState(roomIdentifier: string): HostApprovalRoomState {
@@ -77,18 +125,21 @@ async function readHostApprovals(roomIdentifier: string): Promise<void> {
   const epoch = generation;
   const mutation = mutations.get(roomIdentifier) ?? 0;
   state.loading = true;
+  lastReadStartedAt.set(roomIdentifier, Date.now());
+  ticksSinceRead.set(roomIdentifier, 0);
   try {
     const snapshot = await read(roomIdentifier);
     // A decision started during this read owns the newer status.
     if (epoch !== generation || mutation !== (mutations.get(roomIdentifier) ?? 0)) return;
     if (snapshot.available) {
-      if (JSON.stringify(snapshot.approvals) !== JSON.stringify(state.approvals)) state.approvals = snapshot.approvals;
+      // Unchanged data keeps its old references, so an unchanged poll triggers nothing.
+      state.approvals = reuseUnchanged(state.approvals, snapshot.approvals);
       const now = new Date().toISOString();
       const firstSeenAt = Object.fromEntries(snapshot.approvals.map(approval => {
         const identity = hostApprovalIdentity(approval);
         return [identity, state.firstSeenAt[identity] ?? now];
       }));
-      if (JSON.stringify(firstSeenAt) !== JSON.stringify(state.firstSeenAt)) state.firstSeenAt = firstSeenAt;
+      state.firstSeenAt = reuseUnchanged(state.firstSeenAt, firstSeenAt);
     }
     state.stale = !snapshot.available;
     state.error = snapshot.available ? snapshot.error

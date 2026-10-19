@@ -27,6 +27,7 @@ import {
   validateLocalRoomArtifactInputs,
 } from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
+import { withStatementCache } from "./prepared-statements.js";
 import {
   addColumnIfMissing,
   beginImmediate,
@@ -117,9 +118,10 @@ const localReviewLeaseActiveStatuses = new Set(["in_review", "blocked"]);
 let schemaInitialized = false;
 
 async function getDb(): Promise<SqliteDatabase> {
-  await mkdir(localFilesPath, { recursive: true });
   const database = await getLocalChatDatabase();
   if (!schemaInitialized) {
+    // Only needed once per process; every later call used to repeat this syscall.
+    await mkdir(localFilesPath, { recursive: true });
     database.exec(`
       CREATE TABLE IF NOT EXISTS local_rooms (
         room_id TEXT PRIMARY KEY,
@@ -192,7 +194,7 @@ async function getDb(): Promise<SqliteDatabase> {
     ensureLocalTaskRevisionSchema(database);
     schemaInitialized = true;
   }
-  return database;
+  return withStatementCache(database);
 }
 
 export { getDb as getLocalTaskDatabase };
