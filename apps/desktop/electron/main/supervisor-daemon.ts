@@ -2215,6 +2215,9 @@ export class SupervisorDaemonClient {
           const response = JSON.parse(chunks.join("")) as WireResponse;
           if (response.id !== id) throw new Error("Supervisor daemon response id mismatch.");
           if (!response.ok) {
+            // The daemon refused. Generation and capability fences answer this way, and the cached
+            // status the request was built from may be what is stale, so the next call negotiates again.
+            this.invalidateReadyStatus();
             if (/Protocol version mismatch/i.test(response.error ?? "")) {
               throw new SupervisorDaemonProtocolMismatchError(version, response.version, response.error ?? "Protocol version mismatch.");
             }

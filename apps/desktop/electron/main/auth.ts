@@ -285,6 +285,11 @@ function bumpAuthGeneration(): number {
   return ++authGeneration;
 }
 
+export function resetStoredAuthCacheForTest(): void {
+  cachedAuth = null;
+  decryptFailureUntil = 0;
+}
+
 export function setStoredAuthDecryptFailureTtlMsForTest(ms: number): void {
   decryptFailureTtlMs = ms;
   decryptFailureUntil = 0;
@@ -303,16 +308,20 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
 }
 
 /**
- * Read for a read-modify-write. It never uses the negative cache and never
- * answers "signed out" for a failed decrypt: it throws instead, so a write cannot
- * be built from an empty copy and replace ciphertext that is only temporarily
- * unreadable.
+ * Read for a read-modify-write. It never uses the negative cache, so an update
+ * does not act on an empty copy only because a decrypt failed a moment ago.
+ * `preserveSecrets` is for updates that keep the existing secrets (an account
+ * refresh): they throw on a decrypt failure instead of building a write from an
+ * empty copy. Sign-in, cancel, completion and clear updates do not need the old
+ * secrets. On a decrypt failure they proceed from an empty copy and may replace
+ * the file, which is the only recovery when the file can never be decrypted again
+ * (changed Keychain key, reset item).
  */
-async function readStoredAuthForUpdate(): Promise<StoredDesktopAuth> {
-  return readStoredAuthInternal(true);
+async function readStoredAuthForUpdate(preserveSecrets: boolean): Promise<StoredDesktopAuth> {
+  return readStoredAuthInternal(true, preserveSecrets);
 }
 
-async function readStoredAuthInternal(forUpdate: boolean): Promise<StoredDesktopAuth> {
+async function readStoredAuthInternal(forUpdate: boolean, preserveSecrets = false): Promise<StoredDesktopAuth> {
   if (cachedAuth) {
     return cachedAuth;
   }
@@ -338,7 +347,7 @@ async function readStoredAuthInternal(forUpdate: boolean): Promise<StoredDesktop
   } catch (error) {
     if (error instanceof AuthStorageUnavailableError) {
       if (generation === authGeneration) decryptFailureUntil = Date.now() + decryptFailureTtlMs;
-      if (forUpdate) throw error;
+      if (forUpdate && preserveSecrets) throw error;
     }
     // Only a missing file (= signed out) is a cacheable outcome. A transient
     // read failure (EPERM/EIO disk hiccup at startup, etc.) must NOT latch the
@@ -392,9 +401,10 @@ async function mirrorAgentCommitAccount(account: DesktopAuthAccount | null): Pro
 async function updateStoredAuth(
   update: Partial<StoredDesktopAuth>,
   generation = authGeneration,
+  options: { preserveSecrets?: boolean } = {},
 ): Promise<StoredDesktopAuth> {
   return serializeAuthMutation(async () => {
-    const current = await readStoredAuthForUpdate();
+    const current = await readStoredAuthForUpdate(options.preserveSecrets === true);
     if (generation !== authGeneration) return current;
     const nextAuth: StoredDesktopAuth = {
       ...current,
@@ -482,7 +492,7 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
     }>("/auth/session");
     const account = normalizeAuthAccount(session.account);
     if (session.authenticated && session.credential_type === "session" && account) {
-      const nextAuth = await updateStoredAuth({ account }, generation);
+      const nextAuth = await updateStoredAuth({ account }, generation, { preserveSecrets: true });
       return buildAuthStatus({ storedAuth: nextAuth });
     }
 

@@ -897,6 +897,51 @@ test("manifest state subscription returns an initial snapshot and wakes on a com
   }
 });
 
+test("a host approval change wakes a waiting manifest.watch_state before its timeout", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  let observed: ((event: { type: "snapshot"; connectionId: string; requests: unknown[] }) => void) | null = null;
+  const provider = {
+    observePermissions: async (_handle: unknown, listener: NonNullable<typeof observed>) => { observed = listener; },
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", provider as never);
+  try {
+    await daemon.start();
+    const initial = (await daemonRequest(paths.socketPath, "manifest.watch_state", {
+      after_daemon_generation: 0, after_sequence: 0, wait_ms: 1_000,
+    })).result as { daemon_generation: number; sequence: number };
+    const internals = daemon as unknown as {
+      hostApprovals: { install: (agentId: string, handle: unknown, generation: string) => () => void };
+      liveHandles: Map<string, unknown>;
+    };
+    const handle = { providerConnection: { kind: "claude_cli", pid: 4242, processIdentity: "birth-1" } };
+    internals.liveHandles.set("approval_agent", handle);
+    internals.hostApprovals.install("approval_agent", handle, "generation");
+    assert.ok(observed, "the broker subscribes to the provider's permission events");
+
+    const startedAt = Date.now();
+    const waiting = daemonRequest(paths.socketPath, "manifest.watch_state", {
+      after_daemon_generation: initial.daemon_generation, after_sequence: initial.sequence, wait_ms: 5_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    observed!({ type: "snapshot", connectionId: "connection", requests: [] }); // a permission change from the provider
+    const woken = (await waiting).result as { sequence: number };
+    assert.ok(Date.now() - startedAt < 2_500, "the watch returned early instead of timing out");
+    assert.ok(woken.sequence > initial.sequence, "with a higher sequence");
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("manifest.list scopes to one room on request and still lists everything without a scope", async () => {
   const env = await fixture();
   const paths = {

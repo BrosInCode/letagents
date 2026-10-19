@@ -970,6 +970,29 @@ test("a stale-generation answer or a capability rejection clears the cached read
   }
 });
 
+test("an error reply from the daemon clears the cached ready status", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const spawnDaemon = () => { throw new Error("healthy daemon must be reused"); };
+  let wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 71);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 60_000, spawnDaemon });
+    assert.equal((await client.ensureRunning()).generation, 71);
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 72);
+    assert.equal((await client.ensureRunning()).generation, 71, "the cache answers until something fails");
+    // This wire daemon answers the method with an error reply, as the real one does for a generation fence.
+    await assert.rejects(client.setDisplayName("entry-1", "Renamed"), /unsupported/);
+    assert.equal((await client.ensureRunning()).generation, 72, "the error reply cleared the cache");
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("a failed spawn without a PID releases startup ownership for a later retry", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
