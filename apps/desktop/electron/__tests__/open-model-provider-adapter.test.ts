@@ -1663,7 +1663,22 @@ for (const ending of ["output limit", "denied tool call"] as const) test(`an Ope
   }
 });
 
-test("Open Model checkpoints an exact terminal provider rejection before surfacing it", async () => {
+const promotionEndedMessage = "The free promotion for DeepSeek V4.1 Flash Uncensored has ended. This one-time notice is to let you know that if you keep using this model, requests will be charged to your credit balance. Retry to continue.";
+for (const { name, message, expectedDetail } of [
+  { name: "promotion ended", message: promotionEndedMessage, expectedDetail: `: ${promotionEndedMessage}` },
+  {
+    name: "insufficient credits",
+    message: "This request requires more credits. Visit https://provider.invalid/key/secret-id.",
+    expectedDetail: ": This request requires more credits. Visit provider settings",
+  },
+  { name: "missing explanation", message: undefined, expectedDetail: ". The provider did not include an explanation." },
+  { name: "blank explanation", message: "  \n  ", expectedDetail: ". The provider did not include an explanation." },
+  {
+    name: "sensitive and lengthy explanation",
+    message: `Payment notice. api_key=private-credential-value Authorization: Bearer private-bearer-value https://provider.invalid/secret-link ${"extra ".repeat(100)}`,
+    expectedDetail: `: ${`Payment notice. api_key=[REDACTED] Authorization: Bearer [REDACTED] provider settings ${"extra ".repeat(100)}`.slice(0, 320)}`,
+  },
+]) test(`Open Model checkpoints the provider's 402 explanation before surfacing it: ${name}`, async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
   let checkpointed: ProviderRoomTurnResult | null = null;
@@ -1679,7 +1694,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
           name: "APIError",
           data: {
             statusCode: 402,
-            message: "This request requires more credits. Visit https://provider.invalid/key/secret-id.",
+            message,
           },
         },
       },
@@ -1687,6 +1702,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     }],
   ]);
 
+  const expectedError = `Open Model request was rejected by the provider (HTTP 402)${expectedDetail}`;
   await assert.rejects(
     adapter.runRoomTurn(handle, {
       inboxItemId: "inbox-provider-error",
@@ -1698,8 +1714,8 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /provider account could not cover this turn's output budget \(HTTP 402\)/);
-      assert.doesNotMatch(error.message, /secret-id|provider\.invalid/);
+      assert.equal(error.message, expectedError);
+      assert.doesNotMatch(error.message, /secret-id|provider\.invalid|private-credential|private-bearer|secret-link|https?:\/\//);
       assert.equal(
         (error as Error & { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome,
         "terminal_failure",
@@ -1714,7 +1730,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     outcome: "failed",
     text: null,
     evidence: "transcript",
-    error: "Open Model request was rejected because the model provider account could not cover this turn's output budget (HTTP 402). Add provider credit or choose another model, then retry the unfinished work in LetAgents.",
+    error: expectedError,
   });
   const terminal = observations.find(({ fact }) =>
     fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal");
@@ -1722,7 +1738,10 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
   assert.equal(terminal.fact.sideEffects, "none");
   assert.equal(terminal.fact.providerTurnId, turnId);
   assert.equal(terminal.fact.providerContinuationId, handle.providerContinuationId);
-  assert.equal(harness.promptBodies.length, 1);
+  await assert.rejects(adapter.recoverRoomTurn(handle, {
+    inboxItemId: "inbox-provider-error", providerTurnId: turnId,
+  }), { message: expectedError });
+  assert.equal(harness.promptBodies.length, 1, "a rejected turn is never replayed automatically");
 });
 
 test("Open Model preserves safe 403 explanations in terminal checkpoints without blaming the API key", async () => {
