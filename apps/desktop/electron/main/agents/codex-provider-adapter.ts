@@ -12,104 +12,28 @@ import { isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
-import {
-  codexAppServerEnvironment,
-  launchManagedCodexAppServer,
-  resolveCodexAppServerUrl,
-  waitForLaunchedCodexAppServer,
-  type CodexAppServerExit,
-  type CodexAppServerLaunch,
-} from "./codex-app-server.js";
-import {
-  CODEX_BUILT_IN_READ_ONLY_PROFILE, codexReadOnlyProfileId, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
-} from "./codex-agent-home.js";
-import {
-  STARTS_AGAIN_BY_ITSELF,
-  assertLiveCodexIsolationUnchanged,
-  assertLiveCodexProjectUnchanged,
-  codexProcessKeepsOwnerSetup,
-  readCodexCommandLine,
-  type CodexLiveProcess,
-} from "./codex-home-harness.js";
+import { codexAppServerEnvironment, launchManagedCodexAppServer, resolveCodexAppServerUrl, waitForLaunchedCodexAppServer, type CodexAppServerExit, type CodexAppServerLaunch } from "./codex-app-server.js";
+import { CODEX_BUILT_IN_READ_ONLY_PROFILE, codexReadOnlyProfileId, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal } from "./codex-agent-home.js";
+import { STARTS_AGAIN_BY_ITSELF, assertLiveCodexIsolationUnchanged, assertLiveCodexProjectUnchanged, codexProcessKeepsOwnerSetup, readCodexCommandLine, type CodexLiveProcess } from "./codex-home-harness.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
-import {
-  CodexRpcClient,
-  type RpcNotification,
-  type RpcServerRequest,
-  type ThreadReadResult,
-  type ThreadReadTurn,
-  type TurnStartResult,
-} from "./codex-rpc-client.js";
+import { CodexRpcClient, type RpcNotification, type RpcServerRequest, type ThreadReadResult, type ThreadReadTurn, type TurnStartResult } from "./codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy, launchNoticeSaidOnce, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
-import {
-  ProviderExecutionObserver,
-  nativeExecutionId,
-  nativeLifecycleCheckpoint,
-  type NativeLifecycleCheckpoint,
-} from "./provider-execution-observer.js";
+import { ProviderExecutionObserver, nativeExecutionId, nativeLifecycleCheckpoint, type NativeLifecycleCheckpoint } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
-import {
-  summarizeCodexRuntimeNotification,
-  summarizeCodexRuntimeSnapshot,
-} from "./codex-runtime-reasoning.js";
+import { summarizeCodexRuntimeNotification, summarizeCodexRuntimeSnapshot } from "./codex-runtime-reasoning.js";
 import { extractThreadStatus, extractTurnStatus, isActiveCodexTurnStatus } from "./codex-session-status.js";
 import { CodexTurnResultAccumulator } from "./codex-turn-result.js";
-import {
-  buildCodexStartPrompt,
-  buildCustodialPollingPrompt,
-  DEFAULT_CODEX_STOP_PHRASE,
-  looksLikeInviteCode,
-  makeCodexStopToken,
-} from "./codex-start-prompt.js";
-import {
-  synthesizeTerminalPayload,
-  sameProviderConnectionIdentity,
-  type ProviderActivityEvent,
-  type ProviderAdapter,
-  type ProviderAdapterCapabilities,
-  type ProviderAttachTerminal,
-  type ProviderConnectionRef,
-  type ProviderContinuationRef,
-  type ProviderHandle,
-  type CustodialPollingActivationRequest,
-  type CustodialPollingActivationOptions,
-  type ProviderObservedState,
-  type ProviderSpawnRequest,
-  type ProviderStopOptions,
-  type ProviderTurnControlResult,
-  type ProviderTurnControlOptions,
-  ProviderTurnControlError,
-  type ProviderRoomTurnRequest,
-  type RoomTurnImageDelivery,
-  type ProviderRoomTurnRecoveryRequest,
-  type ProviderRoomTurnResult,
-  type ProviderRoomTurnOptions,
-  type ProviderContinuationRepairRequest,
-  type ProviderContinuationRepairResult,
-  ProviderContinuationMissingError,
-  PROCESS_ENDED_DURING_TURN,
-  type ProviderStreamEvent,
-  type ProviderStreamEventKind,
-  type ProviderTerminalPayload,
-} from "./provider-adapter.js";
-import {
-  DEFAULT_STOP_GRACE_MS,
-  defaultGetProcessIdentity,
-  defaultObserveProcessExit,
-  defaultSignalProcess,
-  delay,
-  errorMessage,
-  observeFencedExit,
-  safeStreamPayload,
-  sameProcessBirthIdentity,
-  terminateFreshLaunch,
-} from "./provider-evidence.js";
+import { buildCodexStartPrompt, buildCustodialPollingPrompt, DEFAULT_CODEX_STOP_PHRASE, looksLikeInviteCode, makeCodexStopToken } from "./codex-start-prompt.js";
+import { synthesizeTerminalPayload, sameProviderConnectionIdentity, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderHandle, type CustodialPollingActivationRequest, type CustodialPollingActivationOptions, type ProviderObservedState, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, type ProviderTurnControlOptions, ProviderTurnControlError, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnResult, type ProviderRoomTurnOptions, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN, type ProviderStreamEvent, type ProviderStreamEventKind, type ProviderTerminalPayload } from "./provider-adapter.js";
+import { DEFAULT_STOP_GRACE_MS, defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, delay, errorMessage, observeFencedExit, safeStreamPayload, sameProcessBirthIdentity, terminateFreshLaunch } from "./provider-evidence.js";
+import { CODEX_SYSTEM_ERROR_SETTLE_MS, codexErrorActivitySummary, codexLifecycleStatus, exactPermissionItemKey, exactTurnKey, hasExplicitCodexSystemError, isCodexExecutionMethod, isCodexPolicyRefusal, isCodexThreadBetweenTurns, notificationThreadId, notificationTurnId, recordValue, streamKind, terminalTurnOutcome, transcriptLifecycleTurn } from "./codex/notifications.js";
+
 
 type CodexThreadResult = {
   thread?: { id?: string }; approvalsReviewer?: unknown; approvalPolicy?: unknown; sandbox?: unknown; activePermissionProfile?: unknown; cwd?: unknown; reasoningEffort?: unknown;
@@ -816,55 +740,6 @@ function custodialMcpOverride(
   return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = ${JSON.stringify(readOnlyRoomTools ? "prompt" : "writes")}, tools = { ${toolApprovalModes} } }`;
 }
 
-function isCodexExecutionMethod(method: string): boolean {
-  return /^(?:item\/|command\/exec(?:\/|$))/i.test(method);
-}
-
-function streamKind(method: string): ProviderStreamEventKind {
-  if (/(?:approval|requestApproval|guardian)/i.test(method)) return "approval";
-  // Preserve execution identity even when a command/tool reports failure.
-  // Runtime process errors still go through the error classifier below.
-  if (isCodexExecutionMethod(method)) {
-    if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
-    if (/(?:command|process|terminal)/i.test(method)) return "command_output";
-  }
-  // A failed turn is still turn lifecycle evidence. Keep its identity ahead of
-  // the generic error label so daemon policy cannot mistake it for app-server
-  // failure.
-  if (/^turn\//.test(method)) return "turn_lifecycle";
-  if (/(?:error|warning|failed)/i.test(method)) return "error";
-  if (/(?:usage|tokenUsage|rateLimit)/i.test(method)) return "usage";
-  if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
-  if (/(?:command|process|terminal)/i.test(method)) return "command_output";
-  if (/(?:delta|transcript)/i.test(method)) return "text_delta";
-  if (/^item\//.test(method)) return "item_lifecycle";
-  return "provider_event";
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function terminalTurnOutcome(
-  method: string,
-  turn: Record<string, unknown> | null,
-): "completed" | "failed" | "interrupted" | null {
-  const terminal = /^turn\/(completed|failed|interrupted|cancelled|stopped)$/i.exec(method)?.[1]?.toLowerCase();
-  if (!terminal) return null;
-  if (terminal === "failed") return "failed";
-  if (terminal !== "completed") return "interrupted";
-  const status = extractTurnStatus(turn)?.trim().toLowerCase() ?? null;
-  if (status === "completed" || status === "failed") return status;
-  return /^(?:interrupted|cancelled|stopped)$/.test(status ?? "") ? "interrupted" : null;
-}
-
-function transcriptLifecycleTurn(value: unknown): { id: unknown; status: unknown } | null {
-  const turn = recordValue(value);
-  return turn ? { id: turn.id, status: turn.status } : null;
-}
-
 const permissionString = z.string().max(4096);
 const permissionSpecialPath = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("root") }),
@@ -969,104 +844,6 @@ function permissionFileChanges(value: unknown): CodexPermissionFileChange[] | nu
     } else return null;
   }
   return Buffer.byteLength(JSON.stringify(changes)) <= 24 * 1024 ? changes : null;
-}
-
-function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | null {
-  const root = recordValue(value);
-  if (!root) return null;
-  const candidates = [
-    root.status,
-    root.threadStatus,
-    root.turnStatus,
-    recordValue(root.thread)?.status,
-    recordValue(root.turn)?.status,
-  ].flatMap((candidate) => {
-    const nested = recordValue(candidate);
-    return [candidate, nested?.type, nested?.status];
-  });
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string") continue;
-    if (/^(?:systemError|error|failed)$/i.test(candidate)) return "failed";
-  }
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string") continue;
-    if (/^(?:completed|interrupted|idle|stopped)$/i.test(candidate)) return "idle";
-    if (/^(?:active|inProgress|running|queued|pending)$/i.test(candidate)) return "working";
-  }
-  return null;
-}
-
-/**
- * The provider's own reason for a failed turn, for the `error` notification
- * the app-server sends before `turn/completed`. It is the one line the owner
- * needs in this agent's activity; the generic summary only said "error". The
- * activity is local to the owner's machine and is never posted to the room.
- */
-function codexErrorActivitySummary(notification: RpcNotification): string | null {
-  if (notification.method !== "error") return null;
-  const message = recordValue(recordValue(notification.params)?.error)?.message;
-  if (typeof message !== "string" || !message.trim()) return null;
-  const safe = safeStreamPayload(message.replace(/\s+/g, " ").trim()).payload;
-  return typeof safe === "string" ? `Codex error: ${safe}`.slice(0, 500) : null;
-}
-
-/**
- * The provider declined the turn's content. Unlike a rate limit or a rejected
- * key, neither a retry nor the owner can make the same content go through.
- */
-function isCodexPolicyRefusal(codexErrorInfo: unknown): boolean {
-  return codexErrorInfo === "cyberPolicy" || codexErrorInfo === "misalignmentPolicyViolation";
-}
-
-/**
- * How long after a thread reports `systemError` its turn's own ending is
- * awaited before the ending is read from the thread instead. The app-server
- * sends the two within milliseconds of each other.
- */
-const CODEX_SYSTEM_ERROR_SETTLE_MS = 2_000;
-
-/**
- * A thread is between turns when it is `idle`, and also when it is in
- * `systemError`: that is what a failed turn leaves on its thread, and the
- * app-server keeps reporting it until the thread's next turn starts. Waiting
- * for `idle` there waits for the turn this boundary is asked in order to allow.
- */
-function isCodexThreadBetweenTurns(status: string | null): boolean {
-  return status === "idle" || status === "systemError";
-}
-
-function hasExplicitCodexSystemError(value: unknown): boolean {
-  const root = recordValue(value);
-  if (!root) return false;
-  const candidates = [root.status, root.threadStatus, recordValue(root.thread)?.status]
-    .flatMap((candidate) => {
-      const nested = recordValue(candidate);
-      return [candidate, nested?.type, nested?.status];
-    });
-  return candidates.some((candidate) => typeof candidate === "string"
-    && /^(?:systemError|error_during_execution)$/i.test(candidate));
-}
-
-function notificationTurnId(value: unknown): string | null {
-  const root = recordValue(value);
-  const nested = recordValue(root?.turn);
-  const candidate = root?.turnId ?? root?.turn_id ?? nested?.id;
-  return typeof candidate === "string" && candidate.trim() ? candidate : null;
-}
-
-function notificationThreadId(value: unknown): string | null {
-  const root = recordValue(value);
-  const nested = recordValue(root?.thread);
-  const candidate = root?.threadId ?? root?.thread_id ?? nested?.id;
-  return typeof candidate === "string" && candidate.trim() ? candidate : null;
-}
-
-function exactTurnKey(threadId: string, turnId: string): string {
-  return `${threadId}\u0000${turnId}`;
-}
-
-function exactPermissionItemKey(threadId: string, turnId: string, itemId: string): string {
-  return JSON.stringify([threadId, turnId, itemId]);
 }
 
 /**
@@ -1440,10 +1217,10 @@ class CodexProviderHandle implements ProviderHandle {
 
 export class CodexProviderAdapter implements ProviderAdapter {
   readonly id = "codex" as const;
-  private readonly codexBin: string;
-  private readonly deps: CodexProviderAdapterDependencies;
-  private readonly activitySink?: (event: ProviderActivityEvent) => void;
-  private readonly streamSink?: (event: ProviderStreamEvent) => void;
+  protected readonly codexBin: string;
+  protected readonly deps: CodexProviderAdapterDependencies;
+  protected readonly activitySink?: (event: ProviderActivityEvent) => void;
+  protected readonly streamSink?: (event: ProviderStreamEvent) => void;
   async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
     const handle = this.requireHandle(providerHandle);
     const continuation = handle.providerContinuationId;
@@ -1484,21 +1261,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return current() ? handle.usage.snapshot(continuation) : null;
   }
 
-  private readonly handles = new Map<string, CodexProviderHandle>();
-  private readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
-  private readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
-  private readonly nonPollingLaunches = new WeakSet<CodexProviderHandle>();
-  private readonly pendingAttaches = new Map<string, {
+  protected readonly handles = new Map<string, CodexProviderHandle>();
+  protected readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
+  protected readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
+  protected readonly nonPollingLaunches = new WeakSet<CodexProviderHandle>();
+  protected readonly pendingAttaches = new Map<string, {
     ref: ProviderContinuationRef;
     promise: Promise<CodexProviderHandle | ProviderAttachTerminal | null>;
   }>();
-  private readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
+  protected readonly exitPromises = new WeakMap<CodexProviderHandle, Promise<ProviderTerminalPayload>>();
   // P0 proved app-server thread/resume on the supported Codex runtime. Start
   // optimistic so a fresh reconciler can select resume, then durably downgrade
   // if an exact continuation resume returns method-not-found. Do not probe with
   // a synthetic thread id: some app-server versions treat that as a fatal
   // protocol error, which must never prevent a genuinely fresh thread/start.
-  private resumeSupported = true;
+  protected resumeSupported = true;
 
   constructor(options: CodexProviderAdapterOptions = {}) {
     this.codexBin = options.codexBin || resolveCodexExecutable({ env: desktopRuntimeEnvironment() });
@@ -1507,7 +1284,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     this.streamSink = options.streamSink;
     this.commandOutputWindowMs = options.commandOutputWindowMs ?? COMMAND_OUTPUT_WINDOW_MS;
   }
-  private readonly commandOutputWindowMs: number;
+  protected readonly commandOutputWindowMs: number;
 
   capabilities(): ProviderAdapterCapabilities {
     return {
@@ -1529,7 +1306,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     await this.resolveCustodialPollingRuntime(input.devMcpServerEntryPath);
   }
 
-  private async resolveCustodialPollingRuntime(devEntryPath?: string): Promise<{ runtime: LetAgentsMcpRuntime; tools: string[] }> {
+  protected async resolveCustodialPollingRuntime(devEntryPath?: string): Promise<{ runtime: LetAgentsMcpRuntime; tools: string[] }> {
     const runtime = this.deps.resolveMcpRuntime(devEntryPath);
     const tools = custodialPollingTools(await this.deps.readMcpRuntimeContract(runtime.entryPath));
     return { runtime, tools };
@@ -1591,7 +1368,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex mid-turn injection is not enabled: P0 proved room delivery, not native poke.");
   }
 
-  private permissionAuthority(
+  protected permissionAuthority(
     handle: CodexProviderHandle, continuation: string, connection: ProviderConnectionRef, rpcConnection: string | null,
   ): "current" | "degraded" | "unavailable" {
     if (handle.terminal || handle.stopRequested || handle.protocolError || this.handles.get(handle.workAttemptId) !== handle
@@ -2621,7 +2398,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return result;
   }
 
-  private async start(
+  protected async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CodexProviderHandle> {
@@ -2983,7 +2760,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private async attachRunning(
+  protected async attachRunning(
     ref: ProviderContinuationRef,
     connection: Extract<ProviderConnectionRef, { kind: "codex_app_server" }>,
   ): Promise<CodexProviderHandle | ProviderAttachTerminal | null> {
@@ -3199,7 +2976,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * read. The daemon still owns turn identity: it accepts this candidate only
    * when it matches an already-durable provider-turn binding.
    */
-  private reconstructAttachedExecution(
+  protected reconstructAttachedExecution(
     handle: CodexProviderHandle,
     read: ThreadReadResult | null,
     exactEmptyFallback: boolean,
@@ -3285,12 +3062,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * typed facts, so failing only the handle would leave the agent silent and
    * unreachable instead of replaced; dispatch surfaces Codex's own error.
    */
-  private settleTurnlessAttach(handle: CodexProviderHandle, read: ThreadReadResult): void {
+  protected settleTurnlessAttach(handle: CodexProviderHandle, read: ThreadReadResult): void {
     if (String(recordValue(read.thread?.status)?.type) === "active") return;
     handle.setLiveState("idle");
   }
 
-  private queuedTurnLifecycleIsAmbiguous(
+  protected queuedTurnLifecycleIsAmbiguous(
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): boolean {
@@ -3314,7 +3091,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * in turn are each added up on their own, in the order they first printed
    * in the window, so a window is as many facts as commands printed in it.
    */
-  private noteCommandOutput(
+  protected noteCommandOutput(
     handle: CodexProviderHandle,
     identity: { providerContinuationId: string; providerTurnId: string },
     executionId: string,
@@ -3334,7 +3111,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.pendingCommandOutput.set(key, { ...identity, executionId, outputBytes });
   }
 
-  private recordCommandOutput(handle: CodexProviderHandle): void {
+  protected recordCommandOutput(handle: CodexProviderHandle): void {
     if (handle.pendingCommandOutputTimer) { clearTimeout(handle.pendingCommandOutputTimer); handle.pendingCommandOutputTimer = null; }
     if (!handle.pendingCommandOutput.size) return;
     const pending = [...handle.pendingCommandOutput.values()];
@@ -3344,7 +3121,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
+  protected emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
     this.recordCommandOutput(handle);
     if (handle.nativeRuntimeUnavailable) return;
     if (fact.domain === "execution") {
@@ -3367,7 +3144,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     );
   }
 
-  private consumeNotification(
+  protected consumeNotification(
     handle: CodexProviderHandle,
     notification: RpcNotification,
     correlateLifecycle = true,
@@ -3440,7 +3217,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observePermissionFileChangeProposal(
+  protected observePermissionFileChangeProposal(
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): void {
@@ -3474,7 +3251,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     else handle.permissionFileChangeProposals.delete(key);
   }
 
-  private observeNativeExecution(
+  protected observeNativeExecution(
     handle: CodexProviderHandle,
     notification: RpcNotification,
     correlateLifecycle = true,
@@ -3579,14 +3356,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return null;
   }
 
-  private markNativeExecutionUnavailable(handle: CodexProviderHandle): void {
+  protected markNativeExecutionUnavailable(handle: CodexProviderHandle): void {
     this.recordCommandOutput(handle);
     handle.execution.markUnavailable();
     handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
       handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
   }
 
-  private emitNativeRuntimeUnavailable(
+  protected emitNativeRuntimeUnavailable(
     handle: CodexProviderHandle,
     controlEvidence: "process_exit" | "native_session_terminated",
   ): void {
@@ -3611,7 +3388,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence, sideEffects: "none" });
   }
 
-  private async emitTranscriptTail(handle: CodexProviderHandle): Promise<void> {
+  protected async emitTranscriptTail(handle: CodexProviderHandle): Promise<void> {
     try {
       const read = await handle.client.request<ThreadReadResult>("thread/read", {
         threadId: handle.providerContinuationId,
@@ -3643,7 +3420,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private async waitForTurnBoundary(handle: CodexProviderHandle, turnId: string, detachSignal?: AbortSignal): Promise<void> {
+  protected async waitForTurnBoundary(handle: CodexProviderHandle, turnId: string, detachSignal?: AbortSignal): Promise<void> {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       if (detachSignal?.aborted) throw new Error("Codex exact turn control observation detached.");
@@ -3659,7 +3436,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex did not prove the active turn reached an interrupted boundary.");
   }
 
-  private async subscribeMaterializedThread(handle: CodexProviderHandle): Promise<boolean> {
+  protected async subscribeMaterializedThread(handle: CodexProviderHandle): Promise<boolean> {
     if (!handle.subscriptionAfterMaterialization) return false;
     const threadId = handle.providerContinuationId;
     const subscribed = await handle.client.request<CodexThreadResult>("thread/resume", { threadId });
@@ -3678,7 +3455,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   /** Terminal correlation is event-driven and deliberately thread+turn exact. */
-  private async waitForExactRoomTurnTerminal(
+  protected async waitForExactRoomTurnTerminal(
     handle: CodexProviderHandle,
     turnId: string,
     detachSignal?: AbortSignal,
@@ -3709,7 +3486,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { status: readStatus, turn };
   }
 
-  private async roomTurnResultFromTerminal(
+  protected async roomTurnResultFromTerminal(
     handle: CodexProviderHandle,
     turnId: string,
     status: string,
@@ -3730,7 +3507,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return terminalResult;
   }
 
-  private waitForExactTurnNotification(handle: CodexProviderHandle, key: string, detachSignal?: AbortSignal): Promise<string> {
+  protected waitForExactTurnNotification(handle: CodexProviderHandle, key: string, detachSignal?: AbortSignal): Promise<string> {
     const cached = handle.terminalTurns.get(key);
     if (cached) { handle.terminalTurns.delete(key); return Promise.resolve(cached); }
     if (handle.turnWaiters.has(key)) throw new Error("Codex bounded room turn already has a terminal waiter.");
@@ -3766,7 +3543,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * turn behind an open one. So read the thread once, a short stated time
    * after the status, and take a waiting turn's ending from there.
    */
-  private reconcileAfterSystemError(handle: CodexProviderHandle): void {
+  protected reconcileAfterSystemError(handle: CodexProviderHandle): void {
     if (handle.systemErrorReconciliation) return;
     const settle = () => {
       handle.systemErrorReconciliation = null;
@@ -3779,7 +3556,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.systemErrorReconciliation = this.deps.sleep(CODEX_SYSTEM_ERROR_SETTLE_MS).then(settle, settle);
   }
 
-  private reconcileExactTurnTerminalsAfterIdle(handle: CodexProviderHandle): void {
+  protected reconcileExactTurnTerminalsAfterIdle(handle: CodexProviderHandle): void {
     if (!handle.turnWaiters.size
       || handle.threadIdleReconciliation
       || handle.threadIdleEpoch <= handle.threadIdleReconciledEpoch) return;
@@ -3821,7 +3598,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     })();
   }
 
-  private noteExactTurnTerminal(handle: CodexProviderHandle, key: string, status: string): void {
+  protected noteExactTurnTerminal(handle: CodexProviderHandle, key: string, status: string): void {
     const waiter = handle.turnWaiters.get(key);
     if (waiter) {
       handle.turnWaiters.delete(key);
@@ -3832,7 +3609,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     while (handle.terminalTurns.size > 64) handle.terminalTurns.delete(handle.terminalTurns.keys().next().value!);
   }
 
-  private publishStream(
+  protected publishStream(
     handle: CodexProviderHandle,
     method: string,
     providerPayload: unknown,
@@ -3865,7 +3642,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * policy. What its conversation reported then is held to the policy now, as
    * an attach with the policy holds it. Every later caller gets the same answer.
    */
-  private bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
+  protected bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
     const reported = handle.bindTurnPolicy(policy);
     const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported, handle.readOnlyProfile());
     if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
@@ -3884,7 +3661,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * the `deny` is in force while the profile is reported: see
    * assertCodexReadOnlyApplied.
    */
-  private holdSettingsToReadOnly(handle: CodexProviderHandle, params: unknown): void {
+  protected holdSettingsToReadOnly(handle: CodexProviderHandle, params: unknown): void {
     const settings = recordValue(recordValue(params)?.threadSettings);
     if (!settings || handle.foundNotReadOnly) return;
     const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), {
@@ -3905,7 +3682,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * attach, or the next call here, tries again, so its process does not stay
    * until the owner restarts the agent.
    */
-  private stopNotReadOnly(handle: CodexProviderHandle): Promise<ProviderAttachTerminal> | null {
+  protected stopNotReadOnly(handle: CodexProviderHandle): Promise<ProviderAttachTerminal> | null {
     const found = handle.foundNotReadOnly;
     if (!found) return null;
     if (!found.stopped) {
@@ -3924,7 +3701,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * starts the agent again by its normal path. When the process cannot be
    * proved gone, the attach fails: a second writer must not start.
    */
-  private async stopFoundNotReadOnly(reported: string, stop: () => Promise<ProviderTerminalPayload>): Promise<ProviderAttachTerminal> {
+  protected async stopFoundNotReadOnly(reported: string, stop: () => Promise<ProviderTerminalPayload>): Promise<ProviderAttachTerminal> {
     let terminal: ProviderTerminalPayload;
     try {
       terminal = await stop();
@@ -3943,7 +3720,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * never makes the call that would have loaded the project's config as the
    * owner's. The agent is idle here, and the owner is told why it stopped.
    */
-  private async stopBeforeProjectReload(handle: CodexProviderHandle, cwd: string): Promise<void> {
+  protected async stopBeforeProjectReload(handle: CodexProviderHandle, cwd: string): Promise<void> {
     const reason = await this.projectReloadRefusal(handle, cwd);
     if (!reason) return;
     // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
@@ -3957,7 +3734,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * conversation it started or loaded now would read a command rule, or when
    * that cannot be checked. As above, the agent is idle and its owner is told.
    */
-  private async stopBeforeRuleLoad(handle: CodexProviderHandle, storedPolicy: unknown, cwd: string): Promise<void> {
+  protected async stopBeforeRuleLoad(handle: CodexProviderHandle, storedPolicy: unknown, cwd: string): Promise<void> {
     const policy = handle.appliedTurnPolicy() ?? recordValue(storedPolicy);
     if (!policy || !codexPolicyIsSandboxed(policy)) return;
     // The project's own rule folders are looked in by name, for every client. The rest is asked of
@@ -3980,7 +3757,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * conversation now: an MCP server or a skill it was not started with turned
    * off, or a project that changes the room's own server. Null when it may.
    */
-  private async isolationChanged(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
+  protected async isolationChanged(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
     const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
     if (!commandLine) {
       return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
@@ -3995,7 +3772,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   /** Why a process with its owner's setup may not load the project's config again. Null when it may. */
-  private async projectReloadRefusal(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
+  protected async projectReloadRefusal(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
     const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
     if (!commandLine) {
       return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
@@ -4014,12 +3791,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private reportDeclinedOwnerRequests(handle: CodexProviderHandle): void {
+  protected reportDeclinedOwnerRequests(handle: CodexProviderHandle): void {
     // The daemon builds an agent's activity from its stream, so that is where it is said.
     handle.ownerRequestDeclined = (summary) => this.publishStream(handle, "mcpServer/elicitation/declined", {}, "provider_event", summary);
   }
 
-  private publishActivity(
+  protected publishActivity(
     handle: CodexProviderHandle,
     input: {
       source: ProviderActivityEvent["source"];
@@ -4045,7 +3822,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     for (const listener of handle.activityListeners) listener(event);
   }
 
-  private observeExit(
+  protected observeExit(
     handle: CodexProviderHandle,
     exit: CodexAppServerExit,
   ): ProviderTerminalPayload {
@@ -4098,14 +3875,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return terminal;
   }
 
-  private requireHandle(handle: ProviderHandle): CodexProviderHandle {
+  protected requireHandle(handle: ProviderHandle): CodexProviderHandle {
     if (!(handle instanceof CodexProviderHandle)) {
       throw new Error("Provider handle does not belong to CodexProviderAdapter.");
     }
     return handle;
   }
 
-  private requireExitPromise(handle: CodexProviderHandle): Promise<ProviderTerminalPayload> {
+  protected requireExitPromise(handle: CodexProviderHandle): Promise<ProviderTerminalPayload> {
     const promise = this.exitPromises.get(handle);
     if (!promise) throw new Error("Codex provider handle is missing its exit observation.");
     return promise;
