@@ -296,6 +296,48 @@ export function setFilesystemNamespaceResolverForTest(
   filesystemNamespaceResolver = resolver ?? defaultFilesystemNamespace;
 }
 
+function resolveFilesystemNamespace(
+  path: string,
+  device: bigint,
+  options: ProjectBindingsStoreOptions,
+  namespaceCache: FilesystemNamespaceCache,
+): Promise<string | null> {
+  if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
+  const cacheKey = device.toString();
+  let namespace = namespaceCache.get(cacheKey);
+  if (!namespace) {
+    namespace = filesystemNamespaceResolver(path);
+    namespaceCache.set(cacheKey, namespace);
+  }
+  return namespace;
+}
+
+/**
+ * The volume UUIDs behind the folder and its `.git`, looked up in this pass.
+ * Checked on every pass, memo hit or not: a different volume mounted at the
+ * same path can reuse the device number and even the inode numbers.
+ */
+async function bindingVolumes(
+  rootPath: string,
+  options: ProjectBindingsStoreOptions,
+  namespaceCache: FilesystemNamespaceCache,
+): Promise<string | null> {
+  try {
+    const gitPath = join(rootPath, ".git");
+    const [rootStats, gitStats] = await Promise.all([
+      stat(rootPath, { bigint: true }),
+      stat(gitPath, { bigint: true }),
+    ]);
+    const volumes = await Promise.all([
+      resolveFilesystemNamespace(rootPath, rootStats.dev, options, namespaceCache),
+      resolveFilesystemNamespace(gitPath, gitStats.dev, options, namespaceCache),
+    ]);
+    return volumes.every(Boolean) ? JSON.stringify(volumes) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function filesystemVerificationKeys(
   rootPath: string,
   context: DesktopProjectBindingContext,
@@ -303,16 +345,8 @@ async function filesystemVerificationKeys(
   namespaceCache: FilesystemNamespaceCache = new Map(),
 ): Promise<FilesystemVerification> {
   const rootStats = await stat(rootPath, { bigint: true });
-  const resolveNamespace = async (path: string, device: bigint): Promise<string | null> => {
-    if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
-    const cacheKey = device.toString();
-    let namespace = namespaceCache.get(cacheKey);
-    if (!namespace) {
-      namespace = filesystemNamespaceResolver(path);
-      namespaceCache.set(cacheKey, namespace);
-    }
-    return namespace;
-  };
+  const resolveNamespace = (path: string, device: bigint) =>
+    resolveFilesystemNamespace(path, device, options, namespaceCache);
   const rootNamespace = await resolveNamespace(rootPath, rootStats.dev);
   const rootNamespaceKey = rootNamespace ? namespaceDigest(rootNamespace) : null;
   const keys = new Set(projectBindingVerificationKeys(context));
@@ -410,6 +444,8 @@ function sameLocalProjectAfterGitSetup(
  *    ctime) - these feed the derived room;
  *  - the global and system Git config files and the GIT_CONFIG_* variables
  *    are unchanged (they can rewrite the origin URL through insteadOf);
+ *  - the folder and `.git` are on the same volumes (UUID), checked in every
+ *    pass, memo hit or not;
  *  - fewer than 45 seconds have passed (fallback for anything not listed,
  *    for example a nested local branch file).
  * Only folders whose `.git` is a real directory are memoized. Plain folders,
@@ -420,6 +456,7 @@ function sameLocalProjectAfterGitSetup(
 type ValidatedBinding = {
   row: string;
   fingerprint: string;
+  volumes: string;
   expiresAt: number;
 };
 
@@ -503,7 +540,7 @@ async function bindingFingerprint(rootPath: string): Promise<string | null> {
   }
 }
 
-function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: string): void {
+function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: string, volumes: string): void {
   const now = Date.now();
   if (validatedBindings.size >= VALIDATED_BINDING_LIMIT) {
     for (const [id, entry] of validatedBindings) {
@@ -514,6 +551,7 @@ function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: s
   validatedBindings.set(binding.id, {
     row: bindingRowKey(binding),
     fingerprint,
+    volumes,
     expiresAt: now + VALIDATED_BINDING_TTL_MS,
   });
 }
@@ -529,12 +567,16 @@ async function validateProjectBinding(
     // Taken before validation: a change during validation alters the next
     // fingerprint, so a racing swap can never be served from this memo.
     const fingerprint = await bindingFingerprint(rootPath);
+    // The volume check is never skipped: df + diskutil run once per device in
+    // each pass, shared by every binding; the memo saves only the git spawns.
+    const volumes = fingerprint ? await bindingVolumes(rootPath, options, namespaceCache) : null;
     const memo = validatedBindings.get(binding.id);
     if (
-      memo && fingerprint
+      memo && fingerprint && volumes
       && memo.expiresAt > Date.now()
       && memo.row === bindingRowKey(binding)
       && memo.fingerprint === fingerprint
+      && memo.volumes === volumes
     ) {
       projectBindingValidationCountsForTest.memo += 1;
       return binding;
@@ -547,7 +589,7 @@ async function validateProjectBinding(
     const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
     if (!comparison.matches && !gitSetup) return null;
     if (!comparison.shouldUpgrade && !gitSetup) {
-      if (fingerprint) rememberValidatedBinding(binding, fingerprint);
+      if (fingerprint && volumes) rememberValidatedBinding(binding, fingerprint, volumes);
       return binding;
     }
     try {

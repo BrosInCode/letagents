@@ -54,6 +54,46 @@ test("a different volume behind the same device number fails closed once the mem
   }
 });
 
+test("a memo hit still checks the volume: a changed UUID within 45 seconds fails closed", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-volume-memo-"));
+  const first = hostedRepo(temporary, "first");
+  const second = hostedRepo(temporary, "second");
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite") };
+  resetProjectBindingsStoreCachesForTest();
+  let volume = "darwin:aaaaaaaa-0000-0000-0000-000000000000";
+  let lookups = 0;
+  setFilesystemNamespaceResolverForTest(async () => { lookups += 1; return volume; });
+  const counts = projectBindingValidationCountsForTest;
+  try {
+    await bindProjectRoot({ context: hostedContext, rootPath: first, source: "git_remote" }, storeOptions);
+    await bindProjectRoot({
+      context: { roomIdentifier: "github.com/acme/gadgets", gitRoom: null },
+      rootPath: second,
+      source: "local_git",
+    }, storeOptions).catch(() => undefined);
+    const bindings = (await listProjectBindings(storeOptions)).length;
+    assert.ok(bindings >= 1);
+    lookups = 0;
+    const memo = counts.memo;
+    assert.equal((await listProjectBindings(storeOptions)).length, bindings);
+    assert.equal(counts.memo - memo, bindings, "every binding is a memo hit");
+    // One device in this pass: one volume lookup (df + diskutil) shared by all bindings.
+    assert.equal(lookups, 1, "one volume lookup per device per pass, memo hit or not");
+
+    // Same device number, same inodes, different volume: within the 45 s window.
+    volume = "darwin:bbbbbbbb-0000-0000-0000-000000000000";
+    const full = counts.full;
+    assert.deepEqual(await listProjectBindings(storeOptions), [], "a changed volume UUID fails closed at once");
+    assert.equal(counts.full - full, bindings, "the memo entry is dropped and validation runs in full");
+    volume = "darwin:aaaaaaaa-0000-0000-0000-000000000000";
+    assert.equal((await listProjectBindings(storeOptions)).length, bindings, "the original volume is accepted again");
+  } finally {
+    setFilesystemNamespaceResolverForTest(null);
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("Git config includes and other origin inputs keep the binding from being memoized or reused", async () => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-include-"));
   const root = hostedRepo(temporary);
@@ -121,10 +161,13 @@ test("a change made while validation runs is never served from the memo", async 
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-race-"));
   const root = hostedRepo(temporary);
   let swapDuringValidation = false;
+  let callsThisPass = 0;
   const storeOptions = {
     storePath: join(temporary, "bindings.sqlite"),
     resolveFilesystemNamespace: async () => {
-      if (swapDuringValidation) {
+      // Calls 1-2 are the per-pass volume check (before validation);
+      // call 3 is the verification-key lookup, after the room was derived.
+      if (swapDuringValidation && ++callsThisPass === 3) {
         swapDuringValidation = false;
         // The room was already derived from the old remote; switch it now.
         execFileSync("git", ["remote", "set-url", "origin", "git@github.com:other/repo.git"], { cwd: root });
@@ -238,7 +281,8 @@ test("validated bindings are reused until the folder, Git metadata, or stored ro
       assert.deepEqual((await listProjectBindings(storeOptions)).map((item) => item.id), [binding.id]);
     }
     assert.equal(spawnsAt() - before, 0, "five unchanged lists spawn no git");
-    assert.equal(namespaceCalls - namespacesBefore, 0, "and resolve no filesystem namespace");
+    // The options hook is not cached per device: root and .git, every pass.
+    assert.equal(namespaceCalls - namespacesBefore, 10, "but still check the volume on every pass");
     assert.equal(counts.memo - memoBefore, 5);
 
     // HEAD moves: the derived room may change, so validate in full again.
