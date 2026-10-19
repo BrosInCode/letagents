@@ -2466,7 +2466,7 @@ test("reverse delivery stop intent refuses absent cursors, active boundaries, qu
     const generation = (await store.load()).generation;
     await assert.rejects(store.updateAgentConfiguration(generation, { agentId: agent.id, expectedRevision: config.config_revision,
       model: config.model, reasoningEffort: config.reasoning_effort, charter: "changed", permissionProfileId: config.permission_profile_id,
-      providerLaunchPolicy: config.provider_launch_policy }), /unresolved delivery drain/);
+      providerLaunchPolicy: config.provider_launch_policy, imageInput: config.image_input }), /unresolved delivery drain/);
     assert.equal((await store.load()).generation, generation);
     assert.deepEqual(await store.getAgentConfiguration(agent.id), config);
     // Poll completion wins the SQLite boundary before stop intent. B is kept,
@@ -4671,7 +4671,7 @@ test("polling custody is internal, survives every manifest replacement and does 
     assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
     const updated = await store.updateAgentConfiguration(4, {
       agentId: entry.id, expectedRevision: 1, model: "new-model", reasoningEffort: null,
-      charter: "Updated charter", permissionProfileId: "full_access", providerLaunchPolicy: { approvalPolicy: "never" },
+      charter: "Updated charter", permissionProfileId: "full_access", providerLaunchPolicy: { approvalPolicy: "never" }, imageInput: false,
     });
     assert.equal(updated.outcome, "updated");
     assert.equal(updated.configuration?.polling_contract, "custodial_polling_v1");
@@ -4705,14 +4705,14 @@ test("Inspector configuration revisions are optimistic, durable, and do not alte
     assert.equal(original?.runtime_configuration_revision, 1);
     const updated = await store.updateAgentConfiguration(1, {
       agentId: entry.id, expectedRevision: 1, model: "gpt-next", reasoningEffort: "high",
-      charter: "Use the new charter on future turns.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" },
+      charter: "Use the new charter on future turns.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" }, imageInput: false,
     });
     assert.equal(updated.outcome, "updated");
     assert.equal(updated.configuration?.config_revision, 2);
     assert.equal(updated.configuration?.runtime_configuration_revision, 1);
     const conflict = await store.updateAgentConfiguration(2, {
       agentId: entry.id, expectedRevision: 1, model: "ignored", reasoningEffort: null,
-      charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {},
+      charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {}, imageInput: false,
     });
     assert.equal(conflict.outcome, "conflict");
     assert.equal((await store.load()).generation, 2, "a revision conflict must not advance manifest generation");
@@ -4729,6 +4729,149 @@ test("Inspector configuration revisions are optimistic, durable, and do not alte
     await store.close();
     await env.cleanup();
   }
+});
+
+const IMAGE_INPUT_UPDATE = (revision: number, imageInput: boolean) => ({
+  agentId: entry.id, expectedRevision: revision, model: "model-a", reasoningEffort: null,
+  charter: "Image input charter.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" }, imageInput,
+});
+
+test("a new database stores image input as off and the flat manifest cannot turn it on", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [{ ...entry, image_input: true } as DaemonManifestEntry]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, false,
+      "a flat manifest entry cannot create the owner's image input choice");
+    const inspection = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(inspection.prepare("SELECT image_input FROM agent_configurations WHERE agent_id=?").get(entry.id)?.image_input, 0);
+      assert.deepEqual({ ...inspection.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get() },
+        { type: "INTEGER", required: 1, dflt_value: "0" });
+      inspection.exec("PRAGMA foreign_keys=OFF");
+      assert.throws(() => inspection.prepare("UPDATE agent_configurations SET image_input=2").run(), /CHECK/,
+        "only 0 and 1 are accepted by the column itself");
+      assert.throws(() => inspection.prepare("UPDATE agent_configurations SET image_input=NULL").run(), /NOT NULL/);
+    } finally { inspection.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("a schema 49 database without image input migrates to schema 50 with every agent off", async () => {
+  const env = await fixture();
+  const original = new ManifestStore(env.databasePath);
+  try {
+    const expected = await original.write(0, [entry, { ...entry, id: "agent_2", display_name: "SecondAgent", work_attempt_id: undefined, provider_ref: undefined, turn_control: undefined, reconciliation: undefined }]);
+    await original.close();
+    const old = new DatabaseSync(env.databasePath);
+    old.exec("ALTER TABLE agent_configurations DROP COLUMN image_input; UPDATE manifest_metadata SET schema_version=49; PRAGMA user_version=49");
+    assert.equal(old.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), undefined);
+    old.close();
+    const migrated = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await migrated.getAgentConfiguration(entry.id))?.image_input, false);
+      assert.equal((await migrated.getAgentConfiguration("agent_2"))?.image_input, false);
+      assert.deepEqual((await migrated.load()).entries.map((agent) => agent.id), expected.entries.map((agent) => agent.id),
+        "the migration keeps every agent");
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.equal(inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()?.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.deepEqual(inspection.prepare("SELECT agent_id,image_input FROM agent_configurations ORDER BY agent_id").all().map((row) => ({ ...row })),
+          [{ agent_id: "agent_1", image_input: 0 }, { agent_id: "agent_2", image_input: 0 }]);
+      } finally { inspection.close(); }
+      const generation = (await migrated.load()).generation;
+      const updated = await migrated.updateAgentConfiguration(generation, IMAGE_INPUT_UPDATE(1, true));
+      assert.equal(updated.outcome, "updated");
+      assert.equal(updated.configuration?.image_input, true, "the added column takes the owner's choice");
+      assert.equal((await migrated.getAgentConfiguration("agent_2"))?.image_input, false);
+    } finally { await migrated.close(); }
+  } finally { await original.close(); await env.cleanup(); }
+});
+
+test("a schema 39 database without image input gains the column through the older migration path", async () => {
+  const env = await fixture();
+  const original = new ManifestStore(env.databasePath);
+  try {
+    await original.write(0, [entry]);
+    await original.close();
+    const old = new DatabaseSync(env.databasePath);
+    old.exec("ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_room_memberships DROP COLUMN local_room_id; UPDATE manifest_metadata SET schema_version=39; PRAGMA user_version=39");
+    old.close();
+    const migrated = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await migrated.getAgentConfiguration(entry.id))?.image_input, false);
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.equal(inspection.prepare("SELECT image_input FROM agent_configurations WHERE agent_id=?").get(entry.id)?.image_input, 0);
+      } finally { inspection.close(); }
+    } finally { await migrated.close(); }
+  } finally { await original.close(); await env.cleanup(); }
+});
+
+test("a current database refuses an image input column that is missing, weakened or holds an invalid value", async () => {
+  const cases: Array<{ name: string; sql: string; refusal: RegExp }> = [
+    { name: "missing column", sql: "ALTER TABLE agent_configurations DROP COLUMN image_input", refusal: /invalid image input column/ },
+    { name: "column that allows null", sql: "ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER DEFAULT 0", refusal: /invalid image input column/ },
+    { name: "column that defaults to on", sql: "ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER NOT NULL DEFAULT 1", refusal: /invalid image input column/ },
+    // SQLite's own integrity check sees the broken CHECK constraint first, so the open fails either way.
+    { name: "value outside 0 and 1", sql: "PRAGMA ignore_check_constraints=ON; UPDATE agent_configurations SET image_input=2; PRAGMA ignore_check_constraints=OFF", refusal: /invalid image input column|failed SQLite integrity validation/ },
+  ];
+  for (const { name, sql, refusal } of cases) {
+    const env = await fixture();
+    const original = new ManifestStore(env.databasePath);
+    try {
+      await original.write(0, [entry]);
+      await original.close();
+      const damaged = new DatabaseSync(env.databasePath);
+      damaged.exec(sql);
+      assert.equal(damaged.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION, name);
+      damaged.close();
+      const reopened = new ManifestStore(env.databasePath);
+      try {
+        await assert.rejects(() => reopened.load(), refusal, name);
+      } finally { await reopened.close(); }
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION,
+          `${name}: a refused open must not advance or repair the schema version`);
+      } finally { inspection.close(); }
+    } finally { await original.close(); await env.cleanup(); }
+  }
+});
+
+test("image input is saved with the Inspector configuration and survives every manifest replacement", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, false);
+    const updated = await store.updateAgentConfiguration(1, IMAGE_INPUT_UPDATE(1, true));
+    assert.equal(updated.outcome, "updated");
+    assert.equal(updated.configuration?.image_input, true);
+    assert.equal(updated.configuration?.config_revision, 2, "turning the choice on is a configuration change like any other");
+    assert.equal(updated.configuration?.runtime_configuration_revision, 1);
+    const stale = { ...entry, observed_state: "idle" as const };
+    await store.replaceEntry(2, stale);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a lifecycle replacement keeps the choice");
+    await store.replaceEntriesBatch(3, [stale]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a batch replacement keeps the choice");
+    await store.write(4, [stale]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a full manifest write keeps the choice");
+    assert.equal(Object.hasOwn((await store.load()).entries[0]!, "image_input"), false, "the flat manifest never carries the choice");
+    const conflict = await store.updateAgentConfiguration(5, IMAGE_INPUT_UPDATE(1, false));
+    assert.equal(conflict.outcome, "conflict");
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a conflicting edit does not change the choice");
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await reopened.getAgentConfiguration(entry.id))?.image_input, true, "the choice survives a restart");
+      const generation = (await reopened.load()).generation;
+      const off = await reopened.updateAgentConfiguration(generation, IMAGE_INPUT_UPDATE(2, false));
+      assert.equal(off.outcome, "updated");
+      assert.equal(off.configuration?.image_input, false, "the owner can turn the choice off again");
+    } finally { await reopened.close(); }
+  } finally { await store.close(); await env.cleanup(); }
 });
 
 test("room-move journal is request-idempotent and exact-generation phase fenced", async () => {

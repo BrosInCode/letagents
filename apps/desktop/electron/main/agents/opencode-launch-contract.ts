@@ -279,6 +279,12 @@ export function openCodeConfig(input: {
   mcpCommand: string[];
   mcpEnvironment: Record<string, string>;
   permissionProfileId?: SupervisedOpenCodePermissionProfileId;
+  /**
+   * The owner says this model reads images. OpenCode takes an image only for
+   * a model whose configuration lists image input; for any other model it
+   * puts an error text in the image's place. `attachment` alone does not do it.
+   */
+  imageInput?: boolean;
 }): OpenCodeConfig {
   return {
     $schema: "https://opencode.ai/config.json",
@@ -312,6 +318,7 @@ export function openCodeConfig(input: {
             limit: input.limits,
             cost: { input: 0, output: 0 },
             options: {},
+            ...(input.imageInput === true ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
           },
         },
       },
@@ -361,6 +368,15 @@ export function minimalOpenCodeEnvironment(
     OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
     ...extra,
   };
+}
+
+/** Whether a running OpenCode runtime was started with image input for its configured Open Model. */
+export function parseConfiguredOpenModelImageInput(config: OpenCodeConfig): boolean {
+  const model = parseConfiguredOpenModel(config);
+  const record = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const models = record(record(record(config.provider)?.[OPEN_MODEL_OPENCODE_PROVIDER_ID])?.models);
+  const input = record(record(model === null ? null : models?.[model])?.modalities)?.input;
+  return Array.isArray(input) && input.includes("image");
 }
 
 export function parseConfiguredOpenModel(config: OpenCodeConfig): string | null {
