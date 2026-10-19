@@ -19,7 +19,12 @@ import {
   projectBindingIdentityKey,
   projectBindingVerificationKeys,
 } from "../project-bindings.js";
-import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../repo-status.js";
+import {
+  buildRepoStatus,
+  normalizeGitRemoteToRoomIdentifier,
+  resolveRoomIdentifierFromPath,
+} from "../repo-status.js";
+import { runGit } from "./git-exec.js";
 
 const require = createRequire(import.meta.url);
 
@@ -446,6 +451,10 @@ function sameLocalProjectAfterGitSetup(
  *    are unchanged (they can rewrite the origin URL through insteadOf);
  *  - the folder and `.git` are on the same volumes (UUID), checked in every
  *    pass, memo hit or not;
+ *  - `git remote get-url origin`, run on every pass, still returns the URL
+ *    recorded with the entry (Git resolves includes, insteadOf, commondir
+ *    and GIT_CONFIG_* itself, so this is the authority; the file checks
+ *    above are extra conditions);
  *  - fewer than 45 seconds have passed (fallback for anything not listed,
  *    for example a nested local branch file).
  * Only folders whose `.git` is a real directory are memoized. Plain folders,
@@ -457,6 +466,7 @@ type ValidatedBinding = {
   row: string;
   fingerprint: string;
   volumes: string;
+  origin: string;
   expiresAt: number;
 };
 
@@ -481,15 +491,38 @@ function bindingRowKey(binding: DesktopProjectBinding): string {
 }
 
 async function statIdentity(path: string, content: boolean): Promise<string> {
-  try {
-    const info = await lstat(path, { bigint: true });
-    const identity = [info.dev, info.ino, info.birthtimeNs, info.mode];
-    if (content) identity.push(info.size, info.mtimeNs, info.ctimeNs);
-    return identity.join(":");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "-";
-    throw error;
+  // Both the entry itself (lstat) and what it points to (stat): replacing a
+  // symlinked config's target changes only the second.
+  const describe = async (read: typeof lstat): Promise<string> => {
+    try {
+      const info = await read(path, { bigint: true });
+      const identity = [info.dev, info.ino, info.birthtimeNs, info.mode];
+      if (content) identity.push(info.size, info.mtimeNs, info.ctimeNs);
+      return identity.join(":");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return "-";
+      throw error;
+    }
+  };
+  return `${await describe(lstat)}>${await describe(stat)}`;
+}
+
+/**
+ * The origin URL exactly as Git resolves it now, normalized the way full
+ * validation derives the room. Git itself applies every config source
+ * (include, includeIf, insteadOf, commondir, GIT_CONFIG_* variables, the
+ * system and Xcode configs), so no input list here can go stale. Returns
+ * "no-origin" only when Git says the remote does not exist; any other
+ * failure returns null and the binding is validated in full.
+ */
+async function resolvedOrigin(rootPath: string): Promise<string | null> {
+  const result = await runGit(rootPath, ["remote", "get-url", "origin"]);
+  if (result.code === 0) {
+    const raw = result.stdout.trim();
+    return raw ? JSON.stringify([normalizeGitRemoteToRoomIdentifier(raw), raw]) : null;
   }
+  return result.code === 2 && /no such remote/i.test(result.stderr) ? "no-origin" : null;
 }
 
 const GIT_CONFIG_INCLUDE = /^\s*\[\s*include(?:if)?\b/im;
@@ -520,18 +553,21 @@ async function bindingFingerprint(rootPath: string): Promise<string | null> {
     const gitPath = join(rootPath, ".git");
     const gitInfo = await lstat(gitPath);
     if (!gitInfo.isDirectory()) return null;
+    // A commondir makes Git read config and refs from another directory:
+    // treat it like a linked worktree and always validate in full.
+    if ((await statIdentity(join(gitPath, "commondir"), false)) !== "->-") return null;
     const configFiles = [join(gitPath, "config"), join(gitPath, "config.worktree"), ...globalGitConfigPaths()];
     const configTexts = await Promise.all(configFiles.map(readOptionalText));
     if (configTexts.some((text) => GIT_CONFIG_INCLUDE.test(text))) return null;
     const parts = await Promise.all([
       statIdentity(rootPath, false),
       statIdentity(gitPath, false),
-      ...["HEAD", "commondir", "packed-refs", join("refs", "remotes", "origin", "HEAD")]
+      ...["HEAD", "packed-refs", join("refs", "remotes", "origin", "HEAD")]
         .map((name) => statIdentity(join(gitPath, name), true)),
       ...configFiles.map((path) => statIdentity(path, true)),
     ]);
     const environment = Object.keys(process.env)
-      .filter((name) => name.startsWith("GIT_"))
+      .filter((name) => name.startsWith("GIT_") || name === "PATH")
       .sort()
       .map((name) => [name, process.env[name]]);
     return JSON.stringify([rootPath, ...parts, environment]);
@@ -540,7 +576,12 @@ async function bindingFingerprint(rootPath: string): Promise<string | null> {
   }
 }
 
-function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: string, volumes: string): void {
+function rememberValidatedBinding(
+  binding: DesktopProjectBinding,
+  fingerprint: string,
+  volumes: string,
+  origin: string,
+): void {
   const now = Date.now();
   if (validatedBindings.size >= VALIDATED_BINDING_LIMIT) {
     for (const [id, entry] of validatedBindings) {
@@ -552,6 +593,7 @@ function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: s
     row: bindingRowKey(binding),
     fingerprint,
     volumes,
+    origin,
     expiresAt: now + VALIDATED_BINDING_TTL_MS,
   });
 }
@@ -570,13 +612,17 @@ async function validateProjectBinding(
     // The volume check is never skipped: df + diskutil run once per device in
     // each pass, shared by every binding; the memo saves only the git spawns.
     const volumes = fingerprint ? await bindingVolumes(rootPath, options, namespaceCache) : null;
+    // One git spawn, never skipped: the origin URL as Git resolves it now must
+    // equal the one recorded with the memo entry.
+    const origin = fingerprint && volumes ? await resolvedOrigin(rootPath) : null;
     const memo = validatedBindings.get(binding.id);
     if (
-      memo && fingerprint && volumes
+      memo && fingerprint && volumes && origin
       && memo.expiresAt > Date.now()
       && memo.row === bindingRowKey(binding)
       && memo.fingerprint === fingerprint
       && memo.volumes === volumes
+      && memo.origin === origin
     ) {
       projectBindingValidationCountsForTest.memo += 1;
       return binding;
@@ -589,7 +635,7 @@ async function validateProjectBinding(
     const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
     if (!comparison.matches && !gitSetup) return null;
     if (!comparison.shouldUpgrade && !gitSetup) {
-      if (fingerprint && volumes) rememberValidatedBinding(binding, fingerprint, volumes);
+      if (fingerprint && volumes && origin) rememberValidatedBinding(binding, fingerprint, volumes, origin);
       return binding;
     }
     try {

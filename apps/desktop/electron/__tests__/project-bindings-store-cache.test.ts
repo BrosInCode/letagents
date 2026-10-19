@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -136,6 +136,96 @@ test("Git config includes and other origin inputs keep the binding from being me
   } finally {
     resetProjectBindingsStoreCachesForTest();
     rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+// Regression cases from review: each changes what `git remote get-url origin`
+// returns without touching the files the fingerprint lists. The next pass
+// must fail closed.
+const goodOrigin = "[remote \"origin\"]\n\turl = git@github.com:acme/widgets.git\n";
+const evilOrigin = "[remote \"origin\"]\n\turl = git@github.com:evil/other.git\n";
+const coreSection = "[core]\n\trepositoryformatversion = 0\n\tbare = false\n";
+
+async function originSwapFailsClosed(
+  name: string,
+  setup: (temporary: string, root: string) => void,
+  attack: (temporary: string, root: string) => void,
+): Promise<void> {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-origin-"));
+  const root = join(temporary, "repo");
+  mkdirSync(root);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  resetProjectBindingsStoreCachesForTest();
+  try {
+    setup(temporary, root);
+    assert.equal(execFileSync("git", ["remote", "get-url", "origin"], { cwd: root, encoding: "utf8" }).trim(), "git@github.com:acme/widgets.git", name);
+    await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
+    assert.equal((await listProjectBindings(storeOptions)).length, 1, `${name}: accepted before the change`);
+    assert.equal((await listProjectBindings(storeOptions)).length, 1, `${name}: still accepted`);
+    attack(temporary, root);
+    assert.equal(execFileSync("git", ["remote", "get-url", "origin"], { cwd: root, encoding: "utf8" }).trim(), "git@github.com:evil/other.git", name);
+    assert.deepEqual(await listProjectBindings(storeOptions), [], `${name}: the next pass fails closed`);
+  } finally {
+    resetProjectBindingsStoreCachesForTest();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+test("an include on the same line as another section cannot keep a stale origin", async () => {
+  await originSwapFailsClosed("same-line include", (temporary, root) => {
+    writeFileSync(join(temporary, "inc"), goodOrigin);
+    execFileSync("sh", ["-c", `printf '[core] [include] path = ${join(temporary, "inc")}\\n' >> .git/config`], { cwd: root });
+  }, (temporary) => writeFileSync(join(temporary, "inc"), evilOrigin));
+});
+
+test("an indented include cannot keep a stale origin", async () => {
+  await originSwapFailsClosed("indented include", (temporary, root) => {
+    writeFileSync(join(temporary, "inc"), goodOrigin);
+    execFileSync("sh", ["-c", `printf '\\t[include]\\n\\tpath = ${join(temporary, "inc")}\\n' >> .git/config`], { cwd: root });
+  }, (temporary) => writeFileSync(join(temporary, "inc"), evilOrigin));
+});
+
+test("a commondir target edit cannot keep a stale origin", async () => {
+  await originSwapFailsClosed("commondir target", (temporary, root) => {
+    const other = join(temporary, "other");
+    mkdirSync(other);
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: other });
+    writeFileSync(join(other, ".git", "config"), coreSection + goodOrigin);
+    writeFileSync(join(root, ".git", "commondir"), `${join(other, ".git")}\n`);
+  }, (temporary) => writeFileSync(join(temporary, "other", ".git", "config"), coreSection + evilOrigin));
+});
+
+test("an atomic replace behind a symlinked .git/config cannot keep a stale origin", async () => {
+  await originSwapFailsClosed("symlinked config", (temporary, root) => {
+    writeFileSync(join(temporary, "real.cfg"), coreSection + goodOrigin);
+    rmSync(join(root, ".git", "config"));
+    symlinkSync(join(temporary, "real.cfg"), join(root, ".git", "config"));
+  }, (temporary) => {
+    writeFileSync(join(temporary, "new.cfg"), coreSection + evilOrigin);
+    renameSync(join(temporary, "new.cfg"), join(temporary, "real.cfg"));
+  });
+});
+
+test("an include set through GIT_CONFIG_* variables cannot keep a stale origin", async () => {
+  const keys = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] as const;
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    await originSwapFailsClosed("GIT_CONFIG include", (temporary, root) => {
+      execFileSync("git", ["config", "remote.origin.url", "git@github.com:acme/widgets.git"], { cwd: root });
+      writeFileSync(join(temporary, "inc"), "");
+      process.env.GIT_CONFIG_COUNT = "1";
+      process.env.GIT_CONFIG_KEY_0 = "include.path";
+      process.env.GIT_CONFIG_VALUE_0 = join(temporary, "inc");
+    }, (temporary) => writeFileSync(
+      join(temporary, "inc"),
+      "[url \"git@github.com:evil/other.git\"]\n\tinsteadOf = git@github.com:acme/widgets.git\n",
+    ));
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
   }
 });
 
@@ -280,7 +370,7 @@ test("validated bindings are reused until the folder, Git metadata, or stored ro
     for (let index = 0; index < 5; index += 1) {
       assert.deepEqual((await listProjectBindings(storeOptions)).map((item) => item.id), [binding.id]);
     }
-    assert.equal(spawnsAt() - before, 0, "five unchanged lists spawn no git");
+    assert.equal(spawnsAt() - before, 5, "five unchanged lists spawn one git each (get-url origin)");
     // The options hook is not cached per device: root and .git, every pass.
     assert.equal(namespaceCalls - namespacesBefore, 10, "but still check the volume on every pass");
     assert.equal(counts.memo - memoBefore, 5);
