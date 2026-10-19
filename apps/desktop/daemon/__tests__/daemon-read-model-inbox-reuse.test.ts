@@ -97,7 +97,17 @@ test("the inbox version changes for every committed write, by this connection or
     const afterOtherWrite = await env.store.committedStateVersion();
     assert.notEqual(afterOtherWrite, afterOwnWrite);
 
+    // A schema change on the store's own connection moves neither data_version nor total_changes().
     const database = (env.store as unknown as { database: DatabaseSync }).database;
+    database.exec("CREATE TABLE reuse_probe(value INTEGER)");
+    const afterCreate = await env.store.committedStateVersion();
+    assert.notEqual(afterCreate, afterOtherWrite);
+    database.exec("ALTER TABLE reuse_probe ADD COLUMN extra TEXT");
+    const afterAlter = await env.store.committedStateVersion();
+    assert.notEqual(afterAlter, afterCreate);
+    database.exec("DROP TABLE reuse_probe");
+    assert.notEqual(await env.store.committedStateVersion(), afterAlter);
+
     database.exec("BEGIN IMMEDIATE");
     try { assert.equal(await env.store.committedStateVersion(), null); }
     finally { database.exec("ROLLBACK"); }
@@ -146,6 +156,30 @@ test("an unchanged database reuses the inbox inputs, and any write shows on the 
     assert.equal(env.reads.receipts, 5);
   } finally {
     other.close();
+    await env.cleanup();
+  }
+});
+
+test("kept inbox inputs are frozen, so editing one view cannot change the next wake", async () => {
+  const env = await fixture();
+  try {
+    await env.ingest("1");
+    const first = (await env.watch())[0]!;
+    const receipt = first.delivery_receipts![0]!;
+    assert.ok(receipt.timeline.length > 0);
+    assert.ok(Object.isFrozen(receipt.timeline));
+    assert.ok(Object.isFrozen(receipt.timeline[0]));
+    assert.throws(() => (receipt.timeline as unknown[]).reverse(), TypeError);
+    assert.throws(() => { (receipt.timeline[0] as { phase: string }).phase = "published"; }, TypeError);
+    const second = (await env.watch())[0]!;
+    assert.equal(env.reads.receipts, 1);
+    assert.deepEqual(second.delivery_receipts, first.delivery_receipts);
+    assert.equal(second.delivery_receipts![0]!.timeline[0]!.phase, "received");
+
+    // A projection that keeps nothing hands out ordinary objects.
+    const unkept = (await env.model.entriesWithDerivedLiveness([entry]))[0]!;
+    assert.equal(Object.isFrozen(unkept.delivery_receipts![0]!.timeline), false);
+  } finally {
     await env.cleanup();
   }
 });

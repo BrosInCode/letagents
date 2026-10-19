@@ -77,6 +77,14 @@ type StoredInboxInputs = {
   ingressHealth: Awaited<ReturnType<SupervisedAgentInboxStore["ingressHealth"]>>;
 };
 
+/** Freeze plain stored data (objects and arrays) in place, all the way down. */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
+}
+
 /** Owns read-only control-surface projections over daemon authority state. */
 export class DaemonReadModel {
   /**
@@ -218,7 +226,14 @@ export class DaemonReadModel {
     const binding = projectedBinding === undefined
       ? await this.ports.bindings.get(entry.id)
       : projectedBinding;
-    const stored = inboxInputs?.kept ?? await this.inboxInputs(entry.id);
+    let stored = inboxInputs?.kept;
+    if (!stored) {
+      stored = await this.inboxInputs(entry.id);
+      // Views share these objects (a receipt's timeline, the blocked-head
+      // skip). Frozen, an in-place edit of one view throws instead of
+      // changing the inputs a later wake reuses.
+      if (inboxInputs) stored = deepFreeze(stored);
+    }
     inboxInputs?.keep.set(entry.id, stored);
     const { receipts, blockedHeadSkip, continuationRepair, ingressHealth: persistedIngress } = stored;
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)

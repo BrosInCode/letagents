@@ -268,6 +268,7 @@ const INBOX_READS = {
   ingressCursor: "SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?",
   latestRepair: "SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
   dataVersion: "PRAGMA data_version",
+  schemaVersion: "PRAGMA schema_version",
   totalChanges: "SELECT total_changes() AS value",
 } as const;
 
@@ -1493,13 +1494,15 @@ export class SupervisedAgentInboxStore {
   }
 
   /**
-   * A token that is equal on two reads only if no row of this database file
-   * was changed between them, by any connection. Another connection's commit
-   * changes `PRAGMA data_version` here; a change made on this connection
-   * (committed or not) changes `total_changes()`. Null while this connection
-   * has a transaction open, because its reads then see rows that may still be
-   * rolled back. Its parts are SQLite's own counters, so nothing a writer does
-   * or forgets to report can leave it unchanged.
+   * A token that is equal on two reads only if neither the rows nor the schema
+   * of this database file changed between them, by any connection. Another
+   * connection's commit changes `PRAGMA data_version` here; a row change made
+   * on this connection (committed or not) changes `total_changes()`; a schema
+   * change made on this connection (which changes neither of those) changes
+   * `PRAGMA schema_version`. Null while this connection has a transaction
+   * open, because its reads then see rows that may still be rolled back. Its
+   * parts are SQLite's own counters, so a writer that forgets to report a
+   * change cannot leave it unchanged.
    */
   async committedStateVersion(): Promise<string | null> {
     return this.read((database) => {
@@ -1508,7 +1511,8 @@ export class SupervisedAgentInboxStore {
       if (identity === undefined) { identity = nextConnectionIdentity++; connectionIdentities.set(database, identity); }
       const dataVersion = (this.reads.get(database, "dataVersion").get() as Row).data_version;
       const totalChanges = (this.reads.get(database, "totalChanges").get() as Row).value;
-      return `${identity}:${String(dataVersion)}:${String(totalChanges)}`;
+      const schemaVersion = (this.reads.get(database, "schemaVersion").get() as Row).schema_version;
+      return `${identity}:${String(dataVersion)}:${String(totalChanges)}:${String(schemaVersion)}`;
     });
   }
 
