@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { z } from "zod";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
 import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
-import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
+import { emptyExecutionProjection, reduceParsedExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
 import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
 import { executionRecordWindowStart, hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
 import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
@@ -43,11 +43,17 @@ export type CapturedRoomWorkSummary =
   | { availability: "not_captured" | "unavailable" }
   | { availability: "available"; attemptId: string; summary: RoomAgentWorkSummary };
 type RetainedBudget = { facts: number; bytes: number };
+/** `replay` counts every journal row the projection reduced, as replayRows bounds them. */
+type CachedRuntime = { value: RuntimeProjection; replay: RetainedBudget; epoch: number; weight: number };
+/** `last` is the newest counted sequence in the record window that starts after `windowStart`. */
+type CachedBudget = { budget: RetainedBudget; windowStart: number; last: number; epoch: number };
+type ReplayState = RuntimeProjection & { replay: RetainedBudget };
 // Count nested entries, not just runtimes: one long-lived runtime can have many
 // turns and operations. Every retained identity is protocol-bounded to 512 chars.
 const MAX_CACHED_RUNTIMES = 16;
 const MAX_CACHED_ENTRIES = 4096;
 const MAX_CACHED_AGENT_BUDGETS = 16;
+const MAX_CACHED_STATEMENTS = 64;
 const MAX_RETAINED_FACTS_PER_AGENT = 10_000;
 const MAX_RETAINED_BYTES_PER_AGENT = 50 * 1024 * 1024;
 // A logical retention budget: stored TEXT bytes plus a conservative fixed
@@ -218,10 +224,19 @@ function materializeTurn(database: DatabaseSync, input: z.output<typeof turnInpu
  */
 export class ExecutionShadowStore {
   private readonly observers = new WeakSet<ShadowObserver>();
-  private readonly projections = new Map<string, { value: RuntimeProjection; weight: number }>();
-  private readonly budgets = new Map<string, RetainedBudget>();
+  private readonly projections = new Map<string, CachedRuntime>();
+  private readonly budgets = new Map<string, CachedBudget>();
+  private readonly statements = new Map<string, StatementSync>();
   private projectionWeight = 0;
-  private projectionStamp: string | null = null;
+  /**
+   * Cache entries carry the epoch they were last proven against. The epoch
+   * moves whenever the database stamp moves for a reason this store did not
+   * itself commit. An entry from an older epoch is not dropped: it is checked
+   * against its own journal key (see revalidateRuntime / retainedBudget).
+   */
+  private cacheEpoch = 0;
+  private cacheStamp: string | null = null;
+  private schemaVersion: number | null = null;
   private readonly lifecycleProjection: LifecycleProjectionLedger;
   constructor(private readonly database: DatabaseSync) {
     this.lifecycleProjection = new LifecycleProjectionLedger(database);
@@ -236,7 +251,7 @@ export class ExecutionShadowStore {
       // Capture before COMMIT; an external commit afterwards must invalidate us.
       const stamp = this.databaseStamp();
       this.database.exec("COMMIT");
-      this.projectionStamp = stamp;
+      this.cacheStamp = stamp;
       return result;
     }
     catch (error) { this.clearProjections(); this.database.exec("ROLLBACK"); throw error; }
@@ -247,68 +262,165 @@ export class ExecutionShadowStore {
     // second store sharing this connection (including rolled-back writes).
     // schema_version prevents a same-connection DDL change being hidden by cache.
     const stamp = this.required("SELECT total_changes() AS changes,data_version,schema_version FROM pragma_data_version,pragma_schema_version");
-    return `${stamp.changes}:${stamp.data_version}:${stamp.schema_version}`;
+    const schemaVersion = Number(stamp.schema_version);
+    if (this.schemaVersion !== null && this.schemaVersion !== schemaVersion) {
+      // DDL can change what any cached projection or statement means.
+      this.clearProjections();
+      this.statements.clear();
+    }
+    this.schemaVersion = schemaVersion;
+    return `${stamp.changes}:${stamp.data_version}:${schemaVersion}`;
   }
   private clearProjections(): void {
     this.projections.clear();
     this.budgets.clear();
     this.projectionWeight = 0;
-    this.projectionStamp = null;
+    this.cacheStamp = null;
   }
   private synchronizeCaches(): void {
     const stamp = this.databaseStamp();
-    if (stamp !== this.projectionStamp) { this.clearProjections(); this.projectionStamp = stamp; }
+    // Someone else wrote (another connection, or another user of this one).
+    // Keep the entries but make each prove its own journal key before use.
+    if (stamp !== this.cacheStamp) { this.cacheEpoch++; this.cacheStamp = stamp; }
   }
-  private rememberBudget(agentId: string, budget: RetainedBudget): void {
+  private rememberBudget(agentId: string, entry: CachedBudget): void {
     this.budgets.delete(agentId);
     if (this.budgets.size >= MAX_CACHED_AGENT_BUDGETS) this.budgets.delete(this.budgets.keys().next().value!);
-    this.budgets.set(agentId, budget);
+    this.budgets.set(agentId, entry);
   }
-  private retainedBudget(agentId: string): RetainedBudget {
+  private retainedBudget(agentId: string): CachedBudget {
     this.synchronizeCaches();
-    let budget = this.budgets.get(agentId);
-    if (!budget) {
+    let entry = this.budgets.get(agentId);
+    if (entry && entry.epoch !== this.cacheEpoch) entry = this.revalidateBudget(agentId, entry);
+    if (!entry) {
+      const windowStart = executionRecordWindowStart(this.database, agentId);
       // Aggregate in SQLite, not a JS array. The extra row proves oversize
       // without scanning an arbitrarily large pre-existing agent journal.
       // Only the agent's current record window counts: see its start.
-      const row = this.required(`SELECT COUNT(*) AS facts,COALESCE(SUM(${FACT_BYTE_COST_SQL}),0) AS bytes
-        FROM (SELECT ${FACT_TEXT_COLUMNS.join(",")} FROM execution_facts WHERE agent_id=? AND sequence>? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`,
-      agentId, executionRecordWindowStart(this.database, agentId));
-      budget = { facts: Number(row.facts), bytes: Number(row.bytes) };
+      // Fresh prepare: a cold count is rare, and tests observe it by its SQL.
+      const row = this.database.prepare(`SELECT COUNT(*) AS facts,COALESCE(SUM(${FACT_BYTE_COST_SQL}),0) AS bytes,COALESCE(MAX(sequence),0) AS last
+        FROM (SELECT sequence,${FACT_TEXT_COLUMNS.join(",")} FROM execution_facts WHERE agent_id=? AND sequence>? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`)
+        .get(agentId, windowStart) as Row;
+      entry = { budget: { facts: Number(row.facts), bytes: Number(row.bytes) }, windowStart, last: Number(row.last), epoch: this.cacheEpoch };
     }
-    this.rememberBudget(agentId, budget);
-    return budget;
+    this.rememberBudget(agentId, entry);
+    return entry;
   }
-  private rememberProjection(runtimeId: string, value: RuntimeProjection): void {
+  /**
+   * An older-epoch budget is still exact when its record window starts at
+   * the same fact and every fact it counted is still there. The journal key
+   * proves the second part: the window holds exactly the counted facts plus
+   * those newer than `last`. Facts are immutable (a trigger refuses UPDATE)
+   * and AUTOINCREMENT never reuses a sequence, so newer facts are appends and
+   * are added on. A deleted fact breaks the count and forces a recount. (Not
+   * caught: a fact deleted and another inserted with that same explicit old
+   * sequence; nothing writes facts that way.)
+   */
+  private revalidateBudget(agentId: string, entry: CachedBudget): CachedBudget | undefined {
+    if (exceededBudget(entry.budget)) return undefined;
+    const windowStart = executionRecordWindowStart(this.database, agentId);
+    if (windowStart !== entry.windowStart) return undefined;
+    const key = this.required(`SELECT COUNT(*) AS seen,COALESCE(MAX(sequence),0) AS last
+      FROM (SELECT sequence FROM execution_facts WHERE agent_id=? AND sequence>? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`,
+    agentId, windowStart);
+    const seen = Number(key.seen);
+    const last = Number(key.last);
+    if (seen > MAX_RETAINED_FACTS_PER_AGENT || last < entry.last) return undefined;
+    if (last === entry.last) return seen === entry.budget.facts ? { ...entry, epoch: this.cacheEpoch } : undefined;
+    const added = this.required(`SELECT COUNT(*) AS added,COALESCE(SUM(${FACT_BYTE_COST_SQL}),0) AS bytes
+      FROM execution_facts WHERE agent_id=? AND sequence>?`, agentId, Math.max(entry.last, windowStart));
+    if (entry.budget.facts + Number(added.added) !== seen) return undefined;
+    return { budget: { facts: seen, bytes: entry.budget.bytes + Number(added.bytes) }, windowStart, last, epoch: this.cacheEpoch };
+  }
+  private rememberProjection(runtimeId: string, entry: Omit<CachedRuntime, "weight">): void {
     const old = this.projections.get(runtimeId);
     if (old) { this.projectionWeight -= old.weight; this.projections.delete(runtimeId); }
-    let weight = 1 + value.projection.turns.size * 4;
-    for (const turn of value.projection.turns.values()) weight += turn.operations.size;
+    let weight = 1 + entry.value.projection.turns.size * 4;
+    for (const turn of entry.value.projection.turns.values()) weight += turn.operations.size;
     if (weight > MAX_CACHED_ENTRIES) return;
     while (this.projections.size >= MAX_CACHED_RUNTIMES || this.projectionWeight + weight > MAX_CACHED_ENTRIES) {
       const oldest = this.projections.keys().next().value!;
       this.projectionWeight -= this.projections.get(oldest)!.weight;
       this.projections.delete(oldest);
     }
-    this.projections.set(runtimeId, { value, weight });
+    this.projections.set(runtimeId, { ...entry, weight });
     this.projectionWeight += weight;
   }
-  private cachedProjection(runtimeId: string): RuntimeProjection {
+  private cachedProjection(runtimeId: string): CachedRuntime | Omit<CachedRuntime, "weight"> {
     this.synchronizeCaches();
     const runtime = this.row("SELECT agent_id FROM execution_runtime_generations WHERE runtime_generation_id=?", runtimeId);
-    if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)))) throw new ExecutionProtocolError("retention_limit");
+    if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)).budget)) throw new ExecutionProtocolError("retention_limit");
     const cached = this.projections.get(runtimeId);
     if (cached) {
+      const current = cached.epoch === this.cacheEpoch ? cached : this.revalidateRuntime(runtimeId, cached);
+      if (current) {
+        this.rememberProjection(runtimeId, current);
+        return current;
+      }
+      this.projectionWeight -= cached.weight;
       this.projections.delete(runtimeId);
-      this.projections.set(runtimeId, cached);
-      return cached.value;
     }
-    const value = this.replayRuntime(runtimeId);
-    this.rememberProjection(runtimeId, value);
-    return value;
+    const entry = { ...this.replayRuntime(runtimeId), epoch: this.cacheEpoch };
+    this.rememberProjection(runtimeId, entry);
+    return entry;
+  }
+  /**
+   * An older-epoch projection is still exact when every fact it reduced is
+   * still there, by the same journal key as revalidateBudget: this runtime's
+   * facts are exactly the reduced ones plus those newer than its last
+   * journal sequence. Those newer facts (for example from another
+   * connection) are reduced on top of it, in journal order and with the same
+   * native-event deduplication as a full replay. A deleted fact breaks the
+   * count and the runtime replays from the start.
+   */
+  private revalidateRuntime(runtimeId: string, cached: CachedRuntime): Omit<CachedRuntime, "weight"> | undefined {
+    const last = cached.value.lastJournalSequence;
+    const key = this.required(`SELECT COUNT(*) AS seen,COALESCE(MAX(sequence),0) AS last
+      FROM (SELECT sequence FROM execution_facts WHERE runtime_generation_id=? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`, runtimeId);
+    const seen = Number(key.seen);
+    if (seen > MAX_RETAINED_FACTS_PER_AGENT || Number(key.last) < last) return undefined;
+    if (Number(key.last) === last) return seen === cached.replay.facts ? { ...cached, epoch: this.cacheEpoch } : undefined;
+    const rows = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
+      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.sequence>? ORDER BY f.sequence
+      LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`).all(runtimeId, last) as Row[];
+    if (cached.replay.facts + rows.length !== seen) return undefined;
+    const state = { projection: cached.value.projection, unverifiedFacts: cached.value.unverifiedFacts,
+      lastJournalSequence: last, replay: { ...cached.replay } };
+    this.replayInto(state, rows, (row, fact) => this.firstRetainedNativeEvent(row, fact));
+    return { value: { projection: state.projection, unverifiedFacts: state.unverifiedFacts, lastJournalSequence: state.lastJournalSequence },
+      replay: state.replay, epoch: this.cacheEpoch };
+  }
+  /** The first earlier verified witness of this native event, as a full replay would have kept it. */
+  private firstRetainedNativeEvent(row: Row, fact: ExecutionFact): string | undefined {
+    const earlier = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
+      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
+      AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? AND f.sequence<? ORDER BY f.sequence`).iterate(
+      fact.runtimeGenerationId, fact.nativeEventId!, fact.domain, fact.kind, "turnId" in fact ? fact.turnId : null,
+      fact.domain === "execution" ? fact.executionId : null, Number(row.sequence),
+    ) as Iterable<Row>;
+    for (const candidate of earlier) {
+      if (unverifiedHistoricalFact(candidate)) continue;
+      return semanticFact(this.decodeFact(candidate));
+    }
+    return undefined;
+  }
+  private statement(sql: string): StatementSync {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      // Every SQL text here is a constant of this module, so the set is
+      // small; the bound only guards against a future dynamic caller.
+      if (this.statements.size >= MAX_CACHED_STATEMENTS) this.statements.clear();
+      statement = this.database.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+  /** Reused statements: callers finish get/run synchronously and never iterate them. */
+  private run(sql: string, ...values: SQLInputValue[]): void {
+    this.statement(sql).run(...values);
   }
   private row(sql: string, ...values: SQLInputValue[]): Row | undefined {
-    return this.database.prepare(sql).get(...values) as Row | undefined;
+    return this.statement(sql).get(...values) as Row | undefined;
   }
   private required(sql: string, ...values: SQLInputValue[]): Row {
     const row = this.row(sql, ...values);
@@ -317,8 +429,8 @@ export class ExecutionShadowStore {
   }
   private insert(table: string, row: Record<string, SQLInputValue>): void {
     // Table/column names are internal constants, never protocol input.
-    this.database.prepare(`INSERT INTO ${table}(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`)
-      .run(...Object.values(row));
+    this.run(`INSERT INTO ${table}(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`,
+      ...Object.values(row));
   }
 
   registerRuntime(value: z.input<typeof runtimeInput>): LifecycleAuthorityMode {
@@ -414,15 +526,15 @@ export class ExecutionShadowStore {
       const lastSourceSequence = sameSource ? Number(current.last_source_sequence) : 0;
       const maxObservedSequence = sameSource ? Number(current.max_observed_sequence) : 0;
       const epoch = input.expectedEpoch + 1;
-      this.database.prepare(`INSERT INTO execution_observers(agent_id,execution_generation_id,runtime_generation_id,
+      this.run(`INSERT INTO execution_observers(agent_id,execution_generation_id,runtime_generation_id,
         observer_execution_generation_id,observer_runtime_generation_id,daemon_generation_id,observer_epoch,
         last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms,source_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(agent_id) DO UPDATE SET execution_generation_id=excluded.execution_generation_id,runtime_generation_id=excluded.runtime_generation_id,
         observer_execution_generation_id=excluded.observer_execution_generation_id,observer_runtime_generation_id=excluded.observer_runtime_generation_id,
         daemon_generation_id=excluded.daemon_generation_id,observer_epoch=excluded.observer_epoch,
         last_source_sequence=excluded.last_source_sequence,max_observed_sequence=excluded.max_observed_sequence,
-        recovery_turn_id=excluded.recovery_turn_id,bound_at_ms=excluded.bound_at_ms,source_id=excluded.source_id`)
-        .run(input.agentId, subject.execution_generation_id, subject.runtime_generation_id, observer.execution_generation_id,
+        recovery_turn_id=excluded.recovery_turn_id,bound_at_ms=excluded.bound_at_ms,source_id=excluded.source_id`,
+        input.agentId, subject.execution_generation_id, subject.runtime_generation_id, observer.execution_generation_id,
           observer.runtime_generation_id, input.daemonGenerationId, epoch, lastSourceSequence, maxObservedSequence,
           input.recovery?.turnId ?? null, input.boundAtMs, input.sourceId);
       if (!sameSource) this.insert("execution_observer_sources", { agent_id: input.agentId, source_id: input.sourceId });
@@ -453,8 +565,7 @@ export class ExecutionShadowStore {
       const current = this.currentObserver(sourceId, token);
       if (latestSequence < Number(current.last_source_sequence)) throw new ExecutionProtocolError("source_gap");
       if (latestSequence <= Number(current.max_observed_sequence)) return;
-      this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
-        .run(latestSequence, token.agentId);
+      this.run("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?", latestSequence, token.agentId);
     });
   }
 
@@ -477,7 +588,7 @@ export class ExecutionShadowStore {
     const fact = parseExecutionFact(value);
     if (!this.observers.has(token)) throw new ExecutionProtocolError("stale_observer");
     if (validated(id, sourceId) !== token.sourceId) throw new ExecutionProtocolError("identity_mismatch");
-    let committed: { value: RuntimeProjection; budget: RetainedBudget; stamp: string } | undefined;
+    let committed: { runtime: Omit<CachedRuntime, "weight">; budget: CachedBudget } | undefined;
     const result = this.transaction<ShadowIngestion>(() => {
       const current = this.currentObserver(sourceId, token);
       if (fact.observerEpoch !== token.epoch) throw new ExecutionProtocolError("stale_observer");
@@ -494,9 +605,18 @@ export class ExecutionShadowStore {
       } else if (fact.runtimeGenerationId !== token.observerRuntimeGenerationId || fact.executionGenerationId !== token.observerExecutionGenerationId) {
         throw new ExecutionProtocolError("identity_mismatch");
       }
+      // Same rows as `fact_id=? OR (agent_id=? AND observer_epoch=? AND
+      // source_sequence=?)`, in the order that OR plan returns them: fact_id
+      // first, then journal order. The second probe reaches the unique
+      // (runtime, epoch, source) key through the agent's own runtimes (every
+      // fact's runtime belongs to its agent by foreign key) instead of
+      // reading every retained fact of the agent.
       const duplicate = this.row(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-        LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.fact_id=? OR (f.agent_id=? AND f.observer_epoch=? AND f.source_sequence=?)`,
-      fact.factId, fact.agentId, fact.observerEpoch, fact.sourceSequence);
+        LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.fact_id=?`, fact.factId)
+        ?? this.row(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_runtime_generations r
+          CROSS JOIN execution_facts f ON f.runtime_generation_id=r.runtime_generation_id AND f.observer_epoch=? AND f.source_sequence=?
+          LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE r.agent_id=? AND f.agent_id=? ORDER BY f.sequence LIMIT 1`,
+        fact.observerEpoch, fact.sourceSequence, fact.agentId, fact.agentId);
       if (duplicate) {
         if (JSON.stringify(this.decodeFact(duplicate)) !== JSON.stringify(fact)) throw new ExecutionProtocolError("sequence_conflict");
         // An exact stored witness consumes no capacity. A native-event replay
@@ -517,28 +637,27 @@ export class ExecutionShadowStore {
         control_evidence: "controlEvidence" in fact ? fact.controlEvidence ?? null : null,
       };
       const retained = this.retainedBudget(fact.agentId);
-      const budget = { facts: retained.facts + 1, bytes: retained.bytes + factBytes(stored) };
+      const storedBytes = factBytes(stored);
+      const budget = { facts: retained.budget.facts + 1, bytes: retained.budget.bytes + storedBytes };
       const limit = exceededBudget(budget);
       if (limit) {
         // Capture is suspended, not provider work. Remember the unaccepted
         // source position so neither rebind nor a new source can erase the gap.
-        this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
-          .run(fact.sourceSequence, fact.agentId);
+        this.run("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?", fact.sourceSequence, fact.agentId);
         return { status: "retention_limit", limit, expectedSourceSequence: expected, observedSourceSequence: fact.sourceSequence };
       }
       if (fact.sourceSequence > expected) {
-        this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
-          .run(fact.sourceSequence, fact.agentId);
+        this.run("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?", fact.sourceSequence, fact.agentId);
         return { status: "gap", expectedSourceSequence: expected, observedSourceSequence: fact.sourceSequence };
       }
       let replay = false;
       if (fact.nativeEventId !== undefined) {
-        const observations = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
+        const observations = this.statement(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
           LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
-          AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? ORDER BY f.sequence`).iterate(
+          AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? ORDER BY f.sequence`).all(
           fact.runtimeGenerationId, fact.nativeEventId, fact.domain, fact.kind, "turnId" in fact ? fact.turnId : null,
           fact.domain === "execution" ? fact.executionId : null,
-        ) as Iterable<Row>;
+        ) as Row[];
         for (const observation of observations) {
           if (unverifiedHistoricalFact(observation)) continue;
           if (semanticFact(this.decodeFact(observation)) !== semanticFact(fact)) throw new ExecutionProtocolError("sequence_conflict");
@@ -559,7 +678,7 @@ export class ExecutionShadowStore {
         }
       }
       const previous = this.cachedProjection(fact.runtimeGenerationId);
-      const next = replay ? previous.projection : reduceExecutionFact(previous.projection, fact);
+      const next = replay ? previous.value.projection : reduceParsedExecutionFact(previous.value.projection, fact);
       this.insert("execution_facts", stored);
       const journalSequence = Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence);
       if (fact.domain !== "execution") {
@@ -594,40 +713,45 @@ export class ExecutionShadowStore {
         });
       }
       this.recordLifecycleProjection(fact, retainedTurn, retainedRuntime);
-      this.database.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
-        .run(fact.sourceSequence, fact.sourceSequence, fact.agentId);
+      this.run("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?",
+        fact.sourceSequence, fact.sourceSequence, fact.agentId);
       if (!replay && fact.domain === "runtime") {
-        this.database.prepare(`UPDATE execution_runtime_generations SET runtime_state=?,
-          ended_at_ms=CASE WHEN ?='exited' THEN COALESCE(ended_at_ms,MAX(created_at_ms,?)) ELSE NULL END WHERE runtime_generation_id=?`)
-          .run(next.runtime, next.runtime, fact.observedAtMs, fact.runtimeGenerationId);
+        this.run(`UPDATE execution_runtime_generations SET runtime_state=?,
+          ended_at_ms=CASE WHEN ?='exited' THEN COALESCE(ended_at_ms,MAX(created_at_ms,?)) ELSE NULL END WHERE runtime_generation_id=?`,
+        next.runtime, next.runtime, fact.observedAtMs, fact.runtimeGenerationId);
       } else if (!replay && fact.domain === "control") {
-        this.database.prepare("UPDATE execution_runtime_generations SET control_state=? WHERE runtime_generation_id=?").run(next.control, fact.runtimeGenerationId);
+        this.run("UPDATE execution_runtime_generations SET control_state=? WHERE runtime_generation_id=?", next.control, fact.runtimeGenerationId);
       } else if (!replay && fact.domain === "continuation") {
-        this.database.prepare("UPDATE execution_runtime_generations SET continuation_state=? WHERE runtime_generation_id=?").run(next.continuation, fact.runtimeGenerationId);
+        this.run("UPDATE execution_runtime_generations SET continuation_state=? WHERE runtime_generation_id=?", next.continuation, fact.runtimeGenerationId);
       } else if (!replay && (fact.domain === "turn" || fact.domain === "execution")) {
         const turn = next.turns.get(fact.turnId)!;
         const sideEffects = combineSideEffects(retainedTurn!.side_effects as SideEffectState, turn.sideEffects);
         if (fact.domain === "execution") {
           // Late tool outcomes cannot rewrite independent native-turn state,
           // including migrated terminals whose exact outcome remains unknown.
-          this.database.prepare("UPDATE execution_turns SET side_effects=? WHERE turn_id=?").run(sideEffects, fact.turnId);
+          this.run("UPDATE execution_turns SET side_effects=? WHERE turn_id=?", sideEffects, fact.turnId);
         } else {
-          this.database.prepare(`UPDATE execution_turns SET state=?,side_effects=?,
-            ended_at_ms=CASE WHEN ? IN ('terminal','lost') THEN COALESCE(ended_at_ms,MAX(created_at_ms,?)) ELSE NULL END WHERE turn_id=?`)
-            .run(turn.state, sideEffects, turn.state, fact.observedAtMs, fact.turnId);
+          this.run(`UPDATE execution_turns SET state=?,side_effects=?,
+            ended_at_ms=CASE WHEN ? IN ('terminal','lost') THEN COALESCE(ended_at_ms,MAX(created_at_ms,?)) ELSE NULL END WHERE turn_id=?`,
+          turn.state, sideEffects, turn.state, fact.observedAtMs, fact.turnId);
         }
       }
       // Capture under the write transaction, never bless an external commit
       // racing after COMMIT. Publish this candidate to the cache only on success.
-      committed = { value: { projection: next, unverifiedFacts: previous.unverifiedFacts, lastJournalSequence: journalSequence }, budget, stamp: this.databaseStamp() };
+      // The candidate becomes current only if COMMIT succeeds; transaction()
+      // then records this write's stamp, so later foreign writes still show.
+      committed = {
+        runtime: { value: { projection: next, unverifiedFacts: previous.value.unverifiedFacts, lastJournalSequence: journalSequence },
+          replay: { facts: previous.replay.facts + 1, bytes: previous.replay.bytes + storedBytes }, epoch: this.cacheEpoch },
+        budget: { budget, windowStart: retained.windowStart, last: journalSequence, epoch: this.cacheEpoch },
+      };
       return {
         status: replay ? "duplicate" : "accepted", journalSequence,
         gapPending: Number(current.max_observed_sequence) > fact.sourceSequence,
       };
     });
     if (committed) {
-      this.projectionStamp = committed.stamp;
-      this.rememberProjection(fact.runtimeGenerationId, committed.value);
+      this.rememberProjection(fact.runtimeGenerationId, committed.runtime);
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
@@ -680,7 +804,7 @@ export class ExecutionShadowStore {
       validated(id, agentId); validated(id, roomId); validated(id, sourceMessageId);
       if (!this.database.isTransaction) { this.database.exec("BEGIN"); ownsSnapshot = true; }
       this.clearProjections();
-      if (exceededBudget(this.retainedBudget(agentId))) throw new ExecutionProtocolError("retention_limit");
+      if (exceededBudget(this.retainedBudget(agentId).budget)) throw new ExecutionProtocolError("retention_limit");
       // Bound the driving relation before filtering. Approval-only identities
       // are not capped; starting from turns would make LIMIT 33 an output-only bound.
       // A record that has rolled over into later windows holds more facts than
@@ -759,7 +883,7 @@ export class ExecutionShadowStore {
       validated(id, agentId); validated(id, roomId); validated(id, sourceMessageId);
       if (!this.database.isTransaction) { this.database.exec("BEGIN"); ownsSnapshot = true; }
       this.clearProjections();
-      if (exceededBudget(this.retainedBudget(agentId))) throw new ExecutionProtocolError("retention_limit");
+      if (exceededBudget(this.retainedBudget(agentId).budget)) throw new ExecutionProtocolError("retention_limit");
       const attempt = this.row("SELECT attempt_id,state,conclusion FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?",
         agentId, roomId, sourceMessageId);
       let result: CapturedRoomWorkSummary = { availability: "not_captured" };
@@ -846,7 +970,7 @@ export class ExecutionShadowStore {
     // its later ROLLBACK need not change SQLite's total_changes counter.
     if (this.database.isTransaction) {
       this.clearProjections();
-      try { return this.replayRuntime(runtimeGenerationId); }
+      try { return this.replayRuntime(runtimeGenerationId).value; }
       finally { this.clearProjections(); }
     }
     // Capacity is agent-wide, replay is runtime-specific. Both must see the
@@ -854,54 +978,71 @@ export class ExecutionShadowStore {
     this.database.exec("BEGIN");
     try {
       // ReadonlyMap is compile-time only; no public object may alias cache state.
-      const result = structuredClone(this.cachedProjection(runtimeGenerationId));
+      const result = structuredClone(this.cachedProjection(runtimeGenerationId).value);
       const stamp = this.databaseStamp();
       this.database.exec("COMMIT");
       // Never bless a concurrent writer's newer stamp after releasing our view.
-      this.projectionStamp = stamp;
+      this.cacheStamp = stamp;
       return result;
     } catch (error) { this.clearProjections(); this.database.exec("ROLLBACK"); throw error; }
   }
 
-  private replayRuntime(runtimeGenerationId: string): RuntimeProjection {
+  private replayRuntime(runtimeGenerationId: string): { value: RuntimeProjection; replay: RetainedBudget } {
     const runtime = this.row("SELECT agent_id FROM execution_runtime_generations WHERE runtime_generation_id=?", runtimeGenerationId);
-    if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)))) throw new ExecutionProtocolError("retention_limit");
+    if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)).budget)) throw new ExecutionProtocolError("retention_limit");
     const facts = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
       LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`)
       .iterate(runtimeGenerationId) as Iterable<Row>;
-    return this.replayRows(facts);
+    const state = this.replayFrom(facts);
+    return { value: { projection: state.projection, unverifiedFacts: state.unverifiedFacts, lastJournalSequence: state.lastJournalSequence },
+      replay: state.replay };
   }
 
   /** Both host detail and room counts use the same typed replay and deduplication. */
   private replayRows(facts: Iterable<Row>): RuntimeProjection {
-    let projection = emptyExecutionProjection();
-    let unverifiedFacts = 0;
-    let lastJournalSequence = 0;
-    const replayBudget = { facts: 0, bytes: 0 };
+    const { projection, unverifiedFacts, lastJournalSequence } = this.replayFrom(facts);
+    return { projection, unverifiedFacts, lastJournalSequence };
+  }
+
+  private replayFrom(facts: Iterable<Row>): ReplayState {
+    const state: ReplayState = { projection: emptyExecutionProjection(), unverifiedFacts: 0, lastJournalSequence: 0, replay: { facts: 0, bytes: 0 } };
     const nativeEvents = new Map<string, string>();
+    this.replayInto(state, facts, (_row, _fact, key, semantic) => {
+      const previous = nativeEvents.get(key);
+      if (previous === undefined) nativeEvents.set(key, semantic);
+      return previous;
+    });
+    return state;
+  }
+
+  /**
+   * Reduce journal rows in sequence order onto `state`. `earlier` returns the
+   * first earlier verified witness of the same native event, if any: a later
+   * witness must match it and is then skipped, never reduced twice.
+   */
+  private replayInto(state: ReplayState, facts: Iterable<Row>,
+    earlier: (row: Row, fact: ExecutionFact, key: string, semantic: string) => string | undefined): void {
     for (const row of facts) {
-      replayBudget.facts++;
-      replayBudget.bytes += factBytes(row);
-      if (exceededBudget(replayBudget)) throw new ExecutionProtocolError("retention_limit");
-      lastJournalSequence = Number(row.sequence);
+      state.replay.facts++;
+      state.replay.bytes += factBytes(row);
+      if (exceededBudget(state.replay)) throw new ExecutionProtocolError("retention_limit");
+      state.lastJournalSequence = Number(row.sequence);
       if (unverifiedHistoricalFact(row)) {
-        unverifiedFacts += 1;
+        state.unverifiedFacts += 1;
         continue;
       }
       const fact = this.decodeFact(row);
       const key = nativeEventKey(fact);
       if (key !== null) {
-        const previous = nativeEvents.get(key);
         const semantic = semanticFact(fact);
+        const previous = earlier(row, fact, key, semantic);
         if (previous !== undefined) {
           if (previous !== semantic) throw new ExecutionProtocolError("sequence_conflict");
           continue;
         }
-        nativeEvents.set(key, semantic);
       }
-      projection = reduceExecutionFact(projection, fact);
+      state.projection = reduceParsedExecutionFact(state.projection, fact);
     }
-    return { projection, unverifiedFacts, lastJournalSequence };
   }
 
   private decodeFact(row: Row): ExecutionFact {

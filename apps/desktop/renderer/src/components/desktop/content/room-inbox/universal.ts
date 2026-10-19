@@ -1,3 +1,4 @@
+import { compareText } from "../../../../domain/formatters";
 import type { DesktopRentalRequest } from '../../../../../../electron/ipc-types.js';
 import type { DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
 import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowledge.mjs';
@@ -66,11 +67,11 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
  * newest-first, so a new request is never buried under old ones.
  */
 export function compareUniversalInboxItems(a: UniversalInboxItem, b: UniversalInboxItem): number {
-  if (a.section !== b.section) return a.section.localeCompare(b.section);
+  if (a.section !== b.section) return compareText(a.section, b.section);
   const blocking = Number(Boolean(b.attention)) - Number(Boolean(a.attention));
   if (blocking) return blocking;
   const newestFirst = (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
-  return (a.attention ? -newestFirst : newestFirst) || a.key.localeCompare(b.key);
+  return (a.attention ? -newestFirst : newestFirst) || compareText(a.key, b.key);
 }
 
 /**
@@ -183,7 +184,7 @@ export function inboxSourceFailureKey(data: DesktopNeedsYou | null, rooms: strin
     inboxSourceFailures(data, rooms).map(room => room.roomIdentifier).sort(),
     (data?.rooms ?? []).filter(room => (!rooms.length || rooms.includes(room.roomIdentifier)) && room.updates?.unavailable.length)
       .map(room => [room.roomIdentifier, [...room.updates!.unavailable].sort()] as const)
-      .sort((a, b) => a[0].localeCompare(b[0])),
+      .sort((a, b) => compareText(a[0], b[0])),
     Boolean(data?.cloudUnavailable), rentalError,
   ]);
 }

@@ -142,6 +142,8 @@ function coordinatorHarness(input: {
   appendActivity?: (method: string) => Promise<void>;
   appendedActivity?: (event: DaemonActivityEvent) => void;
   getRecentEntry?: (manifest: DaemonManifestEntry) => Promise<DaemonManifestEntry | undefined>;
+  getScalarEntry?: (manifest: DaemonManifestEntry) => Promise<DaemonManifestEntry | undefined>;
+  onGetEntry?: () => void;
   appendActivityOnly?: (method: string) => Promise<void>;
   stop?: () => Promise<void>;
   durabilityAttempt?: { execution_generations: Array<Record<string, unknown>>; checkpoints?: unknown[] };
@@ -211,7 +213,8 @@ function coordinatorHarness(input: {
       probeControl: input.probeControl,
     },
     manifest: {
-      getEntry: async () => manifestAvailable ? manifest : undefined,
+      getEntry: async () => { input.onGetEntry?.(); return manifestAvailable ? manifest : undefined; },
+      ...(input.getScalarEntry ? { getScalarEntry: async () => manifestAvailable ? input.getScalarEntry!(manifest) : undefined } : {}),
       ...(input.getRecentEntry ? { getRecentEntry: async () => manifestAvailable ? input.getRecentEntry!(manifest) : undefined } : {}),
       load: async () => ({ entries: [manifest] }),
       updateEntry: async (_entryId, update) => {
@@ -1326,6 +1329,35 @@ test("provider stream events are FIFO per entry and stale handles are ignored", 
     streamEvent(3, "item/stale"),
   );
   assert.deepEqual(calls, ["item/first", "item/second"]);
+  await harness.coordinator.disposeAll();
+});
+
+test("the native heartbeat reads its entry without activity events when the manifest offers a scalar read", async () => {
+  let heartbeat: (() => void) | null = null;
+  let activityCalls = 0;
+  let fullReads = 0;
+  const scalarReads: string[] = [];
+  const harness = coordinatorHarness({
+    onGetEntry: () => { fullReads += 1; },
+    getScalarEntry: async (current) => { scalarReads.push(current.id); return { ...current, activity: [] }; },
+    publishNativeActivity: async () => { activityCalls += 1; },
+    setInterval: ((callback: () => void) => {
+      heartbeat = callback;
+      return { unref() {} };
+    }) as unknown as typeof setInterval,
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  const readsAfterInstall = fullReads;
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.equal(activityCalls, 2, "the heartbeat still announces liveness from the scalar read");
+  assert.deepEqual(scalarReads, ["agent-1", "agent-1"]);
+  assert.equal(fullReads, readsAfterInstall, "no heartbeat reads the full entry");
   await harness.coordinator.disposeAll();
 });
 

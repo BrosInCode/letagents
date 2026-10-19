@@ -121,12 +121,13 @@ const activeOptionId = computed(() =>
     : undefined,
 );
 
+// The query only mirrors the selected label, so watch that label, not the whole option list.
 watch(
-  () => [props.modelValue, props.options] as const,
+  [() => props.modelValue, () => selectedOption.value?.label],
   () => {
     if (!open.value) syncQueryToSelection();
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 );
 
 watch(filteredOptions, (options) => {

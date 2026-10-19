@@ -267,7 +267,14 @@ const INBOX_READS = {
   ingressHealth: "SELECT room_id,state,detail,execution_generation_id FROM supervised_agent_ingress_health WHERE agent_id=?",
   ingressCursor: "SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?",
   latestRepair: "SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+  dataVersion: "PRAGMA data_version",
+  schemaVersion: "PRAGMA schema_version",
+  totalChanges: "SELECT total_changes() AS value",
 } as const;
+
+/** Tells one opened connection from the next, so a version read on a replaced connection never equals an older one. */
+const connectionIdentities = new WeakMap<DatabaseSync, number>();
+let nextConnectionIdentity = 1;
 
 /** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
 export class SupervisedAgentInboxStore {
@@ -1484,6 +1491,29 @@ export class SupervisedAgentInboxStore {
     run(database.prepare(`INSERT INTO supervised_agent_ingress_health(agent_id,room_id,execution_generation_id,state,detail,observed_at,updated_at)
       VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,execution_generation_id=excluded.execution_generation_id,state=excluded.state,detail=excluded.detail,observed_at=excluded.observed_at,updated_at=excluded.updated_at`),
       input.agent_id, input.room_id, input.execution_generation_id, input.state, input.detail ?? null, timestamp, timestamp);
+  }
+
+  /**
+   * A token that is equal on two reads only if neither the rows nor the schema
+   * of this database file changed between them, by any connection. Another
+   * connection's commit changes `PRAGMA data_version` here; a row change made
+   * on this connection (committed or not) changes `total_changes()`; a schema
+   * change made on this connection (which changes neither of those) changes
+   * `PRAGMA schema_version`. Null while this connection has a transaction
+   * open, because its reads then see rows that may still be rolled back. Its
+   * parts are SQLite's own counters, so a writer that forgets to report a
+   * change cannot leave it unchanged.
+   */
+  async committedStateVersion(): Promise<string | null> {
+    return this.read((database) => {
+      if (database.isTransaction) return null;
+      let identity = connectionIdentities.get(database);
+      if (identity === undefined) { identity = nextConnectionIdentity++; connectionIdentities.set(database, identity); }
+      const dataVersion = (this.reads.get(database, "dataVersion").get() as Row).data_version;
+      const totalChanges = (this.reads.get(database, "totalChanges").get() as Row).value;
+      const schemaVersion = (this.reads.get(database, "schemaVersion").get() as Row).schema_version;
+      return `${identity}:${String(dataVersion)}:${String(totalChanges)}:${String(schemaVersion)}`;
+    });
   }
 
   async ingressHealth(agentId: string): Promise<{ room_id: string; state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; detail: string | null; execution_generation_id: string } | null> {
