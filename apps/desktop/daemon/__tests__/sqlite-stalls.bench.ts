@@ -13,9 +13,15 @@
  *   ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
  *     --import tsx daemon/__tests__/sqlite-stalls.bench.ts [mode] [seconds]
  *
- * Modes: default (current behaviour), worker (checkpoint worker), and two
- * attribution-only modes that change durability and must never ship:
+ * Activity goes through the daemon's own admission path
+ * (ManifestAdministrationCoordinator.appendNativeActivity inside the real
+ * DaemonAuthority lanes).
+ *
+ * Modes: unbatched (one commit per activity event, as before batching),
+ * default (the daemon's batched activity writes), and two attribution-only
+ * modes on the unbatched path that change durability and must never ship:
  * no-checkpoint (wal_autocheckpoint = 0) and sync-off (synchronous = OFF).
+ * `commits*` modes time single commits on a raw daemon connection.
  */
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,7 +33,14 @@ import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 
 import { ManifestStore } from "../manifest-store.js";
 import { openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
-import * as stateDatabase from "../daemon-state-database.js";
+import { ActivityWriteBatcher } from "../activity-write-batcher.js";
+import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
+import { DaemonAuthority } from "../daemon-authority.js";
+import { schedulerErrorDetail } from "../daemon-error-policy.js";
+import { ManifestAdministrationCoordinator } from "../manifest-administration-coordinator.js";
+import { projectDaemonCreateRequestReplayParameters } from "../manifest-entry-projection.js";
+import { deriveProviderConfigurationSnapshot } from "../provider-configuration.js";
+import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
 
 const mode = process.argv[2] ?? "default";
@@ -99,17 +112,8 @@ async function main(): Promise<void> {
     observer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 
     const storeDatabase = (store as unknown as { database: DatabaseSync }).database;
-    let stopWorker: (() => Promise<void>) | undefined;
     if (mode === "no-checkpoint") for (const db of [storeDatabase, bindings]) db.exec("PRAGMA wal_autocheckpoint = 0");
     if (mode === "sync-off") for (const db of [storeDatabase, bindings]) db.exec("PRAGMA synchronous = OFF");
-    if (mode === "worker") {
-      const start = (stateDatabase as Record<string, unknown>).startDaemonStateCheckpointWorker as
-        undefined | ((path: string) => Promise<{ stop(): Promise<void>; active: boolean }>);
-      if (!start) throw new Error("This branch has no checkpoint worker.");
-      const worker = await start(path);
-      if (!worker.active) throw new Error("The checkpoint worker did not start.");
-      stopWorker = () => worker.stop();
-    }
 
     let publicationSequence = 1_800_000_000_000;
     const reserve = bindings.prepare(`INSERT INTO worker_binding_publications (reservation_id, entry_id, binding_epoch, execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'reserved', ?)`);
@@ -134,6 +138,43 @@ async function main(): Promise<void> {
       ops.push({ kind, start, end, checkpointed: after.checkpointed > before.checkpointed || after.log < before.log });
     };
 
+    // The daemon's activity admission path, wired as main.ts wires it.
+    const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false, notifyStateChanged: () => {} },
+      (await store.load("summary")).generation);
+    const batcher = new ActivityWriteBatcher({
+      serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
+      // Timed as its own operation: the batch commit runs from the window timer.
+      commit: (items) => run("activity batch commit", async () => {
+        const next = await store.recordActivityBatch(authority.generation, items, (commit) => authority.fenceDaemonCommit(commit));
+        authority.generation = next.generation;
+      }),
+    });
+    authority.setPendingWriteFlush(() => batcher.flushInLane());
+    const coordinator = new ManifestAdministrationCoordinator({
+      store,
+      authority: {
+        serialize: (operation) => authority.serializeManifestMutation(operation),
+        assertCurrent: async () => {},
+        currentDaemonGeneration: () => 1,
+        currentManifestGeneration: () => authority.generation,
+        acceptManifestGeneration: (generation) => { authority.generation = generation; },
+        fenceCommit: (commit) => authority.fenceDaemonCommit(commit),
+      },
+      policies: {
+        projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
+        deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
+        permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
+        sanitizeActivity: sanitizeDaemonActivityEvent,
+        safeErrorDetail: schedulerErrorDetail,
+      },
+      convergence: { request: () => {} },
+      ...(mode === "default" ? { activity: {
+        serializeAdmission: <T>(operation: () => Promise<T>) => batcher.serializeAdmission(operation),
+        pendingState: (entryId: string) => batcher.pendingState(entryId),
+        admit: (item: Parameters<ActivityWriteBatcher["admit"]>[0]) => batcher.admit(item),
+      } } : {}),
+    });
+
     const gaps: { at: number; gap: number }[] = [];
     let last = performance.now();
     const ticker = setInterval(() => { const now = performance.now(); gaps.push({ at: now, gap: now - last }); last = now; }, 2);
@@ -141,7 +182,6 @@ async function main(): Promise<void> {
     histogram.enable();
 
     const sequences = new Array(AGENTS).fill(0);
-    let generation = (await store.load("summary")).generation;
     const deadline = performance.now() + seconds * 1000;
     let tick = 0;
     while (performance.now() < deadline) {
@@ -149,11 +189,7 @@ async function main(): Promise<void> {
       // ~40 activity events/s across the agents, some with large tool output.
       const agent = tick % AGENTS;
       const size = tick % 10 === 0 ? 24_000 : 1_500;
-      await run("activity", async () => {
-        generation = (await store.recordActivity(generation, `agent_${agent}`, event(++sequences[agent], size), {
-          observedState: "working", nativeLiveness: { state: "active", observed_at: new Date().toISOString(), detail: "streaming" },
-        }, 200)).generation;
-      });
+      await run("activity", () => coordinator.appendNativeActivity(`agent_${agent}`, event(++sequences[agent], size), false));
       if (tick % 20 === 0) await run("publication", () => publish(agent));
       if (tick % 4 === 0) await run("watch_state", () => store.load("summary"));
       if (tick % 20 === 10) await run("manifest.list", () => store.load("full"));
@@ -161,7 +197,7 @@ async function main(): Promise<void> {
     }
     clearInterval(ticker);
     histogram.disable();
-    await stopWorker?.();
+    await batcher.close();
 
     const wal = await stat(`${path}-wal`).then((info) => info.size, () => 0);
     const stalls = gaps.filter((entry) => entry.gap > 5);
@@ -184,7 +220,7 @@ async function main(): Promise<void> {
       };
     }
     const checkpointOps = ops.filter((op) => op.checkpointed).map((op) => op.end - op.start).sort((a, b) => a - b);
-    const plainWrites = ops.filter((op) => !op.checkpointed && (op.kind === "activity" || op.kind === "publication"))
+    const plainWrites = ops.filter((op) => !op.checkpointed && (op.kind === "activity" || op.kind === "publication" || op.kind === "activity batch commit"))
       .map((op) => op.end - op.start).sort((a, b) => a - b);
     const sortedGaps = gaps.map((entry) => entry.gap).sort((a, b) => a - b);
     console.log(JSON.stringify({
@@ -222,12 +258,6 @@ async function commits(): Promise<void> {
     const observer = new DatabaseSync(Object.assign(pathToFileURL(path), { search: "?mode=rw" }).href);
     const frames = observer.prepare("PRAGMA wal_checkpoint(NOOP)");
     if (mode === "commits-off") database.exec("PRAGMA synchronous = OFF");
-    let worker: { stop(): Promise<void>; active: boolean } | undefined;
-    if (mode === "commits-worker") {
-      const start = (stateDatabase as Record<string, unknown>).startDaemonStateCheckpointWorker as (path: string) => Promise<{ stop(): Promise<void>; active: boolean }>;
-      worker = await start(path);
-      if (!worker.active) throw new Error("The checkpoint worker did not start.");
-    }
     const insert = database.prepare(`INSERT INTO activity_events(agent_id, sort_order, observed_at, sequence, provider, kind, method, summary,
       status, payload_json, payload_truncated, payload_redacted, durable_payload_ref) VALUES ('agent_0', ?, ?, ?, 'codex', 'tool', 'm', 's', 'working', ?, 0, 0, NULL)`);
     const trim = database.prepare("DELETE FROM activity_events WHERE agent_id='agent_0' AND sort_order < ?");
@@ -246,7 +276,6 @@ async function commits(): Promise<void> {
       (after.checkpointed > before.checkpointed || after.log < before.log ? checkpointed : plain).push(took);
       if (i % 50 === 0) await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    await worker?.stop();
     const sum = (list: number[]) => list.reduce((total, value) => total + value, 0);
     const describe = (list: number[]) => { const sorted = [...list].sort((a, b) => a - b); return {
       count: list.length, totalMs: Math.round(sum(list)), p50: +percentile(sorted, 0.5).toFixed(2),

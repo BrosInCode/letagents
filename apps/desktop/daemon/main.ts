@@ -36,6 +36,7 @@ import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-c
 import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestStore } from "./manifest-store.js";
+import { ActivityWriteBatcher } from "./activity-write-batcher.js";
 import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecoveryBootstrap } from "./state-recovery-key.js";
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
 import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
@@ -116,6 +117,8 @@ export class SupervisorDaemon {
   private maintenance: DaemonMaintenanceService | null = null;
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
+  /** Native activity events wait here briefly and are written in batches. */
+  private readonly activityWrites: ActivityWriteBatcher;
   private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly manifestTransitions: ManifestTransitionCoordinator;
   private readonly readModel: DaemonReadModel;
@@ -209,6 +212,21 @@ export class SupervisorDaemon {
       drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
+    this.activityWrites = new ActivityWriteBatcher({
+      serialize: (operation) => this.authority.serializeManifestMutationWithoutFlush(operation),
+      commit: async (items) => {
+        // Events admitted before a handoff fence are admitted state: they may
+        // still commit while this daemon owns the singleton, like an admitted
+        // transition. New admissions are refused once the fence is up.
+        const next = await this.store.recordActivityBatch(this.manifestGeneration, items, (commit) =>
+          this.handoffScheduled ? this.fenceAdmittedTransitionCommit(commit) : this.fenceDaemonCommit(commit));
+        this.manifestGeneration = next.generation;
+      },
+      diagnostic: (error, dropped) => console.warn("[activity_batch]", JSON.stringify({ dropped, error: String(error) })),
+    });
+    // Every other manifest mutation writes pending activity first, so it reads
+    // and orders after every event admitted before it.
+    this.authority.setPendingWriteFlush(() => this.activityWrites.flushInLane());
     this.manifestAdministration = new ManifestAdministrationCoordinator({
       store: this.store,
       authority: {
@@ -228,6 +246,14 @@ export class SupervisorDaemon {
       },
       convergence: {
         request: (entryId) => this.requestConvergence(entryId),
+      },
+      activity: {
+        serializeAdmission: (operation) => this.activityWrites.serializeAdmission(async () => {
+          if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced new daemon activity.");
+          return operation();
+        }),
+        pendingState: (entryId) => this.activityWrites.pendingState(entryId),
+        admit: (item) => this.activityWrites.admit(item),
       },
     });
     this.audit = new AuditLog(paths.auditPath);
@@ -371,8 +397,13 @@ export class SupervisorDaemon {
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
-        getEntry: (entryId) => this.store.getEntry(entryId),
-        load: () => this.store.load(),
+        // The stream reads its own entry's recent activity to classify the
+        // next event, so it sees the events it admitted that are still pending.
+        getEntry: async (entryId) => this.activityWrites.overlay(await this.store.getEntry(entryId)),
+        load: async () => {
+          const manifest = await this.store.load();
+          return { ...manifest, entries: manifest.entries.map((entry) => this.activityWrites.overlay(entry)) };
+        },
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
       },
@@ -1084,6 +1115,8 @@ export class SupervisorDaemon {
       () => this.providerReconciliation?.disposeAll(),
       () => this.providerExecution?.drainConvergence(),
       () => this.providerStreams.disposeAll(),
+      // Admitted activity commits before authority is released and the store closes.
+      () => this.activityWrites.close(),
       () => this.socket.stop(),
       () => this.serializeManifestCommit(() => this.singleton.release()),
       () => this.store.close(),
@@ -1115,6 +1148,10 @@ export class SupervisorDaemon {
     this.convergencePacer.close();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
+    // The fence already refuses new activity. Write what was admitted before
+    // it first, so it orders before the handoff's own last writes and commits
+    // while this daemon still owns the singleton.
+    try { await this.activityWrites.close(); } catch (error) { failures.push(error); }
     try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.fenceAndDrainRoomMoveReconciliations(); } catch (error) { failures.push(error); }

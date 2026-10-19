@@ -103,6 +103,20 @@ import type {
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
+
+/** The runtime fields a native activity event may set on its entry. */
+export type ActivityRuntimeUpdate = {
+  observedState: DaemonManifestEntry["observed_state"];
+  nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]>;
+};
+
+/** One admitted activity event waiting to be written. */
+export type ActivityWrite = {
+  agentId: string;
+  event: DaemonActivityEvent;
+  runtimeUpdate: ActivityRuntimeUpdate | null;
+  limit: number;
+};
 type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string; image_input: boolean };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
 export type PendingTypedLifecycleEffect = {
@@ -2660,6 +2674,44 @@ export class ManifestStore {
     return { generation: result.generation };
   }
 
+  /**
+   * Writes several admitted activity events in one transaction, in the given
+   * order, with one generation bump. Each event is applied exactly as
+   * recordActivity applies it. An event whose entry is gone, or whose sequence
+   * is no longer newer than the stored one, is skipped rather than failing the
+   * other agents' events in the same batch.
+   */
+  async recordActivityBatch(
+    expectedGeneration: number,
+    items: readonly ActivityWrite[],
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; written: number; skipped: number }> {
+    const normalized = items.map((item) => ({ ...item, event: parseJson<DaemonActivityEvent>(json(item.event)) }));
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      let written = 0;
+      for (const item of normalized) {
+        const latest = this.reads.get(database, "lastSequence").get(item.agentId) as Row | undefined;
+        if (latest && item.event.sequence <= Number(latest.sequence)) continue;
+        if (!this.applyActivityRuntime(database, item.agentId, item.runtimeUpdate)) continue;
+        this.appendActivityEvent(database, item.agentId, item.event, item.limit);
+        written += 1;
+      }
+      return written;
+    }, commitFence);
+    return { generation: result.generation, written: result.value, skipped: items.length - result.value };
+  }
+
+  private applyActivityRuntime(database: DatabaseSync, agentId: string, runtimeUpdate: ActivityRuntimeUpdate | null): boolean {
+    const updated = runtimeUpdate
+      ? database.prepare(`UPDATE runtime_deployments
+          SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
+              native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
+          WHERE agent_id = ?`).run(runtimeUpdate.observedState, runtimeUpdate.nativeLiveness.state,
+        runtimeUpdate.nativeLiveness.observed_at ?? null, runtimeUpdate.nativeLiveness.detail ?? null, agentId)
+      : database.prepare("UPDATE runtime_deployments SET activity_present = 1 WHERE agent_id = ?").run(agentId);
+    return Number(updated.changes) === 1;
+  }
+
   private activityEntry(database: DatabaseSync, agentId: string): DaemonManifestEntry {
     const persisted = this.readEntryFromDatabase(database, agentId);
     if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
@@ -2678,14 +2730,7 @@ export class ManifestStore {
   ): Promise<{ generation: number; value: T }> {
     const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
     return this.writeTargeted(expectedGeneration, database => {
-      const updated = runtimeUpdate
-        ? database.prepare(`UPDATE runtime_deployments
-            SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
-                native_liveness_observed_at = ?, native_liveness_detail = ?, activity_present = 1
-            WHERE agent_id = ?`).run(runtimeUpdate.observedState, runtimeUpdate.nativeLiveness.state,
-          runtimeUpdate.nativeLiveness.observed_at ?? null, runtimeUpdate.nativeLiveness.detail ?? null, agentId)
-        : database.prepare("UPDATE runtime_deployments SET activity_present = 1 WHERE agent_id = ?").run(agentId);
-      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+      if (!this.applyActivityRuntime(database, agentId, runtimeUpdate)) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
       this.appendActivityEvent(database, agentId, normalizedEvent, limit);
       return project(database);
     }, commitFence);

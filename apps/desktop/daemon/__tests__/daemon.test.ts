@@ -1775,11 +1775,21 @@ function fakeGit(root: string): (args: string[]) => Promise<string> {
  * The write a provider stream makes for each activity event. The `manifest.append_activity`
  * request that once exposed it is retired, so these tests reach it through the daemon itself.
  */
-function appendNativeActivity(daemon: SupervisorDaemon, id: string, event: DaemonActivityEvent): Promise<void> {
+async function appendNativeActivity(daemon: SupervisorDaemon, id: string, event: DaemonActivityEvent): Promise<void> {
   const { manifestAdministration } = daemon as unknown as {
     manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
   };
-  return manifestAdministration.appendNativeActivity(id, event, false);
+  await manifestAdministration.appendNativeActivity(id, event, false);
+  await flushActivity(daemon);
+}
+
+/**
+ * Native activity is admitted at once but committed in short batches. Tests
+ * that read stored activity right after a stream event write the batch first,
+ * as the window timer would.
+ */
+function flushActivity(daemon: SupervisorDaemon): Promise<void> {
+  return (daemon as unknown as { activityWrites: { flush(): Promise<void> } }).activityWrites.flush();
 }
 
 const entry: DaemonManifestEntry = {
@@ -2500,6 +2510,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
         },
       },
     });
+    await flushActivity(env.daemon);
     let current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
     assert.equal(current.observed_state, "idle");
@@ -2512,6 +2523,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       method: "item/agentMessage/delta",
       payload: { threadId: handle.providerContinuationId!, turnId: "turn_exact", itemId: "message_exact", delta: "late evidence" },
     });
+    await flushActivity(env.daemon);
     current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
     assert.equal(current.observed_state, "working", "the same healthy execution continues after a retryable wait failure");
@@ -2531,6 +2543,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
         delta: "Checking the durable room delivery path.",
       },
     });
+    await flushActivity(env.daemon);
     current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
     assert.equal(
@@ -2635,6 +2648,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
       type: "assistant", message: { content: [{ type: "thinking", thinking: "provider-internal handoff" }] },
     }));
     assert.deepEqual(published, ["idle", "idle", "idle"], "empty Claude wait lifecycle never flips room presence to working");
+    await flushActivity(second ?? first);
     let projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "idle");
     assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
@@ -2642,6 +2656,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     await firstInternals.handleProviderStream(env.id, handle, wait("wait_2"));
     await firstInternals.handleProviderStream(env.id, handle, result("wait_2", [{ id: "msg_12", text: "please review" }]));
     assert.equal(published.at(-1), "working", "a nonempty addressed wait result remains visible work");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "working");
 
@@ -2677,6 +2692,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     await firstInternals.handleProviderStream(env.id, handle, codexProgress);
     await firstInternals.handleProviderStream(env.id, handle, codexCompleted);
     assert.deepEqual(published.slice(-3), ["idle", "idle", "idle"], "real Codex start, progress, and empty/silent completion stay idle");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
 
@@ -2698,6 +2714,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     await firstInternals.handleProviderStream(env.id, handle, addressedStarted);
     await firstInternals.handleProviderStream(env.id, handle, addressedCompleted);
     assert.deepEqual(published.slice(-2), ["idle", "working"], "a real addressed Codex completion wakes the work indicator");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "working");
     assert.equal(projection.activity?.at(-1)?.status, "working");
@@ -2710,6 +2727,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     const secondInternals = await install(second, afterRestart);
     await secondInternals.handleProviderStream(env.id, handle, result("wait_restart", []));
     assert.deepEqual(afterRestart, ["idle"], "persisted wait correlation survives a daemon restart mid-poll");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "idle");
   } finally {
@@ -8830,6 +8848,65 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
   }
 });
 
+test("daemon stop writes admitted activity before it releases authority, then refuses more", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const { manifestAdministration } = daemon as unknown as {
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  const activity = (sequence: number): DaemonActivityEvent => ({ observed_at: new Date().toISOString(), sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: `step ${sequence}`, status: "working", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null });
+  let stopped = false;
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
+    // Admitted, still inside the batch window: not yet committed.
+    await manifestAdministration.appendNativeActivity(entry.id, activity(1), false);
+    await manifestAdministration.appendNativeActivity(entry.id, activity(2), false);
+    await daemon.stop();
+    stopped = true;
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      const saved = (await inspection.getEntry(entry.id))!;
+      assert.deepEqual(saved.activity?.map((event) => event.sequence), [1, 2], "clean stop drops no admitted activity");
+      assert.equal(saved.observed_state, "working");
+    } finally { await inspection.close(); }
+    await assert.rejects(manifestAdministration.appendNativeActivity(entry.id, activity(3), false), /fence|closed/);
+  } finally {
+    if (!stopped) await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("a handoff fence refuses new activity but still writes activity admitted before it", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const internals = daemon as unknown as {
+    handoffScheduled: boolean;
+    activityWrites: { flush(): Promise<void>; size: number };
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  const activity = (sequence: number): DaemonActivityEvent => ({ observed_at: new Date().toISOString(), sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: `step ${sequence}`, status: "working", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null });
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
+    await internals.manifestAdministration.appendNativeActivity(entry.id, activity(1), false);
+    internals.handoffScheduled = true;
+    await assert.rejects(internals.manifestAdministration.appendNativeActivity(entry.id, activity(2), false), DaemonFenceLostError);
+    assert.equal(internals.activityWrites.size, 1);
+    await internals.activityWrites.flush();
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      assert.deepEqual((await inspection.getEntry(entry.id))!.activity?.map((event) => event.sequence), [1],
+        "admitted activity commits under the admitted-state fence while the singleton is still owned");
+    } finally { await inspection.close(); }
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("daemon ingress redacts provider credentials before manifest, DTO, and audit persistence", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
@@ -10802,6 +10879,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     };
     emitCompatWaitCursor("msg_2818");
     await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
+    await flushActivity(first);
     const pollingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(pollingProjection.observed_state, "idle", "Claude room polling is reachable but not projected as active work");
     assert.equal(pollingProjection.activity?.at(-1)?.status, "idle");
