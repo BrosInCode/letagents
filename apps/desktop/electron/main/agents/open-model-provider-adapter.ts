@@ -65,6 +65,7 @@ import {
   supervisedOpenCodePermissionProfileId,
 } from "./opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
+import { resolveOpenModelLimits } from "./open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
@@ -506,8 +507,8 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   if (failure.statusCode === 429) {
     return `Open Model was rate-limited by the model provider${status}. Wait for the provider limit to reset, then retry the unfinished work in LetAgents.`;
   }
-  const detail = failure.message
-    ?.replace(/https?:\/\/\S+/gi, "provider settings")
+  const detail = redactCredentialText(failure.message ?? "").value
+    .replace(/https?:\/\/\S+/gi, "provider settings")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 320);
@@ -534,6 +535,7 @@ class OpenModelHandle implements ProviderHandle {
   sequence = 0;
   terminal: ProviderTerminalPayload | null = null;
   activeRoomTurnId: string | null = null;
+  compaction: { messageId: string; startedAt: string } | null = null;
   /** True once every user message in the session is known to use OpenCode's ascending ID scheme. */
   nativeOrderingVerified = false;
   readonly execution: ProviderExecutionObserver;
@@ -589,6 +591,27 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   }
 
   capabilities(): ProviderAdapterCapabilities { return { ...CAPABILITIES }; }
+
+  compactionProgress(workAttemptId: string): { state: "compacting"; startedAt: string } | null {
+    const handle = this.handles.get(workAttemptId);
+    return handle?.activeRoomTurnId && !handle.terminal && handle.compaction
+      ? { state: "compacting", startedAt: handle.compaction.startedAt } : null;
+  }
+
+  private observeCompaction(handle: OpenModelHandle, info: JsonRecord | null): void {
+    if (!info || info.sessionID !== undefined && info.sessionID !== handle.providerContinuationId) return;
+    const active = info.summary === true && typeof info.id === "string" && !messageCompleted({ info });
+    const previous = handle.compaction;
+    if (active) {
+      const created = record(info.time)?.created;
+      handle.compaction = { messageId: info.id as string, startedAt: previous && previous.messageId === info.id ? previous.startedAt
+        : typeof created === "number" && Number.isFinite(created) && Math.abs(created) < 8.64e15 ? new Date(created).toISOString() : this.deps.now() };
+    } else handle.compaction = null;
+    if (Boolean(previous) === Boolean(handle.compaction)) return;
+    this.emitStream(handle, { kind: "provider_event", method: "letagents/compaction",
+      summary: active ? "Compacting conversation" : "Conversation compaction ended",
+      payload: { state: active ? "compacting" : "ended" } });
+  }
 
   private async assertPriorStartupProcessGone(authPath: string): Promise<void> {
     let control: OpenCodeRuntimeControl;
@@ -689,8 +712,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       req,
       process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     );
+    const limits = await resolveOpenModelLimits(credential, this.deps.fetch);
     const config = openCodeConfig({
       model: credential.model,
+      limits,
       baseUrl: credential.baseUrl,
       pluginUrl: pathToFileURL(pluginPath).href,
       cwd: req.cwd,
@@ -1731,6 +1756,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses,
           exactSession ? turnId : undefined);
       }
+      this.observeCompaction(handle, record(assistants.at(-1)?.info));
       enforceStepBound(assistants.length);
       const finalAssistant = finalAssistantFor(messages, turnId, turnUserIds);
       const finalInfo = record(finalAssistant?.info);
@@ -1844,6 +1870,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           && typeof info.id === "string") {
           assistantIds.add(info.id);
           if (info.summary === true) summaryIds.add(info.id);
+          this.observeCompaction(handle, info);
           if (info.sessionID === handle.providerContinuationId) typedAssistantIds.add(info.id);
           noteStep(info);
           enforceStepBound(assistantIds.size);
@@ -1903,8 +1930,25 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (event.type === "session.idle") {
           return resultAtSessionBoundary(await snapshot(), true);
         }
+        if (event.type === "session.compacted") {
+          this.observeCompaction(handle, {});
+          continue;
+        }
         if (event.type === "session.error") {
+          const error = record(properties?.error);
+          if (error) {
+            const summary = error.name === "ContextOverflowError"
+              ? "Model context limit reached. OpenCode is recovering the conversation."
+              : safeProviderErrorMessage({ info: { error } });
+            this.emitStream(handle, { kind: "provider_event", method: "letagents/providerNotice",
+              summary, payload: { kind: "provider_error" } });
+          }
           await snapshot();
+          // Context overflow is a recoverable OpenCode step: it emits session.error
+          // before creating its compaction message. A busy session can still answer.
+          if (await handle.client.status(handle.providerContinuationId) === "busy") continue;
+          // Native errors can precede the failed assistant's durable update. An
+          // earlier completed step is not evidence that this turn succeeded.
           return { turnId, outcome: "unreadable", text: null, evidence: "none" };
         }
       }
@@ -1915,6 +1959,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       }
       throw error;
     } finally {
+      this.observeCompaction(handle, {});
       controller.abort();
       signal?.removeEventListener("abort", detach);
       await events.return?.(undefined).catch(() => undefined);

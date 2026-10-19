@@ -1458,7 +1458,7 @@ export class SupervisedAgentInboxStore {
       // A failed, interrupted, stopped or unreadable turn leaves them queued.
       if (input.outcome === "reply" || input.outcome === "no_reply") this.settleQueuedNotices(database, item, timestamp);
       if (input.outcome === "unreadable") {
-        this.recordEvent(database, input.inbox_item_id, `result_unreadable:${input.provider_turn_id}`, "result_unreadable", timestamp, "Re-reading the same completed provider turn.");
+        this.recordEvent(database, input.inbox_item_id, `result_unreadable:${input.provider_turn_id}`, "result_unreadable", timestamp, "Checking the existing provider turn for its result.");
       }
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row);
     }));
@@ -2418,7 +2418,7 @@ export class SupervisedAgentInboxStore {
           error = item.last_error;
         } else if (item.state === "result_recovery") {
           next = "result_recovery";
-          error = "Re-reading the same completed provider turn; no new model turn will start.";
+          error = "Checking the existing provider turn; no new model turn will start.";
         } else if (item.state === "dispatching" || item.state === "awaiting_result" || item.state === "publishing" || item.state === "retryable") {
           if (terminal?.kind === "reply") {
             // Republish only: delivery sees the durable outcome before it can
