@@ -22,7 +22,7 @@ import {
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "./rooms/local-store.js";
-import { focusMainWindow } from "./window.js";
+import { focusMainWindow, getMainWindow } from "./window.js";
 
 const { dialog } = electron as typeof import("electron");
 
@@ -54,11 +54,17 @@ export async function pickAndStageDesktopAttachments(
 ): Promise<DesktopStagedAttachment[]> {
   const store = await resolveAttachmentStore(roomIdentifier);
   focusMainWindow();
-  const result = await dialog.showOpenDialog({
+  const parent = getMainWindow();
+  const options: Electron.OpenDialogOptions = {
     title: "Attach files",
     buttonLabel: "Attach",
     properties: ["openFile", "multiSelections"],
-  });
+  };
+  // A sheet on the main window cannot fall behind it; a detached picker can,
+  // and then the attach request never answers.
+  const result = await (parent && !parent.isDestroyed()
+    ? dialog.showOpenDialog(parent, options)
+    : dialog.showOpenDialog(options));
   if (result.canceled || result.filePaths.length === 0) return [];
 
   // Refuse an oversized pick before any file is read or staged.
