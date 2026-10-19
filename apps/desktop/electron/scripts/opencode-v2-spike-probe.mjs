@@ -26,9 +26,27 @@
 //   SPIKE_ID=<message id>  supply the first user message ID
 //   SPIKE_CONNECT_KEY=1    supply the provider key through the connect API
 //   SPIKE_NO_KEY=1         supply the key only through OPENCODE_AUTH_CONTENT, as 1.x expects
+//   SPIKE_KEY_REF=1        supply the key as "{env:LETAGENTS_SPIKE_KEY}" in the 1.x provider shape
+//   SPIKE_KEY_REF=native   supply it that way in the 2.x `providers` shape (`settings.apiKey`)
+//   SPIKE_KEY_REF=env      2.x shape, the key named only in the provider's `env` list
+//   SPIKE_PLUGIN=native    configure a 2.x plugin that blanks the secrets in the shell
+//                          environment through `ctx.shell.hook("create.before")`
+//   SPIKE_PLUGIN_NO_RETRY=1  the 2.x plugin also refuses every retry through
+//                          `ctx.session.hook("retry")`
+//   SPIKE_RESTART=1        restart the server on the same data directory before the first turn
+//   SPIKE_RESTART=between  restart it before the second turn instead (needs SPIKE_TURNS=2 or more)
+//   SPIKE_GAP_MS=<ms>      pause between turns, after the first (default 0)
 //   SPIKE_PRIVATE_HOME=1   give the server an empty private HOME
+//   SPIKE_PLANT=1          with SPIKE_PRIVATE_HOME, plant marked instruction and skill
+//                          files in that HOME and the worktree, and report which reach
+//                          the model request
+//   SPIKE_NO_EXTERNAL_SKILLS=1  launch with OPENCODE_DISABLE_EXTERNAL_SKILLS=1
+//   SPIKE_TEST_HOME=1      launch with OPENCODE_TEST_HOME set to an empty directory; 2.0.26
+//                          looks for `~/.claude` and `~/.agents` there instead of in HOME
 //   SPIKE_UNTIL_END=1      wait up to 120 s for the turn to end by itself
 //   SPIKE_POLL_MS=<ms>     status polling interval (default 25)
+//   SPIKE_LOG=<file>       also write the server log to this file
+//   SPIKE_DUMP_CONFIG=1    include GET /api/config in the report, with the key masked
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -40,9 +58,24 @@ import { pathToFileURL } from "node:url";
 
 const SCENARIOS = ["plain", "tool", "plugin", "unknown", "retry", "credit", "paths"];
 const PROVIDER_KEY = "spike-provider-key-7d1f";
+const KEY_VARIABLE = "LETAGENTS_SPIKE_KEY";
+// Files SPIKE_PLANT writes; "~/" is the private HOME, anything else the worktree.
+const PLANTED = {
+  "~/.claude/CLAUDE.md": "planted-home-claude-md",
+  "~/.claude/skills/planted-home-claude-skill/SKILL.md": "planted-home-claude-skill",
+  "~/.agents/skills/planted-home-agents-skill/SKILL.md": "planted-home-agents-skill",
+  "~/.opencode/skills/planted-home-opencode-skill/SKILL.md": "planted-home-opencode-skill",
+  "CLAUDE.md": "planted-project-claude-md",
+  "AGENTS.md": "planted-project-agents-md",
+  ".claude/skills/planted-project-claude-skill/SKILL.md": "planted-project-claude-skill",
+  ".agents/skills/planted-project-agents-skill/SKILL.md": "planted-project-agents-skill",
+  ".opencode/skills/planted-project-opencode-skill/SKILL.md": "planted-project-opencode-skill",
+};
 const SERVER_PASSWORD = "spike-server-password";
+// The last field counts the environment variables that hold the key. It
+// greps for part of the key so the command itself never contains it.
 const SECRET_PRINTING_COMMAND =
-  "printf '%s|%s|%s' \"$OPENCODE_CONFIG_CONTENT\" \"$OPENCODE_SERVER_PASSWORD\" \"$OPENCODE_PASSWORD\"";
+  `printf '%s|%s|%s|%s|' "$OPENCODE_CONFIG_CONTENT" "$OPENCODE_SERVER_PASSWORD" "$OPENCODE_PASSWORD" "$${KEY_VARIABLE}"; env | grep -c 'provider-key-7d1f' || true`;
 
 const [binary, scenario = "plain"] = process.argv.slice(2);
 if (!binary || !SCENARIOS.includes(scenario)) {
@@ -115,6 +148,8 @@ async function main() {
         path: request.url,
         authorization: request.headers.authorization ?? null,
         maxTokens: body.max_tokens ?? body.max_completion_tokens ?? null,
+        // Shows whether earlier turns reach the model, for example after a restart.
+        nonSystemMessages: messages.filter((message) => message?.role !== "system").length,
         toolChoice: body.tool_choice ?? null,
         tools,
         systemPromptLength: system.length,
@@ -127,6 +162,7 @@ async function main() {
         // In Code Mode an MCP tool is named in the request's text, for the
         // `execute` tool to call, rather than listed as a tool of its own.
         mcpToolInCodeModeCatalog: JSON.stringify(body).includes("tools.letagents.spike_echo"),
+        plantedMarkers: Object.values(PLANTED).filter((marker) => JSON.stringify(body).includes(marker)),
       });
       if (!request.url?.endsWith("/chat/completions")) { response.writeHead(404).end(); return; }
       if (tools.length === 0) {
@@ -184,6 +220,17 @@ async function main() {
   await mkdir(cwd, { recursive: true });
   const privateHome = join(root, "home");
   await mkdir(privateHome, { recursive: true });
+  const emptyHome = join(root, "empty-home");
+  await mkdir(emptyHome, { recursive: true });
+  if (process.env.SPIKE_PLANT && process.env.SPIKE_PRIVATE_HOME) {
+    for (const [path, marker] of Object.entries(PLANTED)) {
+      const target = path.startsWith("~/") ? join(privateHome, path.slice(2)) : join(cwd, path);
+      await mkdir(join(target, ".."), { recursive: true });
+      await writeFile(target, path.endsWith("SKILL.md")
+        ? `---\nname: ${marker}\ndescription: Planted by the probe (${marker}).\n---\n\n${marker}\n`
+        : `${marker}\n`);
+    }
+  }
 
   const pluginPath = join(root, "credential-boundary.mjs");
   await writeFile(pluginPath, [
@@ -196,9 +243,46 @@ async function main() {
     "});",
     "",
   ].join("\n"));
+  // The 2.x plugin shape: a directory whose index.js exports { id, setup }.
+  // It imports only Node built-ins, so loading it needs no package install.
+  const nativePluginPath = join(root, "credential-boundary-v2");
+  const nativePluginRecordPath = join(root, "credential-boundary-v2.json");
+  await mkdir(nativePluginPath, { recursive: true });
+  await writeFile(join(nativePluginPath, "index.js"), [
+    'import { appendFileSync } from "node:fs";',
+    `const record = (entry) => appendFileSync(${JSON.stringify(nativePluginRecordPath)}, JSON.stringify(entry) + "\\n");`,
+    `const SECRETS = ["OPENCODE_CONFIG_CONTENT", "OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD", "OPENCODE_AUTH_CONTENT", ${JSON.stringify(KEY_VARIABLE)}];`,
+    "export default {",
+    '  id: "letagents-credential-boundary",',
+    "  async setup(ctx) {",
+    '    record({ hook: "setup", options: ctx.options ?? null });',
+    '    await ctx.shell.hook("create.before", (event) => {',
+    "      const names = Object.keys(event.env ?? {});",
+    `      record({ hook: "shell", variables: names.length, secretsPresent: SECRETS.filter((name) => names.includes(name)), keyInValues: Object.values(event.env ?? {}).some((value) => String(value).includes(${JSON.stringify(PROVIDER_KEY)})) });`,
+    "      for (const name of SECRETS) event.env[name] = \"\";",
+    "    });",
+    "    if (ctx.options?.noRetry) {",
+    '      await ctx.session.hook("retry", (event) => {',
+    '        record({ hook: "retry", attempt: event.attempt, error: event.error?.type ?? null });',
+    "        event.decision = { retry: false };",
+    "      });",
+    "    }",
+    "  },",
+    "};",
+    "",
+  ].join("\n"));
   const mcpPath = join(root, "echo-mcp.mjs");
+  const mcpEnvironmentPath = join(root, "mcp-environment.json");
   await writeFile(mcpPath, [
+    'import { writeFileSync } from "node:fs";',
     'import { createInterface } from "node:readline";',
+    // Records which secrets the MCP server process inherited, without the values.
+    `const values = Object.values(process.env).join("\\n");`,
+    `writeFileSync(${JSON.stringify(mcpEnvironmentPath)}, JSON.stringify({`,
+    `  providerKey: values.includes(${JSON.stringify(PROVIDER_KEY)}),`,
+    `  serverPassword: values.includes(${JSON.stringify(SERVER_PASSWORD)}),`,
+    '  configContent: "OPENCODE_CONFIG_CONTENT" in process.env,',
+    "}));",
     'const input = createInterface({ input: process.stdin });',
     "function send(id, result) { process.stdout.write(`${JSON.stringify({ jsonrpc: \"2.0\", id, result })}\\n`); }",
     'input.on("line", (line) => {',
@@ -212,6 +296,26 @@ async function main() {
   ].join("\n"));
 
   const useConnectApi = Boolean(process.env.SPIKE_CONNECT_KEY);
+  const keyReference = process.env.SPIKE_KEY_REF;
+  if (keyReference && !["1", "native", "env"].includes(keyReference)) {
+    throw new Error(`SPIKE_KEY_REF must be 1, native or env; received '${keyReference}'`);
+  }
+  const apiKey = keyReference ? `{env:${KEY_VARIABLE}}` : PROVIDER_KEY;
+  const baseURL = `http://127.0.0.1:${providerPort}/v1`;
+  // The 2.x shape, as 2.0.26 reports the 1.x shape back from GET /api/config.
+  const nativeProviders = { providers: { "letagents-open-model": {
+    name: "LetAgents Open Model",
+    package: "aisdk:@ai-sdk/openai-compatible",
+    ...(keyReference === "env"
+      ? { env: [KEY_VARIABLE], settings: { baseURL } }
+      : { settings: { baseURL, ...(useConnectApi || process.env.SPIKE_NO_KEY ? {} : { apiKey }) } }),
+    models: { m: {
+      modelID: "m", name: "m", settings: {},
+      capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+      cost: [{ input: 0, output: 0, cache: {} }],
+      limit: { context: 1_000_000, output: 8_192 },
+    } },
+  } } };
   const mcpServer = { type: "local", command: [process.execPath, mcpPath], cwd, environment: { SPIKE: "1" }, enabled: true };
   const config = {
     $schema: "https://opencode.ai/config.json",
@@ -221,67 +325,87 @@ async function main() {
     lsp: false,
     model: "letagents-open-model/m",
     ...(scenario === "plugin" ? { plugin: [pathToFileURL(pluginPath).href] } : {}),
+    ...(process.env.SPIKE_PLUGIN === "native"
+      ? { plugins: [{ package: nativePluginPath, options: { noRetry: Boolean(process.env.SPIKE_PLUGIN_NO_RETRY) } }] }
+      : {}),
     ...(process.env.SPIKE_MCP === "native"
       ? { mcp: { servers: { letagents: {
         type: "local", command: mcpServer.command, environment: mcpServer.environment, codemode: false,
       } } } }
       : process.env.SPIKE_MCP ? { mcp: { letagents: mcpServer } } : {}),
     permission: process.env.SPIKE_ASK ? { "*": "allow", bash: "ask", shell: "ask" } : { "*": "allow" },
-    provider: { "letagents-open-model": {
+    ...(keyReference === "native" || keyReference === "env" ? nativeProviders : { provider: { "letagents-open-model": {
       id: "letagents-open-model",
       name: "LetAgents Open Model",
       npm: "@ai-sdk/openai-compatible",
       env: [],
       options: {
-        baseURL: `http://127.0.0.1:${providerPort}/v1`,
-        ...(useConnectApi || process.env.SPIKE_NO_KEY ? {} : { apiKey: PROVIDER_KEY }),
+        baseURL,
+        ...(useConnectApi || process.env.SPIKE_NO_KEY ? {} : { apiKey }),
       },
       models: { m: {
         id: "m", name: "m", attachment: true, reasoning: true, temperature: true, tool_call: true,
         release_date: "2025-01-01", limit: { context: 1_000_000, output: 8_192 },
         cost: { input: 0, output: 0 }, options: {},
       } },
-    } },
+    } } }),
   };
 
   const probe = createNetServer();
   const port = await listen(probe);
   await close(probe);
   const dataHome = join(root, "data");
-  const child = spawn(binary, [
-    "serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs", "--log-level", "info",
-  ], {
-    cwd,
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.SPIKE_PRIVATE_HOME ? privateHome : process.env.HOME,
-      TMPDIR: process.env.TMPDIR,
-      OPENCODE_DISABLE_MODELS_FETCH: "1",
-      npm_config_registry: `http://127.0.0.1:${registryPort}/`,
-      OPENCODE_SERVER_USERNAME: "opencode",
-      OPENCODE_SERVER_PASSWORD: SERVER_PASSWORD,
-      OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
-      // 1.x reads the provider key from this variable. It is set so the
-      // report can show whether 2.x does.
-      OPENCODE_AUTH_CONTENT: JSON.stringify({ "letagents-open-model": { type: "api", key: PROVIDER_KEY } }),
-      XDG_DATA_HOME: dataHome,
-      XDG_CACHE_HOME: join(root, "cache"),
-      XDG_CONFIG_HOME: join(root, "config"),
-      XDG_STATE_HOME: join(root, "state"),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  let child = null;
   let log = "";
-  child.stdout.on("data", (data) => { log += data; });
-  child.stderr.on("data", (data) => { log += data; });
   let launchError = null;
-  child.once("error", (error) => { launchError = error; });
-  cleanups.push(async () => {
-    if (child.exitCode !== null || child.pid === undefined) return;
+  const stopServer = async () => {
+    const running = () => child && child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+    if (!running()) return;
+    const exited = new Promise((resolve) => child.once("exit", resolve));
     child.kill("SIGTERM");
-    await Promise.race([new Promise((resolve) => child.once("exit", resolve)), sleep(2_000)]);
-    if (child.exitCode === null) child.kill("SIGKILL");
-  });
+    await Promise.race([exited, sleep(2_000)]);
+    if (running()) {
+      child.kill("SIGKILL");
+      await Promise.race([exited, sleep(2_000)]);
+    }
+  };
+  const startServer = () => {
+    launchError = null;
+    child = spawn(binary, [
+      "serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs", "--log-level", "info",
+    ], {
+      cwd,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.SPIKE_PRIVATE_HOME ? privateHome : process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        OPENCODE_DISABLE_MODELS_FETCH: "1",
+        ...(process.env.SPIKE_NO_EXTERNAL_SKILLS ? { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1" } : {}),
+        ...(process.env.SPIKE_TEST_HOME ? { OPENCODE_TEST_HOME: emptyHome } : {}),
+        npm_config_registry: `http://127.0.0.1:${registryPort}/`,
+        OPENCODE_SERVER_USERNAME: "opencode",
+        OPENCODE_SERVER_PASSWORD: SERVER_PASSWORD,
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+        // 1.x reads the provider key from this variable. It is set so the
+        // report can show whether 2.x does, except when the key is supplied
+        // through a reference, so the reference is its only source.
+        ...(keyReference
+          ? { [KEY_VARIABLE]: PROVIDER_KEY }
+          : { OPENCODE_AUTH_CONTENT: JSON.stringify({ "letagents-open-model": { type: "api", key: PROVIDER_KEY } }) }),
+        XDG_DATA_HOME: dataHome,
+        XDG_CACHE_HOME: join(root, "cache"),
+        XDG_CONFIG_HOME: join(root, "config"),
+        XDG_STATE_HOME: join(root, "state"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (data) => { log += data; });
+    child.stderr.on("data", (data) => { log += data; });
+    child.once("error", (error) => { launchError = error; });
+  };
+  // Cleanups run in reverse order, so the log is written after the server stops.
+  if (process.env.SPIKE_LOG) cleanups.push(() => writeFile(process.env.SPIKE_LOG, log));
+  cleanups.push(stopServer);
 
   const url = `http://127.0.0.1:${port}`;
   const basic = (password) => `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`;
@@ -310,21 +434,19 @@ async function main() {
     }
   };
 
-  const launchedAt = Date.now();
-  while (Date.now() - launchedAt < 20_000 && child.exitCode === null && !launchError) {
-    const info = await call("GET", "/api/info", undefined, { timeoutMs: 2_000 });
-    if (info.status === 200) {
-      report.version = info.json.version;
-      report.healthyAfterMsAtMost = Date.now() - launchedAt;
-      break;
+  const launch = async () => {
+    startServer();
+    const launchedAt = Date.now();
+    while (Date.now() - launchedAt < 20_000 && child.exitCode === null && !launchError) {
+      const info = await call("GET", "/api/info", undefined, { timeoutMs: 2_000 });
+      if (info.status === 200) return { version: info.json.version, healthyAfterMsAtMost: Date.now() - launchedAt };
+      await sleep(10);
     }
-    await sleep(10);
-  }
-  if (report.version === null) {
     throw new Error(launchError
       ? `could not launch ${binary}: ${launchError.message}`
       : `the server did not become healthy: ${log.split("\n").slice(-5).join(" | ")}`);
-  }
+  };
+  ({ version: report.version, healthyAfterMsAtMost: report.healthyAfterMsAtMost } = await launch());
 
   if (scenario === "paths") {
     report.paths = {};
@@ -340,6 +462,10 @@ async function main() {
     report.paths["POST /session"] = { withCredentials: String(oldPrompt.status) };
     const wrong = await call("GET", "/api/info", undefined, { headers: { authorization: basic("wrong") } });
     report.paths["GET /api/info, wrong password"] = { withCredentials: String(wrong.status) };
+    for (const path of ["/api/info", "/api/config", "/api/session/active", "/api/event"]) {
+      const without = await call("GET", path, undefined, { headers: {}, timeoutMs: 2_000 });
+      report.paths[`GET ${path}, no credentials`] = String(without.status ?? without.error);
+    }
     return report;
   }
 
@@ -356,52 +482,65 @@ async function main() {
   }
   const configRead = await call("GET", "/api/config");
   report.configEndpointReturnsProviderKey = JSON.stringify(configRead.json ?? "").includes(PROVIDER_KEY);
+  report.configEndpointReturnsKeyReference = JSON.stringify(configRead.json ?? "").includes(`{env:${KEY_VARIABLE}}`);
+  if (process.env.SPIKE_DUMP_CONFIG) {
+    report.config = JSON.parse(JSON.stringify(configRead.json ?? null).replaceAll(PROVIDER_KEY, "<provider key>"));
+  }
+  const credentialRead = await call("GET", `/api/credential?${location}`);
+  report.credentialEndpoint = {
+    status: credentialRead.status,
+    returnsProviderKey: JSON.stringify(credentialRead.json ?? credentialRead.text ?? "").includes(PROVIDER_KEY),
+  };
   report.pluginsListed = (await call("GET", `/api/plugin?${location}`)).json?.data ?? null;
+  // Listing a location's MCP servers is what starts them, so this runs again
+  // after a restart.
+  const warmMcp = async () => {
+    const warmingSince = Date.now();
+    while (Date.now() - warmingSince < 10_000) {
+      const listed = (await call("GET", `/api/mcp?${location}`)).json?.data ?? [];
+      if (listed.some((server) => server.status?.status === "connected")) return Date.now() - warmingSince;
+      await sleep(pollMs);
+    }
+    return null;
+  };
   if (process.env.SPIKE_MCP) {
     report.mcpBeforeFirstTurn = (await call("GET", `/api/mcp?${location}`)).json?.data ?? null;
-    if (process.env.SPIKE_MCP_WARM) {
-      const warmingSince = Date.now();
-      while (Date.now() - warmingSince < 10_000) {
-        const listed = (await call("GET", `/api/mcp?${location}`)).json?.data ?? [];
-        if (listed.some((server) => server.status?.status === "connected")) {
-          report.mcpConnectedAfterMsAtMost = Date.now() - warmingSince;
-          break;
-        }
-        await sleep(pollMs);
-      }
-    }
+    if (process.env.SPIKE_MCP_WARM) report.mcpConnectedAfterMsAtMost = await warmMcp();
   }
 
   const controller = new AbortController();
   cleanups.push(async () => controller.abort());
   const events = [];
-  const stream = await fetch(`${url}/api/event`, {
-    headers: { ...headers, accept: "text/event-stream" },
-    signal: controller.signal,
-  });
-  void (async () => {
-    const reader = stream.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    try {
-      while (true) {
-        const part = await reader.read();
-        if (part.done) break;
-        buffer += decoder.decode(part.value, { stream: true });
-        let boundary = buffer.search(/\r?\n\r?\n/);
-        while (boundary >= 0) {
-          const block = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary).replace(/^\r?\n\r?\n/, "");
-          const data = block.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trim()).join("");
-          if (data) {
-            try { events.push({ atMs: Date.now() - started, event: JSON.parse(data) }); } catch {}
+  const subscribe = async () => {
+    const stream = await fetch(`${url}/api/event`, {
+      headers: { ...headers, accept: "text/event-stream" },
+      signal: controller.signal,
+    });
+    void (async () => {
+      const reader = stream.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        while (true) {
+          const part = await reader.read();
+          if (part.done) break;
+          buffer += decoder.decode(part.value, { stream: true });
+          let boundary = buffer.search(/\r?\n\r?\n/);
+          while (boundary >= 0) {
+            const block = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary).replace(/^\r?\n\r?\n/, "");
+            const data = block.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trim()).join("");
+            if (data) {
+              try { events.push({ atMs: Date.now() - started, event: JSON.parse(data) }); } catch {}
+            }
+            boundary = buffer.search(/\r?\n\r?\n/);
           }
-          boundary = buffer.search(/\r?\n\r?\n/);
         }
-      }
-    } catch {}
-  })();
+      } catch {}
+    })();
+  };
+  await subscribe();
 
   const created = await call("POST", "/api/session", { title: "spike", location: { directory: cwd } });
   const sessionId = (created.json?.data ?? created.json)?.id;
@@ -409,16 +548,30 @@ async function main() {
   if (!sessionId) throw new Error(`session was not created: ${JSON.stringify(created)}`);
 
   if (process.env.SPIKE_ENV) {
+    // Leaves out KEY_VARIABLE on purpose: whether it survives shows whether
+    // the call replaces the environment or merges into it.
     const replaced = await call("PUT", `/api/session/${sessionId}/environment`, { variables: {
       OPENCODE_CONFIG_CONTENT: "", OPENCODE_SERVER_PASSWORD: "", OPENCODE_PASSWORD: "", PATH: process.env.PATH,
     } });
     report.environmentPut = replaced.status;
   }
 
+  const restart = async () => {
+    await stopServer();
+    const relaunched = await launch();
+    await subscribe();
+    const found = await call("GET", `/api/session/${sessionId}`);
+    report.restart = { healthyAfterMsAtMost: relaunched.healthyAfterMsAtMost, sessionStatus: found.status };
+    if (process.env.SPIKE_MCP && process.env.SPIKE_MCP_WARM) report.restart.mcpConnectedAfterMsAtMost = await warmMcp();
+  };
+  if (process.env.SPIKE_RESTART === "1") await restart();
+
   const active = async () => JSON.stringify((await call("GET", "/api/session/active", undefined, { timeoutMs: 3_000 })).json ?? {});
   report.turns = [];
   for (let turn = 0; turn < turns; turn += 1) {
     await sleep(Number(process.env.SPIKE_SETTLE_MS || 0));
+    if (turn > 0) await sleep(Number(process.env.SPIKE_GAP_MS || 0));
+    if (turn === 1 && process.env.SPIKE_RESTART === "between") await restart();
     const requestsBefore = modelRequests.length;
     const eventsBefore = events.length;
     const promptedAt = Date.now();
@@ -472,11 +625,13 @@ async function main() {
     result.first = requests[0] ? {
       authorization: requests[0].authorization,
       maxTokens: requests[0].maxTokens,
+      nonSystemMessages: requests[0].nonSystemMessages,
       toolChoice: requests[0].toolChoice,
       tools: requests[0].tools,
       systemPromptLength: requests[0].systemPromptLength,
       skillsInSystemPrompt: requests[0].skillsInSystemPrompt,
       mcpToolInCodeModeCatalog: requests[0].mcpToolInCodeModeCatalog,
+      plantedMarkers: requests[0].plantedMarkers,
     } : null;
     result.shellOutputSeenByModel = requests.flatMap((request) => request.toolResults);
     result.shellOutputContainsProviderKey = requests.some((request) => request.toolResultsContainProviderKey);
@@ -495,15 +650,25 @@ async function main() {
     : null;
   if (process.env.SPIKE_MCP) {
     report.mcpAfterTurns = (await call("GET", `/api/mcp?${location}`)).json?.data ?? null;
+    report.mcpProcessInherited = JSON.parse(await readFile(mcpEnvironmentPath, "utf8").catch(() => "null"));
+  }
+  if (process.env.SPIKE_PLUGIN === "native") {
+    report.nativePluginRecord = (await readFile(nativePluginRecordPath, "utf8").catch(() => ""))
+      .split("\n").filter(Boolean).map((line) => JSON.parse(line));
   }
   report.registryRequests = registryRequests;
   report.configDirectory = await readdir(join(root, "config", "opencode")).catch(() => null);
 
-  const dataFiles = await readdir(join(dataHome, "opencode")).catch(() => []);
+  // Every file the server could have written under the temporary root: data,
+  // state, cache, config, both HOMEs and the worktree. OpenCode's own temporary
+  // directory under TMPDIR is not scanned. Paths are relative to the root.
   report.providerKeyOnDisk = [];
-  for (const name of dataFiles) {
-    const content = await readFile(join(dataHome, "opencode", name)).catch(() => null);
-    if (content?.includes(PROVIDER_KEY)) report.providerKeyOnDisk.push(name);
+  for (const directory of ["data", "state", "cache", "config", "home", "empty-home", "worktree"]) {
+    const names = await readdir(join(root, directory), { recursive: true }).catch(() => []);
+    for (const name of names) {
+      const content = await readFile(join(root, directory, name)).catch(() => null);
+      if (content?.includes(PROVIDER_KEY)) report.providerKeyOnDisk.push(join(directory, name));
+    }
   }
 
   const lines = log.split("\n");
