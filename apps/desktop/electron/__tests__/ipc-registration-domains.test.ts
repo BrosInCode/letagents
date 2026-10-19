@@ -12,6 +12,7 @@ const domainSources = {
   app: readDomainSource("app"),
   maintenance: readDomainSource("maintenance"),
   authSetup: readDomainSource("auth-setup"),
+  asks: readDomainSource("asks"),
   rental: readDomainSource("rental"),
   rooms: readDomainSource("rooms"),
   repos: readDomainSource("repos"),
@@ -36,6 +37,16 @@ const expectedDirectChannels = [
   "desktop:app:read-workspace-review",
   "desktop:app:read-workspace-review-page",
   "desktop:app:resolve-workspace-files",
+  "desktop:asks:act",
+  "desktop:asks:can-give",
+  "desktop:asks:cant-help",
+  "desktop:asks:create",
+  "desktop:asks:give",
+  "desktop:asks:list-mine",
+  "desktop:asks:list-models",
+  "desktop:asks:list-room",
+  "desktop:asks:preview",
+  "desktop:asks:take-pending-link",
   "desktop:auth:cancel-device-flow",
   "desktop:auth:get-status",
   "desktop:auth:open-verification",
@@ -222,6 +233,7 @@ test("desktop IPC composition root delegates without owning channel behavior", (
   for (const registrar of [
     "registerDesktopAuthAndSetupIpcHandlers",
     "registerDesktopAppIpcHandlers",
+    "registerDesktopAskIpcHandlers",
     "registerDaemonMaintenanceIpcHandlers",
     "registerDesktopRoomIpcHandlers",
     "registerDesktopRentalDomainIpcHandlers",
@@ -340,6 +352,7 @@ test("application registers startup preparation before rental recovery without d
       initializeDesktopNotifications: async () => {}, prepareDesktopNotificationLaunch() {}, prepareDesktopNotifications() {}, setDesktopNotificationBadgeCount() {},
     } }),
     mock.module("../main/attachments.js", { namedExports: { handleAttachmentProtocolRequest() {} } }),
+    mock.module("../main/ask-links.js", { namedExports: { registerAskLinks() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
     mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", workspaceRoot: "/fixture" } }),
     mock.module("../main/room-stream.js", { namedExports: {
@@ -379,6 +392,7 @@ test("application registers startup preparation before rental recovery without d
 
 test("desktop IPC channel prefixes stay in their owning domains", () => {
   const expectedPrefixes: Record<keyof typeof domainSources, string[]> = {
+    asks: ["desktop:asks:"],
     app: [
       "desktop:app:",
       "desktop:updates:",

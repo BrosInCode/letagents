@@ -17,6 +17,7 @@ export interface DesktopMessageReactionChange { changed: boolean; reactions: Mes
 export interface DesktopRoomMessageSearchPage { terms: string[]; messages: DesktopRoomMessage[]; has_more: boolean; next_before: string | null; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import type { DesktopAccountActivityState } from "./account-activity.js";
+import type { DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "./asks.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { RoomNotificationPreferenceChange, RoomNotificationPreferenceEntry, RoomNotificationPreferenceList } from "../../../../shared/room-notification-preferences.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
@@ -377,6 +378,19 @@ export interface DesktopApi {
     syncLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
   };
   rental?: DesktopRentalApi;
+  asks?: {
+    listModels: () => Promise<DesktopAskResult<DesktopAgentAskModel[]>>;
+    create: (input: DesktopCreateAgentAskInput) => Promise<DesktopAskResult<{ ask: DesktopAgentAsk; link: string }>>;
+    listRoom: (roomId: string) => Promise<DesktopAskResult<DesktopAgentAsk[]>>;
+    listMine: () => Promise<DesktopAskResult<DesktopAgentAsk[]>>;
+    act: (askId: string, action: "cancel" | "accept" | "decline" | "remove") => Promise<DesktopAskResult<DesktopAgentAsk>>;
+    preview: (token: string) => Promise<DesktopAskResult<DesktopAgentAskLink>>;
+    canGive: (providerId: string) => Promise<boolean>;
+    give: (input: DesktopGiveAgentInput) => Promise<DesktopAskResult<DesktopAgentAsk>>;
+    cantHelp: (token: string) => Promise<DesktopAskResult<void>>;
+    takePendingLink: () => Promise<string | null>;
+    onOpenLink: (callback: (token: string) => void) => () => void;
+  };
   auth: {
     getStatus: () => Promise<DesktopAuthStatus>;
     startDeviceFlow: (roomIdentifier?: string | null) => Promise<DesktopAuthStartResult>;

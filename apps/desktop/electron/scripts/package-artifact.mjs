@@ -128,6 +128,10 @@ for (const key of [
 ]) {
   await removePlistKey(infoPlist, key);
 }
+// "Ask for an agent" links (letagents://ask/<token>) open the app.
+await removePlistKey(infoPlist, "CFBundleURLTypes");
+await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json",
+  JSON.stringify([{ CFBundleURLName: "LetAgents links", CFBundleURLSchemes: ["letagents"] }]), infoPlist]);
 await createApplicationIcon();
 await writeFile(
   join(resources, "app-update.yml"),

@@ -214,6 +214,7 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
+          @open-ask-agent="askAgentOpen = true"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           :attention="roomAttention"
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
@@ -302,6 +303,15 @@
       @open-settings="openAppAgentSettings"
       @run="runAppAgent"
     />
+
+    <AskAgentDialog
+      :open="askAgentOpen"
+      :room-identifier="selectedRoomWithProjectContext?.identifier ?? null"
+      :rooms="settingsAccountRooms"
+      @close="askAgentOpen = false"
+      @created="void refreshAccountRooms()"
+    />
+    <GiveAgentDialog :token="giveAgentToken" @close="giveAgentToken = null" />
 
     <Transition name="new-room-modal">
       <DesktopNewRoomModal
@@ -443,6 +453,8 @@ import { preserveRoomRepoStatistics } from "./domain/repo-status";
 import { reuseUnchanged } from "./domain/reuse-unchanged";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
+import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
@@ -2815,7 +2827,14 @@ watch(
   },
 );
 
+// "Ask for an agent": the asker's sheet, and the giver's screen opened from a link.
+const askAgentOpen = ref(false);
+const giveAgentToken = ref<string | null>(null);
+let unsubscribeAskLinks: (() => void) | null = null;
+
 onMounted(() => {
+  void desktopIpc.asks?.takePendingLink().then(token => { if (token) giveAgentToken.value = token; }).catch(() => undefined);
+  unsubscribeAskLinks = desktopIpc.asks?.onOpenLink(token => { giveAgentToken.value = token; }) ?? null;
   void refreshNeedsYou();
   needsYouInterval = window.setInterval(() => { if (!document.hidden) void refreshNeedsYou(); }, 60_000);
   unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
@@ -2865,6 +2884,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  unsubscribeAskLinks?.();
   if (needsYouInterval) window.clearInterval(needsYouInterval);
   clearAuthPollTimer();
   clearLiveMetadataRefreshTimer();

@@ -125,6 +125,7 @@
           </template>
         </RoomMessageViewport>
 
+        <RoomAskBar v-if="!roomLoading" :room-identifier="roomIdentifier" />
 
         <div
           v-if="roomLoading"
@@ -163,6 +164,7 @@
           :correctable-agents="correctableAgents"
           @clear-reply="clearReplyTarget"
           @open-add-agent="emit('open-add-agent')"
+          @open-ask-agent="emit('open-ask-agent')"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @open-event-preview="openEventPreview"
@@ -236,6 +238,7 @@ import {
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
 import { useAgentPresenceChips } from "../../../composables/useAgentPresenceChips";
 import RoomComposer from "./room-chat/RoomComposer.vue";
+import RoomAskBar from "./asks/RoomAskBar.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
@@ -324,6 +327,7 @@ const emit = defineEmits<{
   "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
+  "open-ask-agent": [];
   "scroll-position": [scrollTop: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-events": [];
