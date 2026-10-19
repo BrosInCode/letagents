@@ -326,6 +326,35 @@ test("a removal the room never confirmed is retried by the next daemon process",
   assert.deepEqual(withdrawn, [AGENT]);
 });
 
+test("a removal the owner asked for keeps being retried while the room may still show the agent's work", async () => {
+  const { time, calls, publisher, push, setTarget, withdrawn } = harness({ sharing: true });
+  publisher.turnStarted(AGENT, "inbox_1", "msg_7");
+  push(note("r1", "A shared note."));
+  await time.advance(LIVE_ROOM_SHARE_INTERVAL_MS);
+  // The owner's computer goes offline, then the owner turns sharing off.
+  setTarget(null);
+  publisher.setSharing(AGENT, "withdrawing");
+  await time.advance(30 * 60 * 1000);
+  assert.equal(calls.filter((call) => call.kind === "withdraw").length, 0, "nothing can be sent while offline");
+  assert.equal(time.pending(), 1, "after many failures the removal still waits for the next attempt");
+  setTarget(TARGET);
+  await time.advance(60_000);
+  assert.deepEqual(calls.slice(-1).map((call) => call.kind), ["withdraw"]);
+  assert.deepEqual(withdrawn, [AGENT]);
+  assert.equal(time.pending(), 0);
+});
+
+test("a removal that cannot reach the room for a day ends with the server's retention", async () => {
+  const { time, calls, publisher, withdrawn } = harness({ sharing: "withdrawing", target: null });
+  publisher.resume(new Map([[AGENT, "withdrawing"]]));
+  await time.advance(23 * 60 * 60 * 1000);
+  assert.equal(time.pending(), 1, "still retrying within the retention");
+  await time.advance(2 * 60 * 60 * 1000);
+  assert.equal(time.pending(), 0, "the server's retention has removed what was shared");
+  assert.deepEqual(calls, []);
+  assert.deepEqual(withdrawn, [AGENT]);
+});
+
 test("a failed read of the owner's choice is not remembered as off", async () => {
   const { time, calls, publisher, reads } = harness({ sharing: true, failRead: true });
   publisher.turnStarted(AGENT, "inbox_1", "msg_7");

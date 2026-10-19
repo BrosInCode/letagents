@@ -18,8 +18,14 @@ import type { DaemonAgentStreamEvent } from "./types.js";
 export const LIVE_ROOM_SHARE_INTERVAL_MS = 3_000;
 /** Longest wait between attempts after the room server could not be reached. */
 const MAX_RETRY_DELAY_MS = 60_000;
-/** Attempts after which a failing agent waits for its next activity before trying again. */
+/** Publication attempts after which a failing agent waits for its next activity before trying again. */
 const MAX_CONSECUTIVE_FAILURES = 8;
+/**
+ * How long a removal the owner asked for keeps being retried (once a minute
+ * at most): the server's retention removes a live session with no snapshot
+ * for this long, and the daemon sends none once sharing is off.
+ */
+const WITHDRAW_RETRY_LIMIT_MS = 24 * 60 * 60 * 1000;
 /** Text blocks of one turn whose beginning is remembered; a later block counts as cut once the feed drops events. */
 const MAX_TRACKED_TEXT_PARTS = 4_096;
 /** Longest current-step line of a live session. */
@@ -185,6 +191,8 @@ type ShareState = {
   chain: Promise<void>;
   /** Earlier live sessions may still be in the room and must be removed. */
   withdrawPending: boolean;
+  /** When this process began trying to remove them; null while nothing waits for removal. */
+  withdrawSinceMs: number | null;
   /** Counts the owner's changes, so a request that started before one cannot undo it. */
   epoch: number;
   /** The turn the room server refused to keep as a live session; nothing more is sent for it. */
@@ -229,7 +237,7 @@ export class LiveRoomSharePublisher {
       this.enabled.set(entryId, choice === "on");
       if (choice !== "withdrawing") continue;
       const state = this.state(entryId);
-      state.withdrawPending = true;
+      this.awaitWithdrawal(state);
       this.schedule(entryId, state, true);
     }
   }
@@ -292,7 +300,7 @@ export class LiveRoomSharePublisher {
       if (state.timer) this.clearTimer(state.timer);
       state.timer = null;
       state.session = null;
-      state.withdrawPending = state.withdrawPending || saved === "withdrawing";
+      if (saved === "withdrawing") this.awaitWithdrawal(state);
     }
     this.schedule(entryId, state, !enabled);
   }
@@ -314,7 +322,7 @@ export class LiveRoomSharePublisher {
     if (!state) {
       state = {
         turn: null, session: null, sentKey: null, lastPublishMs: Number.NEGATIVE_INFINITY, failures: 0,
-        timer: null, chain: Promise.resolve(), withdrawPending: false, epoch: 0, unsupportedTurn: null,
+        timer: null, chain: Promise.resolve(), withdrawPending: false, withdrawSinceMs: null, epoch: 0, unsupportedTurn: null,
       };
       this.states.set(entryId, state);
     }
@@ -330,7 +338,7 @@ export class LiveRoomSharePublisher {
     // A change the owner made meanwhile wins over the read.
     if (!this.enabled.has(entryId)) {
       this.enabled.set(entryId, saved === "on");
-      if (saved === "withdrawing") state.withdrawPending = true;
+      if (saved === "withdrawing") this.awaitWithdrawal(state);
     }
     return this.enabled.get(entryId) === true;
   }
@@ -348,8 +356,34 @@ export class LiveRoomSharePublisher {
     }, Math.max(paced, backoff));
   }
 
+  private awaitWithdrawal(state: ShareState): void {
+    state.withdrawPending = true;
+    state.withdrawSinceMs ??= this.nowMs();
+  }
+
+  private withdrawalDone(state: ShareState): void {
+    state.withdrawPending = false;
+    state.withdrawSinceMs = null;
+  }
+
+  /**
+   * Try again later. A removal the owner asked for is never given up while
+   * the room may still show the agent's work: it is retried at most once a
+   * minute until it succeeds, or until the server's retention has removed
+   * what was shared. A publication gives up after a few failures and waits
+   * for the agent's next activity.
+   */
   private retryLater(entryId: string, state: ShareState): void {
     state.failures += 1;
+    if (state.withdrawPending) {
+      if (this.nowMs() - (state.withdrawSinceMs ?? this.nowMs()) < WITHDRAW_RETRY_LIMIT_MS) {
+        this.schedule(entryId, state);
+        return;
+      }
+      this.withdrawalDone(state);
+      if (this.enabled.get(entryId) !== true) void this.ports.withdrawn(entryId).catch(() => undefined);
+      return;
+    }
     if (state.failures < MAX_CONSECUTIVE_FAILURES) this.schedule(entryId, state);
   }
 
@@ -367,7 +401,7 @@ export class LiveRoomSharePublisher {
         return;
       }
       if (state.epoch === epoch) {
-        state.withdrawPending = false;
+        this.withdrawalDone(state);
         state.failures = 0;
         if (!sharing) await this.ports.withdrawn(entryId).catch(() => undefined);
       }
@@ -414,7 +448,7 @@ export class LiveRoomSharePublisher {
         if (!current()) return;
         state.session = { id, inboxItemId: turn.inboxItemId };
         // The server replaced every earlier live session of the agent.
-        state.withdrawPending = false;
+        this.withdrawalDone(state);
       }
       state.sentKey = key;
       state.failures = 0;

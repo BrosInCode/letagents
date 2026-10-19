@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp } from "vue";
+import { createSSRApp, ref } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
 
@@ -145,7 +145,17 @@ test("the owner's live sharing switch is a DesktopSwitch that starts off", async
     assert.match(off, /Share live activity with the room/);
     assert.match(off, /data-testid="agent-inspector-live-sharing"/);
     assert.match(off, /aria-checked="false"/);
-    assert.match(off, /never see commands, file contents, tool results or error details/);
+    assert.match(off, /Anyone who can read this room sees a Live tab/);
+    assert.match(off, /Notes and updates can quote code or text the agent read/);
+    assert.match(off, /Commands, tool results and error details are not shared/);
+    assert.match(off, /This room is public: anyone can read it, even without signing in/, "without a known audience, the note assumes the widest one");
+    // The key must come from the same module copy that the server render uses.
+    const { agentRoomAudienceKey } = await vite.ssrLoadModule("/renderer/src/domain/agent-home-harness.ts");
+    for (const [audience, note] of [["public", /anyone can read it, even without signing in/], ["shared", /Other people are in this room/], ["private", /anyone who joins it later/]] as const) {
+      const app = createSSRApp(component, { configuration, state: { enabled: false, availability: "available" }, disabled: false, unsavedEdits: false });
+      app.provide(agentRoomAudienceKey, ref(audience));
+      assert.match(await renderToString(app), note, audience);
+    }
     assert.match(off, /Off\. Only you see this agent’s Live tab/);
     const on = await render({ enabled: true, availability: "available" });
     assert.match(on, /aria-checked="true"/);

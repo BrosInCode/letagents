@@ -16,6 +16,11 @@
     <p v-if="unavailableReason" class="agent-inspector-settings-note">{{ unavailableReason }}</p>
     <template v-if="!unavailableReason || shown">
       <p id="agent-inspector-live-sharing-description" class="agent-inspector-settings-note">{{ LIVE_SHARING_DESCRIPTION }}</p>
+      <p
+        class="agent-inspector-settings-note"
+        :data-tone="audience === 'public' ? 'warning' : undefined"
+        data-testid="agent-inspector-live-sharing-audience"
+      >{{ liveSharingAudienceNote(audience) }}</p>
       <p class="agent-inspector-settings-note" data-testid="agent-inspector-live-sharing-state">{{ shown ? LIVE_SHARING_ON_NOTE : LIVE_SHARING_OFF_NOTE }}</p>
       <p v-if="unsavedEdits && !shown" class="agent-inspector-settings-note">Save or reload your other changes before turning this on.</p>
       <p class="sr-only" role="status">{{ saving ? "Saving…" : "" }}</p>
@@ -25,14 +30,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import type { DesktopSupervisorAgentConfiguration } from "../../../../../../electron/ipc-types";
 import {
   LIVE_SHARING_DESCRIPTION,
   LIVE_SHARING_OFF_NOTE,
   LIVE_SHARING_ON_NOTE,
+  liveSharingAudienceNote,
   liveSharingUnavailableReason,
 } from "../../../../domain/agent-live-sharing";
+import { agentRoomAudienceKey } from "../../../../domain/agent-home-harness";
 import { desktopIpc } from "../../../../ipc";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 
@@ -53,6 +60,9 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ changed: [] }>();
 
+const roomAudience = inject(agentRoomAudienceKey, null);
+// Unknown counts as public: the note must never understate who can read the room.
+const audience = computed(() => roomAudience?.value ?? "public");
 const saving = ref(false);
 const pending = ref<boolean | null>(null);
 const error = ref<string | null>(null);

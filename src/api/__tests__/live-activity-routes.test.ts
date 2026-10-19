@@ -62,6 +62,7 @@ const worker = { actor_label: "Ada | Codex", agent_key: "agent_ada", session_kin
 function routes(options: {
   store?: Partial<RoomReasoningStore>;
   identity?: { ok: true; identity: unknown } | { ok: false; status: number; error: string } | null;
+  participant?: boolean;
 } = {}) {
   const handlers = new Map<string, Handler>();
   const events = new EventEmitter();
@@ -77,7 +78,10 @@ function routes(options: {
     reasoningEvents: events,
     resolveCanonicalRoomRequestId: async (roomId) => roomId,
     resolveRoomOrReply: async () => project(),
-    requireParticipant: async () => true,
+    requireParticipant: (async (_req: unknown, res: ReturnType<typeof response>) => {
+      if (options.participant === false) { res.status(403).json({ error: "Not a room participant." }); return false; }
+      return true;
+    }) as never,
     requireWorkerIdentity: (async () => options.identity === undefined
       ? { ok: true, identity: worker } : options.identity) as never,
     reasoningStore: {
@@ -217,6 +221,23 @@ test("reasoning lists leave live sessions out unless asked for them", async () =
   await call(LIST, { authKind: "session", query: { kind: "live" } });
   await call(LIST, { authKind: "session", query: { kind: "anything" } });
   assert.deepEqual(kinds, ["reasoning", "live", "reasoning"]);
+});
+
+test("a reader who may not read the room gets no live session, listed or by id", async () => {
+  const touched: string[] = [];
+  const { call } = routes({
+    participant: false,
+    store: {
+      getReasoningSessions: (async () => { touched.push("list"); return [session()]; }) as never,
+      getReasoningSessionById: (async () => { touched.push("get"); return session(); }) as never,
+      getReasoningSessionUpdates: (async () => { touched.push("updates"); return []; }) as never,
+    },
+  });
+  const list = await call(LIST, { authKind: "session", query: { kind: "live" } });
+  assert.equal(list.statusCode, 403);
+  const detail = await call("get /^\\/rooms\\/(.+)\\/reasoning-sessions\\/([^/]+)$/", { authKind: "session" });
+  assert.equal(detail.statusCode, 403);
+  assert.deepEqual(touched, [], "storage is never read for a non-participant");
 });
 
 test("withdrawing removes every live session of the worker's agent and tells the room", async () => {
