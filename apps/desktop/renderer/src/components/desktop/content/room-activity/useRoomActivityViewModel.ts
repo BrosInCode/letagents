@@ -3,6 +3,7 @@ import type {
   DesktopActivityEntry,
   DesktopRoomMessage,
 } from "../../../../../../electron/ipc-types";
+import { useNow } from "../../../../composables/useNow";
 import { normalizeAgentKey } from "../../../../domain/agents";
 import { reasoningStatus, reasoningSummary, reasoningTitle } from "../../../../domain/reasoning";
 import { formatRelativeTime, timestampValue } from "../../../../domain/time";
@@ -33,6 +34,8 @@ export function useRoomActivityViewModel(
   options: { autoSelectLive?: boolean } = {},
 ) {
   const autoSelectLive = options.autoSelectLive ?? true;
+  // Relative times and "recent signal" windows move on with this clock even when the data is unchanged.
+  const now = useNow(30_000);
   const activeView = ref<"live" | "history">("live");
   const selectedLiveKey = ref<string | null>(null);
   const selectedHistoryKey = ref<string | null>(null);
@@ -114,7 +117,7 @@ export function useRoomActivityViewModel(
   );
   const workingAgents = computed(() =>
     liveParticipants.value
-      .filter((participant) => participant.kind === "agent" && hasAgentSignal(participant) && !isReachableParticipant(participant))
+      .filter((participant) => participant.kind === "agent" && hasAgentSignal(participant, now.value) && !isReachableParticipant(participant))
       .sort(compareSignalParticipants)
   );
   const liveRosterAgents = computed(() => {
@@ -169,9 +172,9 @@ export function useRoomActivityViewModel(
     selectedLiveParticipant,
     selectedHistoryEntry,
     initials,
-    connectionLabel,
-    connectionTone,
-    formatRelativeTime,
+    connectionLabel: (participant: ActivityParticipant) => connectionLabel(participant, now.value),
+    connectionTone: (participant: ActivityParticipant) => connectionTone(participant, now.value),
+    formatRelativeTime: (value: string | null | undefined) => formatRelativeTime(value, now.value),
     signalLabel,
     reasoningStatus,
     reasoningTitle,

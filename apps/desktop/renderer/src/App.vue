@@ -2810,6 +2810,9 @@ onMounted(() => {
   // A connected account activity stream still avoids routine room-list polling.
   accountRoomsRefreshInterval = window.setInterval(() => {
     void refreshUnreadCounts();
+    // Retry leaving an archived active room: the room list keeps its identity
+    // on an unchanged poll, so its watcher does not fire again by itself.
+    void leaveArchivedSelectedRoomFromSettingsList();
     // While the activity stream is open it pushes messages and work as they
     // happen; the room list is then refreshed only rarely, to pick up rooms
     // that were renamed or created elsewhere.

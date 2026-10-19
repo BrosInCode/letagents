@@ -129,7 +129,8 @@ const workDurationLabel = computed(() => {
   const duration = formatLiveWorkDuration(
     props.work.startedAt,
     null,
-    now.value,
+    // Never older than the work start: the shared clock may be idle while not following.
+    Math.max(now.value, Date.now()),
   );
   return duration ? `Working for ${duration}` : "Work in progress";
 });

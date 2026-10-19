@@ -27,6 +27,11 @@ function isHidden(): boolean {
   return Boolean(globalThis.document?.hidden);
 }
 
+/** A clock timer must never keep a Node process alive (tests); browsers have no `unref`. */
+function unrefTimer(timer: unknown): void {
+  (timer as { unref?: () => void } | null)?.unref?.();
+}
+
 function startClock(intervalMs: number, clock: SharedClock): void {
   const tick = () => {
     if (shouldSkipPollTick({ hidden: isHidden() })) return;
@@ -39,7 +44,9 @@ function startClock(intervalMs: number, clock: SharedClock): void {
     clock.alignTimer = null;
     tick();
     clock.interval = setInterval(tick, intervalMs);
+    unrefTimer(clock.interval);
   }, untilBoundary);
+  unrefTimer(clock.alignTimer);
 }
 
 function stopClock(clock: SharedClock): void {

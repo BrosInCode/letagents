@@ -21,7 +21,7 @@
             :aria-current="selectedSourceMessageId === item.source_message_id ? 'true' : undefined"
             @click="emit('select-source', item.source_message_id)">
             <span class="outcome-dot" :data-tone="messageOutcomeTone(item.state)" aria-hidden="true" />
-            <span><strong>{{ item.text_preview || 'Message content is unavailable.' }}</strong><small>{{ humanizeAgentInspectorReceiptState(item.state, item.terminal_reason) }} · {{ formatRelativeTime(item.updated_at) }}</small></span>
+            <span><strong>{{ item.text_preview || 'Message content is unavailable.' }}</strong><small>{{ humanizeAgentInspectorReceiptState(item.state, item.terminal_reason) }} · {{ formatRelativeTime(item.updated_at, now) }}</small></span>
           </button>
         </nav>
       </details>
@@ -134,6 +134,9 @@ import { Activity, ArrowUpRight, Check, ChevronDown, CircleDashed, Clock3, Corne
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import { formatFullTimestamp, formatRelativeTime } from "../../../../domain/time";
+import { useNow } from "../../../../composables/useNow";
+
+const now = useNow(30_000);
 import { messageInterventionLabel, messageOutcomeDuration, messageOutcomeTone, messageTriggerLabel } from "../../../../domain/message-outcome";
 import { describeAgentInspectorUncertainEffect, describeRecordedOperation, humanizeRecordedTurn, humanizeAgentInspectorReceiptState, humanizeAgentInspectorTimeline, type AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import "./message-outcome.css";

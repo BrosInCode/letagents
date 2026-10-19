@@ -434,6 +434,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     const allAccountRooms =
       (await desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => [])) || [];
     if (!sessionIsCurrent(sessionGeneration)) return;
+    // The two lists are separate arrays; their room objects are shared only
+    // when unchanged. Never mutate a room entry in place.
     // An unchanged poll keeps the previous references, so the sidebar and
     // Settings do not recompute when the room list did not change.
     options.settingsAccountRooms.value = reuseUnchanged(toRaw(options.settingsAccountRooms.value), allAccountRooms);

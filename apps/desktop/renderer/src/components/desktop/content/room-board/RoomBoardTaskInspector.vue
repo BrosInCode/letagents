@@ -28,7 +28,7 @@
       </span>
       <span>
         <small>Updated</small>
-        <strong>{{ relativeTime(task.updatedAt || task.createdAt) }}</strong>
+        <strong>{{ relativeTime(task.updatedAt || task.createdAt, now) }}</strong>
       </span>
       <span>
         <small>Working agent</small>
@@ -175,6 +175,10 @@ import { Pencil } from '@lucide/vue';
 import { renderDesktopMarkdown } from '../formatting/markdown';
 import type { DesktopAgentPresence, DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
+import { useNow } from "../../../../composables/useNow";
+
+// Labels such as "2m ago" move on with the shared clock even when the data is unchanged.
+const now = useNow(30_000);
 import { reviewCandidateKey, reviewCandidateLabel, reviewCandidateValue } from "./review-candidates";
 import {
   executionAuthorityState,
