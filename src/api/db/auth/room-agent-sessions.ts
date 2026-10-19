@@ -3,6 +3,7 @@ import { isMcpWorkerId, isMcpConnectionToken } from "../../../shared/mcp-worker.
 import { getSessionConnections } from "../messages/session-connections.js";
 import { finishReplyTurnsTx, queueReplyTurnWakes, type ReleasedReplyTurn } from "../messages/reply-turns.js";
 import { adoptTaskLeasesFromEndedSessionsTx, relabelTaskWorkTx, type AdoptedTaskLease } from "../coordination/lease-adoption.js";
+import { announceRemovedLiveActivity, deleteLiveActivityOfDepartedAgentTx } from "../reasoning.js";
 import { agentDisplayNameKey } from "../../rooms/agent-display-name-allocation.js";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 
@@ -1359,10 +1360,16 @@ export async function endRoomAgentSession(input: {
   credential_fence?: RoomAgentDeliveryCredentialFence | null;
   /** Recorded on the session; see RoomAgentSessionEndReason. */
   end_reason?: RoomAgentSessionEndReason | null;
+  /**
+   * The supervisor ends the session to start the agent again in the same
+   * room. Its shared live activity stays for the next session to replace.
+   */
+  restarting?: boolean;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   const releasedReplyTurns: ReleasedReplyTurn[] = [];
   let unavailableReceiptRoom: string | null = null;
+  let removedLiveActivity: { room_id: string; session_ids: string[] } | null = null;
   const credentialInvalidations: RoomAgentCredentialInvalidation[] = [];
   const ended = await db.transaction(async (tx) => {
   if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
@@ -1453,12 +1460,20 @@ export async function endRoomAgentSession(input: {
       ...await markUnresolvedReceiptsUnavailableTx(tx, row as RoomAgentSessionRow, now, releasedReplyTurns),
     );
     unavailableReceiptRoom = (row as RoomAgentSessionRow).room_id;
+    // The agent left the room (retired, purged, moved, disconnected, its
+    // grant revoked): the turn it shared there would only read "Stopped
+    // updating" until retention removes it. Only a worker session shares.
+    if (!input.restarting && row.session_kind === "worker") {
+      const sessionIds = await deleteLiveActivityOfDepartedAgentTx(tx, { room_id: row.room_id, agent_key: row.agent_key });
+      if (sessionIds.length > 0) removedLiveActivity = { room_id: row.room_id, session_ids: sessionIds };
+    }
   }
 
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
   });
   emitCommittedCredentialInvalidations(credentialInvalidations);
   queueReplyTurnWakes(releasedReplyTurns);
+  if (removedLiveActivity) await announceRemovedLiveActivity([removedLiveActivity]);
   if (unavailableReceiptRoom && unavailableReceiptTargets.length > 0) {
     // Dynamic import: the server event module transitively imports this file.
     // Room-level so the shared stream never enumerates ids that may be

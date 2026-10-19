@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
 import type { RecordedReplyAttachment } from "../../../shared/message-attachments.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
@@ -116,7 +118,8 @@ export interface SupervisedDeliveryHttp {
   /**
    * The bytes of one attachment on a room message, at most `maxBytes`. The
    * bearer goes only to the room API; the storage address it redirects to
-   * gets no credential and is never returned, logged or shown. Rejects with
+   * gets no credential and is never returned, logged or shown. A local room
+   * reads the stored file in this process instead. Rejects with
    * RoomAttachmentDownloadError, or with the abort reason.
    */
   downloadAttachment?(input: {
@@ -204,6 +207,15 @@ type ActiveDeliveryInterruptReservation = {
   disposition: "cancelled" | "resume" | "freeze" | null;
 };
 
+type BearerRotationHold = {
+  bearer: string;
+  until: number;
+  maxHoldMs: number;
+  holders: number;
+  revoked: boolean;
+  successorBinding: boolean;
+};
+
 /**
  * The room refused the worker bearer itself (HTTP 401 or 403), as opposed to
  * a transport or server failure that the same bearer may survive.
@@ -224,6 +236,12 @@ export class SupervisedRoomAuthorizationError extends Error {
 export const ROOM_REFUSED_ACCESS_DETAIL = "The room refused this agent's access, so it is not receiving room messages.";
 
 const SUCCESSFUL_POLL_PACE_MS = 25;
+/**
+ * The longest a lane holds its polls for a rotated bearer. After it, the lane
+ * polls with the bearer it holds, and a refusal shows as one.
+ */
+export const BEARER_ROTATION_HOLD_MS = 60_000;
+const BEARER_ROTATION_WAIT_STEP_MS = 250;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
 const POLL_ERROR_BACKOFF_CAP_MS = 30_000;
 
@@ -240,6 +258,8 @@ export class SupervisedAgentDelivery {
   /** Memory-only registration identity; only a same-session bearer rotation
    * changes it in place. The bearer is never logged or persisted. */
   private readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent; roomRefused?: boolean }>();
+  /** Lanes whose bearer a same-session rotation is replacing; see holdIngressForBearerRotation. */
+  private readonly bearerRotations = new Map<string, BearerRotationHold>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   /** The live agent object each pump (and its admitted turn) authorizes with. */
@@ -303,6 +323,8 @@ export class SupervisedAgentDelivery {
     private readonly replyAttachmentSpool?: SupervisedReplyAttachmentSpool,
     /** Prepares the activating message's images for one turn; absent, no turn carries any. */
     private readonly roomTurnAttachments?: Pick<RoomTurnAttachmentStager, "prepare">,
+    /** Told when a delivered turn starts (for a room message) and when it ends, for the room's live view. */
+    private readonly observeTurn?: (agentId: string, change: { inboxItemId: string; sourceMessageId: string } | { ended: string | null }) => void,
   ) {}
 
   /**
@@ -696,7 +718,10 @@ export class SupervisedAgentDelivery {
     }
     this.startupRecovered.delete(agentId);
     this.refreshCalls.delete(agentId);
-    this.activeTurns.delete(agentId);
+    this.bearerRotations.delete(agentId);
+    if (this.activeTurns.delete(agentId)) {
+      try { this.observeTurn?.(agentId, { ended: null }); } catch { /* observation only */ }
+    }
     this.activeTurnAborts.delete(agentId);
     const health = await this.inbox.ingressHealth(agentId);
     if (health) await this.inbox.setIngressHealth({ agent_id: agentId, room_id: health.room_id, execution_generation_id: health.execution_generation_id, state: "stopped", detail: "Ingress stopped by the supervisor." });
@@ -704,7 +729,25 @@ export class SupervisedAgentDelivery {
 
   private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     let consecutivePollErrors = 0;
-    while (await this.hasIngressAuthority(agent, controller)) {
+    for (;;) {
+      // Once a rotation has revoked this bearer, wait for its successor with
+      // local checks only: the binding may already hold the new credential,
+      // and the full authority check would end the lane about to adopt it.
+      if (this.bearerHold(agent.agentId, agent.bearer)?.revoked) {
+        if (!this.daemonIngressAllowed(agent) || this.isStopping(agent.agentId)
+          || !await this.waitForNextPoll(controller, BEARER_ROTATION_WAIT_STEP_MS)) return;
+        continue;
+      }
+      if (!await this.hasIngressAuthority(agent, controller)) {
+        // The successor was bound before any poll was refused. Any other loss
+        // of authority ends the lane as before.
+        const hold = this.bearerHold(agent.agentId, agent.bearer);
+        if (!hold?.successorBinding || controller.signal.aborted || this.fenced || this.isStopping(agent.agentId)
+          || !this.daemonIngressAllowed(agent)) return;
+        this.bearerRevoked(hold);
+        continue;
+      }
+      const bearer = agent.bearer;
       try {
         // Intake and serialized delivery have independent lifetimes: neither
         // a long native turn nor a long network poll may block the other.
@@ -712,6 +755,13 @@ export class SupervisedAgentDelivery {
         await this.pollOnce(agent, controller);
         consecutivePollErrors = 0;
       } catch (error) {
+        // The rotation revoked this bearer: wait for its successor, with no
+        // refusal, health change or backoff.
+        const hold = error instanceof SupervisedRoomAuthorizationError && error.status === 401 ? this.bearerHold(agent.agentId, bearer) : null;
+        if (hold) {
+          this.bearerRevoked(hold);
+          continue;
+        }
         consecutivePollErrors += 1;
         // A refusal is shown to the owner and asks for nothing. The same
         // answer is all the daemon sees when a room admin has disconnected the
@@ -795,7 +845,8 @@ export class SupervisedAgentDelivery {
       const owner = this.loopOwners.get(agent.agentId);
       const bearer = agent.bearer;
       const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal }).catch((error: unknown) => {
-        if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) owner.roomRefused = true;
+        if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer
+          && (error.status !== 401 || !this.bearerHold(agent.agentId, bearer))) owner.roomRefused = true;
         throw error;
       });
       if (owner) this.roomAcceptsAgain(agent.agentId, owner);
@@ -868,6 +919,80 @@ export class SupervisedAgentDelivery {
     if (!owner.roomRefused) return;
     owner.roomRefused = false;
     this.onDeliverySettled?.(agentId);
+  }
+
+  /**
+   * A same-session rotation is about to replace this lane's bearer. The server
+   * revokes the old bearer when it mints the new one and ends the open poll,
+   * but the lane adopts the new bearer only once it is bound. A poll in
+   * between is refused, and that refusal says nothing about the room. So while
+   * the hold stands, a refusal of the old bearer is not read as the room's:
+   * the lane keeps polling until the old bearer is refused (or its successor
+   * is bound), then waits for that successor without polling. The hold ends
+   * when the lane holds another bearer, when every caller releases it,
+   * `maxHoldMs` after the old bearer was first refused, or twice that after
+   * the first caller took it; a refusal then shows as before.
+   */
+  holdIngressForBearerRotation(agentId: string, maxHoldMs = BEARER_ROTATION_HOLD_MS): () => void {
+    const owner = this.loopOwners.get(agentId);
+    if (!owner) return () => {};
+    // A retried or second mint of the same bearer keeps the first deadline, so
+    // repeated attempts cannot postpone a refusal indefinitely.
+    let hold = this.bearerHold(agentId, owner.bearer);
+    if (!hold) {
+      hold = { bearer: owner.bearer, until: performance.now() + 2 * maxHoldMs, maxHoldMs, holders: 0, revoked: false, successorBinding: false };
+      this.bearerRotations.set(agentId, hold);
+    }
+    hold.holders += 1;
+    const held = hold;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      held.holders -= 1;
+      if (held.holders <= 0 && this.bearerRotations.get(agentId) === held) this.bearerRotations.delete(agentId);
+    };
+  }
+
+  /**
+   * The rotation is about to bind the successor of this lane's bearer. From
+   * then until the lane adopts it, the lane's own authority check fails; that
+   * failure is the rotation, not a loss of authority.
+   */
+  bearerSuccessorBinding(agentId: string): void {
+    const owner = this.loopOwners.get(agentId);
+    const hold = owner ? this.bearerHold(agentId, owner.bearer) : null;
+    if (hold) hold.successorBinding = true;
+  }
+
+  /** The announced successor bind failed: a later loss of authority is no rotation. */
+  bearerSuccessorAbandoned(agentId: string): void {
+    const owner = this.loopOwners.get(agentId);
+    const hold = owner ? this.bearerHold(agentId, owner.bearer) : null;
+    if (hold) hold.successorBinding = false;
+  }
+
+  /**
+   * The rotation hold on `bearer`. A hold past its time, or one the lane has
+   * moved past by adopting another bearer, ends here; a late answer for an
+   * older bearer leaves a newer hold alone.
+   */
+  private bearerHold(agentId: string, bearer: string): BearerRotationHold | null {
+    const hold = this.bearerRotations.get(agentId);
+    if (!hold) return null;
+    const ownerBearer = this.loopOwners.get(agentId)?.bearer;
+    if (performance.now() >= hold.until || (ownerBearer !== undefined && ownerBearer !== hold.bearer)) {
+      this.bearerRotations.delete(agentId);
+      return null;
+    }
+    return hold.bearer === bearer ? hold : null;
+  }
+
+  /** The held bearer was refused: the lane now waits, at most `maxHoldMs` more. */
+  private bearerRevoked(hold: BearerRotationHold): void {
+    if (hold.revoked) return;
+    hold.revoked = true;
+    hold.until = Math.min(hold.until, performance.now() + hold.maxHoldMs);
   }
 
   /**
@@ -1617,6 +1742,7 @@ export class SupervisedAgentDelivery {
         phase,
         agent,
       });
+      try { this.observeTurn?.(agent.agentId, { inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id }); } catch { /* observation only */ }
     };
     const retryFailure = async (failure: Parameters<SupervisedAgentInboxStore["recordRetryFailure"]>[1]): Promise<void> => {
       if (!await this.hasLaneAuthority(agent, turnController)) return;
@@ -1741,7 +1867,11 @@ export class SupervisedAgentDelivery {
         const owner = this.loopOwners.get(agent.agentId);
         const fresh = await this.http.context({ roomId: agent.roomId, apiUrl: agent.apiUrl,
           bearer, signal: turnController.signal }).catch((error: unknown) => {
-          if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) owner.roomRefused = true;
+          if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) {
+            const hold = error.status === 401 ? this.bearerHold(agent.agentId, bearer) : null;
+            if (hold) this.bearerRevoked(hold);
+            else owner.roomRefused = true;
+          }
           throw error;
         });
         if (fresh !== null) observedContext = fresh;
@@ -2359,7 +2489,10 @@ export class SupervisedAgentDelivery {
       const active = this.activeTurns.get(agent.agentId);
       if (active?.invocationId === invocationId
         && active.recoveryContext === recoveryContext
-        && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
+        && active.inboxItemId === item.inbox_item_id) {
+        this.activeTurns.delete(agent.agentId);
+        try { this.observeTurn?.(agent.agentId, { ended: item.inbox_item_id }); } catch { /* observation only */ }
+      }
       await restoreProvenUndispatchedClaim();
       const interrupt = this.interruptReservations.get(agent.agentId);
       if (interrupt?.reservation.invocationId === invocationId

@@ -233,6 +233,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
         },
       },
     ],
+    liveActivitySessions: [],
     reasoningSessions: [
       {
         id: smokeCodexReasoningSessionId,

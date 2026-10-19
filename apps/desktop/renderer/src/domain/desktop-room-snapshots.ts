@@ -69,6 +69,32 @@ export function removeSnapshotReasoningSession(
   };
 }
 
+/**
+ * The newest shared turn of an agent. A room holds at most one per agent, so
+ * a session for the same agent replaces the one shown before.
+ */
+export function upsertSnapshotLiveActivitySession(
+  snapshot: DesktopRoomSnapshot | null,
+  session: DesktopReasoningSession
+): DesktopRoomSnapshot | null {
+  if (!snapshot || session.kind !== "live") return snapshot;
+  const agentKey = session.agentKey?.trim() || null;
+  const kept = (snapshot.liveActivitySessions ?? []).filter((existing) =>
+    existing.id !== session.id && (!agentKey || existing.agentKey?.trim() !== agentKey));
+  return { ...snapshot, liveActivitySessions: [session, ...kept] };
+}
+
+export function removeSnapshotLiveActivitySession(
+  snapshot: DesktopRoomSnapshot | null,
+  sessionId: string
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  return {
+    ...snapshot,
+    liveActivitySessions: (snapshot.liveActivitySessions ?? []).filter((session) => session.id !== sessionId),
+  };
+}
+
 let liveMessageArrival = 0;
 
 export function appendSnapshotMessage(

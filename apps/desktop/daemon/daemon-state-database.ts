@@ -20,7 +20,7 @@ import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js
 import { applyRuntimeRecoverySchema, validateRuntimeRecoverySchema } from "./runtime-recovery-journal.js";
 import { applyApprovalRequestClosureSchema, validateApprovalRequestClosureSchema } from "./execution-approval-journal.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 50;
+export const DAEMON_STATE_SCHEMA_VERSION = 51;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const workerExecutionBindingsSql = `CREATE TABLE worker_execution_bindings (
   entry_id TEXT NOT NULL, room_id TEXT NOT NULL, api_url TEXT NOT NULL,
@@ -82,6 +82,26 @@ function validateAgentImageInputColumn(database: DatabaseSync): void {
   if (!column || String(column.type).toUpperCase() !== "INTEGER" || Number(column.required) !== 1 || String(column.dflt_value) !== "0"
     || database.prepare("SELECT 1 FROM agent_configurations WHERE image_input NOT IN (0, 1) LIMIT 1").get()) {
     throw new Error("Agent configuration storage has an invalid image input column.");
+  }
+}
+/**
+ * v51: whether an agent's owner shares its live activity with the room: off,
+ * on, or off while the room may still show earlier turns that the daemon must
+ * remove. Only the owner's desktop turns it on, and the daemon publishes
+ * nothing while it is not on. Off for every existing agent.
+ */
+const LIVE_SHARING_COLUMN = "live_sharing TEXT NOT NULL DEFAULT 'off' CHECK (live_sharing IN ('off', 'on', 'withdrawing'))";
+function applyAgentLiveSharingColumn(database: DatabaseSync): void {
+  if (!database.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='live_sharing'").get()) {
+    database.exec(`ALTER TABLE agent_configurations ADD COLUMN ${LIVE_SHARING_COLUMN}`);
+  }
+  validateAgentLiveSharingColumn(database);
+}
+function validateAgentLiveSharingColumn(database: DatabaseSync): void {
+  const column = database.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agent_configurations') WHERE name='live_sharing'").get() as Row | undefined;
+  if (!column || String(column.type).toUpperCase() !== "TEXT" || Number(column.required) !== 1 || String(column.dflt_value) !== "'off'"
+    || database.prepare("SELECT 1 FROM agent_configurations WHERE live_sharing NOT IN ('off', 'on', 'withdrawing') LIMIT 1").get()) {
+    throw new Error("Agent configuration storage has an invalid live sharing column.");
   }
 }
 function applyDaemonEfficiencyMigration(database: DatabaseSync): void {
@@ -397,7 +417,7 @@ createSchema(database: DatabaseSync): void {
     this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
-  if (existingVersion >= 43 && existingVersion <= 49) {
+  if (existingVersion >= 43 && existingVersion <= 50) {
     this.migrateHostToolRules(database);
     return;
   }
@@ -710,6 +730,7 @@ createSchema(database: DatabaseSync): void {
     this.applyCurrentSchemaTail(database);
     this.applyCurrentConfigurationShape(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     database.exec("COMMIT");
   } catch (error) {
@@ -729,6 +750,7 @@ private migrateHostToolRules(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -749,6 +771,7 @@ private migratePreparedRoomContext(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -782,6 +805,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -814,6 +838,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -846,6 +871,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -917,6 +943,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -975,6 +1002,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -1005,6 +1033,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1031,6 +1060,7 @@ migrateV7ToV8(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1055,6 +1085,7 @@ migrateV8ToV9(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1078,6 +1109,7 @@ migrateV9ToV10(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1101,6 +1133,7 @@ migrateV10ToV11(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1124,6 +1157,7 @@ migrateV11ToV12(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1159,6 +1193,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1192,6 +1227,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1223,6 +1259,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1252,6 +1289,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1279,6 +1317,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1304,6 +1343,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1335,6 +1375,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1365,6 +1406,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1396,6 +1438,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1426,6 +1469,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1452,6 +1496,7 @@ migrateV22ToV23(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1478,6 +1523,7 @@ migrateV23ToV24(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1504,6 +1550,7 @@ migratePollingOfferStorage(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1535,6 +1582,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1564,6 +1612,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1592,6 +1641,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1619,6 +1669,7 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1645,6 +1696,7 @@ private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1669,6 +1721,7 @@ private migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1695,6 +1748,7 @@ private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1718,6 +1772,7 @@ private migrateExecutionDelegationAuthorityStorage(database: DatabaseSync): void
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1740,6 +1795,7 @@ private migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void 
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -1763,6 +1819,7 @@ private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void
     applyManagedLaunchContractSchema(database);
     applyWorkerExecutionBindings(database);
     applyAgentImageInputColumn(database);
+    applyAgentLiveSharingColumn(database);
     applyDaemonEfficiencyMigration(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     this.applyLocalRoomMembershipShape(database);
@@ -3372,6 +3429,7 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 
     validateTerminalResults(database, 20);
     if (version >= 48) applyDaemonReadIndexes(database);
     if (version >= 50) validateAgentImageInputColumn(database);
+    if (version >= 51) validateAgentLiveSharingColumn(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -3387,6 +3445,7 @@ validateCurrentShape(database: DatabaseSync): void {
   this.validateLocalRoomMembershipShape(database);
   validateDaemonReadIndexes(database);
   validateAgentImageInputColumn(database);
+  validateAgentLiveSharingColumn(database);
   validatePreparedRoomContextSchema(database);
   if (this.hasPendingV6SecretScrub(database)) {
     throw new Error("Daemon observation storage requires completed credential cleanup.");

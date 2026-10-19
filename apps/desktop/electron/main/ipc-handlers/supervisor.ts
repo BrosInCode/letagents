@@ -348,6 +348,15 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       assertDesktopUpdateMutationAllowed();
     });
   });
+  // Signed like the owner's-setup choice: only the app's own window shares an agent's work with its room.
+  targetIpcMain.handle("desktop:supervisor:set-agent-live-sharing", async (event, input: import("../../ipc-types.js").DesktopSupervisorAgentLiveSharingInput) => {
+    assertHostApprovalSender(event);
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.setAgentLiveSharing(input, () => {
+      assertHostApprovalSender(event);
+      assertDesktopUpdateMutationAllowed();
+    });
+  });
   targetIpcMain.handle("desktop:supervisor:apply-agent-configuration", async (_event, input: import("../../ipc-types.js").DesktopSupervisorAgentConfigurationApplyInput) => {
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.applyAgentConfiguration(input);
