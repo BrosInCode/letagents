@@ -5,7 +5,6 @@ import { closeSync, constants as fsConstants, fsyncSync, mkdtempSync, openSync, 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
-
 import {
   buildCodexStartPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
@@ -20,7 +19,6 @@ import {
   type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
-  type ProviderObservedState,
   type ProviderRoomTurnOptions,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnRequest,
@@ -38,12 +36,7 @@ import {
   type ControlProbeResult,
 } from "./provider-adapter.js";
 import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
-import {
-  nativeExecutionId,
-  nativeLifecycleCheckpoint,
-  ProviderExecutionObserver,
-  type NativeLifecycleCheckpoint,
-} from "./provider-execution-observer.js";
+import { nativeExecutionId, nativeLifecycleCheckpoint, type NativeLifecycleCheckpoint } from "./provider-execution-observer.js";
 import {
   CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
   CURSOR_MCP_CONNECTOR_PARENT,
@@ -60,7 +53,6 @@ import {
   CursorRoomTurnRecoveryError, readBoundedCursorTurnFile,
 } from "./cursor-turn-settlement.js";
 import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
-export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 import {
   cursorNativeToolEnvelope,
   cursorNativeToolTerminalResult,
@@ -83,15 +75,6 @@ import {
   defaultLaunchTurn,
   type CursorCliChild,
 } from "./cursor-turn-launcher.js";
-export {
-  assertCursorPersonalIdentity,
-  cursorCliEnv,
-  CursorIdentityAuthRequiredError,
-  CursorTeamManagedIdentityError,
-  defaultLaunchTurn,
-};
-export type { CursorCliChild };
-
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   ProviderProcessCustody,
@@ -130,6 +113,19 @@ import {
   removeSupervisedWorkspaceGenerationReceipt,
   type SupervisedWorkspaceGenerationHandle,
 } from "./supervised-workspace-generation.js";
+import {
+  CursorPostDispatchCheckpointError,
+  CursorProviderHandle,
+  CursorRecordedTurnInProgressError,
+  CursorRoomTurnNotDispatchedError,
+  CursorRoomTurnObservationDetachedError,
+  type CursorGenerationSettlement,
+  type CursorStreamMessage,
+  type CursorTurnTerminal,
+  type LiveTurn,
+} from "./cursor/lane-state.js";
+
+export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 
 // P2b (plan v10 §4.8/§6, task_38, matrix row in §4.8): Cursor through its
 // native `cursor-agent` harness. Unlike Codex (durable app-server) and Claude
@@ -149,6 +145,16 @@ import {
 // reseals an attempt-private MCP profile, and builds a narrow child environment.
 // Generic interactive Cursor lanes retain their established local behavior.
 
+export {
+  assertCursorPersonalIdentity,
+  cursorCliEnv,
+  CursorIdentityAuthRequiredError,
+  CursorTeamManagedIdentityError,
+  defaultLaunchTurn,
+};
+
+export type { CursorCliChild };
+
 function cursorPermissionUsesWorkspaceGeneration(
   permissionProfileId: ProviderSpawnRequest["permissionProfileId"],
 ): boolean {
@@ -158,15 +164,6 @@ function cursorPermissionUsesWorkspaceGeneration(
 function usesExactScratchWorkspace(request: ProviderSpawnRequest): boolean {
   return request.workspaceKind === "room_scratch";
 }
-
-type CursorStreamMessage = Record<string, unknown> & {
-  type?: unknown;
-  subtype?: unknown;
-  session_id?: unknown;
-  is_error?: unknown;
-  result?: unknown;
-  request_id?: unknown;
-};
 
 export interface CursorProviderAdapterDependencies {
   launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; allowedInternalUnixSocketRoots?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; fullAccess?: boolean; nativeResumeSessionId?: string; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
@@ -282,7 +279,9 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
 const ALLOWED_POLICY_KEYS = new Set(["mode", "force", "sandbox"]);
 
 export const CURSOR_NO_ROOM_REPLY_SENTINEL = "LETAGENTS_NO_ROOM_REPLY";
+
 const CURSOR_PENDING_CONTINUATION_PREFIX = "cursor-pending:";
+
 export function boundedCursorRoomTurnPrompt(
   request: ProviderRoomTurnRequest,
   turnId: string,
@@ -443,83 +442,6 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   now: () => new Date().toISOString(),
 };
 
-interface LiveTurn {
-  child: CursorCliChild;
-  pid: number;
-  processIdentity: string;
-  sawInit: boolean;
-  sawResult: boolean;
-  resultWasError: boolean;
-  resultText: string | null;
-  providerRequestId: string | null;
-  interruptRequested: boolean;
-  /** Supervisor-minted identity embedded in the prompt and durable inbox. */
-  roomTurnId: string | null;
-  /** Exact control identity even for predecessor legacy turns with no inbox id. */
-  controlTurnId: string;
-  statePath: string | null;
-  /** Writable turns own one private generation until its immutable tree is reconciled. */
-  workspaceGeneration: SupervisedWorkspaceGenerationHandle | null;
-  workspaceGenerationManifestPath: string | null;
-  workspaceGenerationSettlement?: CursorGenerationSettlement;
-  liveDisplayTools: Map<string, { tool: string; input: unknown; completed: boolean }>;
-  executionTools: Map<string, { tool: string; completed: boolean }>;
-  executionTurnFinished: boolean;
-  executionRuntimeFinished: boolean;
-  /** Keep the exited child birth installed until its typed turn effect is durable. */
-  lifecycleSettlementDeferred: boolean;
-  executionTerminalCheckpoint: {
-    sessionId: string; subtype: string; isError: boolean; nativeLifecycle: NativeLifecycleCheckpoint;
-  } | null;
-  executionContinuationId: string | null;
-  completion?: Promise<CursorTurnTerminal>;
-}
-
-type CursorTurnTerminal = {
-  state: "result" | "interrupted" | "attempt_terminal";
-  exit: ProviderProcessExit;
-  text: string | null;
-  isError: boolean;
-  nativeFailure?: boolean;
-  providerRequestId: string | null;
-  attemptTerminal: ProviderTerminalPayload | null;
-  publicationContract: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0";
-  /** Safely redacted detail from the trusted private wrapper terminal. */
-  terminalError?: string;
-  /** Exact init identity retained when a live post-init checkpoint fails. */
-  providerContinuationId?: string;
-  /** Trusted wrapper link to the exact private filesystem authority journal. */
-  workspaceGenerationManifestPath?: string;
-  workspaceGenerationSettlement?: CursorGenerationSettlement;
-  /** The turn finished, but its wrapper could not prove its remote authority ended. */
-  authorityUnproven?: true;
-  /** Its private generation stays unreconciled, so the turn's file changes are not kept. */
-  fileChangesLost?: true;
-};
-
-type CursorGenerationSettlement = {
-  version: 1;
-  phase: "aborted" | "cleaned";
-  provider_continuation_id: string;
-};
-
-class CursorRoomTurnNotDispatchedError extends Error {
-  readonly roomTurnRecoveryOutcome = "not_dispatched" as const;
-  constructor(message: string, readonly providerTurnId: string | null = null,
-    readonly workspaceGenerationManifestPath?: string,
-    readonly workspaceGenerationSettlement?: CursorGenerationSettlement) {
-    super(message);
-  }
-}
-
-class CursorPostDispatchCheckpointError extends Error {}
-
-class CursorRoomTurnObservationDetachedError extends Error {}
-
-class CursorRecordedTurnInProgressError extends Error {
-  readonly providerAttachOutcome = "in_progress" as const;
-}
-
 // The empirically proven usage-limit signature (task_38 spike, msg_1708):
 // init observed, the stream stops with NO result event, the process exits
 // non-zero with no signal, and stderr carries the ActionRequiredError. This is
@@ -535,55 +457,6 @@ function isProviderQuotaExit(turn: LiveTurn, exit: ProviderProcessExit): boolean
     && turn.sawInit
     && !turn.sawResult
     && PROVIDER_QUOTA_STDERR.test(turn.child.stderrTail());
-}
-
-class CursorProviderHandle implements ProviderHandle {
-  state: ProviderObservedState = "starting";
-  stopRequested = false;
-  protocolError = false;
-  terminal: ProviderTerminalPayload | null = null;
-  providerContinuationId: string | null = null;
-  liveTurn: LiveTurn | null = null;
-  activeRoomTurnId: string | null = null;
-  roomTurnOperationId: string | null = null;
-  roomTurnAbortController: AbortController | null = null;
-  roomTurnOperationSettled: Promise<void> | null = null;
-  readonly roomTurnResults = new Map<string, CursorTurnTerminal>();
-  readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
-  readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
-  readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
-  streamSequence = 0;
-  readonly execution: ProviderExecutionObserver;
-
-  constructor(
-    readonly workAttemptId: string,
-    readonly cwd: string,
-    readonly policyArgs: string[],
-    readonly deliveryMode: "mcp_polling" | "daemon_inbox",
-    readonly spawnRequest: ProviderSpawnRequest,
-    readonly supervisedProfile: CursorManagedProfile | null,
-    now: () => string,
-  ) { this.execution = new ProviderExecutionObserver(now); }
-
-  /**
-   * Honest process claim: a pid exists only while a turn runs. Between turns
-   * the lane claims NO process (matrix cell "never a claimed live process").
-   */
-  get pid(): number | null {
-    return this.liveTurn?.pid ?? null;
-  }
-
-  get providerConnection(): ProviderConnectionRef {
-    return {
-      kind: "cursor_cli",
-      pid: this.liveTurn?.pid ?? null,
-      processIdentity: this.liveTurn?.processIdentity ?? null,
-    };
-  }
-
-  observedState(): ProviderObservedState {
-    return this.state;
-  }
 }
 
 export class CursorProviderAdapter implements ProviderAdapter {
