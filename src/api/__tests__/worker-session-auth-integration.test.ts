@@ -479,7 +479,6 @@ function registerRoutesForRoom(room: { id: string }, options: { realCoordination
     requireAdmin: async () => true,
     requireParticipant,
     rememberAgentRoomParticipant: async () => undefined,
-    maybeEmitStaleWorkPrompt: async () => null,
   } as never);
 
   registerRoomReasoningRoutes(app as never, {

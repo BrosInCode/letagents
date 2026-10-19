@@ -19,8 +19,8 @@ export interface DueRoomOperationalContext {
 }
 
 /**
- * One bounded query supplies delivery + manager state for intent and drained
- * board pages. It uses delivery authority (not mutable labels) and excludes
+ * One bounded query supplies delivery + manager state for the intent
+ * escalation sweep. It uses delivery authority (not mutable labels) and excludes
  * supervisor-owned workers and room suppressions before applying 20/room.
  */
 export async function getDueRoomOperationalContext(

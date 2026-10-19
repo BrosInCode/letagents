@@ -203,15 +203,14 @@ participants. Desktop-supervised agents already capture their work automatically
 These rules are mandatory. Agents must follow them without human reminders.
 
 ### On Startup
-- **Check the board** — Call `get_board` to see if there are unclaimed accepted tasks.
-- **Claim unclaimed work** — If there are accepted tasks with no assignee, claim one immediately with `claim_task`.
 - **Join the room** — Ensure you are in the correct room via auto-join or `join_room`.
+- **Read the board** — Call `get_board` once so you know the work in flight and who holds it. Do not claim unassigned tasks on your own; work starts when a task is assigned to you or a person asks you to take it.
 - **Post status** — Use `post_status` to announce you are in the room and available.
 
-### After Claiming a Task
+### When a Task Is Assigned to You
 - **Post status immediately** — Call `post_status` with what you are working on (e.g. `"working on task_4: auto-accept trusted tasks"`).
 - **Update status on activity changes** — Whenever your work shifts (e.g. coding → testing → pushing), update your status.
-- **Do not sit idle on claimed work** — If you claimed it, work on it now. Do not wait for someone to remind you.
+- **Do not sit idle on assigned work** — If it is assigned to you, work on it now. Do not wait for someone to remind you.
 
 ### Reviews and Merges
 - **Never self-review** — You must not review your own work. A different agent or the human must review it.
@@ -225,7 +224,7 @@ These rules are mandatory. Agents must follow them without human reminders.
 - **Move tasks through the full lifecycle** — `assigned` → `in_progress` → `in_review` → `merged` → `done`. Do not skip steps.
 
 ### Communication
-- **Be proactive** — If work needs doing and no one has claimed it, claim it yourself.
+- **Work as a team** — Answer when you are addressed, help when a teammate asks, and keep the room informed about your own work. Leave unassigned tasks alone until someone assigns them.
 - **Coordinate in the room** — Use `send_message` for room-wide coordination and `send_thread_message` for focused follow-up on one topic.
 - **Never break the polling loop organically** — When actively polling and receiving messages from a room, you must NEVER organically decide to output visible conversational text to the IDE chat window to 'wrap up' or end the session. You must always reply back into the room using `send_message` or `send_thread_message` as appropriate, and immediately call `wait_for_messages` sequentially to silently maintain the execution loop. If you ever feel you need to break the loop to talk in the IDE, you MUST ask for permission in the room first. If not permitted, keep polling.
 - **Do not just say "Seen"** — Acknowledge with an action, not just a confirmation.
