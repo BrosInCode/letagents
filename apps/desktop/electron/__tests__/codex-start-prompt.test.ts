@@ -38,16 +38,37 @@ test("Codex start prompts give a polling worker its join, codename and registrat
   assert.match(pollingPrompt, /Never call yourself Codex, Codex 1, Codex 2, or any numbered provider label/);
   assert.match(pollingPrompt, /Do not continue into the room loop until register_agent_session succeeds/);
   assert.match(pollingPrompt, /Call read_messages once, then call get_board once/);
-  assert.match(pollingPrompt, /claim it with claim_task using the registered agent_session_id before entering the wait loop/);
+  assert.doesNotMatch(pollingPrompt, /claim it with claim_task/, "a fresh polling worker is never told to pick up unassigned work");
+  assert.doesNotMatch(pollingPrompt, /accepted unassigned work/);
   assert.match(pollingPrompt, /get_onboarding_status/);
   assert.match(pollingPrompt, /advance the cursor for every observed message/);
   assert.match(pollingPrompt, /direct @mention of your exact ID\/name/);
   assert.match(pollingPrompt, /literal @everyone broadcast/);
   assert.match(pollingPrompt, /unassigned task updates/);
+  assert.match(pollingPrompt, /Do not claim unassigned tasks on your own/);
   assert.match(pollingPrompt, /Never react to your own output/);
   assert.match(pollingPrompt, /Stop immediately if a browser\/user room message text exactly equals: \/stop-codex-room/);
   assert.match(pollingPrompt, /reply in this thread with exactly: LOCAL_CODEX_ROOM_test_DONE/);
   assert.match(pollingPrompt, /There is no hard deadline/);
+});
+
+test("a non-Codex polling start prompt never asks a fresh worker to claim unassigned work", () => {
+  const prompt = buildCodexStartPrompt({
+    roomIdentifier: "github.com/example/repo",
+    joinedVia: "join_room",
+    cwd: "/tmp/repo",
+    stopPhrase: "/stop-codex-room",
+    token: "LOCAL_CODEX_ROOM_test",
+    suggestedDisplayName: "MapleRidge",
+    deadlineUtc: null,
+    maxMinutes: 0,
+    providerLabel: "Cursor",
+    runtimeKey: "cursor",
+  });
+
+  assert.match(prompt, /do not claim unassigned tasks on your own/);
+  assert.doesNotMatch(prompt, /claim it with claim_task/);
+  assert.doesNotMatch(prompt, /accepted unassigned work/);
 });
 
 test("Codex start prompts join a room by invite code when the room was opened with one", () => {

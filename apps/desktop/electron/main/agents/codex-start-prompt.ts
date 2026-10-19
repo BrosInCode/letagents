@@ -69,7 +69,7 @@ export function buildCodexStartPrompt(input: {
     ? [
       "Codex room activation policy: every observed message remains shared transcript context, and you must advance the cursor for every observed message (including last_observed_message_id when no visible messages are returned).",
       "Only reply or start work for a direct @mention of your exact ID/name, a literal @everyone broadcast, a task assigned or actively leased to your exact worker, or a reply/thread where you were directly addressed or are already a participant.",
-      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
+      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Do not claim unassigned tasks on your own; work starts when a task is assigned to you. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
     ]
     : [];
   const deadlineInstruction =
@@ -119,17 +119,16 @@ export function buildCodexStartPrompt(input: {
     `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`${runtimeKey}:${input.token}`)}, the same chosen display_name, and cwd=${JSON.stringify(input.cwd)}. Keep the returned agent_session_id.`,
     "7. Do not continue into the room loop until register_agent_session succeeds. If LetAgents MCP auth is required, call get_onboarding_status and finish with a short public setup-needed note instead of claiming availability.",
     "8. Pass that agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, post_reasoning, and task tools whenever the tool accepts it.",
-    "9. If get_board shows accepted unassigned work that is appropriate for you, claim it with claim_task using the registered agent_session_id before entering the wait loop.",
-    "10. Do not start another live session. Join the room inline in this worker only.",
-    "11. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
+    "9. Do not start another live session. Join the room inline in this worker only.",
+    "10. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
     ...(codexActivationRules.length
       ? codexActivationRules
-      : ["12. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive."]),
-    "13. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
-    "14. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
-    "15. Also call post_reasoning for concise public progress summaries when you start meaningful work, become blocked, make a useful checkpoint, or finish useful work. This is readable progress for the desktop UI, not hidden chain-of-thought.",
-    `16. Stop immediately if a browser/user room message text exactly equals: ${input.stopPhrase}`,
-    `17. When stopping, reply in this thread with exactly: ${input.token}_DONE`,
+      : ["11. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive. Act on work assigned to you and on messages addressed to you; do not claim unassigned tasks on your own."]),
+    "12. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
+    "13. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
+    "14. Also call post_reasoning for concise public progress summaries when you start meaningful work, become blocked, make a useful checkpoint, or finish useful work. This is readable progress for the desktop UI, not hidden chain-of-thought.",
+    `15. Stop immediately if a browser/user room message text exactly equals: ${input.stopPhrase}`,
+    `16. When stopping, reply in this thread with exactly: ${input.token}_DONE`,
     "",
     "Constraints:",
     "- Do not narrate hidden chain-of-thought.",
