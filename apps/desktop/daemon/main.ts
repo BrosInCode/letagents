@@ -283,7 +283,7 @@ export class SupervisorDaemon {
     );
     this.nativeActivity = new NativeActivityPublicationCoordinator({
       bindings: this.workerBindings,
-      updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      updateEntry: (entryId, update, options) => this.updateManifestEntry(entryId, update, undefined, options),
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
     });
     this.stateWatch = new DaemonStateWatch({
@@ -415,6 +415,7 @@ export class SupervisorDaemon {
       manifest: {
         getEntry: (entryId) => this.activityWrites.overlayEntry(this.store.getEntry(entryId)),
         getRecentEntry: (entryId) => this.activityWrites.readRecentEntry(entryId),
+        getScalarEntry: (entryId) => this.activityWrites.overlayEntry(this.store.getEntry(entryId, "summary")),
         load: () => this.activityWrites.overlayManifest(this.store.load()),
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
@@ -1511,12 +1512,10 @@ export class SupervisorDaemon {
     return this.nativeActivity.publish(entryId, method, status, observedAt);
   }
 
-  private async updateManifestEntry(
-    entryId: string,
-    update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
-    roomMoveCancellation?: { agentId: string; detail: string },
+  private async updateManifestEntry(entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
+    roomMoveCancellation?: { agentId: string; detail: string }, options?: { readsNoActivity?: boolean },
   ): Promise<DaemonManifestEntry> {
-    return this.manifestTransitions.updateEntry(entryId, update, roomMoveCancellation);
+    return this.manifestTransitions.updateEntry(entryId, update, roomMoveCancellation, options);
   }
 
   /** Identity P1b/P1d must pass into work-durability fencing. */
