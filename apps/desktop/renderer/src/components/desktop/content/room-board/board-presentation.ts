@@ -1,3 +1,4 @@
+import { compareText } from "../../../../domain/formatters";
 import type { DesktopTaskSummary, WorkerSnapshot } from "../../../../../../electron/ipc-types";
 import { TASK_STATUS_ORDER } from "../../../../domain/tasks";
 import { timestampValue } from "../../../../domain/time";
@@ -115,7 +116,7 @@ export function boardOwnerOptions(tasks: DesktopTaskSummary[]): Array<{ id: stri
     { id: "all", label: "All owners" },
     { id: "unassigned", label: "Unassigned" },
     ...[...owners].map(([id, label]) => ({ id, label }))
-      .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id)),
+      .sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id)),
   ];
 }
 
@@ -147,11 +148,11 @@ export function visibleBoardGroups(input: {
     && (!input.statusFilter || input.statusFilter === "all" || task.status === input.statusFilter)
   ).sort((left, right) => {
     const delta = input.sort === "title"
-      ? left.title.localeCompare(right.title)
+      ? compareText(left.title, right.title)
       : input.sort === "oldest"
         ? timestampValue(left.createdAt) - timestampValue(right.createdAt)
         : timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt);
-    return delta || left.id.localeCompare(right.id);
+    return delta || compareText(left.id, right.id);
   });
   const groups = statuses.filter((status) => !input.statusFilter || input.statusFilter === "all" || status === input.statusFilter).map((status) => ({
     status,

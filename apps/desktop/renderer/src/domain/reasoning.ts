@@ -1,3 +1,4 @@
+import { compareText } from "./formatters";
 import type { DesktopReasoningSession } from "../../../electron/ipc-types";
 import { displayNameFromActor, normalizeAgentKey } from "./agents";
 import { timestampValue } from "./time";
@@ -21,7 +22,7 @@ export function latestReasoningSessionForTarget(
     .filter((session) => reasoningSessionAgentKeys(session).some((key) => keys.includes(key)))
     .sort((left, right) =>
       timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt)
-      || String(right.id).localeCompare(String(left.id))
+      || compareText(String(right.id), String(left.id))
     )[0] || null;
 }
 
@@ -47,7 +48,7 @@ export function latestReasoningSessionForExactIdentity(
     })
     .sort((left, right) =>
       timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt)
-      || String(right.id).localeCompare(String(left.id))
+      || compareText(String(right.id), String(left.id))
     )[0] || null;
 }
 

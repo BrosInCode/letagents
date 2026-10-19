@@ -115,9 +115,9 @@ export function buildRoomLiveSnapshot(input: {
       if (text) entries.push({ ...entry, text });
     }
   }
-  let omitted = input.dropped || entries.length > ROOM_LIVE_LIMITS.entries;
-  let kept = entries.slice(-ROOM_LIVE_LIMITS.entries);
-  const live = (list: RoomLiveEntry[]) => ({
+  const omittedAtStart = input.dropped || entries.length > ROOM_LIVE_LIMITS.entries;
+  const newest = entries.slice(-ROOM_LIVE_LIMITS.entries);
+  const live = (list: RoomLiveEntry[], omitted: boolean) => ({
     version: ROOM_LIVE_SNAPSHOT_VERSION,
     state: input.endedAt ? "ended" as const : "working" as const,
     started_at: input.startedAt,
@@ -127,11 +127,22 @@ export function buildRoomLiveSnapshot(input: {
     entries: list,
   });
   // Leave room for the request body around the snapshot.
-  while (kept.length && Buffer.byteLength(JSON.stringify(live(kept))) > ROOM_LIVE_LIMITS.snapshotBytes - 1_024) {
-    kept = kept.slice(1);
-    omitted = true;
+  const fits = (dropFromStart: number) => Buffer.byteLength(JSON.stringify(
+    live(newest.slice(dropFromStart), omittedAtStart || dropFromStart > 0))) <= ROOM_LIVE_LIMITS.snapshotBytes - 1_024;
+  // The snapshot only shrinks as older entries go (dropping any sets the
+  // omitted flag once), so the fewest entries to drop is found by bisection
+  // instead of one full serialization per dropped entry.
+  let drop = 0;
+  if (!fits(0)) {
+    let low = 1;
+    let high = newest.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (fits(middle)) high = middle; else low = middle + 1;
+    }
+    drop = Math.min(low, newest.length);
   }
-  const snapshot = normalizeRoomLiveSnapshot(live(kept));
+  const snapshot = normalizeRoomLiveSnapshot(live(newest.slice(drop), omittedAtStart || drop > 0));
   return { summary: boundLiveActivityLine(currentStep(snapshot), LIVE_ROOM_SHARE_SUMMARY_MAX_LENGTH), live: snapshot };
 }
 
@@ -184,6 +195,8 @@ type ShareState = {
   turn: ShareTurn | null;
   session: { id: string; inboxItemId: string } | null;
   sentKey: string | null;
+  /** The shape of the feed (turn, end, window) the sent snapshot was built from; read only with sentKey. */
+  sentShape: string | null;
   lastPublishMs: number;
   failures: number;
   timer: ReturnType<typeof setTimeout> | null;
@@ -321,7 +334,7 @@ export class LiveRoomSharePublisher {
     let state = this.states.get(entryId);
     if (!state) {
       state = {
-        turn: null, session: null, sentKey: null, lastPublishMs: Number.NEGATIVE_INFINITY, failures: 0,
+        turn: null, session: null, sentKey: null, sentShape: null, lastPublishMs: Number.NEGATIVE_INFINITY, failures: 0,
         timer: null, chain: Promise.resolve(), withdrawPending: false, withdrawSinceMs: null, epoch: 0, unsupportedTurn: null,
       };
       this.states.set(entryId, state);
@@ -409,8 +422,16 @@ export class LiveRoomSharePublisher {
     const turn = state.turn;
     if (!turn || turn.inboxItemId === state.unsupportedTurn || !sharing) return;
     let body: SnapshotBody;
+    let feedShape: string;
     try {
       const feed = this.ports.feed.retainedAfter(entryId, turn.startSequence);
+      // Feed events are appended with new sequences and never changed, so the
+      // same turn, end, window and dropped flag give the same snapshot as the
+      // one already sent. Skip building it again.
+      feedShape = [turn.inboxItemId, turn.endedAt ?? "", feed.dropped, feed.events.length,
+        feed.events[0]?.sequence ?? "", feed.events.at(-1)?.sequence ?? ""].join("|");
+      if (state.sentKey !== null && state.sentShape === feedShape
+        && state.session?.inboxItemId === turn.inboxItemId) return;
       const windowStart = feed.events[0]?.sequence ?? Number.POSITIVE_INFINITY;
       body = buildRoomLiveSnapshot({
         events: feed.events,
@@ -451,6 +472,7 @@ export class LiveRoomSharePublisher {
         this.withdrawalDone(state);
       }
       state.sentKey = key;
+      state.sentShape = feedShape;
       state.failures = 0;
     } catch (error) {
       if (!current()) return;

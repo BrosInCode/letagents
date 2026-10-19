@@ -149,6 +149,12 @@ export type ProviderStreamManifest = {
    * activity events between reads, so they are read only, never changed.
    */
   getRecentEntry?(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  /**
+   * The same entry as getEntry for a caller that reads only its scalar fields:
+   * the activity holds the short summary window, never payloads. The batcher's
+   * overlay still applies, so state it changed is seen. Falls back to getEntry.
+   */
+  getScalarEntry?(entryId: string): Promise<DaemonManifestEntry | undefined>;
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   updateEntry(
     entryId: string,
@@ -780,7 +786,8 @@ export class ProviderStreamCoordinator {
       if (!heartbeatInstallation) return;
       const current = heartbeatInstallation.handle;
       this.track((async () => {
-        const manifestEntry = await this.options.manifest.getEntry(entryId);
+        // The heartbeat reads only scalar fields; it never needs the events.
+        const manifestEntry = await this.readScalarEntry(entryId);
         if (!manifestEntry || !this.entryMatchesInstallation(manifestEntry, heartbeatInstallation)
           || !this.isCurrentInstallation(heartbeatInstallation)) return;
         if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
@@ -1008,6 +1015,11 @@ export class ProviderStreamCoordinator {
       && entry.provider_ref.execution_generation_id === executionGenerationId
       && sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, connection)
       && handle.appliedConfigurationRevision !== undefined;
+  }
+
+  /** The entry for a reader of scalar fields only; its activity is not the full window. */
+  private readScalarEntry(entryId: string): Promise<DaemonManifestEntry | undefined> {
+    return this.options.manifest.getScalarEntry?.(entryId) ?? this.options.manifest.getEntry(entryId);
   }
 
   private entryMatchesInstallation(
@@ -1284,7 +1296,7 @@ export class ProviderStreamCoordinator {
     installation: ProviderInstallationToken,
   ): Promise<"working" | "idle" | null> {
     const { entryId, handle } = installation;
-    const entry = await this.options.manifest.getEntry(entryId);
+    const entry = await this.readScalarEntry(entryId);
     if (!entry || !this.entryMatchesInstallation(entry, installation)
       || !this.isCurrentInstallation(installation)) return null;
     if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId

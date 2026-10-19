@@ -405,6 +405,55 @@ test("a snapshot keeps the newest entries within the stored limits", () => {
   for (const entry of live.entries) if (entry.kind === "note") assert.ok(entry.text.length <= ROOM_LIVE_LIMITS.textChars);
 });
 
+test("a too-large snapshot keeps exactly as many newest entries as fit", () => {
+  const events = [] as Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: null; payload: unknown }>;
+  for (let index = 0; index < 45; index += 1) {
+    const words = Array.from({ length: 150 }, (_, word) => `w${index}x${word}`).join(" ");
+    for (const item of [note(`r${index}`, words), tool(`t${index}`, "shellToolCall", "completed")]) {
+      events.push({ sequence: events.length + 1, observed_at: item.observed_at, kind: item.kind, method: item.method, summary: null, payload: item.payload });
+    }
+  }
+  const build = (list: typeof events) => buildRoomLiveSnapshot({
+    events: list, dropped: false, startedAt: "2026-10-18T10:00:00.000Z", endedAt: null, requestMessageId: "msg_1",
+  }).live;
+  // The reference: the longest newest suffix the byte limit leaves whole. Such
+  // a suffix is returned with no entry dropped, so it is not marked omitted.
+  let expected = 0;
+  for (let count = 1; count <= events.length; count += 1) {
+    const live = build(events.slice(-count));
+    if (!live.omitted_earlier) expected = live.entries.length;
+  }
+  const live = build(events);
+  assert.ok(expected > 0 && expected < ROOM_LIVE_LIMITS.entries, "the fixture crosses the byte limit before the entry limit");
+  assert.equal(live.entries.length, expected);
+  assert.equal(live.omitted_earlier, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(live)) <= ROOM_LIVE_LIMITS.snapshotBytes - 1_024);
+});
+
+test("a turn whose feed did not change is not rebuilt for the next check", async () => {
+  const { time, calls, feed, publisher, push } = harness({ sharing: true });
+  publisher.turnStarted(AGENT, "inbox_1", "msg_7");
+  push(note("r1", "Looking at the failing test."));
+  await time.advance(LIVE_ROOM_SHARE_INTERVAL_MS);
+  assert.equal(calls.length, 1);
+  let payloadReads = 0;
+  const retained = feed.retainedAfter.bind(feed);
+  feed.retainedAfter = (entryId, afterSequence) => {
+    const result = retained(entryId, afterSequence);
+    return { ...result, events: result.events.map((item) => ({ ...item, get payload() { payloadReads += 1; return item.payload; } })) };
+  };
+  // The same event again wakes the publisher; the feed it reads is unchanged.
+  const latest = retained(AGENT, 0).events.at(-1)!;
+  publisher.observe(AGENT, latest);
+  await time.advance(LIVE_ROOM_SHARE_INTERVAL_MS);
+  assert.equal(payloadReads, 0, "no snapshot was built from an unchanged feed");
+  assert.equal(calls.length, 1, "nothing is sent for an unchanged feed");
+  push(update("m1", "Fixed."));
+  await time.advance(LIVE_ROOM_SHARE_INTERVAL_MS);
+  assert.ok(payloadReads > 0, "a new event builds a new snapshot");
+  assert.equal(calls.length, 2);
+});
+
 test("room text keeps line breaks but loses controls, credentials and machine paths", () => {
   assert.equal(
     roomSafeText("Step one.\r\nRead C:\\Users\\owner\\keys\\prod.pem and\u0007 redis://:pw@cache:6379\u200b", 1_200),
