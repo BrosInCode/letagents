@@ -29,6 +29,8 @@ import {
 import { parseAgentActorLabel } from "../../../shared/agent-identity.js";
 import {
   normalizeMessageAttachmentReferences,
+  resolveMessageAttachmentUploader,
+  type MessageAttachmentUploader,
   type NormalizedMessageAttachmentReference,
 } from "../../messages/attachments.js";
 import {
@@ -110,6 +112,7 @@ export interface LegacyProjectMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
+      attachment_uploader?: MessageAttachmentUploader | null;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
       account_id?: string | null;
@@ -210,6 +213,7 @@ export function registerLegacyProjectMessageRoutes(
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
         attachments,
+        attachment_uploader: resolveMessageAttachmentUploader(req),
         ...(workerIdentity?.ok ? {
           publisher_agent_key: workerIdentity.identity.agent_key,
           publisher_agent_session_id: workerIdentity.identity.agent_session_id,

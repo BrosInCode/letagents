@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mapEntry } from "../../electron/main/supervisor-daemon.js";
-import { agentInspectorOverallState, projectAgentInspector } from "../../renderer/src/domain/agent-inspector.js";
+import { agentInspectorOverallState, projectAgentInspector, projectAgentInspectorTurnControl } from "../../renderer/src/domain/agent-inspector.js";
 
 import {
   bindingMatchesRoomAgentGeneration,
@@ -722,4 +722,16 @@ test("a process the daemon has not re-attached yet is shown by the revision the 
   // A revision the store could not give is counted as older than every change, never as a start after them all.
   assert.equal(await shown({ ...ownerSetupOn, ...ownerSetupChangedAt(2) }, undefined), "after_restart");
   assert.equal(await shown(ownerSetupChangedAt(3), undefined), "until_restart");
+});
+
+
+test("an active result re-read stays recovering and does not offer Stop for a completed invocation", () => {
+  const projected = projectRoomAgentManifestEntry(facts({ receipts: [receipt({
+    state: "result_recovery", receipt_state: "result_recovery", provider_turn_id: "turn_1",
+    last_error: "Checking the existing provider turn without starting a new one.",
+  })] }));
+  assert.equal(projected.room_agent_state?.turn.state, "retrying");
+  const inspector = projectAgentInspector(mapEntry(projected), { roomId: entry.room_id });
+  assert.equal(inspector?.deliveryProgress?.label, "Recovering response");
+  assert.equal(projectAgentInspectorTurnControl(mapEntry(projected)), null);
 });

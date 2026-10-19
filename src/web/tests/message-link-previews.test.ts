@@ -10,13 +10,14 @@ const render = (text: string, onLink?: (url: string) => void) => renderMessageCo
 
 const url = 'https://github.com/org/repo/pull/1'
 const preview = { kind: 'pull' as const, number: 1, repository: 'org/repo', title: '<script>Title</script>', state: 'draft' as const, url }
-test('existing markdown rendering collects links in message order and excludes code without changing HTML', () => {
+test('link collection includes inline-code URLs in message order but excludes fenced code', () => {
   const text = [url, '[second](https://github.com/org/repo/issues/2)', '`https://github.com/org/repo/pull/3`', '```ts', 'https://github.com/org/repo/pull/4', '```', '> https://github.com/org/repo/issues/5'].join('\n')
   const urls: string[] = []
   const html = render(text, value => urls.push(value))
   assert.equal(html, render(text))
-  assert.deepEqual(urls, [url, 'https://github.com/org/repo/issues/2', 'https://github.com/org/repo/issues/5'])
-  assert.deepEqual(eligibleLinkPreviewReferences(urls, 'ORG/REPO'), [{ kind: 'pull', number: 1 }, { kind: 'issue', number: 2 }, { kind: 'issue', number: 5 }])
+  assert.deepEqual(urls, [url, 'https://github.com/org/repo/issues/2', 'https://github.com/org/repo/pull/3', 'https://github.com/org/repo/issues/5'])
+  // The existing three-card cap still applies, now including the inline-code URL.
+  assert.deepEqual(eligibleLinkPreviewReferences(urls, 'ORG/REPO'), [{ kind: 'pull', number: 1 }, { kind: 'issue', number: 2 }, { kind: 'pull', number: 3 }])
 })
 
 test('link collection preserves staging code-span rendering for a fencing regex', () => {

@@ -92,14 +92,10 @@ describe("room chat helpers", () => {
   it("builds image attachment ids and data URLs consistently", () => {
     const attachment: DesktopRoomMessageAttachment = {
       id: null,
-      name: "screen",
       fileName: "screen.png",
       mimeType: "image/png",
       sizeBytes: 1536,
-      url: null,
-      downloadUrl: null,
-      dataUrl: null,
-      contentBase64: "abc123",
+      href: "data:image/png;base64,abc123",
     };
 
     assert.equal(formatBytes(1536), "1.5 KB");
@@ -114,14 +110,10 @@ describe("room chat helpers", () => {
     const { sessionId: _sessionId, repoRootPath: _repoRootPath, ...summary } = managedAgentChangeSummary();
     const attachment: DesktopRoomMessageAttachment = {
       id: "managed-agent-change-summary",
-      name: "Agent changes",
       fileName: "agent-changes.json",
       mimeType: MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
       sizeBytes: 120,
-      url: null,
-      downloadUrl: null,
-      dataUrl: null,
-      contentBase64: Buffer.from(JSON.stringify({
+      href: "data:application/json;base64," + Buffer.from(JSON.stringify({
         kind: "managed_agent_change_summary",
         version: 1,
         summary: {
@@ -203,14 +195,10 @@ describe("room chat helpers", () => {
     const second = roomMessage("msg_2", null, "2026-05-28T00:01:00.000Z");
     second.attachments = [{
       id: null,
-      name: "screen",
       fileName: "screen.png",
       mimeType: "image/png",
       sizeBytes: 1,
-      url: null,
-      downloadUrl: null,
-      dataUrl: null,
-      contentBase64: null,
+      href: null,
     }];
     const github = {
       ...roomMessage("msg_3", null, "2026-05-28T00:02:00.000Z"),

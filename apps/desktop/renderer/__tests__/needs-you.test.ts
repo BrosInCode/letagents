@@ -140,7 +140,7 @@ test('Needs you presents a human decision with context and escapes agent content
     const unavailable = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, loading: false, error: '' }));
     assert.match(unavailable, /Dismiss loading notice/); assert.match(unavailable, /Some updates couldn’t be loaded/);
     assert.match(unavailable, /Some inbox data is unavailable/); assert.match(unavailable, /<details class="inbox-source-notice"/); assert.match(unavailable, /Couldn’t load all inbox data for Product launch/); assert.doesNotMatch(unavailable, /You’re clear for now/);
-    const emptyUpdates = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, section: 'updates', loading: false, error: '' }));
+    const emptyUpdates = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }], updatesIncluded: true }, section: 'updates', loading: false, error: '' }));
     assert.match(emptyUpdates, /No unread updates to show/); assert.match(emptyUpdates, /Some room data is still unavailable/); assert.doesNotMatch(emptyUpdates, /You’re caught up/);
   } finally { await vite.close(); }
 });
@@ -184,6 +184,23 @@ test('answered requests move out of Needs you and remain attached to their room'
   const items = buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], records: [answered] }] });
   assert.equal(filterUniversalInbox(items, 'needs-you', [], {}).length, 0);
   assert.equal(filterUniversalInbox(items, 'answered', ['room'], {})[0].record?.response?.body, 'Start with product teams');
+});
+
+test('a request closed without an answer reads as Closed in Answered, keeping its row identity', async () => {
+  const { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel } = await import('../src/components/desktop/content/room-inbox/universal');
+  const closed = { ...record, version: record.version + 1, response: { body: 'Agent retired.', actor: { id: 'human', label: 'Emmy', kind: 'human' as const }, at: '2026-09-14T14:00:00Z', closed: true as const } };
+  const [open] = buildUniversalInbox(data);
+  const [item] = filterUniversalInbox(buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], records: [closed] }] }), 'answered', [], {});
+  assert.equal(item.category, 'closed'); assert.equal(inboxCategoryLabel(item.category), 'Closed');
+  assert.equal(item.key, open.key); assert.equal(item.fingerprint, String(closed.version));
+  const vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/InboxView.vue')).default;
+    const html = await renderToString(createSSRApp(component, { data: { ...data, rooms: [{ ...data.rooms[0], records: [closed] }] }, section: 'answered', loading: false, error: '' }));
+    assert.match(html, /<\/svg> Closed<\/span>/); assert.doesNotMatch(html, /Answer recorded/); assert.match(html, /Agent retired\./);
+    const openHtml = await renderToString(createSSRApp(component, { data, loading: false, error: '' }));
+    assert.match(openHtml, /Close without answering/);
+  } finally { await vite.close(); }
 });
 
 test('bulk read clears a large backlog, preserves requests, and allows new activity to return', async () => {

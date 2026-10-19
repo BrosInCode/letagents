@@ -26,51 +26,16 @@
       </button>
     </div>
 
-    <Teleport to="body">
-      <div
-        v-if="readerOpen"
-        class="desktop-reader-backdrop"
-        data-testid="desktop-reader-backdrop"
-        @click.self="closeReader"
-      >
-        <section
-          ref="readerDialog"
-          class="desktop-reader-dialog"
-          role="dialog"
-          aria-modal="true"
-          :aria-labelledby="readerTitleId"
-          tabindex="-1"
-          data-testid="desktop-reader-dialog"
-          @keydown.esc="closeReader"
-        >
-          <header class="desktop-reader-header">
-            <div>
-              <p>{{ statsLabel }}</p>
-              <h2 :id="readerTitleId">Message reader</h2>
-            </div>
-            <button type="button" @click="closeReader">Close</button>
-          </header>
-
-          <div
-            class="desktop-reader-content desktop-long-message-html"
-            v-html="html"
-            @click="handleInlineReferenceClick"
-          />
-
-          <footer class="desktop-reader-footer">
-            <button type="button" @click="copyText">{{ copyLabel }}</button>
-            <button class="primary" type="button" @click="closeReader">Done</button>
-          </footer>
-        </section>
-      </div>
-    </Teleport>
+    <MessageReader v-if="readerOpen" :text="text" :html="html" :sender="sender" :room-identifier="roomIdentifier"
+      @close="closeReader" @content-click="handleInlineReferenceClick" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, ref } from "vue";
 
-import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import MessageReader from "../../../../../../../shared/ui/MessageReader.vue";
+import type { MessageReaderSender } from "../../../../../../../shared/ui/message-reader";
 import { LETAGENTS_ROOM_ORIGIN, resolveSameRoomMessageReference } from "../../../domain/room-urls";
 
 const props = withDefaults(defineProps<{
@@ -78,6 +43,7 @@ const props = withDefaults(defineProps<{
   html: string;
   messageId: string;
   roomIdentifier?: string | null;
+  sender?: MessageReaderSender;
   collapseAfterChars?: number;
   collapseAfterLines?: number;
 }>(), {
@@ -93,8 +59,6 @@ const emit = defineEmits<{
 
 const expanded = ref(false);
 const readerOpen = ref(false);
-const { copied, copy: copyToClipboard } = useCopyIndicator(1600);
-const readerDialog = ref<HTMLElement | null>(null);
 
 const lineCount = computed(() => props.text ? props.text.split(/\r\n|\r|\n/).length : 0);
 const characterCount = computed(() => props.text.length);
@@ -103,18 +67,14 @@ const isLong = computed(() =>
 );
 const safeMessageId = computed(() => props.messageId.replace(/[^A-Za-z0-9_-]/g, "-") || "message");
 const contentId = computed(() => `desktop-message-content-${safeMessageId.value}`);
-const readerTitleId = computed(() => `desktop-message-reader-title-${safeMessageId.value}`);
 const statsLabel = computed(() => {
   const lines = lineCount.value;
   const chars = new Intl.NumberFormat().format(characterCount.value);
   return `${lines} ${lines === 1 ? "line" : "lines"} / ${chars} chars`;
 });
-const copyLabel = computed(() => copied.value ? "Copied" : "Copy text");
 
 function openReader(): void {
   readerOpen.value = true;
-  copied.value = false;
-  void nextTick(() => readerDialog.value?.focus());
 }
 
 function closeReader(): void {
@@ -160,7 +120,4 @@ function handleInlineReferenceClick(event: MouseEvent): void {
   emit("task-reference-click", taskId);
 }
 
-async function copyText(): Promise<void> {
-  await copyToClipboard(props.text);
-}
 </script>

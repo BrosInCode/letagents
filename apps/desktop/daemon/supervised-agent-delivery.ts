@@ -1,10 +1,12 @@
 import { performance } from "node:perf_hooks";
 
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import type { RecordedReplyAttachment } from "../../../shared/message-attachments.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
-import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnImageDelivery } from "./provider-action-port.js";
 import { ReplyTurnCompactionObserver, type ReplyTurnCompactionProof } from "./reply-turn-compaction.js";
 import { RoomLatencyTrace } from "./room-latency-trace.js";
+import type { PreparedRoomTurnAttachments, RoomTurnAttachmentStager } from "./room-turn-attachments.js";
 import { turnStartLatency } from "./turn-start-latency.js";
 import { queuedDeliveryKind, roomArrival } from "./queued-delivery-order.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
@@ -113,6 +115,16 @@ export interface SupervisedDeliveryHttp {
   latest?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ messages?: Array<Record<string, unknown>> }>;
   /** Idempotent remote membership join used by the durable room-move journal. */
   joinRoom?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ roomId: string }>;
+  /**
+   * The bytes of one attachment on a room message, at most `maxBytes`. The
+   * bearer goes only to the room API; the storage address it redirects to
+   * gets no credential and is never returned, logged or shown. Rejects with
+   * RoomAttachmentDownloadError, or with the abort reason.
+   */
+  downloadAttachment?(input: {
+    roomId: string; apiUrl: string; bearer: string; messageId: string; attachmentId: string;
+    maxBytes: number; signal: AbortSignal;
+  }): Promise<Uint8Array>;
   publish(input: {
     roomId: string;
     apiUrl: string;
@@ -120,11 +132,30 @@ export interface SupervisedDeliveryHttp {
     text: string;
     clientMessageId: string;
     gif?: RoomGif | null;
+    attachments?: Array<{ upload_id: string }>;
     replyTo: string | null;
     threadRootId: string | null;
     signal: AbortSignal;
   }): Promise<{ messageId: string; roomId: string }>;
+  /** Stage one file for the next publication with the worker's own bearer. */
+  stageAttachment?(input: {
+    roomId: string;
+    apiUrl: string;
+    bearer: string;
+    fileName: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    signal: AbortSignal;
+  }): Promise<{ uploadId: string }>;
+  /** Discard a staged upload the reply did not use; a staged upload otherwise stays until it expires. */
+  discardAttachment?(input: { roomId: string; apiUrl: string; bearer: string; uploadId: string; signal: AbortSignal }): Promise<void>;
 }
+
+/** The daemon-owned copies of reply attachments; see ReplyAttachmentSpool. */
+export type SupervisedReplyAttachmentSpool = {
+  read(inboxItemId: string, file: RecordedReplyAttachment): Promise<Uint8Array>;
+  remove(inboxItemId: string): Promise<void>;
+};
 
 export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
 export type SupervisedRoomMoveCommitter = (input: {
@@ -288,6 +319,9 @@ export class SupervisedAgentDelivery {
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
     /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
     private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
+    private readonly replyAttachmentSpool?: SupervisedReplyAttachmentSpool,
+    /** Prepares the activating message's images for one turn; absent, no turn carries any. */
+    private readonly roomTurnAttachments?: Pick<RoomTurnAttachmentStager, "prepare">,
   ) {}
 
   /**
@@ -1730,6 +1764,8 @@ export class SupervisedAgentDelivery {
       disposeCompactionStream = null;
     };
     const startTrace = recovering ? null : turnStartLatency.begin(agent.agentId, item.inbox_item_id, agent.provider);
+    let preparedAttachments: PreparedRoomTurnAttachments | null = null;
+    let providerTurn: Promise<unknown> | undefined;
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1826,6 +1862,21 @@ export class SupervisedAgentDelivery {
           throw error;
         });
         if (fresh !== null) observedContext = fresh;
+      }
+      if (!recovering && this.roomTurnAttachments && /^msg_[1-9]\d*$/.test(item.source_message_id)) {
+        // Only this turn's activating message, never history. A file that
+        // cannot be given becomes a note in the prompt, never a failed turn;
+        // only Stop or retirement ends the preparation early.
+        const handle = agent.handle;
+        const delivery: RoomTurnImageDelivery = handle && this.provider.roomTurnImageDelivery
+          ? await this.provider.roomTurnImageDelivery(handle).catch(() => null) : null;
+        preparedAttachments = await this.roomTurnAttachments.prepare({
+          delivery,
+          localRoom: isLocalRoomApi(agent.apiUrl),
+          sourceMessage: item.source_message, sourceMessageId: item.source_message_id,
+          roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+          http: this.http, signal: turnController.signal,
+        });
       }
       if (!await hasProviderAuthority()) return;
       // A runtime can itself have ended by the time it reports its turn's
@@ -2099,6 +2150,7 @@ export class SupervisedAgentDelivery {
         activation: item.activation,
         actionId: item.action_id,
         observedContext,
+        ...(preparedAttachments?.attachments.length ? { attachments: preparedAttachments.attachments } : {}),
       }, { beforeNativeDispatch: beforeDispatch, markDispatched: async () => {
         await beforeDispatch();
         setActive("responding");
@@ -2146,6 +2198,7 @@ export class SupervisedAgentDelivery {
           markProviderTurnDurablyStarted();
         }
       }, checkpointTerminalResult, detachSignal: turnController.signal });
+      providerTurn = turn;
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's provider process.
       // Once an exact turn is durable, race its result with retirement. Before
@@ -2184,9 +2237,9 @@ export class SupervisedAgentDelivery {
         }
         if (result.outcome === "unreadable") {
           if (item.state === "result_recovery") {
-            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The result of this turn is still unavailable after re-reading it. No new model turn was started." });
           } else {
-            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The result of this turn is unavailable. Checking the existing provider turn without starting a new one." });
           }
           return;
         }
@@ -2394,6 +2447,15 @@ export class SupervisedAgentDelivery {
       }
       await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
+      if (preparedAttachments) {
+        // A staged file stays until the provider turn that reads it has ended.
+        // Codex reads its local image after its turn has started, and a
+        // detached observation (Stop, retirement) rejects while the native
+        // turn may still run: those files are left to the age sweep.
+        const { release, abandon } = preparedAttachments;
+        if (!providerTurn) void release();
+        else void providerTurn.then(() => release(), () => abandon());
+      }
       if (startTrace) startTrace.end();
       else if (providerCallEntered) turnStartLatency.unmeasuredTurnEnded(agent.agentId);
       closeCompactionObservation();
@@ -2542,24 +2604,79 @@ export class SupervisedAgentDelivery {
       }
       if (!await this.hasLaneAuthority(agent, parent)) return false;
       const gif = await this.inbox.replyGif(item.inbox_item_id);
+      const attached = await this.stageReplyAttachments(agent, item, controller);
+      // Uploads can take minutes; post only if this lane still owns the reply.
+      if (!await this.hasLaneAuthority(agent, parent)) {
+        await this.discardReplyAttachments(agent, attached.uploads);
+        return false;
+      }
       const publication = await this.track(controller, this.http.publish({
         roomId: agent.roomId,
         apiUrl: agent.apiUrl,
         bearer: agent.bearer,
-        text,
+        text: attached.unavailable.length ? `${text}\n\n(Could not attach: ${attached.unavailable.join(", ")})` : text,
         ...(gif ? { gif } : {}),
+        ...(attached.uploads.length ? { attachments: attached.uploads } : {}),
         clientMessageId: item.reply_client_message_id,
         replyTo: replyTarget.replyTo,
         threadRootId: replyTarget.threadRootId,
         signal: controller.signal,
-      }));
+      })).catch(async (error: unknown) => {
+        // The next attempt stages fresh copies, so these uploads would only wait to expire.
+        await this.discardReplyAttachments(agent, attached.uploads);
+        throw error;
+      });
       if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
+      await this.replyAttachmentSpool?.remove(item.inbox_item_id).catch(() => undefined);
       this.publishedIds.set(item.inbox_item_id, publication.messageId);
       const current = await this.hasLaneAuthority(agent, parent);
       if (!current) this.publishedIds.delete(item.inbox_item_id);
       return current;
     } catch (error) { this.publishedIds.delete(item.inbox_item_id); throw error; }
     finally { parent.signal.removeEventListener("abort", relayAbort); }
+  }
+  /**
+   * Upload the files the agent attached, just before the reply is posted:
+   * a staged upload expires after 15 minutes, and a turn can run longer.
+   * A file that cannot be uploaded never blocks the reply; the reply names it.
+   */
+  private async stageReplyAttachments(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<{
+    uploads: Array<{ upload_id: string }>;
+    unavailable: string[];
+  }> {
+    const recorded = await this.inbox.replyAttachments(item.inbox_item_id);
+    const uploads: Array<{ upload_id: string }> = [];
+    const unavailable: string[] = [];
+    const spool = this.replyAttachmentSpool;
+    const stage = this.http.stageAttachment?.bind(this.http);
+    for (const file of recorded) {
+      if (!spool || !stage) { unavailable.push(file.name); continue; }
+      const bytes = await spool.read(item.inbox_item_id, file).catch(() => null);
+      if (!bytes) { unavailable.push(file.name); continue; }
+      let staged: { uploadId: string } | null = null;
+      // One retry covers a dropped connection or a busy server; a lasting refusal fails twice.
+      for (let attempt = 0; attempt < 2 && !staged; attempt++) {
+        try {
+          staged = await this.track(controller, stage({
+            roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+            fileName: file.name, mimeType: file.mime_type, bytes, signal: controller.signal,
+          }));
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          if (attempt === 0) await this.sleep(this.retryDelayMs);
+        }
+      }
+      if (staged) uploads.push({ upload_id: staged.uploadId });
+      else unavailable.push(file.name);
+    }
+    return { uploads, unavailable };
+  }
+
+  private async discardReplyAttachments(agent: SupervisedIngressAgent, uploads: Array<{ upload_id: string }>): Promise<void> {
+    if (!this.http.discardAttachment) return;
+    await Promise.all(uploads.map(({ upload_id }) => this.http.discardAttachment!({
+      roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, uploadId: upload_id, signal: AbortSignal.timeout(5_000),
+    }).catch(() => undefined)));
   }
   private async publishedMessageId(agent: SupervisedIngressAgent, item: SupervisedInboxItem): Promise<string> {
     const id = this.publishedIds.get(item.inbox_item_id);

@@ -1,17 +1,17 @@
 <template>
   <section class="knowledge-page needs-you-page" aria-labelledby="inbox-title" data-testid="inbox-view" :data-motion="motionEnabled" @pointerdown.capture="motionEnabled = true" @keydown.capture="motionEnabled = false">
     <header class="knowledge-header">
-      <div><h1 id="inbox-title" ref="pageHeading" tabindex="-1">{{ sectionTitle }}<span class="knowledge-total">{{ items.length }}</span></h1><p>{{ sectionDescription }}</p></div>
+      <div><h1 id="inbox-title" ref="pageHeading" tabindex="-1">{{ sectionTitle }}<span v-if="section !== 'updates' || updatesLoaded" class="knowledge-total">{{ items.length }}</span></h1><p>{{ sectionDescription }}</p></div>
       <div class="knowledge-header-actions inbox-header-actions">
         <button v-if="sourceNoticeHidden" ref="showNoticeButton" class="knowledge-icon-button inbox-notice-indicator" :aria-label="hasSourceFailure ? 'Show loading issues' : 'Show inbox information'" :title="hasSourceFailure ? 'Some updates couldn’t be loaded' : 'Room access and history limits'" @click="showSourceNotice"><TriangleAlert :size="16" aria-hidden="true" /></button>
-        <button v-if="section === 'updates'" class="knowledge-button" :disabled="!items.length" :title="`Mark the ${items.length.toLocaleString()} displayed updates read${rooms.length ? ' in the selected rooms' : ''}. New activity will still appear.`" @click="markRead(items)"><CheckCheck :size="15" aria-hidden="true" />Mark all updates read</button>
+        <button v-if="section === 'updates'" class="knowledge-button" :disabled="!items.length || !updatesLoaded" :title="updatesLoaded ? `Mark the ${items.length.toLocaleString()} displayed updates read${rooms.length ? ' in the selected rooms' : ''}. New activity will still appear.` : 'Available once updates load.'" @click="markRead(items)"><CheckCheck :size="15" aria-hidden="true" />Mark all updates read</button>
         <button class="knowledge-button" :disabled="loading" @click="emit('refresh')"><RefreshCw :size="14" :class="{ 'knowledge-spin': loading }" />Refresh</button>
       </div>
     </header>
     <MessageRemindersSection @open="emit('openRoom', $event)" />
     <div class="knowledge-filters">
       <div class="knowledge-segments" aria-label="Inbox view">
-        <button v-for="tab in sections" :key="tab.id" :aria-pressed="section === tab.id" @click="emit('update:section', tab.id)">{{ tab.label }}<span v-if="tab.id !== 'answered'">{{ count(tab.id) }}</span></button>
+        <button v-for="tab in sections" :key="tab.id" :aria-pressed="section === tab.id" @click="emit('update:section', tab.id)">{{ tab.label }}<span v-if="tab.id !== 'answered' && (tab.id !== 'updates' || updatesLoaded)">{{ count(tab.id) }}</span></button>
       </div>
       <details ref="roomMenu" class="inbox-room-filter" @keydown.esc.stop="closeRoomMenu" @toggle="roomMenuToggled">
         <summary class="knowledge-button"><SlidersHorizontal :size="14" />{{ roomFilterLabel }}<ChevronDown :size="13" /></summary>
@@ -62,7 +62,7 @@
         <div v-if="selected.record?.unblocks" class="knowledge-unblocks"><ArrowRight :size="15" /><p><strong>Your answer unblocks</strong>{{ selected.record.unblocks }}</p></div>
         <div v-if="selected.record?.source_url || selected.record?.source_message_id" class="knowledge-source-row"><button v-if="selected.record.source_url" class="knowledge-button" @click="openSource(selected.record.source_url)"><Link2 :size="14" />View source</button><button v-if="selected.record.source_message_id" class="knowledge-button" @click="openRoom(selected, 'source')"><MessageSquare :size="14" />Original message</button></div>
         </div>
-        <div v-if="selected.record?.response" class="knowledge-answer" role="status"><span><CircleCheck :size="16" /> Answer recorded</span><p>{{ selected.record.response.body }}</p><small>{{ selected.record.response.actor.label }} · {{ date(selected.record.response.at) }}</small></div>
+        <div v-if="selected.record?.response" class="knowledge-answer" role="status"><span><CircleCheck :size="16" /> {{ selected.record.response.closed ? 'Closed' : 'Answer recorded' }}</span><p>{{ selected.record.response.body }}</p><small>{{ selected.record.response.actor.label }} · {{ date(selected.record.response.at) }}</small></div>
         <div v-else-if="selectedApproval" class="knowledge-task-action">
           <p v-if="selectedApproval.status === 'pending' && selectedApproval.presentation.denyScope === 'session_pending'" class="inbox-approval-note">Deny applies to all pending permissions for this agent.</p>
           <div v-if="selectedApproval.status === 'pending'" class="knowledge-source-row"><button class="knowledge-button" :disabled="approvalDisabled" @click="decideApproval('deny')">Deny</button><button class="knowledge-button knowledge-primary" :disabled="approvalDisabled" @click="decideApproval('allow_once')">{{ approvalState.busy === selectedApproval.id ? 'Recording…' : hostApprovalAllowLabel(selectedApproval.presentation) }}</button><button v-if="selectedApproval.presentation.alwaysAllow" class="knowledge-button" :disabled="approvalDisabled" :title="HOST_APPROVAL_ALWAYS_ALLOW_HINT" @click="decideApproval('allow_always')">{{ hostApprovalAlwaysAllowLabel(selectedApproval.presentation) }}</button></div>
@@ -73,7 +73,7 @@
         </div>
         <form v-else-if="selected.record" class="knowledge-response" @submit.prevent="respond">
           <label :for="`response-${selected.record.id}`">Your response</label><textarea :id="`response-${selected.record.id}`" v-model="drafts[selected.key]" rows="4" maxlength="8000" placeholder="Give the agent a clear decision or next step…" :disabled="sending" required></textarea>
-          <div class="knowledge-response-footer"><small>Sent to the room and saved with this request.</small><button class="knowledge-button knowledge-primary" :disabled="sending || !drafts[selected.key]?.trim()"><LoaderCircle v-if="sending" :size="14" class="knowledge-spin" /><Send v-else :size="14" />{{ sending ? 'Sending…' : 'Send response' }}</button></div>
+          <div class="knowledge-response-footer"><small>Sent to the room and saved with this request.</small><button type="button" class="knowledge-button knowledge-close-request" :disabled="sending" title="Close this request without a decision. The agent that asked is told in the room." @click="closeRequest">Close without answering</button><button class="knowledge-button knowledge-primary" :disabled="sending || !drafts[selected.key]?.trim()"><LoaderCircle v-if="sending" :size="14" class="knowledge-spin" /><Send v-else :size="14" />{{ sending ? 'Sending…' : 'Send response' }}</button></div>
         </form>
         <div v-else class="knowledge-task-action">
           <div class="knowledge-source-row"><button class="knowledge-button knowledge-primary" @click="openRoom(selected)">{{ actionLabel(selected) }}<ArrowUpRight :size="14" /></button><button v-if="selected.section === 'updates'" class="knowledge-button" @click="markRead([selected])"><Check :size="14" />Mark read</button></div>
@@ -96,6 +96,7 @@ import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
 import { buildUniversalInbox, compareUniversalInboxItems, filterUniversalInbox, inboxCategoryLabel, inboxNavigationIntent, inboxRelativeTime, inboxSourceFailureKey, inboxSourceFailures, markInboxUpdatesRead, nextInboxSelection, searchInboxRooms, stableInboxOrder, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
 import { isActionableHostApproval, type AgentAttentionItem } from './room-inbox/agent-attention';
 import type { KnowledgeRecord } from '../../../../../../../shared/room-knowledge.mjs';
+import { attentionRecordCategory } from './room-inbox/universal';
 import type { HostApprovalSelection } from '../../../../../shared/host-approvals';
 import { decideHostApproval, hostApprovalRoom, refreshHostApprovals } from './room-chat/host-approvals';
 import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_SETTLE_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalStatusLabel } from './room-chat/host-approval-presentation';
@@ -154,7 +155,7 @@ const sentAnswers = ref<Record<string, KnowledgeRecord>>({});
 const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention).map(item => {
   const record = sentAnswers.value[item.key];
   return record && item.record && record.version > item.record.version
-    ? { ...item, record, section: 'answered' as const, timestamp: record.response?.at || item.timestamp, fingerprint: String(record.version) } : item;
+    ? { ...item, record, section: 'answered' as const, category: attentionRecordCategory(record), timestamp: record.response?.at || item.timestamp, fingerprint: String(record.version) } : item;
 }).sort(compareUniversalInboxItems));
 // The list as last displayed. Arrivals join around the selected row instead of
 // reshuffling it; a new section, room filter or account starts from the usual order.
@@ -199,8 +200,10 @@ const roomFilterLabel = computed(() => !props.rooms.length ? 'All rooms' : props
 const unavailable = computed(() => (props.data?.rooms ?? []).filter(room => !props.rooms.length || props.rooms.includes(room.roomIdentifier)).flatMap(room => room.updates?.unavailable.length ? [`${room.displayName} (${[...room.updates.unavailable].sort().join(', ')})`] : []).sort());
 const roomsWithMoreThreads = computed(() => (props.data?.rooms ?? []).filter(room => room.updates?.threads.hasMore && (!props.rooms.length || props.rooms.includes(room.roomIdentifier))));
 const hiddenByFilter = computed(() => props.rooms.length ? filterUniversalInbox(allItems.value, props.section, [], dismissals.value).length - items.value.length : 0);
-const emptyTitle = computed(() => props.loading ? 'Checking your rooms' : hiddenByFilter.value ? 'Nothing here in the selected rooms' : props.section === 'updates' ? 'No unread updates to show' : props.error || hasSourceFailure.value ? 'Some inbox data is unavailable' : props.section === 'answered' ? 'No answers here yet' : 'You’re clear for now');
-const emptyDescription = computed(() => props.section === 'answered' ? 'Answered requests will appear here.' : props.section === 'updates' ? props.error || hasSourceFailure.value ? 'New activity will appear here. Some room data is still unavailable.' : 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.');
+// Updates load only while the Inbox is open. Until they arrive, the Updates list holds task rows only, so its count is not shown.
+const updatesLoaded = computed(() => Boolean(props.data?.updatesIncluded));
+const emptyTitle = computed(() => props.loading ? 'Checking your rooms' : hiddenByFilter.value ? 'Nothing here in the selected rooms' : props.section === 'updates' ? updatesLoaded.value ? 'No unread updates to show' : 'Updates aren’t loaded' : props.error || hasSourceFailure.value ? 'Some inbox data is unavailable' : props.section === 'answered' ? 'No answers here yet' : 'You’re clear for now');
+const emptyDescription = computed(() => props.section === 'answered' ? 'Answered requests will appear here.' : props.section === 'updates' && !updatesLoaded.value ? props.loading ? 'Gathering replies, checks and agent activity.' : 'Refresh to load replies, checks and agent activity.' : props.section === 'updates' ? props.error || hasSourceFailure.value ? 'New activity will appear here. Some room data is still unavailable.' : 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.');
 function count(section: InboxSection) { return filterUniversalInbox(allItems.value, section, props.rooms, dismissals.value).length; }
 watch(() => selected.value?.key, () => { sendError.value = ''; });
 watch([() => props.section, () => props.rooms], () => { outcome.value = null; });
@@ -287,6 +290,24 @@ async function respond() {
     if (moveOnFrom(item, list, 'Answer sent', true)) { void nextTick(() => requestHeading.value?.focus({ preventScroll: true })); return; }
     emit('update:section', 'answered'); void nextTick(() => pageHeading.value?.focus({ preventScroll: true }));
   } catch (error) { if (alive) sendError.value = error instanceof Error ? error.message : 'Unable to send your response.'; }
+  finally { if (alive) sending.value = false; }
+}
+/** Close the selected request without a decision. A draft response is not sent. */
+async function closeRequest() {
+  const item = selected.value; if (!item?.record || !item.roomIdentifier || sending.value) return;
+  sending.value = true; sendError.value = '';
+  try {
+    if (!desktopIpc.room.reviseKnowledge) throw new Error(desktopBridgeUpgradeMessage());
+    const list = items.value;
+    const closed = await desktopIpc.room.reviseKnowledge(item.roomIdentifier, 'attention', item.record.id, { expected_version: item.record.version, close: true });
+    if (!alive) return;
+    delete drafts[item.key];
+    if (closed?.response) sentAnswers.value = { ...sentAnswers.value, [item.key]: closed };
+    emit('refresh');
+    if (selectedKey.value !== item.key) return; // Moved on while it was closing.
+    if (moveOnFrom(item, list, 'Closed', true)) { void nextTick(() => requestHeading.value?.focus({ preventScroll: true })); return; }
+    emit('update:section', 'answered'); void nextTick(() => pageHeading.value?.focus({ preventScroll: true }));
+  } catch (error) { if (alive) sendError.value = error instanceof Error ? error.message : 'Unable to close this request.'; }
   finally { if (alive) sending.value = false; }
 }
 </script>

@@ -6,7 +6,10 @@ import type {
   Project,
 } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
-import type { NormalizedMessageAttachmentReference } from "../../../messages/attachments.js";
+import type {
+  MessageAttachmentUploader,
+  NormalizedMessageAttachmentReference,
+} from "../../../messages/attachments.js";
 import type { AgentPromptKind } from "../../../../shared/room-agent-prompts.js";
 import type { RoomEventBroker } from "../../../server/room-event-broker.js";
 import type { RoomMessageOverlayBatcher } from "../../../server/room-message-overlays.js";
@@ -65,6 +68,7 @@ export interface RoomMessageRouteDeps {
       thread_root_id?: string | null;
       gif?: RoomGif | null;
     attachments?: NormalizedMessageAttachmentReference[];
+      attachment_uploader?: MessageAttachmentUploader | null;
       client_message_id?: string | null;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;

@@ -71,6 +71,8 @@ function storedConfiguration(overrides: Partial<StoredAgentConfiguration> = {}):
     runtime_configuration_revision: 2,
     // Room messages are delivered by the daemon, as for every agent the desktop app creates.
     delivery_mode: "daemon_inbox",
+    // Off unless the owner of an Open Model agent turned it on.
+    image_input: false,
     ...overrides,
   };
 }
@@ -159,6 +161,7 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
           charter: input.charter,
           permission_profile_id: input.permissionProfileId,
           provider_launch_policy: input.providerLaunchPolicy,
+          image_input: input.imageInput,
           config_revision: input.expectedRevision + 1,
         };
       });
@@ -1114,4 +1117,120 @@ test("the owner's own setup is saved beside a change to the access level without
     approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...OWN_SETUP_ON, ...changedAt(5), ...permissionChangedAt(4),
   }, "the record of the access level survives the switch");
   assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), [], "the switch has its own restart");
+});
+
+const IMAGE_INPUT_REFUSAL = /Only an Open Model agent takes this choice/;
+const saveConfiguration = (state: ReturnType<typeof harness>, expectedRevision: number, extra: Record<string, unknown> = {}) =>
+  state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision,
+    configuration: { model: "provider/model", reasoning_effort: null, charter: "Help the room", permission_profile_id: "full_access", ...extra },
+  });
+const openModelHarness = (imageInput = false) => {
+  const state = harness([entry({ provider: "open-model" })]);
+  state.setConfiguration(storedConfiguration({
+    provider: "open-model", model: "provider/model", reasoning_effort: null, permission_profile_id: "full_access",
+    provider_launch_policy: { permission: { "*": "allow" } }, image_input: imageInput,
+  }));
+  return state;
+};
+
+test("the owner of an Open Model agent saves that its model reads images, and turns it off again", async () => {
+  const state = openModelHarness();
+  assert.equal((await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).image_input, false, "off until the owner says so");
+
+  state.events.length = 0;
+  const on = await saveConfiguration(state, 3, { image_input: true });
+  assert.equal(on.outcome, "updated");
+  assert.equal(on.configuration?.image_input, true);
+  assert.equal(state.configuration?.image_input, true, "the store was asked to keep it");
+  assert.equal(on.configuration?.config_revision, 4, "it is a configuration change like a model change");
+  assert.ok(state.events.includes("authority:fence") && state.events.includes("state:notify"));
+  assert.equal(state.configuration?.model, "provider/model", "nothing else about the agent changes");
+
+  const off = await saveConfiguration(state, 4, { image_input: false });
+  assert.equal(off.outcome, "updated");
+  assert.equal(off.configuration?.image_input, false);
+  assert.equal(state.configuration?.image_input, false);
+});
+
+test("a save that leaves out the image choice keeps what is saved", async () => {
+  for (const saved of [true, false]) {
+    const state = openModelHarness(saved);
+    const result = await saveConfiguration(state, 3, { charter: `Changed while saved is ${saved}` });
+    assert.equal(result.outcome, "updated", String(saved));
+    assert.equal(result.configuration?.image_input, saved, `an older desktop app does not turn it ${saved ? "off" : "on"}`);
+    assert.equal(state.configuration?.image_input, saved);
+    assert.equal(state.configuration?.charter, `Changed while saved is ${saved}`);
+  }
+});
+
+test("only an Open Model agent can be saved as reading images, and a refusal writes nothing", async () => {
+  for (const [provider, profile, policy] of [
+    ["codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["claude-code", "full_access", { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }],
+    ["cursor", "sandboxed_write", { force: true, sandbox: "enabled" }],
+  ] as const) {
+    const state = harness([entry({ provider })]);
+    state.setConfiguration(storedConfiguration({ provider, permission_profile_id: profile, provider_launch_policy: policy }));
+    state.events.length = 0;
+    const refused = await saveConfiguration(state, 3, { image_input: true, permission_profile_id: profile });
+    assert.equal(refused.outcome, "invalid", provider);
+    assert.match((refused as { error: string }).error, IMAGE_INPUT_REFUSAL, provider);
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, `${provider}: nothing is written`);
+    assert.equal(state.configuration?.image_input, false, provider);
+    assert.equal(state.configuration?.config_revision, 3, provider);
+
+    const off = await saveConfiguration(state, 3, { image_input: false, permission_profile_id: profile });
+    assert.equal(off.outcome, "updated", `${provider}: turning it off is always allowed ${JSON.stringify(off)}`);
+    assert.equal(off.configuration?.image_input, false, provider);
+  }
+});
+
+test("a choice about images that is not true or false is refused before anything is read or written", async () => {
+  for (const bad of ["true", "false", 1, 0, null, {}, []]) {
+    const state = openModelHarness();
+    state.events.length = 0;
+    const refused = await saveConfiguration(state, 3, { image_input: bad });
+    assert.equal(refused.outcome, "invalid", String(bad));
+    assert.deepEqual(state.events, [], `${JSON.stringify(bad)}: no store read, no write`);
+    assert.equal(state.configuration?.image_input, false);
+    assert.equal(state.configuration?.config_revision, 3);
+  }
+});
+
+test("settings report that the image choice exists only for an Open Model agent", async () => {
+  for (const [provider, available] of [["open-model", true], ["codex", false], ["claude-code", false], ["cursor", false], ["legacy-provider", false]] as const) {
+    const state = harness([entry({ provider })]);
+    state.setConfiguration(storedConfiguration({ provider }));
+    const read = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+    assert.equal(read.image_input_available, available, provider);
+    assert.equal(read.image_input, false, `${provider}: the saved choice is reported beside whether it is offered`);
+  }
+  const on = openModelHarness(true);
+  const read = await on.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.deepEqual([read.image_input, read.image_input_available], [true, true]);
+});
+
+test("switching the owner's own setup keeps a saved image choice, and an agent that cannot switch it is left as it was", async () => {
+  // Only the agent apps with an owner setup can switch it; a stored value on one of them is carried through unchanged.
+  const codex = harness([entry({ provider: "codex" })]);
+  codex.setConfiguration(storedConfiguration({ provider: "codex", image_input: true }));
+  const toggle = (state: ReturnType<typeof harness>, homeHarness: boolean) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision, configuration: {}, homeHarness,
+  });
+  assert.equal((await toggle(codex, true)).outcome, "updated");
+  assert.equal(codex.configuration?.image_input, true, "on");
+  assert.equal((await toggle(codex, false)).outcome, "updated");
+  assert.equal(codex.configuration?.image_input, true, "off again");
+  const plain = harness([entry({ provider: "codex" })]);
+  assert.equal((await toggle(plain, true)).outcome, "updated");
+  assert.equal(plain.configuration?.image_input, false, "an agent that never had the choice does not gain it");
+
+  // An Open Model agent has no owner setup to switch, so the request is refused and its image choice stays.
+  const openModel = openModelHarness(true);
+  openModel.events.length = 0;
+  const refused = await toggle(openModel, true);
+  assert.equal(refused.outcome, "invalid");
+  assert.equal(openModel.events.some((event) => event.startsWith("store:update-config")), false);
+  assert.equal(openModel.configuration?.image_input, true);
 });

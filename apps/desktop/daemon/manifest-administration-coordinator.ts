@@ -42,6 +42,8 @@ export type StoredAgentConfiguration = {
   polling_contract?: DaemonAgentConfiguration["polling_contract"];
   /** How room messages reach the agent. Absent is read as the older polling delivery. */
   delivery_mode?: string;
+  /** The owner says this Open Model agent's model reads images. */
+  image_input: boolean;
 };
 
 export type ManifestAdministrationStore = {
@@ -67,6 +69,7 @@ export type ManifestAdministrationStore = {
       charter: string;
       permissionProfileId: string | null;
       providerLaunchPolicy: unknown;
+      imageInput: boolean;
     },
     commitFence: CommitFence,
   ): Promise<{
@@ -362,6 +365,8 @@ export class ManifestAdministrationCoordinator {
       home_harness_pending: availability === "available"
         && homeHarnessDiffersFromSaved(configuration.provider_launch_policy, configuration.runtime_configuration_revision),
       home_harness_availability: availability,
+      // Only an Open Model agent's owner says whether its model reads images.
+      image_input_available: configuration.provider === "open-model",
     };
   }
 
@@ -415,6 +420,7 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: current.reasoning_effort ?? null,
             charter: current.charter,
             permissionProfileId: current.permission_profile_id,
+            imageInput: current.image_input,
             providerLaunchPolicy: storedLaunchPolicy(
               { launchPolicy: policy as Record<string, unknown>, ...(input.homeHarness ? { homeHarness: true as const } : {}) },
               {
@@ -455,6 +461,7 @@ export class ManifestAdministrationCoordinator {
     const model = input.configuration.model;
     const charter = input.configuration.charter;
     const profile = input.configuration.permission_profile_id;
+    const imageInput = input.configuration.image_input;
     if (!Object.hasOwn(input.configuration, "model")
       || !Object.hasOwn(input.configuration, "reasoning_effort")
       || !Object.hasOwn(input.configuration, "charter")
@@ -465,7 +472,8 @@ export class ManifestAdministrationCoordinator {
       || typeof charter !== "string"
       || !charter.trim()
       || charter.length > 32_768
-      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))) {
+      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))
+      || (Object.hasOwn(input.configuration, "image_input") && typeof imageInput !== "boolean")) {
       return {
         outcome: "invalid" as const,
         error: "The selected provider does not accept this model, effort, charter, or permission profile. Native launch policy is managed by the desktop supervisor.",
@@ -474,6 +482,11 @@ export class ManifestAdministrationCoordinator {
     const currentConfiguration = await this.options.store.getAgentConfiguration(input.entryId);
     if (!currentConfiguration) {
       return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+    }
+    // An older desktop app leaves the choice out, and it then stays as saved.
+    const nextImageInput = typeof imageInput === "boolean" ? imageInput : currentConfiguration.image_input;
+    if (nextImageInput && currentConfiguration.provider !== "open-model") {
+      return { outcome: "invalid" as const, error: "Only an Open Model agent takes this choice. Other agent apps decide for themselves whether they read images." };
     }
     try {
       // A rental or an agent app with no owner setup never keeps the key, however it got there.
@@ -515,6 +528,7 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: normalized.reasoningEffort,
             charter: charter.trim(),
             permissionProfileId: normalized.permissionProfileId,
+            imageInput: nextImageInput,
             // An edit to the model or access level keeps the owner's choice. The record of an earlier access
             // level change is read from the stored policy: an agent that cannot use the owner's setup has it removed above.
             providerLaunchPolicy: storedLaunchPolicy(normalized, {

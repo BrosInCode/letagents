@@ -1,8 +1,7 @@
-import { Buffer } from "node:buffer";
-
 import type { DesktopRoomMessage } from "../../ipc-types.js";
-import { apiUrl, attachmentProtocolScheme } from "../paths.js";
+import { cloudAttachmentHref, localAttachmentHref } from "./links.js";
 
+/** The stored or wire shape of a message attachment: cloud payloads and local rows both use it. */
 export type RoomMessageAttachmentPayload = {
   id?: string | null;
   name?: string | null;
@@ -18,38 +17,31 @@ export type RoomMessageAttachmentPayload = {
   content_base64?: string | null;
 };
 
+/** Every alias and storage variant ends here: the screen gets one name, one type and one link. */
 export function mapRoomMessageAttachmentPayload(
   attachment: RoomMessageAttachmentPayload,
 ): DesktopRoomMessage["attachments"][number] {
-  const rawUrl = attachment.url || null;
-  const rawDownloadUrl = attachment.download_url || null;
+  const mimeType = attachment.mime_type || attachment.content_type || "application/octet-stream";
   return {
     id: attachment.id || null,
-    name: attachment.name || null,
-    fileName: attachment.file_name || attachment.filename || null,
-    mimeType: attachment.mime_type || attachment.content_type || null,
+    fileName: attachment.file_name || attachment.filename || attachment.name || "attachment",
+    mimeType,
     sizeBytes: attachment.size_bytes ?? attachment.byte_size ?? null,
-    url: rawUrl ? proxiedAttachmentUrl(rawUrl) : null,
-    downloadUrl: rawDownloadUrl ? proxiedAttachmentUrl(rawDownloadUrl) : null,
-    dataUrl: attachment.data_url || null,
-    contentBase64: attachment.content_base64 || null,
+    href: attachmentHref(attachment, mimeType),
   };
 }
 
-function proxiedAttachmentUrl(rawUrl: string): string {
-  if (!shouldProxyAttachmentUrl(rawUrl)) return rawUrl;
-  const encoded = Buffer.from(rawUrl, "utf8").toString("base64url");
-  return `${attachmentProtocolScheme}://download/${encoded}`;
-}
-
-function shouldProxyAttachmentUrl(rawUrl: string): boolean {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return false;
-  if (trimmed.startsWith("/")) return true;
-  try {
-    const target = new URL(trimmed);
-    return target.origin === new URL(apiUrl).origin;
-  } catch {
-    return false;
+function attachmentHref(attachment: RoomMessageAttachmentPayload, mimeType: string): string | null {
+  const link = attachment.download_url || attachment.url || null;
+  if (link?.startsWith("file:")) {
+    const localHref = localAttachmentHref(link);
+    if (localHref) return localHref;
+  } else if (link) {
+    const cloudHref = cloudAttachmentHref(link);
+    if (cloudHref) return cloudHref;
   }
+  // Rows written before local files were stored once keep an inline copy.
+  if (attachment.data_url?.startsWith("data:")) return attachment.data_url;
+  if (attachment.content_base64) return `data:${mimeType};base64,${attachment.content_base64}`;
+  return null;
 }

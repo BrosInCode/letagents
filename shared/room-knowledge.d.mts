@@ -9,10 +9,11 @@ export interface KnowledgeInput {
 export interface KnowledgeRecord extends Required<KnowledgeInput> {
   id: string; room_id: string; type: KnowledgeType; version: number;
   author: KnowledgeActor; updated_by: KnowledgeActor; created_at: string; updated_at: string; archived: boolean;
-  response: { body: string; actor: KnowledgeActor; at: string } | null;
+  /** `closed`: a person closed the request without a decision. */
+  response: { body: string; actor: KnowledgeActor; at: string; closed?: true } | null;
 }
 export interface KnowledgePage { records: KnowledgeRecord[]; truncated: boolean }
-export interface KnowledgeRevisionInput extends Partial<KnowledgeInput> { expected_version: number; response?: string; archived?: boolean }
+export interface KnowledgeRevisionInput extends Partial<KnowledgeInput> { expected_version: number; response?: string; archived?: boolean; close?: true }
 export const MEMORY_CATEGORIES: MemoryCategory[];
 export const ATTENTION_CATEGORIES: AttentionCategory[];
 export class RoomKnowledgeError extends Error { status: number; constructor(message: string, status?: number) }
@@ -23,5 +24,7 @@ export function reviseKnowledgeRecord(record: KnowledgeRecord, input: KnowledgeR
 export function assertKnowledgeReplay(existing: KnowledgeRecord, candidate: KnowledgeRecord): void;
 
 export function attentionResponseHandle(agentKey: string | null | undefined): string;
+export const ATTENTION_CLOSED_RESPONSE: string;
+export function formatAttentionRequest(record: KnowledgeRecord): string;
 export function formatAttentionResponse(record: KnowledgeRecord): string;
 export function attentionResponseDisplayText(text: string, agentName: (handle: string) => string | null | undefined): string | null;

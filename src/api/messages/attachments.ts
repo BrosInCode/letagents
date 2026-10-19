@@ -15,11 +15,31 @@ export interface NormalizedMessageAttachmentReference {
   upload_id: string;
 }
 
-export function canStageMessageAttachment(input: {
+/**
+ * The credential that staged an upload. Exactly one field is set: a worker
+ * bearer stages as its agent session, and an app session or owner token
+ * stages as its account. Only the same uploader can discard or attach it.
+ */
+export interface MessageAttachmentUploader {
+  account_id: string | null;
+  agent_session_id: string | null;
+}
+
+export function resolveMessageAttachmentUploader(input: {
   authKind?: string | null;
-  sessionAccount?: unknown;
-}): boolean {
-  return Boolean(input.sessionAccount) || input.authKind === "agent_session";
+  sessionAccount?: { account_id?: string | null } | null;
+  agentSession?: { agent_session_id?: string | null } | null;
+}): MessageAttachmentUploader | null {
+  if (input.authKind === "agent_session") {
+    const agentSessionId = input.agentSession?.agent_session_id?.trim();
+    return agentSessionId ? { account_id: null, agent_session_id: agentSessionId } : null;
+  }
+  const accountId = input.sessionAccount?.account_id?.trim();
+  return accountId ? { account_id: accountId, agent_session_id: null } : null;
+}
+
+export function canStageMessageAttachment(input: Parameters<typeof resolveMessageAttachmentUploader>[0]): boolean {
+  return resolveMessageAttachmentUploader(input) !== null;
 }
 
 function sanitizeFilename(value: string): string {

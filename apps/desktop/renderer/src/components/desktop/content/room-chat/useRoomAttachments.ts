@@ -11,9 +11,10 @@ import {
   readDroppedAttachmentContent,
   toPendingAttachmentDraft,
 } from "./attachment-utils";
+import { MESSAGE_ATTACHMENT_LIMITS } from "../../../../../../../../shared/message-attachments.mjs";
 
-const maxAttachments = 4;
-const maxAttachmentBytes = 25 * 1024 * 1024;
+const maxAttachments = MESSAGE_ATTACHMENT_LIMITS.maxFiles;
+const maxAttachmentBytes = MESSAGE_ATTACHMENT_LIMITS.maxFileBytes;
 
 interface RoomAttachmentsOptions {
   roomIdentifier: Readonly<Ref<string | null>>;

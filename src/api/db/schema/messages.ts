@@ -452,10 +452,21 @@ export const message_attachment_uploads = pgTable(
     attached_message_number: integer("attached_message_number"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     attached_at: timestamp("attached_at", { mode: "string", withTimezone: true }),
+    // Who staged the upload: an app/owner-token account or a worker agent
+    // session, never both. Rows from before ownership have neither.
+    uploader_account_id: text("uploader_account_id"),
+    uploader_agent_session_id: text("uploader_agent_session_id"),
   },
   (table) => ({
     room_idx: index("message_attachment_uploads_room_idx").on(table.room_id, table.created_at),
     object_key_idx: uniqueIndex("message_attachment_uploads_object_key_idx").on(table.object_key),
+    pending_expiry_idx: index("message_attachment_uploads_pending_expiry_idx")
+      .on(table.expires_at, table.upload_id)
+      .where(sql`${table.status} = 'pending'`),
+    single_uploader_check: check(
+      "message_attachment_uploads_single_uploader_check",
+      sql`${table.uploader_account_id} IS NULL OR ${table.uploader_agent_session_id} IS NULL`
+    ),
     status_check: check(
       "message_attachment_uploads_status_check",
       sql`${table.status} IN ('pending', 'attached')`

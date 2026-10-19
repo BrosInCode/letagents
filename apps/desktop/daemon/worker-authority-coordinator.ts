@@ -1404,6 +1404,7 @@ export class WorkerAuthorityCoordinator {
     api_key: string | null;
     base_url: string;
     model: string;
+    context_window?: number;
     daemon_generation: number;
   }): Promise<{ status: "installed" | "stale" }> {
     if (!input.entry_id.trim() || !input.base_url.trim() || !input.model.trim()) {
@@ -1430,6 +1431,7 @@ export class WorkerAuthorityCoordinator {
       apiKey: input.api_key,
       baseUrl: input.base_url.replace(/\/+$/, ""),
       model: input.model.trim(),
+      ...(input.context_window !== undefined ? { contextWindow: input.context_window } : {}),
       daemonGeneration: input.daemon_generation,
     });
     return { status: "installed" };
