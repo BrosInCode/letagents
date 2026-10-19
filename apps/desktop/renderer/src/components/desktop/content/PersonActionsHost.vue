@@ -18,7 +18,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onDeactivated, ref, watch } from "vue";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
 import PersonWorkPanel from "./PersonWorkPanel.vue";
 import { buildPersonContextMenuItems, type PersonMenuAction, type PersonMenuPosition } from "../../../domain/person-context-menu";
@@ -69,6 +69,9 @@ function close(): void {
   personMenu.value = null;
   personWorkTarget.value = null;
 }
+
+// Leaving a kept-alive room view must close the teleported panel and its key listener.
+onDeactivated(close);
 
 defineExpose({ open, close });
 </script>

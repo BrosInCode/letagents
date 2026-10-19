@@ -74,7 +74,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { trapFocusInDialog } from "./modal-focus";
 import type { PersonTarget } from "../../../domain/person-target";
 import {
   buildPersonWork,
@@ -160,6 +161,9 @@ onMounted(() => {
   void loadWork();
 });
 
+// The panel is teleported to body. Leaving a kept-alive room view must close it.
+onDeactivated(() => emit("close"));
+
 onBeforeUnmount(() => {
   requestToken += 1;
   document.removeEventListener("keydown", handleKeydown, true);
@@ -223,8 +227,14 @@ async function openPullRequest(row: PersonWorkRow): Promise<void> {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === "Tab") {
+    trapFocusInDialog(event, panelElement.value);
+    return;
+  }
   if (event.key !== "Escape") return;
   event.preventDefault();
+  // One Escape press must not also close an inspector behind the panel.
+  event.stopPropagation();
   emit("close");
 }
 

@@ -7,6 +7,7 @@ export const OPEN_CONVERSATION_FAILED_MESSAGE = "LetAgents could not open that c
 export type OpenConversationWithPersonResult =
   | { status: "self" }
   | { status: "not_found" }
+  | { status: "ambiguous" }
   | { status: "failed"; message: string }
   | { status: "opened"; conversationId: string };
 
@@ -30,7 +31,10 @@ export async function openConversationWithPerson(
   if (wanted.length < 2) return { status: "not_found" };
   try {
     const { people } = await api.people(target.login);
-    const person = people.find((candidate) => candidate.login.trim().toLowerCase() === wanted);
+    // accounts.login is not unique, so two exact matches could be two different people.
+    const matches = people.filter((candidate) => candidate.login.trim().toLowerCase() === wanted);
+    if (matches.length > 1) return { status: "ambiguous" };
+    const person = matches[0];
     if (!person) return { status: "not_found" };
     const result = await api.create([person.id]);
     return { status: "opened", conversationId: result.conversation_id };

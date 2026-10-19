@@ -60,3 +60,14 @@ test("person work panel labels the signed-in person's own work", async () => {
   const html = await renderPanel("Mira");
   assert.match(html, /Your work/);
 });
+
+test("person work panel wires the focus trap, Escape stopPropagation and deactivate close", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    fileURLToPath(new URL("../src/components/desktop/content/PersonWorkPanel.vue", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /trapFocusInDialog\(event, panelElement\.value\)/);
+  assert.match(source, /event\.stopPropagation\(\)/);
+  assert.match(source, /onDeactivated\(/);
+});

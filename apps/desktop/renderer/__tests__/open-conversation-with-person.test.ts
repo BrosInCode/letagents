@@ -43,6 +43,13 @@ describe("openConversationWithPerson", () => {
     assert.deepEqual(calls.create, []);
   });
 
+  it("returns ambiguous and does not create when two accounts share the login", async () => {
+    const { api, calls } = fakeApi([ana, { ...ana, id: "acc_ana_2" }]);
+    const result = await openConversationWithPerson(target, "owen", api);
+    assert.deepEqual(result, { status: "ambiguous" });
+    assert.deepEqual(calls.create, []);
+  });
+
   it("ignores a fuzzy result with a different login", async () => {
     const { api, calls } = fakeApi([{ ...ana, id: "acc_other", login: "ana-lee-2" }]);
     const result = await openConversationWithPerson(target, "owen", api);

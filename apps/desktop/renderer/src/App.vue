@@ -632,6 +632,10 @@ async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
     pushActionToast(`${target.displayName} is not available for messages.`, "info");
     return;
   }
+  if (result.status === "ambiguous") {
+    pushActionToast("More than one account uses this login. Open Messages and search for the person.", "info");
+    return;
+  }
   if (result.status === "failed") {
     pushActionToast(result.message, "error");
     return;
