@@ -5,20 +5,21 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
-import { ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderObservedState, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "./provider-adapter.js";
+import { ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "./provider-adapter.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { DEFAULT_STOP_GRACE_MS, delay, redactCredentialText, safeStreamPayload, sameProcessBirthIdentity, terminateFreshLaunch, type ProviderProcessExit } from "./provider-evidence.js";
 import { credentialBoundaryPluginSource, minimalOpenCodeEnvironment, OPEN_MODEL_OPENCODE_PROVIDER_ID, OPENCODE_SERVER_USERNAME, openCodeAuthContent, openCodeConfig, parseConfiguredOpenModel, parseConfiguredOpenModelImageInput, seedOpenCodeConfigHome, shieldOwnerInstructions, supervisedOpenCodeMcpEnvironment, workspaceOpenCodeEnvironment, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { resolveOpenModelLimits } from "./open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
-import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
-import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
+import { nativeExecutionId, nativeLifecycleCheckpoint } from "./provider-execution-observer.js";
+import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
 import { assistantsFor, eventReferencesSession, finalAssistantFor, messageCompleted, messageError, messageFinishReason, messageText, mintNativeUserMessageId, nativelyOrderedMessageId, OpenCodePermissionReplyError, OpenCodeServerClient, parseOpenCodePermissionEvent, record, turnUserMessageIds, type JsonRecord, type OpenCodeEvent, type OpenCodeMessage, type OpenCodePart, type OpenCodePermissionRequest, type OpenCodePermissionTurnCorrelation, type OpenCodeRuntimeAuth } from "./opencode-server-client.js";
 import { CAPABILITIES, MAX_ASSISTANT_STEPS, type OpenCodePermissionObservation, type OpenModelProviderAdapterDependencies, type OpenModelProviderAdapterOptions, SESSION_ORDERING_SCAN_LIMIT, START_TIMEOUT_MS, TURN_CONTROL_TIMEOUT_MS, TURN_TIMEOUT_MS } from "./open-model/types.js";
 import { MAX_CONSECUTIVE_DENIED_STEPS, TOOL_CALLS_UNFINISHED, type TurnStep, boundedRoomTurnPrompt, classifyTurn, deniedToolCall, deniedToolState, roomTurnImageParts, unansweredCompletionReason, unfinishedToolCalls } from "./open-model/turn-results.js";
 import { OPEN_MODEL_PROVIDER_RETRY_METHOD, OpenCodeBoundedTurnError, type OpenCodeRetryStatus, OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError, OpenCodeTerminalTurnError, openCodeRetryStatus, openModelProviderRetrySummary, safeProviderErrorMessage } from "./open-model/errors.js";
 import { type OpenCodeRuntimeControl, defaultDependencies, nextEventBefore, readRuntimeControl, resolveBeforeDeadline, safeRuntimeId, terminalFromExit, withRuntimeLaunchOwnership, writeRuntimeControl } from "./open-model/runtime-launch.js";
+import { OpenModelHandle } from "./open-model/handle.js";
 export type { OpenModelProviderAdapterDependencies } from "./open-model/types.js";
 export type { OpenModelProviderAdapterOptions } from "./open-model/types.js";
 export type { OpenCodePermissionObservation } from "./open-model/types.js";
@@ -28,42 +29,6 @@ export { OpenCodeStartTimeoutError } from "./open-model/errors.js";
 export { OpenCodeRuntimeGoneError } from "./open-model/errors.js";
 
 
-class OpenModelHandle implements ProviderHandle {
-  private observed: ProviderObservedState;
-  readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
-  readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
-  readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
-  sequence = 0;
-  terminal: ProviderTerminalPayload | null = null;
-  activeRoomTurnId: string | null = null;
-  compaction: { messageId: string; startedAt: string } | null = null;
-  /** True once every user message in the session is known to use OpenCode's ascending ID scheme. */
-  nativeOrderingVerified = false;
-  readonly execution: ProviderExecutionObserver;
-  controlLoss: HardControlEvidence | null = null;
-  observedTurn: { id: string; terminal: TurnOutcome | "lost" | null } | null = null;
-  launchNotices: readonly string[] = [];
-  /** This runtime was started with image input for its model, so it takes the activating message's images. */
-  imageInput = false;
-
-  constructor(
-    readonly workAttemptId: string,
-    readonly pid: number,
-    readonly providerContinuationId: string,
-    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
-    readonly providerConnection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>,
-    readonly client: OpenCodeServerClient,
-    readonly configuredModel: string,
-    initialState: ProviderObservedState,
-    now: () => string,
-  ) {
-    this.observed = initialState;
-    this.execution = new ProviderExecutionObserver(now);
-  }
-
-  observedState(): ProviderObservedState { return this.observed; }
-  setState(value: ProviderObservedState): void { this.observed = value; }
-}
 
 export class OpenModelProviderAdapter implements ProviderAdapter {
   readonly id = "open-model" as const;
