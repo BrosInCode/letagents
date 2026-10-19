@@ -68,3 +68,12 @@ export interface RoomHistoryExpansion {
   /** For a single message: the message itself. */
   message: { id: string; sender: string; text: string; timestamp: string; thread_root_id: string | null } | null;
 }
+
+export declare const ROOM_HISTORY_TURN_VIEW_LINES: number;
+/** The history summary an agent's turn carries. */
+export interface RoomHistoryTurnSummary {
+  lines: Array<{ node: string; first_message_id: string; last_message_id: string; last_at: string; text: string; pending: boolean }>;
+  covered_through_message_id: string | null;
+}
+export declare function roomHistoryTurnSummary(value: unknown): RoomHistoryTurnSummary | null;
+export declare function formatRoomHistoryTurnSummary(summary: RoomHistoryTurnSummary | null | undefined): string[];

@@ -9118,3 +9118,83 @@ test("a turn whose observation ends early keeps its staged file for the native t
     assert.deepEqual(await readdir(stagedRoot), [], "the age sweep removes it once no turn can still read it");
   } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test("an agent's first turn on a continuation carries the room history summary, later turns do not", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-history-summary-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const summary = { lines: [{ node: "3:0", first_message_id: "msg_1", last_message_id: "msg_8", last_at: "2026-10-19T09:00:00.000Z",
+    text: "Emmy and Ada chose Postgres.", pending: false }], covered_through_message_id: "msg_8" };
+  const activation = { for_current_agent: { decision: "activate", reason: "broadcast" } };
+  const seen: Array<{ source: string; summary: unknown }> = [];
+  let reads = 0;
+  let failNext = false;
+  let next = 10;
+  const http = {
+    historySummary: async () => {
+      reads++;
+      if (failNext) { failNext = false; throw new Error("offline"); }
+      return summary;
+    },
+    poll: async ({ afterMessageId }: { afterMessageId: string | null }) => {
+      const after = afterMessageId ? Number(afterMessageId.slice(4)) : 9;
+      return { messages: after < next ? [{ id: `msg_${after + 1}`, text: `Question ${after + 1}`, activation }] : [] };
+    },
+    publish: async () => { throw new Error("no reply expected"); },
+  };
+  const run = provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    seen.push({ source: request.sourceMessage.id as string, summary: request.historySummary });
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  });
+  let delivery = new SupervisedAgentDelivery(store, run, http, currentAuthority, 0);
+  try {
+    await delivery.poll(agent);
+    next = 11;
+    await delivery.poll(agent);
+    assert.deepEqual(seen, [{ source: "msg_10", summary }, { source: "msg_11", summary: undefined }]);
+    assert.equal(reads, 1, "the continuation holds the summary after its first turn");
+    // A restarted daemon does not know what the continuation holds: it gives it again.
+    await delivery.fenceAndDrain();
+    delivery = new SupervisedAgentDelivery(store, run, http, currentAuthority, 0);
+    failNext = true;
+    next = 12;
+    await delivery.poll(agent);
+    next = 13;
+    await delivery.poll(agent);
+    assert.deepEqual(seen.slice(2), [{ source: "msg_12", summary: undefined }, { source: "msg_13", summary }],
+      "a failed read gives the turn none and is asked again on the next turn");
+    assert.equal(reads, 3);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("the history summary counts as given under every id its continuation had during the turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-history-summary-given-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const summary = { lines: [{ node: "0:0", first_message_id: "msg_1", last_message_id: "msg_1", last_at: "2026-10-19T09:00:00.000Z",
+    text: "Emmy: hello", pending: false }], covered_through_message_id: "msg_1" };
+  const activation = { for_current_agent: { decision: "activate", reason: "broadcast" } };
+  const seen: Array<{ source: string; summary: unknown }> = [];
+  let next = 10;
+  // A copy whose continuation id changes during a turn, as a Cursor pending id becomes the real one.
+  const moving = structuredClone(agent);
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    seen.push({ source: request.sourceMessage.id as string, summary: request.historySummary });
+    if (request.historySummary) { moving.handle.providerContinuationId = "thread-real"; moving.providerContinuationId = "thread-real"; }
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    historySummary: async () => summary,
+    poll: async ({ afterMessageId }: { afterMessageId: string | null }) => {
+      const after = afterMessageId ? Number(afterMessageId.slice(4)) : 9;
+      return { messages: after < next ? [{ id: `msg_${after + 1}`, text: `Question ${after + 1}`, activation }] : [] };
+    },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.poll(moving);
+    // The id changed during the answered first turn: the next turn, under the new id, does not repeat it.
+    next = 11;
+    await delivery.poll(moving);
+    assert.deepEqual(seen.map((turn) => [turn.source, Boolean(turn.summary)]), [["msg_10", true], ["msg_11", false]]);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
