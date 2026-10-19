@@ -176,6 +176,9 @@ export function createCodeHighlighter(options) {
   const windowMs = options?.windowMs ?? DEFAULT_TIME_WINDOW_MS;
 
   const cache = new CodeHighlightCache();
+  // Counts blocks that fell back to plain text because the time budget was spent.
+  // Callers that cache a whole rendered result use it to skip caching such a result.
+  let budgetFallbacks = 0;
 
   // Sliding window execution time tracker
   // Worst-case main-thread freeze per second:
@@ -239,6 +242,7 @@ export function createCodeHighlighter(options) {
         const spent = getSpentTime(currentTime);
         if (spent >= maxBudgetMs) {
           // Budget exhausted: fall back to plain escaped text, do NOT cache
+          budgetFallbacks += 1;
           codeHtml = escapeHtml(codeString);
         } else {
           const t0 = now();
@@ -269,6 +273,7 @@ export function createCodeHighlighter(options) {
     renderCodeBlock,
     cache,
     resolveLanguage,
+    get budgetFallbacks() { return budgetFallbacks; },
   };
 }
 

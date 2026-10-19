@@ -9,6 +9,8 @@ export interface DesktopMarkdownOptions {
   mentions?: boolean;
   preservePaths?: boolean;
   onLink?: (url: string) => void;
+  /** Skip the render cache, e.g. for an editor preview that changes on every keystroke. */
+  noCache?: boolean;
 }
 
 const MAX_BLOCKQUOTE_DEPTH = 8;
@@ -19,17 +21,20 @@ export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOpt
   // Output is a pure function of (text, block, mentions, preservePaths). A call that
   // passes `onLink` has a side effect per link and `highlightQuery` varies with the
   // search box, so neither is cached.
-  const cacheable = !options.onLink && !options.highlightQuery;
+  const cacheable = !options.onLink && !options.highlightQuery && !options.noCache;
   const key = cacheable ? markdownCacheKey(value, options) : null;
   if (key !== null) {
     const hit = markdownCache.get(key);
     if (hit !== undefined) return hit;
   }
+  const fallbacksBefore = desktopHighlighter.budgetFallbacks;
   const html = options.block
     ? renderBlockMarkdown(value, options)
     : renderInlineMarkdown(value, options).replace(/\n/g, "<br>");
   const sanitized = sanitizeMarkdownHtml(html);
-  if (key !== null) markdownCache.set(key, sanitized);
+  // A code block that fell back to plain text (highlight budget spent) is not cached
+  // by the highlighter, so a later render may colour it. Keep that true here too.
+  if (key !== null && desktopHighlighter.budgetFallbacks === fallbacksBefore) markdownCache.set(key, sanitized);
   return sanitized;
 }
 

@@ -205,3 +205,36 @@ test("App.vue and DesktopModelPicker.vue no longer walk whole lists with deep wa
   const picker = source("../src/components/desktop/controls/DesktopModelPicker.vue");
   assert.doesNotMatch(picker.slice(picker.indexOf("watch(\n  [() => props.modelValue"), picker.indexOf("watch(filteredOptions")), /deep: true/);
 });
+
+test("markdown cache: a note whose code fell back to plain text is not cached, so a later render can colour it", () => {
+  markdownCache.clear();
+  const realNow = performance.now;
+  let fake = 1_000_000;
+  const clock = (step: number) => { performance.now = () => (fake += step); };
+  const fence = (n: number) => ["```javascript", `const value${n} = ${n};`, "```"].join("\n");
+  const highlighted = (html: string) => /hljs-/.test(html);
+  try {
+    clock(300); // one highlight reads as 300 ms, which spends the 250 ms budget
+    renderDesktopMarkdown(fence(100), { block: true });
+    markdownCache.clear();
+    const note = `note\n\n${fence(1)}`;
+    const first = renderDesktopMarkdown(note, { block: true });
+    assert.equal(highlighted(first), false, "budget spent: plain fallback");
+    assert.equal(markdownCache.size, 0, "a result with a fallback block is not cached");
+    fake += 1500; // wait out the 1 s window
+    clock(0);
+    const later = renderDesktopMarkdown(note, { block: true });
+    assert.equal(highlighted(later), true, "a later render colours it");
+    assert.equal(markdownCache.size, 1, "a fully highlighted result is cached");
+    assert.equal(markdownCache.hits, 0);
+  } finally {
+    performance.now = realNow;
+  }
+});
+
+test("markdown cache: noCache skips the cache (editor preview)", () => {
+  markdownCache.clear();
+  renderDesktopMarkdown("draft text", { block: true, noCache: true });
+  assert.equal(markdownCache.size, 0);
+  assert.match(source("../src/components/desktop/content/room-board/TaskMarkdownEditor.vue"), /noCache: true/);
+});
