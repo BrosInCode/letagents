@@ -43,6 +43,8 @@ export function useAddAgentConfiguration() {
   const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
   const openModelBaseUrl = ref("");
   const openModelModel = ref("");
+  const openModelContextWindow = ref("");
+  watch([openModelBaseUrl, openModelModel], () => { openModelContextWindow.value = ""; }, { flush: "sync" });
   const openModelApiKey = ref("");
   const openModelError = ref<string | null>(null);
   const savingOpenModelSettings = ref(false);
@@ -106,6 +108,7 @@ export function useAddAgentConfiguration() {
         openModelStatus.value = status;
         openModelBaseUrl.value = status.baseUrl;
         openModelModel.value = status.model;
+        openModelContextWindow.value = status.contextWindow == null ? "" : String(status.contextWindow);
         if (status.error) {
           openModelError.value = contextualAddAgentError(
             "Couldn't read Open Model settings",
@@ -193,6 +196,7 @@ export function useAddAgentConfiguration() {
     async function applyOpenModelSettings(input: {
       baseUrl?: string | null;
       model?: string | null;
+      contextWindow?: number | null;
       apiKey?: string | null;
     }): Promise<void> {
       if (openModelWrite) return openModelWrite;
@@ -208,6 +212,7 @@ export function useAddAgentConfiguration() {
           openModelStatus.value = status;
           openModelBaseUrl.value = status.baseUrl;
           openModelModel.value = status.model;
+          openModelContextWindow.value = status.contextWindow == null ? "" : String(status.contextWindow);
           openModelApiKey.value = "";
           if (status.error) {
             openModelError.value = `${contextualAddAgentError(
@@ -244,6 +249,7 @@ export function useAddAgentConfiguration() {
       return applyOpenModelSettings({
         baseUrl: openModelBaseUrl.value.trim() || null,
         model: openModelModel.value.trim() || null,
+        contextWindow: openModelContextWindow.value.trim() ? Number(openModelContextWindow.value) : null,
         ...(apiKey ? { apiKey } : {}),
       });
     }
@@ -388,6 +394,7 @@ export function useAddAgentConfiguration() {
     openModelStatus,
     openModelBaseUrl,
     openModelModel,
+    openModelContextWindow,
     openModelApiKey,
     openModelError,
     savingOpenModelSettings,

@@ -36,6 +36,45 @@ test('renderMessageContent linkifies URLs and keeps href attributes escaped', ()
   )
 })
 
+test('inline-code URLs keep code styling and link the exact destination once', () => {
+  for (const url of [
+    'https://example.com/share.cgi?ssid=abc&download=1#file',
+    'http://example.com/a_b/file(1).pdf',
+    'HTTPS://example.com/task_42?message=msg_12&encoded=%22',
+  ]) {
+    const links: string[] = []
+    const escaped = url.replace(/&/g, '&amp;')
+    const html = renderMessageContent(`Download: \`${url}\`.`, new Set(['task_42']), url => links.push(url))
+    assert.equal(html, `<p>Download: <code><a href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a></code>.</p>`)
+    assert.deepEqual(links, [url])
+  }
+})
+
+test('inline commands, non-web targets and markup remain literal code', () => {
+  const links: string[] = []
+  for (const code of [
+    'curl https://example.com/file.pdf', 'https://example.com/a https://example.com/b',
+    'src/api/server.ts', 'javascript:alert(1)', 'file:///tmp/file.pdf', 'ftp://example.com/file.pdf',
+    'https://', 'https://example.com/" onclick="alert(1)', '<img src=x onerror=alert(1)>',
+  ]) {
+    const html = renderMessageContent(`\`${code}\``, undefined, url => links.push(url))
+    assert.match(html, /^<p><code>/)
+    assert.doesNotMatch(html, /<a\b|<img\b/)
+  }
+  assert.deepEqual(links, [])
+})
+
+test('URLs in fenced code remain unlinked and are not collected', () => {
+  for (const language of ['', 'text', 'sh']) {
+    const links: string[] = []
+    const html = renderMessageContent(`\`\`\`${language}\nhttps://example.com/file.pdf\n\`https://example.com/inline-looking\`\n\`\`\``, undefined, url => links.push(url))
+    assert.match(html, /fenced-code-block/)
+    assert.match(html, /https:\/\/example\.com\/file\.pdf/)
+    assert.doesNotMatch(html, /<a\b/)
+    assert.deepEqual(links, [])
+  }
+})
+
 test('renderMessageContent preserves collision-safe owner/agent mention handles', () => {
   assert.equal(
     renderMessageContent('@agent:local/EmmyMay/codex/oak please review'),

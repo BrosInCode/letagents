@@ -350,6 +350,13 @@ export interface DesktopSupervisorAgentConfiguration {
    */
   homeHarness?: { enabled: boolean; pending: boolean; availability: "available" | "rental" | "unsupported" | "polling" };
   /**
+   * The owner says this agent's model reads images, so the agent is given the
+   * images people attach to the message that wakes it. Present only for an
+   * agent app that asks (Open Model); the others decide for themselves. It
+   * applies the next time the agent starts. Absent from an older background service.
+   */
+  imageInput?: boolean;
+  /**
    * Whether other members of the agent's room see its live activity, and
    * whether it can be shared at all: not for a rented agent, and not for an
    * agent that fetches its own room messages. Absent from an older
@@ -386,7 +393,7 @@ export interface DesktopSupervisorAgentConfigurationUpdateInput {
   daemonGeneration: number;
   expectedRevision: number;
   /** User-editable values only. Native provider policy is daemon-owned. */
-  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId">;
+  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "imageInput">;
 }
 export type DesktopSupervisorAgentConfigurationUpdateResult =
   | { outcome: "updated"; configuration: DesktopSupervisorAgentConfiguration }
@@ -844,6 +851,7 @@ export interface DesktopOpenModelSettingsStatus {
   savedAt: string | null;
   settingsPath: string;
   error: string | null;
+  contextWindow?: number | null;
 }
 
 export interface DesktopOpenModelSaveSettingsInput {
@@ -851,6 +859,7 @@ export interface DesktopOpenModelSaveSettingsInput {
   model?: string | null;
   /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
   apiKey?: string | null;
+  contextWindow?: number | null;
 }
 
 export interface DesktopAgentCommitIdentitySettings {

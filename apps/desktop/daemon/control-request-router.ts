@@ -85,7 +85,7 @@ export interface DaemonControlOperations {
   }): unknown;
   syncExecutionDelegations(input: { room_id: string; daemon_generation: number }): unknown;
   installOpenModelCredential(input: {
-    entry_id: string; api_key: string | null; base_url: string; model: string; daemon_generation: number;
+    entry_id: string; api_key: string | null; base_url: string; model: string; context_window?: number; daemon_generation: number;
   }): unknown;
   bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
@@ -699,6 +699,7 @@ export function createDaemonControlRequestHandler(
         api_key: params.api_key === null ? null : String(params.api_key ?? ""),
         base_url: String(params.base_url ?? ""),
         model: String(params.model ?? ""),
+        ...(params.context_window !== undefined ? { context_window: positiveIntegerParam(params, "context_window", "The model context window must be a positive whole number.") } : {}),
         daemon_generation: Number(params.daemon_generation ?? NaN),
       });
     }

@@ -2,7 +2,7 @@ import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/roo
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
-import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { ProviderUsageTracker, readCodexUsageTail } from "./provider-usage.js";
 import type { ProviderUsage } from "../../../shared/provider-usage.js";
@@ -86,6 +86,7 @@ import {
   type ProviderTurnControlOptions,
   ProviderTurnControlError,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnResult,
   type ProviderRoomTurnOptions,
@@ -1066,6 +1067,18 @@ function exactTurnKey(threadId: string, turnId: string): string {
 
 function exactPermissionItemKey(threadId: string, turnId: string, itemId: string): string {
   return JSON.stringify([threadId, turnId, itemId]);
+}
+
+/**
+ * Codex's own process reads a local image, outside the agent's sandbox, and
+ * resizes it before it enters the thread history. The daemon staged the file
+ * and keeps it until this turn has ended. Each image follows a short label.
+ */
+function roomTurnImageInput(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
+  return includedRoomTurnImages(request.attachments).flatMap(image => image.path ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}`, text_elements: [] },
+    { type: "localImage", path: image.path },
+  ] : []);
 }
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest, context = formatRoomTurnContext(request)): string {
@@ -2106,6 +2119,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
 
+  /**
+   * Codex's own process reads a local image and resizes it before it enters
+   * the thread history; a data URL would stay there at full size.
+   */
+  roomTurnImageDelivery(): RoomTurnImageDelivery {
+    return "file";
+  }
+
   /** Execute one durable inbox item on this exact app-server/thread only. */
   async runRoomTurn(
     providerHandle: ProviderHandle,
@@ -2138,7 +2159,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       started = await handle.client.request<TurnStartResult>("turn/start", {
         ...turnPolicy,
         threadId: handle.providerContinuationId,
-        input: [{ type: "text", text: boundedRoomTurnPrompt(request, context.lines), text_elements: [] }],
+        input: [{ type: "text", text: boundedRoomTurnPrompt(request, context.lines), text_elements: [] }, ...roomTurnImageInput(request)],
       });
     } catch (error) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
