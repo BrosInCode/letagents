@@ -33,7 +33,19 @@ export type RoomInfoPayload = {
   git_room?: unknown;
 };
 
-const joinedRoomInfoCache = new Map<string, RoomInfoPayload>();
+/**
+ * Joined-room info, reused so room opens do not call the join endpoint again.
+ *
+ * Problem: the map had no size limit and no expiry, so a rename or a role change
+ * stayed hidden until sign-out, and a long session kept every room it had seen.
+ * Rule: an entry lives `JOINED_ROOM_INFO_TTL_MS` (5 minutes). The map keeps at most
+ * `JOINED_ROOM_INFO_MAX_ENTRIES` keys; a hit moves its key to the newest place and
+ * the oldest key is dropped first. `clearJoinedRoomInfoCache` still empties it
+ * (sign-out and account changes).
+ */
+export const JOINED_ROOM_INFO_TTL_MS = 5 * 60 * 1000;
+export const JOINED_ROOM_INFO_MAX_ENTRIES = 500;
+const joinedRoomInfoCache = new Map<string, { payload: RoomInfoPayload; storedAt: number }>();
 
 export function createRoomAccess(
   input: Partial<DesktopRoomAccess>,
@@ -66,8 +78,15 @@ export function rememberJoinedRoomInfo(
   const keys = roomInfoCacheKeys(requestedRoomIdentifier, payload)
     .map(roomInfoCacheKey)
     .filter((key): key is string => Boolean(key));
+  const storedAt = Date.now();
   for (const key of keys) {
-    joinedRoomInfoCache.set(key, payload);
+    joinedRoomInfoCache.delete(key);
+    joinedRoomInfoCache.set(key, { payload, storedAt });
+  }
+  while (joinedRoomInfoCache.size > JOINED_ROOM_INFO_MAX_ENTRIES) {
+    const oldest = joinedRoomInfoCache.keys().next().value;
+    if (oldest === undefined) break;
+    joinedRoomInfoCache.delete(oldest);
   }
 }
 
@@ -91,7 +110,15 @@ export async function getJoinedRoomInfo(
 ): Promise<RoomInfoPayload> {
   const cacheKey = roomInfoCacheKey(roomIdentifier);
   const cached = cacheKey ? joinedRoomInfoCache.get(cacheKey) : null;
-  if (cached) return cached;
+  if (cacheKey && cached) {
+    if (Date.now() - cached.storedAt < JOINED_ROOM_INFO_TTL_MS) {
+      // A hit becomes the newest entry, so busy rooms outlive idle ones.
+      joinedRoomInfoCache.delete(cacheKey);
+      joinedRoomInfoCache.set(cacheKey, cached);
+      return cached.payload;
+    }
+    joinedRoomInfoCache.delete(cacheKey);
+  }
 
   const joined = await apiFetch<RoomInfoPayload>(
     `/rooms/${encodeURIComponent(roomIdentifier)}/join`,

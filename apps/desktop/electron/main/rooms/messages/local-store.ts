@@ -26,6 +26,7 @@ import {
   rollback,
   type SqliteDatabase,
 } from "../local-db.js";
+import { readDatabaseChangeStamp, withStatementCache } from "../prepared-statements.js";
 
 type LocalMessageRow = {
   room_id: string;
@@ -229,7 +230,7 @@ async function getDb(): Promise<SqliteDatabase> {
       schemaInitialization = null;
     }
   }
-  return database;
+  return withStatementCache(database);
 }
 
 function ensureLocalThreadReadsSchema(database: SqliteDatabase): void {
@@ -859,6 +860,15 @@ export async function getLocalMessageAttachment(
     data_url: attachment.data_url,
     content_base64: attachment.content_base64,
   };
+}
+
+/**
+ * Token that changes when local chat rows may have changed (a write in this
+ * process, or a commit by another process such as the MCP server).
+ * Pollers compare two tokens and skip their query when they match.
+ */
+export async function getLocalChatChangeStamp(): Promise<string> {
+  return readDatabaseChangeStamp(await getDb());
 }
 
 export async function getLocalChatMessages(
