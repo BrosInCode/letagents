@@ -290,6 +290,8 @@ export async function loadReplyTurnPriorSpeakers(
   return byMessage;
 }
 
+const pendingReplyTurnWakes = new Set<Promise<void>>();
+
 /**
  * After commit: wake the released agents. Fire-and-forget; a lost wake is
  * recovered by the agent's next poll, and the frontier itself honours the
@@ -298,9 +300,23 @@ export async function loadReplyTurnPriorSpeakers(
  */
 export function queueReplyTurnWakes(turns: readonly ReleasedReplyTurn[]): void {
   if (turns.length === 0) return;
-  void import("../../server/reply-turn-holds.js")
+  const wake: Promise<void> = import("../../server/reply-turn-holds.js")
     .then(({ publishReleasedReplyTurns }) => publishReleasedReplyTurns(turns))
     .catch((error) => {
       console.error("[reply turns] failed to wake released agents", error);
-    });
+    })
+    .finally(() => { pendingReplyTurnWakes.delete(wake); });
+  pendingReplyTurnWakes.add(wake);
+}
+
+/**
+ * Wait for queued wakes, including ones queued while waiting. Each wake reads
+ * the released message, so the pool must outlive them: shutdown calls this
+ * after intake stops and before the pool ends; DB tests call it before they
+ * drop the schema.
+ */
+export async function settleReplyTurnWakes(): Promise<void> {
+  while (pendingReplyTurnWakes.size > 0) {
+    await Promise.allSettled([...pendingReplyTurnWakes]);
+  }
 }
