@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { appSource as readAppSource } from "./app-source";
+import { roomShellSource as readRoomShellSource } from "./room-shell-source";
 
 function source(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
@@ -13,7 +14,7 @@ const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.v
 const dialogSource = source("../src/components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue");
 const quickCloseSource = source("../src/components/desktop/controls/FocusRoomQuickCloseOption.vue");
 const roomDetailsSource = source("../src/components/desktop/content/RoomDetailsView.vue");
-const roomShellSource = source("../src/components/desktop/content/DesktopRoomShell.vue");
+const roomShellSource = readRoomShellSource();
 const settingsSource = source("../src/composables/useDesktopAccountRoomSettings.ts");
 const mainFocusRoomsSource = source("../../electron/main/rooms/focus-rooms.ts");
 

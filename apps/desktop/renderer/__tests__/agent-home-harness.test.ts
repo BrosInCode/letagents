@@ -20,6 +20,7 @@ import {
 } from "../src/domain/agent-home-harness";
 import { supervisedPermissionProfileLimits } from "../src/domain/managed-agents";
 import { appSource } from "./app-source";
+import { roomShellSource } from "./room-shell-source";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -181,7 +182,7 @@ test("the app tells every agent's settings which room this is, who has been in i
   assert.match(composable, /provide\(agentRoomAudienceKey, computed\(\(\) => agentRoomAudience\(room\(\), participants\(\), viewer\(\)\)\)\);/);
   // It lives in its own module: the room shell and the inspector host carry nothing for it.
   for (const file of ["../src/components/desktop/content/DesktopRoomShell.vue", "../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue"]) {
-    assert.doesNotMatch(read(file), /agentRoomAudience|roomPeople/, file);
+    assert.doesNotMatch(file.endsWith("DesktopRoomShell.vue") ? roomShellSource() : read(file), /agentRoomAudience|roomPeople/, file);
   }
 });
 
