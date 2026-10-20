@@ -323,35 +323,13 @@ import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, readonly, ref, shallowReadonly, toRef, watch } from "vue";
 import { useNow } from "../../../composables/useNow";
 import type {
-  DesktopActivityEntry,
-  DesktopAgentProvider,
-  DesktopAgentPresence,
-  DesktopBoardSettingsSummary,
-  DesktopFocusRoomInfo,
-  DesktopGitHubEventsPage,
-  DesktopParticipantSummary,
-  DesktopRoomInfo,
-  DesktopRoomAgentDeliveryAttention,
-  DesktopRoomAgentWork,
-  DesktopRoomSharedArtifact,
-  DesktopRoomSnapshot,
   DesktopRoomStorageState,
-  DesktopRoomMessage,
-  DesktopReasoningSession,
-  DesktopSnapshotSourceStates,
   DesktopSupervisorManifestEntry,
-  DesktopAgentStreamEvent,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorRoomMove,
   DesktopSupervisorRetirementEvent,
   DesktopSupervisorStateSnapshot,
-  DesktopTaskSummary,
-  RepoStatus,
-  WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
-import { useCopyIndicator } from "../../../composables/useCopyIndicator";
-import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
-import type { FocusRoomConcludedEvent } from "../../../domain/focus-room-conclusion";
 import { isLocalGitRoom } from "../../../domain/git-rooms";
 import {
   managedAgentRepoStatusForRoom,
@@ -363,11 +341,9 @@ import {
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { attentionResponseAgentNames } from "../../../domain/attention-response";
-import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
 import { appendAgentInspectorLiveBatch } from "../../../domain/agent-inspector-live";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
-import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMessageDeliveryReceipts } from "../../../domain/room-message-receipts";
 import { agentScheduledRetry, waitingAgentIndicators } from "../../../domain/scheduled-retry";
 import { roomMentionCandidates } from "../../../domain/participants";
@@ -375,10 +351,9 @@ import {
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
   resolvingAgentInspectorRequest,
-  resolveAgentInspectorSelection,
-  supervisedAgentInspectorRequest, inspectorInitialTab,
+  supervisedAgentInspectorRequest,
+  inspectorInitialTab,
   type AgentInspectorSupervisorEntryUpdate,
-  type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
 import { agentInspectorActionErrorMessage, actionProgressMessage, actionSuccessMessage } from "../../../domain/agent-inspector-presentation";
 import {
@@ -398,7 +373,6 @@ import {
 import {
   agentInspectorSettingsFenceCurrent,
   configurationDraft,
-  configurationHasRuntimeLag,
   isStaleDaemonGenerationError,
   recoveredRoomMoveState,
   settleConfigurationConflict,
@@ -406,14 +380,10 @@ import {
   snapshotConfigurationSave,
   supervisorGenerationIsCurrent,
   type AgentInspectorConfigurationDraft,
-  type AgentInspectorConfigurationResource,
-  type AgentInspectorRoomMoveResource,
   type AgentInspectorSettingsFence,
 } from "../../../domain/agent-inspector-settings";
 import {
   invalidateAgentInspectorRuntimeControl,
-  createAgentInspectorBackgroundRefresh,
-  createAgentInspectorDetailRequest,
   agentInspectorDetailRevision,
   agentInspectorDetailKey,
   agentInspectorDetailRequestIsCurrent,
@@ -422,7 +392,6 @@ import {
   defaultAgentInspectorWorkSource,
   canRevealAgentInspectorWorkMessage,
   emptyAgentInspectorWorkResource,
-  type AgentInspectorWorkResource,
 } from "../../../domain/agent-inspector-work";
 import {
   foldSupervisorActivityPush,
@@ -433,7 +402,6 @@ import {
   supervisorStateSubscriptionNeedsRepair,
   supervisorStatusTrailingRefreshGeneration,
 } from "../../../domain/supervisor-entries-resource";
-import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import { supervisorEntriesKey } from "./add-agent/supervisor-entries-context";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
@@ -459,18 +427,14 @@ import {
   rememberGitHubEventsVisible,
 } from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
-import { isRoomTabId, type AttentionNavigationIntent, type RoomTab, type RoomTabId } from "./room-shell/types";
+import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useRoomAttentionNavigation } from "./room-shell/useRoomAttentionNavigation";
 import { useSupervisorStateSubscription } from "./room-shell/useSupervisorStateSubscription";
 import { useAgentCorrectionHandoff } from "./room-shell/useAgentCorrectionHandoff";
 import { useAgentInspectorObservations } from "./room-shell/useAgentInspectorObservations";
 import { useAgentInspectorConfigurationApply } from "./room-shell/useAgentInspectorConfigurationApply";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
-import type {
-  AgentInspectorSelection,
-  AgentInspectorRequest,
-  AgentModalTarget,
-} from "./desktop-chat-message/types";
+import type { AgentInspectorRequest, AgentModalTarget } from "./desktop-chat-message/types";
 import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
 import { useDesktopRoomGitHubEvents } from "./room-shell/useDesktopRoomGitHubEvents";
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
@@ -483,133 +447,56 @@ import { hostApprovalStopsTurn } from "./room-chat/host-approval-presentation";
 import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./room-chat/host-approvals";
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
+import type { RoomShellContext } from "../../../composables/room-shell/context";
+import { useRoomShellState } from "../../../composables/room-shell/useRoomShellState";
 const props = defineProps<DesktopRoomShellProps>();
-const { pushActionToast } = useDesktopActionToasts();
-const personActions = ref<InstanceType<typeof PersonActionsHost> | null>(null);
-
 const emit = defineEmits<DesktopRoomShellEmits>();
-const roomRef = toRef(props, "room");
-const messagesRef = toRef(props, "messages");
-const reasoningSessionsRef = toRef(props, "reasoningSessions");
-const activeTab = ref<RoomTabId>(readRoomActiveTab(props.room.identifier));
-const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
-const revealedMessageId = ref<string | null>(null);
-const actionPanelOpen = ref(false);
-const addAgentModalOpen = ref(false);
-const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
-const selectedAgentDetailRequestVersion = ref(0);
-const agentInspectorInitialTab = ref<"overview" | "live" | "work" | "workspace" | "diagnostics">("overview");
-const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
-const agentInspectorCompact = ref(false);
-// Agent inspector request tokens and timers. Its loaders, the room-change and
-// inspector watchers, the supervisor status refresh, and unmount all read them.
-const agentInspectorRequestState = {
-  agentInspectorLiveIdentity: null as string | null,
-  agentInspectorSettingsRequestToken: 0,
-  agentInspectorRoomMoveRequestToken: 0,
-  agentInspectorRoomMoveRecoveryTimer: null as number | null,
-  agentInspectorWorkRequestToken: 0,
-};
-// Ephemeral live feed for the inspected agent's "Live" tab. Not persisted;
-// accumulates raw stream events for the focused entry only, reset on focus
-// change and inspector close.
-const agentInspectorLiveFeed = ref<{ events: DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number }>({ events: [], ended: false, droppedEvents: 0 });
-const agentInspectorWorkResource = ref<AgentInspectorWorkResource>(emptyAgentInspectorWorkResource());
-const agentInspectorWorkSourceMessageId = ref<string | null>(null);
-const agentInspectorConfigurationResource = ref<AgentInspectorConfigurationResource>({ status: "idle", configuration: null, draft: null, error: null });
-const agentInspectorRoomMoveResource = ref<AgentInspectorRoomMoveResource>({ status: "idle", move: null, error: null });
-const agentInspectorProviders = ref<DesktopAgentProvider[]>([]);
+
+// The shell holds the layout template and this wiring. The context fills in the
+// original order: props and emit, state, then the function composables (only
+// function definitions, like the hoisted declarations they came from), then each
+// watcher and composable slice exactly where its code used to run.
+const app = {} as RoomShellContext;
+Object.assign(app, { props, emit });
+const {
+  pushActionToast, personActions, roomRef, messagesRef, reasoningSessionsRef, activeTab,
+  roomChatView, revealedMessageId, actionPanelOpen, addAgentModalOpen, selectedAgentDetailRequest,
+  selectedAgentDetailRequestVersion, agentInspectorInitialTab, agentInspectorActionState,
+  agentInspectorCompact, agentInspectorRequestState, agentInspectorLiveFeed,
+  agentInspectorWorkResource, agentInspectorWorkSourceMessageId,
+  agentInspectorConfigurationResource, agentInspectorRoomMoveResource, agentInspectorProviders,
+  agentInspectorSettingsConflict, agentInspectorBackgroundRefresh, agentInspectorDetailRequest,
+  rulesOpen, roomLinkCopied, copyRoomLinkToClipboard, deliveryRetryCoordinator,
+  deliveryRetryingKeys, continuationRepairCoordinator, continuationRepairingKeys,
+  roomDeliverySkipCoordinator, roomDeliverySkippingKeys, deliveryRetryNegotiated,
+  deliveryRetryAvailable, boardSelectedTaskId, boardGovernanceSection, activityHistoryRequest,
+  artifactTimelineTaskFilterId, storageBusy, storageFeedback, githubEventsVisible,
+  environmentPanelOpen, refreshedEnvironmentRepoStatus, supervisorEntries, supervisorEntriesState,
+  supervisorEntriesError, supervisorEntriesHaveLoaded, agentRosterState,
+  supervisorEntriesUpdatedAt, supervisorStatus, supervisorSyncState,
+  agentInspectorRoomMoveAvailable, continuationRepairAvailable, roomDeliverySkipAvailable,
+  selectedAgentDetailTarget, roomIdentifierRef, roomActiveTabStorageKey, readRoomActiveTab,
+  supervisorGenerationChangedMessage, supervisorSettingsGenerationChangedMessage,
+} = Object.assign(app, useRoomShellState(app));
+
 let agentInspectorProvidersRequest: Promise<void> | null = null;
-const agentInspectorSettingsConflict = ref(false);
+
 let agentInspectorSettingsDraftVersion = 0;
+
 let agentInspectorMessageIdentityRequestToken = 0;
-const agentInspectorBackgroundRefresh = createAgentInspectorBackgroundRefresh();
-const agentInspectorDetailRequest = createAgentInspectorDetailRequest();
-const rulesOpen = ref(false);
-const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
-const deliveryRetryCoordinator = createRoomDeliveryRetryCoordinator();
-const deliveryRetryingKeys = deliveryRetryCoordinator.retryingKeys;
-const continuationRepairCoordinator = createRoomDeliveryRetryCoordinator();
-const continuationRepairingKeys = continuationRepairCoordinator.retryingKeys;
-const roomDeliverySkipCoordinator = createRoomDeliveryRetryCoordinator();
-const roomDeliverySkippingKeys = roomDeliverySkipCoordinator.retryingKeys;
-const deliveryRetryNegotiated = ref(false);
-const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
-const boardSelectedTaskId = ref<string | null>(null);
-const boardGovernanceSection = ref<"pending" | null>(null);
-const activityHistoryRequest = ref(0);
-const artifactTimelineTaskFilterId = ref<string | null>(null);
-const storageBusy = ref(false);
-const storageFeedback = ref<{ message: string; error: boolean } | null>(null);
+
 watch(() => props.room.identifier, () => { storageFeedback.value = null; });
-const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
-const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
-const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
-const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
+
 const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
-const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
-const supervisorEntriesError = ref<string | null>(null);
-const supervisorEntriesHaveLoaded = ref(false);
-const agentRosterState = computed(() => {
-  if (supervisorEntriesState.value === "error" || props.sourceStates?.presence.status === "error") return "error";
-  if (props.roomLoading || supervisorEntriesState.value === "loading") return "loading";
-  return supervisorEntriesState.value;
-});
-const supervisorEntriesUpdatedAt = ref<string | null>(null);
-const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
-// Supervisor status and entries refresh state. The refresh functions, the
-// inspector loaders, the room-change watcher, and unmount all read it.
-const supervisorSyncState = {
-  supervisorStatusRequestToken: 0,
-  supervisorEntriesRefreshRequestId: 0,
-  supervisorEntriesMutationVersion: 0,
-  supervisorEntriesRefreshQueued: false,
-  supervisorEntriesRefreshOwnerActive: true,
-  retirementStatusCheckOperationId: null as string | null,
-  supervisorStateLastRepairAtMs: null as number | null,
-  supervisorStateDaemonGeneration: 0,
-  supervisorStateSequence: 0,
-};
+
 let supervisorStatusRefreshInFlight: Promise<DesktopSupervisorDaemonStatus | null> | null = null;
+
 let supervisorStatusRequiredGeneration = 0;
+
 let supervisorStatusTrailingRefreshAttemptGeneration = 0;
-const agentInspectorRoomMoveAvailable = computed(() =>
-  Boolean(supervisorStatus.value?.capabilities.agentRoomMove));
-const continuationRepairAvailable = computed(() =>
-  Boolean(supervisorStatus.value?.capabilities.providerContinuationRepair
-    && typeof desktopIpc.supervisor?.restoreAgentConversation === "function"));
-const roomDeliverySkipAvailable = computed(() =>
-  Boolean(supervisorStatus.value?.capabilities.roomDeliverySkip
-    && typeof desktopIpc.supervisor?.skipRoomDelivery === "function"));
-const supervisorEntriesResource = computed<SupervisorEntriesResource>(() => {
-  if (supervisorEntriesState.value === "error") {
-    return {
-      state: "error",
-      roomIdentifier: props.room.identifier,
-      updatedAt: supervisorEntriesUpdatedAt.value,
-      data: supervisorEntries.value,
-      error: supervisorEntriesError.value || "Supervisor daemon unavailable.",
-    };
-  }
-  return {
-    state: supervisorEntriesState.value,
-    roomIdentifier: props.room.identifier,
-    updatedAt: supervisorEntriesUpdatedAt.value,
-    data: supervisorEntries.value,
-    error: null,
-  } as SupervisorEntriesResource;
-});
-const selectedAgentDetailTarget = computed<AgentInspectorSelection | null>(() => {
-  const request = selectedAgentDetailRequest.value;
-  if (!request) return null;
-  return resolveAgentInspectorSelection(
-    supervisorEntriesResource.value,
-    request,
-    props.room.identifier,
-  );
-});
-const roomIdentifierRef = computed(() => props.room.identifier);
+
 const roomWakeRules = useRoomWakeRules(roomIdentifierRef, computed(() => props.storage.effectiveMode !== "local"));
+
 provideRoomWakeRules({
   roomIdentifier: roomIdentifierRef,
   activeByAgentKey: roomWakeRules.activeByAgentKey,
@@ -617,6 +504,7 @@ provideRoomWakeRules({
   api: roomWakeRules.api,
   openMessage: (messageId) => { void revealWakeMessage(messageId); },
 });
+
 const agentInspectorProjections = computed(() => {
   return projectAgentInspectors(supervisorEntries.value, {
     roomId: props.room.identifier,
@@ -632,6 +520,7 @@ const agentInspectorProjections = computed(() => {
     pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
   });
 });
+
 const {
   correctionRequest: agentInspectorCorrectionRequest,
   correctableAgents,
@@ -645,11 +534,13 @@ const {
     ownerAttribution: ownerAttributionLabel(projection.entry.createdBy),
   })),
 });
+
 const selectedAgentDetailProjection = computed(() => {
   const target = selectedAgentDetailTarget.value;
   if (target?.kind !== "supervised") return null;
   return agentInspectorProjections.value.find((projection) => projection.entryId === target.supervisorEntryId) ?? null;
 });
+
 const { applyAgentInspectorSettings } = useAgentInspectorConfigurationApply({
   selectedProjection: selectedAgentDetailProjection,
   configurationResource: agentInspectorConfigurationResource,
@@ -662,6 +553,7 @@ const { applyAgentInspectorSettings } = useAgentInspectorConfigurationApply({
   operationCurrent: agentInspectorOperationCurrent,
   recoverGeneration: recoverAgentInspectorSettingsGeneration,
 });
+
 const selectedAgentInspectorActionState = computed(() => {
   const target = selectedAgentDetailTarget.value;
   return agentInspectorActionStateForEntry(
@@ -669,24 +561,35 @@ const selectedAgentInspectorActionState = computed(() => {
     target?.kind === "supervised" ? target.supervisorEntryId : null,
   );
 });
+
 const selectedAgentInspectorWorkArtifacts = computed(() => {
   const projection = selectedAgentDetailProjection.value;
   return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
+
 const deliveryReceiptsByMessage = computed(() => roomMessageDeliveryReceipts(supervisorEntries.value));
+
 provide(supervisorEntriesKey, {
   entries: shallowReadonly(supervisorEntries),
   state: readonly(supervisorEntriesState),
   error: readonly(supervisorEntriesError),
   refresh: refreshSupervisorEntries,
 });
+
 let supervisorEntriesRefreshTimer: number | null = null;
+
 let supervisorEntriesRefreshInFlight: Promise<void> | null = null;
+
 let unsubscribeSupervisorActivity: (() => void) | null = null;
+
 let unsubscribeSupervisorAgentStream: (() => void) | null = null;
+
 let unsubscribeSupervisorRetirement: (() => void) | null = null;
+
 const supervisorStateSubscription = useSupervisorStateSubscription({ roomIdentifier: () => props.room.identifier, accept: acceptSupervisorStateSnapshot });
+
 let environmentRepoStatusRefreshRequestId = 0;
+
 const roomUrl = computed(() => props.room.kind === "focus"
   ? buildLetAgentsFocusRoomUrl({
       roomIdentifier: props.room.identifier,
@@ -698,8 +601,11 @@ const roomUrl = computed(() => props.room.kind === "focus"
       localOnly: props.storage.localRoom?.publishStatus === "local_only",
     })
 );
+
 const localGitRoom = computed(() => isLocalGitRoom(props.room));
+
 const isLocalRoom = computed(() => props.storage.effectiveMode === "local");
+
 const messageNamespace = computed(() =>
   [
     props.room.identifier,
@@ -707,6 +613,7 @@ const messageNamespace = computed(() =>
     props.storage.localRoom?.roomIdentifier || "cloud",
   ].join(":")
 );
+
 const {
   soundEnabled,
   notificationsEnabled,
@@ -717,6 +624,7 @@ const {
   showRoomNotification,
   watchRoomNotifications,
 } = useDesktopRoomPreferences(() => props.room.identifier);
+
 const {
   sendingMessage,
   sendError,
@@ -812,18 +720,23 @@ const {
   githubConnected: computed(() => Boolean(githubStatus.value?.connected)),
   connectedRepository: computed(() => githubStatus.value?.repository?.fullName || null),
 });
+
 const githubEventsAvailable = showEventsTab;
+
 const showEnvironmentPanelWidget = computed(() =>
   activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
 );
+
 const effectiveEnvironmentRepoStatus = computed(() => {
   const refreshed = refreshedEnvironmentRepoStatus.value;
   if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;
   return refreshed;
 });
+
 const managedAgentRepoStatus = computed(() =>
   managedAgentRepoStatusForRoom(props.repoStatus, props.room, props.gitRoomMatchesActiveRepo)
 );
+
 const managedAgentRepoRootPath = computed(() =>
   managedAgentRootPathForRoom({
     room: props.room,
@@ -832,10 +745,12 @@ const managedAgentRepoRootPath = computed(() =>
     durableProjectRootPath: props.durableProjectRootPath,
   })
 );
+
 // Room agents by Needs-you answer handle, for surfaces outside the chat view.
 const roomAttentionResponseNames = computed(() =>
   attentionResponseAgentNames([...roomParticipants.value, ...props.presence])
 );
+
 const roomParticipants = computed(() =>
   mergeDesktopSupervisorAgentParticipants(
     // Message history can lack canonical agent keys. Enrich its identities
@@ -845,6 +760,7 @@ const roomParticipants = computed(() =>
     props.room.identifier,
   )
 );
+
 const agentMentionInsertTextByEntryId = computed(() => {
   const result = new Map<string, string>();
   for (const entry of supervisorEntries.value) {
@@ -867,13 +783,16 @@ const agentMentionInsertTextByEntryId = computed(() => {
   }
   return result;
 });
+
 const pendingResponseParticipants = useRoomResponseParticipants(() => ({
   roomIdentifier: props.room.identifier, loading: props.roomLoading, messages: props.messages,
   entries: supervisorEntries.value, presence: props.presence,
   fresh: supervisorEntriesResourceFreshness(supervisorEntriesState.value) === "fresh",
 }));
+
 // The 90 s "recently working" window needs the clock, not only new presence data.
 const workWindowNow = useNow(30_000);
+
 const localAgentWork = computed(() =>
   mergeRoomResponseParticipants([
     ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
@@ -882,6 +801,7 @@ const localAgentWork = computed(() =>
   ], [...pendingResponseParticipants.value, /* other members' agents, last */ ...remoteAgentWorkIndicators(props.presence,
     supervisorEntries.value, [], workWindowNow.value)], props.messages)
 );
+
 function openBoardTask(taskId: string): void {
   boardSelectedTaskId.value = taskId;
   activeTab.value = "board";
@@ -1181,19 +1101,6 @@ function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
 }
 
-function roomActiveTabStorageKey(roomIdentifier: string): string {
-  return `letagents-desktop:room-active-tab:${roomIdentifier}`;
-}
-
-function readRoomActiveTab(roomIdentifier: string): RoomTabId {
-  try {
-    const stored = window.localStorage.getItem(roomActiveTabStorageKey(roomIdentifier));
-    return isRoomTabId(stored) ? stored : "chat";
-  } catch {
-    return "chat";
-  }
-}
-
 function rememberRoomActiveTab(roomIdentifier: string, tab: RoomTabId): void {
   try {
     window.localStorage.setItem(roomActiveTabStorageKey(roomIdentifier), tab);
@@ -1453,11 +1360,6 @@ async function revealRecordedWorkMessage(messageId: string): Promise<void> {
   activeTab.value = "chat";
   await revealRoomMessage(messageId);
 }
-
-const supervisorGenerationChangedMessage =
-  "Background agent management restarted. Current state was refreshed; review and retry.";
-const supervisorSettingsGenerationChangedMessage =
-  "Background agent management restarted. Your draft is preserved; reload the current configuration before saving.";
 
 function applySupervisorStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
   const previousGeneration = supervisorStatus.value?.generation ?? null;
