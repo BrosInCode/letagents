@@ -433,7 +433,7 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import { activeRepoRoomContext, resolveActiveProjectRootPath } from "./domain/room-project-context";
 import type {
   FocusRoomConcludedEvent,
   FocusRoomConclusionInput,
@@ -443,10 +443,7 @@ import {
   useDesktopAccountRoomSettings,
   type SidebarRoomBatchMutationResult,
 } from "./composables/useDesktopAccountRoomSettings";
-import { provideAgentRoomAudience } from "./composables/useAgentRoomAudience";
-import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
-import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopUnreadCounts } from "./composables/useDesktopUnreadCounts";
@@ -498,11 +495,12 @@ import {
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import { desktopIpc } from "./ipc/index.js";
-import { gitRoomsShareRepo, roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
+import { roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
 import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
+import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -515,9 +513,9 @@ const RentMarketplaceView = defineAsyncComponent(
 const app = {} as AppContext;
 const {
   loading, appInfo, updateStatus, repoStatus, workers, rootRoomSnapshot, selectedSnapshot,
-  authStatus, sessionGeneration, authDialogOpen, selectedRootRoomStorageKey, activeEntryStorageKey,
-  recentRootRoomsStorageKey, legacyRepositoryRootBindingsStorageKey, readRoomMessagesStorageKey,
-  sidebarWidthStorageKey, sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
+  authStatus, sessionGeneration, authDialogOpen, recentRootRoomsStorageKey,
+  legacyRepositoryRootBindingsStorageKey, readRoomMessagesStorageKey, sidebarWidthStorageKey,
+  sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
   SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, recentRootRooms,
   newRoomRecentProjectFolders, legacyRepositoryRootBindings, projectBindings, windowFocused,
   windowHidden, readRoomMessageIds, sidebarWidth, sidebarRoomOrder, sidebarRevealRequest,
@@ -546,8 +544,10 @@ const {
 } = Object.assign(app, useAppSessionActions(app));
 // Functions still in App.vue are hoisted, so they join the context first.
 Object.assign(app, {
-  refreshSidebarRoomMetadata, refreshProjectBindings, restartRepoStatusWatch,
-  refreshRentalRequestCount, markActiveRoomRead, openRoomFromAppAgent,
+  refreshSidebarRoomMetadata, activeProjectRootPath, refreshProjectBindings,
+  restartRepoStatusWatch, refreshRentalRequestCount, refreshSidebarLatestMessages,
+  markActiveRoomRead, openRoomFromAppAgent, forgetLoadingChatScrollRooms,
+  activeChatScrollRoomIdentifier,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -571,50 +571,18 @@ watch(() => accountActivity.connected.value, (connected, wasConnected) => {
 
 const {
   needsYouData, needsYouLoading, needsYouError, mergeInboxThreads, agentAttentionItems,
-  needsYouCount, inboxRoomOpens, inboxStorageKey, inboxRooms, chooseInboxRooms,
+  needsYouCount, inboxStorageKey, inboxRooms, chooseInboxRooms,
 } = Object.assign(app, useAppInboxState(app));
 
 let needsYouInterval: number | null = null;
 
 const {
-  activeEntry,
-  collapsedProjects,
-  currentParentRoom,
-  cycleSidebar: toggleSidebarMode,
-  focusRooms,
-  getAuthRoomIdentifier,
-  openRoomSnapshot,
-  pinnedCollapsed,
-  pinnedRoom,
-  projectEntries,
-  reconcileActiveEntry,
-  rememberRootRoomSnapshot,
-  repoName,
-  resolveSelectedRoomIdentifier,
-  roomsCollapsed,
-  returnFromSettings,
-  selectSidebarEntry,
-  selectedAccess,
-  selectedFocusRooms,
-  selectedNeedsAccess,
-  selectedRoomIdentifier,
-  selectedRoomInfo,
-  sidebarMode,
-  toggleProject,
-  togglePinnedCollapsed,
-  toggleRoomsCollapsed,
-} = useDesktopNavigationState({
-  accountRooms,
-  activeEntryStorageKey,
-  appInfo,
-  recentRootRooms,
-  recentRootRoomsStorageKey,
-  repoStatus,
-  rootRoomSnapshot,
-  selectedRootRoomIdentifier,
-  selectedSnapshot,
-});
-Object.assign(app, { activeEntry, getAuthRoomIdentifier, projectEntries, selectSidebarEntry, selectedNeedsAccess, selectedRoomIdentifier, selectedRoomInfo });
+  activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, openRoomSnapshot,
+  pinnedCollapsed, pinnedRoom, projectEntries, reconcileActiveEntry, rememberRootRoomSnapshot,
+  repoName, resolveSelectedRoomIdentifier, roomsCollapsed, returnFromSettings, selectSidebarEntry,
+  selectedAccess, selectedFocusRooms, selectedNeedsAccess, selectedRoomIdentifier,
+  selectedRoomInfo, sidebarMode, toggleProject, togglePinnedCollapsed, toggleRoomsCollapsed,
+} = Object.assign(app, useAppNavigation(app));
 
 const {
   roomAttention,
@@ -642,8 +610,10 @@ let repoStatusWatchRootPath: string | null = null;
 
 let repoStatusWatchRequestId = 0;
 
-const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
-Object.assign(app, { pushActionToast });
+const {
+  actionToasts, dismissActionToast, pushActionToast, selectedRoomWithProjectContext,
+  selectedGitRoomMatchesActiveRepo, selectedRoomProjectRootPath, selectedRoomIsProject,
+} = Object.assign(app, useAppRoomContext(app));
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 
@@ -667,49 +637,6 @@ async function cycleSidebar(): Promise<void> {
     '[data-testid="room-sidebar-reveal-button"], [data-testid="auth-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
   )?.focus({ preventScroll: true });
 }
-
-const selectedRoomWithProjectContext = computed(() => {
-  const room = selectedRoomInfo.value;
-  const parentRoom = rootRoomSnapshot.value?.room || null;
-  const isListedChild = Boolean(
-    rootRoomSnapshot.value?.focusRooms.some((focusRoom) =>
-      normalizeRoomIdentifier(focusRoom.identifier) === normalizeRoomIdentifier(room.identifier)
-    )
-  );
-  return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
-});
-
-provideAgentRoomAudience(() => selectedRoomWithProjectContext.value, () => selectedSnapshot.value?.participants ?? [], () => [authStatus.value?.account?.login, authStatus.value?.account?.displayName]);
-
-const selectedGitRoomMatchesActiveRepo = computed(() => {
-  const gitRoom = selectedRoomWithProjectContext.value.gitRoom;
-  if (!gitRoom || !repoStatus.value?.isGitRepo) return false;
-  const activeRoomIdentifier = normalizeRoomIdentifier(repoStatus.value.roomIdentifier);
-  if (
-    activeRoomIdentifier &&
-    activeRoomIdentifier === normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
-  ) return true;
-  const rootGitRoom = rootRoomSnapshot.value?.room?.gitRoom || null;
-  if (rootGitRoom) return gitRoomsShareRepo(rootGitRoom, gitRoom);
-  return normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
-    === normalizeRoomIdentifier(rootRoomSnapshot.value?.roomIdentifier);
-});
-
-const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
-
-const selectedRoomIsProject = computed(() => {
-  if (selectedRoomWithProjectContext.value.gitRoom || selectedRoomProjectRootPath.value) return true;
-  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
-  const identifier = normalizeRoomIdentifier(
-    context?.roomIdentifier
-      ?? selectedRootRoomIdentifier.value
-      ?? rootRoomSnapshot.value?.roomIdentifier,
-  );
-  if (!identifier) return false;
-  return recentRootRooms.value.some((room) =>
-    room.kind === "project" && normalizeRoomIdentifier(room.identifier) === identifier
-  );
-});
 
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, (accountId) => {
   accountReadStorageKey = accountId ? `${readRoomMessagesStorageKey}:${encodeURIComponent(accountId)}` : null;
@@ -1406,7 +1333,7 @@ const {
   syncRoomStream: syncDesktopRoomStream,
   workers,
 });
-Object.assign(app, { handleRoomStreamEvent, invalidateSession, refresh, syncSelectedRoomStream });
+Object.assign(app, { handleRoomStreamEvent, invalidateSession, refresh, refreshSelectedSnapshot, syncSelectedRoomStream });
 
 const authSnapshotPending = computed(() =>
   isAuthSnapshotPending({
@@ -2420,44 +2347,7 @@ function activeChatScrollRoomIdentifier(): string | null {
   return selectedRoomInfo.value.identifier || null;
 }
 
-watch(
-  () => activeEntry.value,
-  async (nextEntry, previousEntry) => {
-    const selectedEntryId = nextEntry.id;
-    const previousRoomIdentifier = previousEntry?.type === "room" ? previousEntry.roomIdentifier : null;
-    forgetLoadingChatScrollRooms([activeChatScrollRoomIdentifier()]);
-    if (previousRoomIdentifier) {
-      void nextTick(() => {
-        forgetLoadingChatScrollRooms([previousRoomIdentifier]);
-      });
-    }
-    rememberStoredString(activeEntryStorageKey, nextEntry.id);
-    if (!rootRoomSnapshot.value) return;
-    if (nextEntry.id === previousEntry?.id) return;
-    await inboxRoomOpens.load(selectedEntryId, () => refreshSelectedSnapshot(rootRoomSnapshot.value));
-    if (activeEntry.value.id !== selectedEntryId) return;
-    markActiveRoomRead();
-  }
-);
-
-watch(
-  [() => projectEntries.value, () => loading.value],
-  () => {
-    if (loading.value || !rootRoomSnapshot.value) return;
-    if (!sidebarMetadataRefresh.inFlight) {
-      void refreshSidebarLatestMessages();
-    }
-  },
-  { deep: true, immediate: true }
-);
-
-watch(
-  () => selectedRootRoomIdentifier.value,
-  (roomIdentifier) => {
-    rememberStoredString(selectedRootRoomStorageKey, roomIdentifier);
-  },
-  { immediate: true }
-);
+Object.assign(app, useAppSelectionWatchers(app));
 
 watch(
   () => activeProjectRootPath(),

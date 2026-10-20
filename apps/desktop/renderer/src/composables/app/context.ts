@@ -6,6 +6,7 @@
 import type { useAppState } from "./useAppState";
 import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
+import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 
 /** What each composable returns, by composable name. */
 interface AppContextParts {
@@ -14,9 +15,12 @@ interface AppContextParts {
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
   useAppInboxState: ReturnType<typeof useAppInboxState>;
+  useAppNavigation: ReturnType<typeof useAppNavigation>;
   useAppRoomAttention: ReturnType<typeof useAppRoomAttention>;
+  useAppRoomContext: ReturnType<typeof useAppRoomContext>;
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
+  useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
   /** Names that still live in App.vue while the split is in progress. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

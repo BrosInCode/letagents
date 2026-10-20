@@ -16,7 +16,13 @@ import type { AppContextOf } from "./context";
 
 /** Inbox, Needs you, and private message navigation. */
 export function useAppInboxActions(context: unknown) {
-  const app = context as AppContextOf<"useAppInboxState" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<
+      "useAppInboxState"
+    | "useAppNavigation"
+    | "useAppRoomContext"
+    | "useAppState"
+    | "appVuePending"
+  >;
   const {
     attentionIntent, authStatus, inboxSection, notificationRevealMessageId, openConversationId,
     openConversationNonce,
@@ -68,7 +74,7 @@ export function useAppInboxActions(context: unknown) {
 
 /** Needs you data, agent attention, and the Inbox room filter. */
 export function useAppInboxState(context: unknown) {
-  const app = context as AppContextOf<"useAppState" | "appVuePending">;
+  const app = context as AppContextOf<"useAppRoomContext" | "useAppState" | "appVuePending">;
   const {
     authStatus, rentalRequestCount,
   } = app;
@@ -96,22 +102,22 @@ export function useAppInboxState(context: unknown) {
 
 /** Per-room attention signals and room notification preferences. */
 export function useAppRoomAttention(context: unknown) {
-  const app = context as AppContextOf<"useAppInboxState" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<"useAppInboxState" | "useAppNavigation" | "useAppState">;
   const {
-    agentAttentionItems, approvalsReady, authStatus, inboxRooms, inboxSection, inboxStorageKey,
-    needsYouData,
+    activeEntry, agentAttentionItems, approvalsReady, authStatus, inboxRooms, inboxSection,
+    inboxStorageKey, needsYouData, selectedNeedsAccess, selectedRoomIdentifier, selectedRoomInfo,
   } = app;
   const roomAttention = useNeedsYouSignal(needsYouData, agentAttentionItems, {
     ready: () => approvalsReady.value,
     account: () => inboxStorageKey.value,
-    activeRoom: () => app.activeEntry.value.type === "room" && !app.selectedNeedsAccess.value ? app.selectedRoomInfo.value.identifier : null,
-    inboxRooms: () => app.activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
+    activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
+    inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
   });
 
   watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {
     roomNotificationPreferences.setViewer(account ? { id: account.id, login: account.login } : null);
     void roomNotificationPreferences.refreshAll();
-    if (app.selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(app.selectedRoomIdentifier.value);
+    if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
   }, { immediate: true, flush: "sync" });
   return {
     roomAttention,

@@ -21,6 +21,7 @@ export function useAppSessionActions(context: unknown) {
       "useAppAuthFlow"
     | "useAppInboxActions"
     | "useAppInboxState"
+    | "useAppNavigation"
     | "useAppState"
     | "appVuePending"
   >;
@@ -164,9 +165,14 @@ export function useAppAccountScope(context: unknown) {
 
 /** The GitHub device sign-in flow. */
 export function useAppAuthFlow(context: unknown) {
-  const app = context as AppContextOf<"useAppSessionActions" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<
+      "useAppNavigation"
+    | "useAppSessionActions"
+    | "useAppState"
+    | "appVuePending"
+  >;
   const {
-    authStatus, clearDesktopSessionState, firstRunStage, mcpInstallState,
+    authStatus, clearDesktopSessionState, firstRunStage, getAuthRoomIdentifier, mcpInstallState,
   } = app;
   const {
     authBusy,
@@ -181,7 +187,7 @@ export function useAppAuthFlow(context: unknown) {
     startAuthFlow,
   } = useDesktopAuthFlow({
     authStatus,
-    getRoomIdentifier: () => app.getAuthRoomIdentifier(),
+    getRoomIdentifier: () => getAuthRoomIdentifier(),
     isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
     onFirstRunAuthorized: async () => {
       firstRunStage.value = "room";
