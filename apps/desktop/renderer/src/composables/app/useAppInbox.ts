@@ -17,12 +17,12 @@ import type { AppContextOf } from "./context";
 /** Inbox, Needs you, and private message navigation. */
 export function useAppInboxActions(context: unknown) {
   const app = context as AppContextOf<
-      "useAppInboxState"
+      "useAppArchivedRooms"
+    | "useAppInboxState"
     | "useAppNavigation"
     | "useAppRentalActions"
     | "useAppRoomContext"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     attentionIntent, authStatus, inboxSection, notificationRevealMessageId, openConversationId,

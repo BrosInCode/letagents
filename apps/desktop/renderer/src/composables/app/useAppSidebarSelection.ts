@@ -17,13 +17,13 @@ import type { AppContextOf } from "./context";
 /** Sidebar entry selection, multi-select, and batch room actions. */
 export function useAppSidebarSelection(context: unknown) {
   const app = context as AppContextOf<
-      "useAppNavigation"
+      "useAppArchivedRooms"
+    | "useAppNavigation"
     | "useAppRoomContext"
     | "useAppRoomManagement"
     | "useAppSidebarEntries"
     | "useAppSidebarMessages"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     authStatus, sidebarBatchActionBusy, sidebarBatchDialogAction, sidebarBatchDialogError,

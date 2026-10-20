@@ -405,7 +405,7 @@ import type { ChatScrollPosition } from "./domain/chat-scroll";
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { defineAsyncComponent, onBeforeUnmount, onMounted, watch } from "vue";
-import type { DesktopAppAgentRunInput, DesktopAppAgentRunResult, DesktopRoomSnapshot } from "../../electron/ipc-types";
+import type { DesktopRoomSnapshot } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
@@ -421,15 +421,11 @@ import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardin
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { settingsEntry } from "./domain/desktop-navigation";
-import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
-import { normalizeRoomIdentifier, rememberRecentRootRooms } from "./domain/sidebar-rooms";
+import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 import { replaceSidebarProjectId, rememberSidebarRoomOrder } from "./domain/sidebar-room-order";
-import { appAgentArchivedRoomIdentifiers } from "./domain/app-agent";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "./domain/account-activity";
-import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import { desktopIpc } from "./ipc/index.js";
-import { roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
 import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
@@ -441,6 +437,7 @@ import { useAppSidebarSelection, useAppSidebarEntries } from "./composables/app/
 import { useAppFocusRoomConclusion } from "./composables/app/useAppFocusRoomConclusion";
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
 import { useAppSettingsActions, useAppSetupOnboarding } from "./composables/app/useAppSettings";
+import { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./composables/app/useAppArchivedRooms";
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 
@@ -455,11 +452,10 @@ const RentMarketplaceView = defineAsyncComponent(
 const app = {} as AppContext;
 const {
   loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
-  sessionGeneration, authDialogOpen, recentRootRoomsStorageKey, sidebarRoomOrderStorageKey,
-  sidebarMinWidth, sidebarMaxWidth, SIDEBAR_METADATA_REFRESH_INTERVAL_MS,
-  selectedRootRoomIdentifier, recentRootRooms, newRoomRecentProjectFolders, sidebarWidth,
-  sidebarRoomOrder, sidebarRevealRequest, isSidebarResizing, sidebarLatestMessages,
-  chatScrollPositionsByRoom, loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms,
+  sessionGeneration, authDialogOpen, sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
+  SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, newRoomRecentProjectFolders,
+  sidebarWidth, sidebarRoomOrder, sidebarRevealRequest, isSidebarResizing, sidebarLatestMessages,
+  chatScrollPositionsByRoom, loadingChatScrollRoomIdentifiers, settingsAccountRooms,
   sidebarMetadataRefresh, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
   openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
   openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
@@ -512,11 +508,12 @@ const {
   refreshSettingsSurface, refreshDesktopUpdateStatus, checkDesktopUpdate, installDesktopUpdate,
   openAppAgentSettings, runAppAgent, setChatStorageMode, syncLocalChat,
 } = Object.assign(app, useAppSettingsActions(app));
+const {
+  leaveArchivedSelectedRoomFromSettingsList, openServiceAgent,
+} = Object.assign(app, useAppArchivedRooms(app));
 // Functions still in App.vue are hoisted, so they join the context first.
 Object.assign(app, {
-  leaveArchivedActiveRoomAfterAppAgent, leaveArchivedRoomIfActive,
-  leaveArchivedSelectedRoomFromSettingsList, openRoomFromAppAgent, handleRoomShellRefresh,
-  forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
+  handleRoomShellRefresh, forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -533,8 +530,8 @@ const {
 let needsYouInterval: number | null = null;
 
 const {
-  activeEntry, collapsedProjects, currentParentRoom, openRoomSnapshot, pinnedCollapsed, repoName,
-  roomsCollapsed, returnFromSettings, selectedAccess, selectedFocusRooms, selectedNeedsAccess,
+  activeEntry, collapsedProjects, currentParentRoom, pinnedCollapsed, repoName, roomsCollapsed,
+  returnFromSettings, selectedAccess, selectedFocusRooms, selectedNeedsAccess,
   selectedRoomIdentifier, selectedRoomInfo, sidebarMode, toggleProject, togglePinnedCollapsed,
   toggleRoomsCollapsed,
 } = Object.assign(app, useAppNavigation(app));
@@ -576,9 +573,9 @@ Object.assign(app, useAppHistoryWatchers(app));
 
 const {
   clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, roomAgentWork,
-  roomAgentWorkStatus, roomAgentWorkTruncated, clearSelectedSnapshotCache, handleMessageSent,
-  handleRefreshRoom, handleRoomRenamed, refresh, repoStatusValue, selectedSnapshotLoading,
-  syncSelectedRoomStream, upsertSelectedTask, authSnapshotPending,
+  roomAgentWorkStatus, roomAgentWorkTruncated, handleMessageSent, handleRefreshRoom,
+  handleRoomRenamed, refresh, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
+  upsertSelectedTask, authSnapshotPending,
 } = Object.assign(app, useAppRoomData(app));
 
 const {
@@ -613,161 +610,6 @@ const {
   selectMcpTarget, setupApiAvailable, showFirstRunGate, showFirstRunSplash, visibleMcpInstallState,
   startFirstRunSetup,
 } = Object.assign(app, useAppSetupOnboarding(app));
-
-async function leaveArchivedActiveRoomAfterAppAgent(
-  result: DesktopAppAgentRunResult,
-  input: DesktopAppAgentRunInput,
-  options: { deferNavigation?: boolean } = {},
-): Promise<boolean> {
-  const archivedAliases = new Set(appAgentArchivedRoomIdentifiers(result));
-  if (!archivedAliases.size) return false;
-  forgetRecentRootRoomAliases(archivedAliases);
-
-  const activeAliases = currentActiveRoomAliases(input);
-  if (![...archivedAliases].some((alias) => activeAliases.has(alias))) {
-    return false;
-  }
-
-  for (const alias of activeAliases) {
-    archivedAliases.add(alias);
-  }
-  forgetRecentRootRoomAliases(archivedAliases);
-  if (options.deferNavigation) {
-    rootRoomSnapshot.value = null;
-    clearSelectedSnapshotCache();
-    selectedSnapshot.value = null;
-    selectedRootRoomIdentifier.value = null;
-    return true;
-  }
-  await leaveArchivedActiveRoom(archivedAliases);
-  return true;
-}
-
-async function leaveArchivedRoomIfActive(
-  roomIdentifier: string,
-  displayName?: string | null,
-): Promise<boolean> {
-  const archivedAliases = roomAliasSet([roomIdentifier, displayName]);
-  if (!archivedAliases.size) return false;
-  forgetRecentRootRoomAliases(archivedAliases);
-  const activeAliases = currentActiveRoomAliases();
-  if (![...archivedAliases].some((alias) => activeAliases.has(alias))) {
-    return false;
-  }
-  for (const alias of activeAliases) {
-    archivedAliases.add(alias);
-  }
-  forgetRecentRootRoomAliases(archivedAliases);
-  await leaveArchivedActiveRoom(archivedAliases);
-  return true;
-}
-
-async function leaveArchivedSelectedRoomFromSettingsList(): Promise<boolean> {
-  if (activeEntry.value.type !== "room") return false;
-  const activeAliases = currentActiveRoomAliases();
-  const archivedRoom = settingsAccountRooms.value.find(
-    (room) => room.archived && roomMatchesAliases(room, activeAliases),
-  ) || null;
-  if (!archivedRoom) return false;
-
-  const archivedAliases = roomAliasSet([
-    archivedRoom.roomIdentifier,
-    archivedRoom.displayName,
-    archivedRoom.name,
-  ]);
-  for (const alias of activeAliases) {
-    archivedAliases.add(alias);
-  }
-  forgetRecentRootRoomAliases(archivedAliases);
-  await leaveArchivedActiveRoom(archivedAliases);
-  return true;
-}
-
-async function leaveArchivedActiveRoom(archivedAliases: Set<string>): Promise<void> {
-  const nextRoom = accountRooms.value.find(
-    (room) => !room.archived && !roomMatchesAliases(room, archivedAliases),
-  ) || null;
-  if (nextRoom) {
-    await openRoomFromAppAgent(nextRoom.roomIdentifier);
-    return;
-  }
-
-  rootRoomSnapshot.value = null;
-  clearSelectedSnapshotCache();
-  selectedSnapshot.value = null;
-  selectedRootRoomIdentifier.value = null;
-  activeEntry.value = settingsEntry;
-}
-
-function currentActiveRoomAliases(input?: Partial<DesktopAppAgentRunInput>): Set<string> {
-  return roomAliasSet([
-    input?.activeRoomIdentifier,
-    input?.activeRoomDisplayName,
-    selectedRoomIdentifier.value,
-    selectedRootRoomIdentifier.value,
-    selectedRoomInfo.value.identifier,
-    selectedRoomInfo.value.displayName,
-    selectedRoomInfo.value.name,
-    selectedRoomInfo.value.code,
-    selectedSnapshot.value?.roomIdentifier,
-    selectedSnapshot.value?.access.roomIdentifier,
-    selectedSnapshot.value?.access.code,
-    selectedSnapshot.value?.room?.identifier,
-    selectedSnapshot.value?.room?.displayName,
-    selectedSnapshot.value?.room?.name,
-    selectedSnapshot.value?.room?.code,
-    rootRoomSnapshot.value?.roomIdentifier,
-    rootRoomSnapshot.value?.access.roomIdentifier,
-    rootRoomSnapshot.value?.access.code,
-    rootRoomSnapshot.value?.room?.identifier,
-    rootRoomSnapshot.value?.room?.displayName,
-    rootRoomSnapshot.value?.room?.name,
-    rootRoomSnapshot.value?.room?.code,
-    activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
-    activeEntry.value.title,
-  ]);
-}
-
-function forgetRecentRootRoomAliases(aliases: Set<string>): void {
-  if (!aliases.size) return;
-  const nextRecentRooms = recentRootRooms.value.filter(
-    (room) =>
-      !aliases.has(normalizeRoomIdentifier(room.identifier) || "") &&
-      !aliases.has(normalizeRoomIdentifier(room.displayName) || ""),
-  );
-  if (nextRecentRooms.length === recentRootRooms.value.length) return;
-  recentRootRooms.value = nextRecentRooms;
-  rememberRecentRootRooms(recentRootRoomsStorageKey, nextRecentRooms);
-}
-
-async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
-  const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
-  if (!normalizedIdentifier) return;
-  const knownRoom = [...accountRooms.value, ...settingsAccountRooms.value]
-    .find((room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier);
-  loading.value = true;
-  try {
-    const snapshot = await desktopIpc.room.getSnapshot(normalizedIdentifier);
-    openRoomSnapshot(snapshot, {
-      kind: "room",
-      rootPath: null,
-      meta: knownRoom?.role === "admin" ? "Admin" : "Account room",
-    });
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function openServiceAgent(intent: AttentionNavigationIntent): Promise<void> {
-  attentionIntent.value = null;
-  notificationRevealMessageId.value = null;
-  try {
-    await openRoomFromAppAgent(intent.roomIdentifier);
-    attentionIntent.value = intent;
-  } catch (error) {
-    pushActionToast(safeUserVisibleErrorDetail(error, "Could not open this agent’s room."), "error");
-  }
-}
 
 function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]): void {
   handleMessageSent(message);
@@ -902,21 +744,7 @@ Object.assign(app, useAppSelectionWatchers(app));
 
 Object.assign(app, useAppProjectRepoWatchers(app));
 
-watch(
-  [
-    () => settingsAccountRooms.value,
-    () => selectedRootRoomIdentifier.value,
-    () => rootRoomSnapshot.value?.roomIdentifier || null,
-    // The room list keeps its identity when a poll finds no change, so opening
-    // an already-archived room must re-run the check by itself.
-    () => activeEntry.value.type === "room" ? [...currentActiveRoomAliases()].sort().join("|") : "",
-  ],
-  () => {
-    void leaveArchivedSelectedRoomFromSettingsList();
-  },
-  // No `deep`: the settings room list is replaced on every refresh, not edited in place.
-  { immediate: true }
-);
+Object.assign(app, useAppArchivedRoomWatcher(app));
 
 Object.assign(app, useAppRoomStreamWatchers(app));
 

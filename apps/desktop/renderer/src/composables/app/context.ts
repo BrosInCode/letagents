@@ -13,6 +13,7 @@ import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSideb
 import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 import type { useAppSettingsActions, useAppSetupOnboarding } from "./useAppSettings";
+import type { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./useAppArchivedRooms";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 
@@ -28,6 +29,7 @@ interface AppContextParts {
   useAppFocusRoomConclusion: ReturnType<typeof useAppFocusRoomConclusion>;
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppSettingsActions: ReturnType<typeof useAppSettingsActions>;
+  useAppArchivedRooms: ReturnType<typeof useAppArchivedRooms>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
   useAppAccountActivityFeed: ReturnType<typeof useAppAccountActivityFeed>;
   useAppInboxState: ReturnType<typeof useAppInboxState>;
@@ -45,6 +47,7 @@ interface AppContextParts {
   useAppSetupOnboarding: ReturnType<typeof useAppSetupOnboarding>;
   useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
   useAppProjectRepoWatchers: ReturnType<typeof useAppProjectRepoWatchers>;
+  useAppArchivedRoomWatcher: ReturnType<typeof useAppArchivedRoomWatcher>;
   useAppRoomStreamWatchers: ReturnType<typeof useAppRoomStreamWatchers>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
   /** Names that still live in App.vue while the split is in progress. */

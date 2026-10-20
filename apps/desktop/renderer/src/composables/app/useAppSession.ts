@@ -18,7 +18,8 @@ import type { AppContextOf } from "./context";
 /** Window focus and visibility, the desktop session, sign-in entry points, and notification activation. */
 export function useAppSessionActions(context: unknown) {
   const app = context as AppContextOf<
-      "useAppAuthFlow"
+      "useAppArchivedRooms"
+    | "useAppAuthFlow"
     | "useAppInboxActions"
     | "useAppInboxState"
     | "useAppNavigation"
@@ -27,7 +28,6 @@ export function useAppSessionActions(context: unknown) {
     | "useAppRoomData"
     | "useAppSidebarMessages"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     accountRooms, attentionIntent, authDialogOpen, authStatus, firstRunStage, inboxRentalError,

@@ -101,19 +101,19 @@ export function useAppRoomData(context: unknown) {
 /** The new room modal and account room settings. */
 export function useAppRoomManagement(context: unknown) {
   const app = context as AppContextOf<
-      "useAppNavigation"
+      "useAppArchivedRooms"
+    | "useAppNavigation"
     | "useAppRoomContext"
     | "useAppRoomData"
     | "useAppSidebarEntries"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
-    accountRooms, activeEntry, chatStorageSettings, handleRoomRenamed, loading, openRoomSnapshot,
-    pushActionToast, recentRootRooms, recentRootRoomsStorageKey, refresh, refreshAccountRooms,
-    repoStatus, rootRoomSnapshot, selectedRoomIdentifier, selectedRootRoomIdentifier,
-    selectedSnapshot, settingsAccountRooms, sidebarMode, sidebarProjectEntries,
-    sidebarRevealRequest, sidebarRoomOrder, sidebarRoomOrderStorageKey,
+    accountRooms, activeEntry, chatStorageSettings, handleRoomRenamed, leaveArchivedRoomIfActive,
+    loading, openRoomSnapshot, pushActionToast, recentRootRooms, recentRootRoomsStorageKey,
+    refresh, refreshAccountRooms, repoStatus, rootRoomSnapshot, selectedRoomIdentifier,
+    selectedRootRoomIdentifier, selectedSnapshot, settingsAccountRooms, sidebarMode,
+    sidebarProjectEntries, sidebarRevealRequest, sidebarRoomOrder, sidebarRoomOrderStorageKey,
   } = app;
   const {
     backFromSubstep,
@@ -216,7 +216,7 @@ export function useAppRoomManagement(context: unknown) {
     refresh: () => refresh(),
     refreshAccountRooms: () => refreshAccountRooms(),
     onRoomArchived: async (roomIdentifier, displayName) => {
-      await app.leaveArchivedRoomIfActive(roomIdentifier, displayName);
+      await leaveArchivedRoomIfActive(roomIdentifier, displayName);
     },
     onRoomRenamed: (room) => {
       if (normalizeRoomIdentifier(room.identifier) === normalizeRoomIdentifier(selectedRoomIdentifier.value)) {

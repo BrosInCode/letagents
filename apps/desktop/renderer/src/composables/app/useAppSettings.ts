@@ -8,7 +8,8 @@ import type { AppContextOf } from "./context";
 /** Settings surface: chat storage, the App Agent, and desktop updates. */
 export function useAppSettingsActions(context: unknown) {
   const app = context as AppContextOf<
-      "useAppNavigation"
+      "useAppArchivedRooms"
+    | "useAppNavigation"
     | "useAppProjectRepo"
     | "useAppRoomData"
     | "useAppRoomManagement"
