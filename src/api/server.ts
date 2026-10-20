@@ -16,6 +16,7 @@ import { pool } from "./db/client.js";
 import { waitForSseCleanupDrain } from "./http/sse.js";
 import { releaseAgentProcessConnectionsForShutdown } from "./rooms/agent-process-connections.js";
 import { drainRoomAgentDeliveryLeases } from "./rooms/agent-delivery.js";
+import { settleReplyTurnWakes } from "./db/messages/reply-turns.js";
 import {
   closeHttpServerIntake,
   createGracefulShutdownController,
@@ -74,6 +75,8 @@ const shutdown = createGracefulShutdownController({
   drainConnections: async () => {
     await waitForSseCleanupDrain();
     await drainRoomAgentDeliveryLeases();
+    // Delivery drains can release reply turns; their wakes read the database.
+    await settleReplyTurnWakes();
   },
   closeDatabase: () => pool.end(),
   forceClose: () => server.closeAllConnections?.(),
