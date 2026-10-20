@@ -9,6 +9,7 @@ import type { useRoomShellSupervisorActions, useRoomShellSupervisorSync } from "
 import type { useRoomShellDeliveryActions } from "./useRoomShellDelivery";
 import type { useRoomShellToolActions, useRoomShellStorageWatcher } from "./useRoomShellTools";
 import type { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotifications } from "./useRoomShellConversation";
+import type { useRoomShellParticipants } from "./useRoomShellParticipants";
 
 /** What each part of the context holds, by composable name. */
 interface RoomShellContextParts {
@@ -22,6 +23,7 @@ interface RoomShellContextParts {
   useRoomShellSupervisorSync: ReturnType<typeof useRoomShellSupervisorSync>;
   useRoomShellConversation: ReturnType<typeof useRoomShellConversation>;
   useRoomShellIntegrations: ReturnType<typeof useRoomShellIntegrations>;
+  useRoomShellParticipants: ReturnType<typeof useRoomShellParticipants>;
   useRoomShellNotifications: ReturnType<typeof useRoomShellNotifications>;
   /** Names that still live in DesktopRoomShell.vue while the split is in progress. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

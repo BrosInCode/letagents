@@ -17,7 +17,7 @@ export function useRoomShellConversation(context: unknown) {
   const {
     emit, githubEventsVisible, messagesRef, props, roomRef,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
-  const app = context as RoomShellContextOf<"pending">;
+  const app = context as RoomShellContextOf<"useRoomShellParticipants">;
   const roomUrl = computed(() => props.room.kind === "focus"
     ? buildLetAgentsFocusRoomUrl({
         roomIdentifier: props.room.identifier,
@@ -182,19 +182,20 @@ export function useRoomShellIntegrations(context: unknown) {
 export function useRoomShellNotifications(context: unknown) {
   const {
     activeTab, eventsUnseenCount, eventsUnseenTone, isLocalRoom, ownMessageIds, playRoomSound,
-    props, showEventsTab, showRoomNotification, visibleMessages, watchRoomNotifications,
+    props, roomAttentionResponseNames, showEventsTab, showRoomNotification, visibleMessages,
+    watchRoomNotifications,
   } = context as RoomShellContextOf<
       "inputs"
     | "useRoomShellConversation"
     | "useRoomShellIntegrations"
+    | "useRoomShellParticipants"
     | "useRoomShellState"
   >;
-  const app = context as RoomShellContextOf<"pending">;
   watchRoomNotifications({
     visibleMessages,
     ownMessageIds,
     playRoomSound,
-    showRoomNotification: (message) => showRoomNotification(message, props.room.displayName, app.roomAttentionResponseNames.value),
+    showRoomNotification: (message) => showRoomNotification(message, props.room.displayName, roomAttentionResponseNames.value),
   });
 
   const tabs = computed<RoomTab[]>(() => {
