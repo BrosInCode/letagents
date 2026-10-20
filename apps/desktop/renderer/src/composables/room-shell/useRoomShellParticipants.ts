@@ -83,6 +83,7 @@ export function useRoomShellParticipants(context: unknown) {
     }
     return result;
   });
+  Object.assign(app, { agentMentionInsertTextByEntryId });
   const pendingResponseParticipants = useRoomResponseParticipants(() => ({
     roomIdentifier: props.room.identifier, loading: props.roomLoading, messages: props.messages,
     entries: supervisorEntries.value, presence: props.presence,

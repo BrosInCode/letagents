@@ -32,7 +32,11 @@ export function useRoomShellSupervisorActions(context: unknown) {
     supervisorEntriesUpdatedAt, supervisorSettingsGenerationChangedMessage, supervisorStatus,
     supervisorSyncState,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
-  const app = context as RoomShellContextOf<"useRoomShellSupervisorSync" | "pending">;
+  const app = context as RoomShellContextOf<
+      "useRoomShellInspectorActions"
+    | "useRoomShellSupervisorSync"
+    | "pending"
+  >;
   let supervisorStatusRefreshInFlight: Promise<DesktopSupervisorDaemonStatus | null> | null = null;
   let supervisorStatusRequiredGeneration = 0;
   let supervisorStatusTrailingRefreshAttemptGeneration = 0;

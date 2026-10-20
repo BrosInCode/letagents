@@ -115,6 +115,7 @@ export function useRoomShellIntegrations(context: unknown) {
     reasoningSessions: reasoningSessionsRef,
     roomMessagesForAgentInsight,
   });
+  Object.assign(app, { openReasoningInspector });
 
   const {
     renameBusy,

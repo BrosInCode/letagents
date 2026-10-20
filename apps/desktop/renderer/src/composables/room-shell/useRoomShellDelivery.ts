@@ -13,7 +13,11 @@ export function useRoomShellDeliveryActions(context: unknown) {
     deliveryRetryCoordinator, props, pushActionToast, roomDeliverySkipAvailable,
     roomDeliverySkipCoordinator, supervisorEntries,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
-  const app = context as RoomShellContextOf<"useRoomShellSupervisorActions" | "pending">;
+  const app = context as RoomShellContextOf<
+      "useRoomShellInspectorActions"
+    | "useRoomShellSupervisorActions"
+    | "pending"
+  >;
   async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
     if (!deliveryRetryAvailable.value) return;
     const entry = supervisorEntries.value.find((candidate) => candidate.id === agentId);

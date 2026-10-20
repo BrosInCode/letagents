@@ -8,6 +8,7 @@ import type { useRoomShellState } from "./useRoomShellState";
 import type { useRoomShellSupervisorActions, useRoomShellSupervisorSync } from "./useRoomShellSupervisor";
 import type { useRoomShellDeliveryActions } from "./useRoomShellDelivery";
 import type { useRoomShellToolActions, useRoomShellStorageWatcher } from "./useRoomShellTools";
+import type { useRoomShellInspectorActions, useRoomShellAgentProjections, useRoomShellInspectorWatchers, useRoomShellInspectorObservations } from "./useRoomShellAgentInspector";
 import type { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotifications } from "./useRoomShellConversation";
 import type { useRoomShellParticipants } from "./useRoomShellParticipants";
 
@@ -19,12 +20,16 @@ interface RoomShellContextParts {
   useRoomShellSupervisorActions: ReturnType<typeof useRoomShellSupervisorActions>;
   useRoomShellDeliveryActions: ReturnType<typeof useRoomShellDeliveryActions>;
   useRoomShellToolActions: ReturnType<typeof useRoomShellToolActions>;
+  useRoomShellInspectorActions: ReturnType<typeof useRoomShellInspectorActions>;
   useRoomShellStorageWatcher: ReturnType<typeof useRoomShellStorageWatcher>;
+  useRoomShellAgentProjections: ReturnType<typeof useRoomShellAgentProjections>;
   useRoomShellSupervisorSync: ReturnType<typeof useRoomShellSupervisorSync>;
   useRoomShellConversation: ReturnType<typeof useRoomShellConversation>;
   useRoomShellIntegrations: ReturnType<typeof useRoomShellIntegrations>;
   useRoomShellParticipants: ReturnType<typeof useRoomShellParticipants>;
   useRoomShellNotifications: ReturnType<typeof useRoomShellNotifications>;
+  useRoomShellInspectorWatchers: ReturnType<typeof useRoomShellInspectorWatchers>;
+  useRoomShellInspectorObservations: ReturnType<typeof useRoomShellInspectorObservations>;
   /** Names that still live in DesktopRoomShell.vue while the split is in progress. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pending: Record<string, any>;
