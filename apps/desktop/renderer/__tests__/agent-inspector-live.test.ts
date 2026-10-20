@@ -18,6 +18,7 @@ import {
   scopeAgentStreamEventsToWork,
 } from "../src/domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../electron/ipc-types";
+import { roomShellSource } from "./room-shell-source";
 
 function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
@@ -261,7 +262,7 @@ test("an unmatched running tool becomes interrupted when the live feed ends", ()
 test("the inspector wires a lazily-subscribed Live tab that starts and stops with focus", () => {
   const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
   const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
-  const shell = source("../src/components/desktop/content/DesktopRoomShell.vue");
+  const shell = roomShellSource();
 
   // A 5th tab that emits live-selected on open (the lazy-subscribe signal).
   assert.match(surface, /id="agent-inspector-live-tab"/);
@@ -641,11 +642,11 @@ test("Live layout remount retains the feed and subscription for the same agent/s
   const ts = (await import("typescript")).default;
   const { runInNewContext } = await import("node:vm");
   const { ref, watch, nextTick, effectScope } = await import("vue");
-  const text = source("../src/components/desktop/content/DesktopRoomShell.vue");
+  const text = roomShellSource();
   const marker = '<script setup lang="ts">';
   const script = text.slice(text.indexOf(marker) + marker.length, text.indexOf("</script>"));
   const ast = ts.createSourceFile("shell.ts", script, ts.ScriptTarget.Latest, true);
-  const variables = new Set(["agentInspectorLiveFeed", "agentInspectorLiveIdentity"]);
+  const variables = new Set(["agentInspectorLiveFeed", "agentInspectorLiveIdentity", "agentInspectorRequestState"]);
   const functions = new Set(["openAgentInspectorLive", "stopAgentInspectorLive"]);
   const statements = ast.statements.filter(statement =>
     (ts.isVariableStatement(statement) && statement.declarationList.declarations.some(declaration => variables.has(declaration.name.getText(ast))))

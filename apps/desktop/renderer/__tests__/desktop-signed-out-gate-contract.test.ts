@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { appSource as readAppSource } from "./app-source";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(join(testDirectory, "../src/App.vue"), "utf8");
+const appSource = readAppSource();
 const signedOutSource = readFileSync(
   join(testDirectory, "../src/components/desktop/content/DesktopSignedOutView.vue"),
   "utf8",

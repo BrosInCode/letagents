@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { roomShellSource } from "./room-shell-source";
 
 function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
 }
 
-const shell = source("../src/components/desktop/content/DesktopRoomShell.vue");
+const shell = roomShellSource();
 const activity = source("../src/components/desktop/content/RoomActivityTabView.vue");
 const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
 const actions = source("../src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue");

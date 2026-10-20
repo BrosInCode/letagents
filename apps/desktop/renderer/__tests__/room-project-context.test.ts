@@ -17,6 +17,7 @@ import {
   resolveActiveProjectRootPath,
   roomWithInheritedProjectContext,
 } from "../src/domain/room-project-context";
+import { roomShellSource } from "./room-shell-source";
 
 const projectGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
   provider: "git",
@@ -192,7 +193,7 @@ test("legacy renderer roots are parsed only as migration input", () => {
 });
 
 test("project association is room-level and Add Agent cannot open a folder picker", () => {
-  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  const shell = roomShellSource();
   const actionBar = readFileSync(new URL("../src/components/desktop/content/add-agent/AddAgentActionBar.vue", import.meta.url), "utf8");
   assert.match(shell, /project-connection-needed/);
   assert.match(shell, /Connect this room to its local project before adding an agent/);

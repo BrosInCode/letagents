@@ -34,8 +34,9 @@ import { mergeThreadInboxPages } from "../src/composables/useNeedsYou";
 import { useSupervisorStateSubscription } from "../src/components/desktop/content/room-shell/useSupervisorStateSubscription";
 import { useRoomAttentionNavigation } from "../src/components/desktop/content/room-shell/useRoomAttentionNavigation";
 import type { AttentionNavigationIntent, RoomTabId } from "../src/components/desktop/content/room-shell/types";
+import { roomShellSource } from "./room-shell-source";
 
-const shellSource = read("../src/components/desktop/content/DesktopRoomShell.vue");
+const shellSource = roomShellSource();
 const githubEventsSource = read("../src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents.ts");
 
 test("the desktop room shell keeps GitHub events and no longer owns an inbox", () => {
@@ -265,7 +266,7 @@ function stateSnapshot(sequence: number): DesktopSupervisorStateSnapshot {
 function supervisorSubscriptionFixture() {
   const script = shellSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]!;
   const parsed = ts.createSourceFile("DesktopRoomShell.ts", script, ts.ScriptTarget.Latest, true);
-  const variableNames = new Set(["supervisorStateDaemonGeneration", "supervisorStateSequence", "supervisorEntriesMutationVersion"]);
+  const variableNames = new Set(["supervisorStateDaemonGeneration", "supervisorStateSequence", "supervisorEntriesMutationVersion", "supervisorSyncState"]);
   const source = parsed.statements.filter((statement) =>
     (ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => variableNames.has(declaration.name.getText(parsed))))
     || (ts.isFunctionDeclaration(statement) && statement.name?.text === "acceptSupervisorStateSnapshot")

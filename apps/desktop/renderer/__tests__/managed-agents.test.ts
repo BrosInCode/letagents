@@ -57,6 +57,7 @@ import {
   supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant, roomMentionCandidates } from "../src/domain/participants";
+import { roomShellSource } from "./room-shell-source";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -1161,7 +1162,7 @@ test("supervisor reachability preserves server-owned attribution while replacing
 });
 
 test("presence restores message-history identity before supervisor rows are projected", () => {
-  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  const shell = roomShellSource();
   assert.match(shell, /const roomParticipants = computed\(\(\) =>\s*mergeDesktopSupervisorAgentParticipants\(\s*(?:\/\/[^\n]*\n\s*)*mergeReachableAgentPresenceParticipants\(props\.participants,/);
   const history = [participant({
     participantKey: "agent:dawnhaven | emmymay's agent | codex",
