@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { appSource } from "./app-source";
 
-const app = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
+const app = appSource();
 
 describe("archived active room check", () => {
   it("re-runs when the active room changes, not only when the room list changes", () => {

@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { appSource as readAppSource } from "./app-source";
 
 function source(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
 }
 
-const appSource = source("../src/App.vue");
+const appSource = readAppSource();
 const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.vue");
 const dialogSource = source("../src/components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue");
 const quickCloseSource = source("../src/components/desktop/controls/FocusRoomQuickCloseOption.vue");
@@ -69,7 +70,7 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(appSource, /:on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"/);
     assert.match(
       appSource,
-      /async function handleRoomDetailsFocusRoomConcluded[\s\S]*?await refresh\(\)[\s\S]*?handleSidebarEntrySelected\(parentAfterRefresh\)/,
+      /async function handleRoomDetailsFocusRoomConcluded[\s\S]*?await (?:app\.)?refresh\(\)[\s\S]*?(?:app\.)?handleSidebarEntrySelected\(parentAfterRefresh\)/,
     );
   });
 
@@ -82,7 +83,7 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(dialogSource, /@after-leave="handleAfterLeave"/);
     assert.match(dialogSource, /emit\("after-leave"\)/);
     assert.match(appSource, /@after-leave="handleSidebarFocusRoomConclusionAfterLeave"/);
-    assert.match(appSource, /if \(toast\) pushActionToast\(toast\.message, toast\.state\)/);
+    assert.match(appSource, /if \(toast\) (?:app\.)?pushActionToast\(toast\.message, toast\.state\)/);
   });
 
   it("uses the app session for human Focus Room actions", () => {
