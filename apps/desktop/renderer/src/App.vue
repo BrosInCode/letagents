@@ -404,7 +404,7 @@
 import type { ChatScrollPosition } from "./domain/chat-scroll";
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, toRaw, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, toRaw, watch } from "vue";
 import type {
   DesktopAppAgentRunInput,
   DesktopAppAgentRunResult,
@@ -438,7 +438,6 @@ import type {
   FocusRoomConcludedEvent,
   FocusRoomConclusionInput,
 } from "./domain/focus-room-conclusion";
-import type { SettingsPaneId } from "./components/desktop/settings/types";
 import {
   useDesktopAccountRoomSettings,
   type SidebarRoomBatchMutationResult,
@@ -452,7 +451,6 @@ import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composab
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
-import { rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
   isRoomBeingRead,
@@ -475,10 +473,6 @@ import {
   promoteSidebarProject,
   replaceSidebarProjectId,
   rememberSidebarRoomOrder,
-  reorderSidebarChildRooms,
-  reorderSidebarParentRooms,
-  type SidebarChildRoomReorder,
-  type SidebarParentRoomReorder,
 } from "./domain/sidebar-room-order";
 import {
   appAgentArchivedRoomIdentifiers,
@@ -499,6 +493,7 @@ import { roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
 import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
+import { useAppSidebarLayout } from "./composables/app/useAppSidebarLayout";
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 
@@ -514,15 +509,14 @@ const app = {} as AppContext;
 const {
   loading, appInfo, updateStatus, repoStatus, workers, rootRoomSnapshot, selectedSnapshot,
   authStatus, sessionGeneration, authDialogOpen, recentRootRoomsStorageKey,
-  legacyRepositoryRootBindingsStorageKey, readRoomMessagesStorageKey, sidebarWidthStorageKey,
-  sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
-  SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, recentRootRooms,
-  newRoomRecentProjectFolders, legacyRepositoryRootBindings, projectBindings, windowFocused,
-  windowHidden, readRoomMessageIds, sidebarWidth, sidebarRoomOrder, sidebarRevealRequest,
-  isSidebarResizing, sidebarLatestMessages, chatScrollPositionsByRoom,
-  loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms, sidebarMetadataRefresh,
-  rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread, openConversationId,
-  openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
+  legacyRepositoryRootBindingsStorageKey, readRoomMessagesStorageKey, sidebarRoomOrderStorageKey,
+  sidebarMinWidth, sidebarMaxWidth, SIDEBAR_METADATA_REFRESH_INTERVAL_MS,
+  selectedRootRoomIdentifier, recentRootRooms, newRoomRecentProjectFolders,
+  legacyRepositoryRootBindings, projectBindings, windowFocused, windowHidden, readRoomMessageIds,
+  sidebarWidth, sidebarRoomOrder, sidebarRevealRequest, isSidebarResizing, sidebarLatestMessages,
+  chatScrollPositionsByRoom, loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms,
+  sidebarMetadataRefresh, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
+  openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
   openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
   chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
   appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
@@ -532,11 +526,16 @@ const {
   sidebarFocusRoomConclusionError, sidebarFocusRoomConclusionPendingToast, sidebarSelectionActive,
   sidebarSelectedEntryIds, sidebarBatchActionBusy, sidebarBatchDialogAction,
   sidebarBatchDialogTargets, sidebarBatchDialogError, sidebarBatchPendingToast,
-  requestedSettingsPane, clampSidebarWidth,
 } = Object.assign(app, useAppState());
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
 } = Object.assign(app, useAppInboxActions(app));
+const {
+  isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
+  settingsPaneForActiveEntry, openSettingsSurface, openUpdatesSurface, startSidebarResize,
+  handleSidebarResizeKeydown, setAllProjectsCollapsed, handleSidebarParentRoomReorder,
+  handleSidebarChildRoomReorder,
+} = Object.assign(app, useAppSidebarLayout(app));
 const {
   refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
   handleDesktopRoomStreamEvent, startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth,
@@ -546,8 +545,8 @@ const {
 Object.assign(app, {
   refreshSidebarRoomMetadata, activeProjectRootPath, refreshProjectBindings,
   restartRepoStatusWatch, refreshRentalRequestCount, refreshSidebarLatestMessages,
-  markActiveRoomRead, openRoomFromAppAgent, forgetLoadingChatScrollRooms,
-  activeChatScrollRoomIdentifier,
+  cancelSidebarRoomSelection, markActiveRoomRead, openRoomFromAppAgent,
+  forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -577,9 +576,9 @@ const {
 let needsYouInterval: number | null = null;
 
 const {
-  activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, openRoomSnapshot,
-  pinnedCollapsed, pinnedRoom, projectEntries, reconcileActiveEntry, rememberRootRoomSnapshot,
-  repoName, resolveSelectedRoomIdentifier, roomsCollapsed, returnFromSettings, selectSidebarEntry,
+  activeEntry, collapsedProjects, currentParentRoom, openRoomSnapshot, pinnedCollapsed, pinnedRoom,
+  projectEntries, reconcileActiveEntry, rememberRootRoomSnapshot, repoName,
+  resolveSelectedRoomIdentifier, roomsCollapsed, returnFromSettings, selectSidebarEntry,
   selectedAccess, selectedFocusRooms, selectedNeedsAccess, selectedRoomIdentifier,
   selectedRoomInfo, sidebarMode, toggleProject, togglePinnedCollapsed, toggleRoomsCollapsed,
 } = Object.assign(app, useAppNavigation(app));
@@ -614,29 +613,6 @@ const {
   actionToasts, dismissActionToast, pushActionToast, selectedRoomWithProjectContext,
   selectedGitRoomMatchesActiveRepo, selectedRoomProjectRootPath, selectedRoomIsProject,
 } = Object.assign(app, useAppRoomContext(app));
-
-const isSettingsSurface = computed(() => activeEntry.value.type === "system");
-
-const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
-
-const desktopShellStyle = computed(() => ({
-  "--sidebar-width": `${sidebarWidth.value}px`,
-  "--sidebar-min-width": `${sidebarMinWidth}px`,
-  "--sidebar-max-width": `${sidebarMaxWidth}px`,
-}));
-
-async function cycleSidebar(): Promise<void> {
-  const hidingSidebar = sidebarMode.value !== "hidden";
-  if (hidingSidebar && sidebarBatchActionBusy.value) return;
-  if (hidingSidebar && sidebarSelectionActive.value) cancelSidebarRoomSelection();
-  toggleSidebarMode();
-  if (!hidingSidebar) return;
-
-  await nextTick();
-  document.querySelector<HTMLElement>(
-    '[data-testid="room-sidebar-reveal-button"], [data-testid="auth-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
-  )?.focus({ preventScroll: true });
-}
 
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, (accountId) => {
   accountReadStorageKey = accountId ? `${readRoomMessagesStorageKey}:${encodeURIComponent(accountId)}` : null;
@@ -682,6 +658,7 @@ const sidebarProjectEntries = computed(() =>
     focusRooms: project.focusRooms.map(withRoomUnreadState),
   })), sidebarRoomOrder.value)
 );
+Object.assign(app, { sidebarProjectEntries });
 
 const sidebarSelectedEntries = computed(() => {
   const selectedIds = new Set(sidebarSelectedEntryIds.value);
@@ -721,77 +698,6 @@ const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
     localFilesPath: chatStorageSettings.value?.localFilesPath || "",
   }
 );
-
-const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
-  if (requestedSettingsPane.value) return requestedSettingsPane.value;
-  if (activeEntry.value.type !== "system") return "storage:chat";
-  if (activeEntry.value.id === "system:setup") return "system:setup";
-  if (activeEntry.value.id === "system:app-agent") return "system:app-agent";
-  if (activeEntry.value.id === "system:repos") return "system:runtime";
-  if (activeEntry.value.id === "system:workers") return "system:agents";
-  if (activeEntry.value.id === "system:diagnostics") return "system:diagnostics";
-  return "storage:chat";
-});
-
-function openSettingsSurface(): void {
-  requestedSettingsPane.value = null;
-  activeEntry.value = settingsEntry;
-}
-
-function openUpdatesSurface(): void {
-  requestedSettingsPane.value = "system:updates";
-  activeEntry.value = settingsEntry;
-}
-
-function startSidebarResize(event: PointerEvent): void {
-  if (!showSidebarResizeHandle.value) return;
-  event.preventDefault();
-  const startX = event.clientX;
-  const startWidth = sidebarWidth.value;
-  isSidebarResizing.value = true;
-  document.documentElement.style.cursor = "col-resize";
-  document.body.style.userSelect = "none";
-
-  function handlePointerMove(moveEvent: PointerEvent): void {
-    sidebarWidth.value = clampSidebarWidth(startWidth + moveEvent.clientX - startX);
-  }
-
-  function handlePointerUp(): void {
-    isSidebarResizing.value = false;
-    rememberStoredString(sidebarWidthStorageKey, String(sidebarWidth.value));
-    document.documentElement.style.cursor = "";
-    document.body.style.userSelect = "";
-    window.removeEventListener("pointermove", handlePointerMove);
-    window.removeEventListener("pointerup", handlePointerUp);
-    window.removeEventListener("pointercancel", handlePointerUp);
-  }
-
-  window.addEventListener("pointermove", handlePointerMove);
-  window.addEventListener("pointerup", handlePointerUp);
-  window.addEventListener("pointercancel", handlePointerUp);
-}
-
-function handleSidebarResizeKeydown(event: KeyboardEvent): void {
-  const step = event.shiftKey ? 32 : 12;
-  if (event.key === "ArrowLeft") {
-    event.preventDefault();
-    setSidebarWidth(sidebarWidth.value - step);
-  } else if (event.key === "ArrowRight") {
-    event.preventDefault();
-    setSidebarWidth(sidebarWidth.value + step);
-  } else if (event.key === "Home") {
-    event.preventDefault();
-    setSidebarWidth(sidebarMinWidth);
-  } else if (event.key === "End") {
-    event.preventDefault();
-    setSidebarWidth(sidebarMaxWidth);
-  }
-}
-
-function setSidebarWidth(value: number): void {
-  sidebarWidth.value = clampSidebarWidth(value);
-  rememberStoredString(sidebarWidthStorageKey, String(sidebarWidth.value));
-}
 
 async function refreshSidebarRoomMetadata(): Promise<void> {
   if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefresh.inFlight) return;
@@ -1244,26 +1150,6 @@ function markRoomEntryRead(entry: RoomEntry, explicit = false, latestMessageId =
   if (!result.changed) return;
   readRoomMessageIds.value = result.readMarkers;
   rememberRoomMessageIds();
-}
-
-function setAllProjectsCollapsed(collapsed: boolean): void {
-  collapsedProjects.value = Object.fromEntries(
-    projectEntries.value.map((project) => [project.id, collapsed]),
-  );
-}
-
-function handleSidebarParentRoomReorder(input: SidebarParentRoomReorder): void {
-  const next = reorderSidebarParentRooms(sidebarProjectEntries.value, input);
-  if (!next) return;
-  sidebarRoomOrder.value = next;
-  rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, next);
-}
-
-function handleSidebarChildRoomReorder(input: SidebarChildRoomReorder): void {
-  const next = reorderSidebarChildRooms(sidebarProjectEntries.value, input);
-  if (!next) return;
-  sidebarRoomOrder.value = next;
-  rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, next);
 }
 
 function rememberRoomMessageIds(): void {

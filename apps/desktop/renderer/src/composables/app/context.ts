@@ -5,6 +5,7 @@
 
 import type { useAppState } from "./useAppState";
 import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
+import type { useAppSidebarLayout } from "./useAppSidebarLayout";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 
@@ -12,6 +13,7 @@ import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } fro
 interface AppContextParts {
   useAppState: ReturnType<typeof useAppState>;
   useAppInboxActions: ReturnType<typeof useAppInboxActions>;
+  useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
   useAppInboxState: ReturnType<typeof useAppInboxState>;

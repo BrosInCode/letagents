@@ -53,7 +53,7 @@ export function useAppNavigation(context: unknown) {
     selectedRootRoomIdentifier,
     selectedSnapshot,
   });
-  Object.assign(app, { activeEntry, projectEntries, selectSidebarEntry, selectedRoomIdentifier });
+  Object.assign(app, { activeEntry, collapsedProjects, toggleSidebarMode, projectEntries, selectSidebarEntry, selectedRoomIdentifier, sidebarMode });
   return {
     activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, focusRooms,
     getAuthRoomIdentifier, openRoomSnapshot, pinnedCollapsed, pinnedRoom, projectEntries,
