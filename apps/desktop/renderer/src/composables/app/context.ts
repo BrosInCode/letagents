@@ -6,6 +6,7 @@
 import type { useAppState } from "./useAppState";
 import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
 import type { useAppSidebarLayout } from "./useAppSidebarLayout";
+import type { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./useAppSidebarMessages";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 
@@ -14,12 +15,16 @@ interface AppContextParts {
   useAppState: ReturnType<typeof useAppState>;
   useAppInboxActions: ReturnType<typeof useAppInboxActions>;
   useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
+  useAppSidebarMessages: ReturnType<typeof useAppSidebarMessages>;
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
+  useAppAccountActivityFeed: ReturnType<typeof useAppAccountActivityFeed>;
   useAppInboxState: ReturnType<typeof useAppInboxState>;
   useAppNavigation: ReturnType<typeof useAppNavigation>;
   useAppRoomAttention: ReturnType<typeof useAppRoomAttention>;
   useAppRoomContext: ReturnType<typeof useAppRoomContext>;
+  useAppReadMarkers: ReturnType<typeof useAppReadMarkers>;
+  useAppHistoryWatchers: ReturnType<typeof useAppHistoryWatchers>;
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
   useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;

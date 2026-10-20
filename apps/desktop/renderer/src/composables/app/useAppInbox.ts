@@ -74,13 +74,13 @@ export function useAppInboxActions(context: unknown) {
 
 /** Needs you data, agent attention, and the Inbox room filter. */
 export function useAppInboxState(context: unknown) {
-  const app = context as AppContextOf<"useAppRoomContext" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<"useAppAccountActivityFeed" | "useAppRoomContext" | "useAppState">;
   const {
-    authStatus, rentalRequestCount,
+    accountActivity, authStatus, rentalRequestCount,
   } = app;
   const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
   Object.assign(app, { needsYouError, loadNeedsYou, resetNeedsYou });
-  useNeedsYouRoomActivity(app.accountActivity.state, refreshNeedsYouRoom);
+  useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
   const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
   Object.assign(app, { refreshAgentApprovals });
   const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
