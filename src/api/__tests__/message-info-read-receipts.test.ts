@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -11,7 +11,13 @@ const { planObservationSpanUpdate } = await import("../routes/rooms/agents/obser
 const { attachAgentMessageActivationsFromReceipts } = await import("../../shared/activation-routing.js");
 
 function routeSource(relative: string): string {
-  return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+  const path = fileURLToPath(new URL(relative, import.meta.url));
+  // A barrel such as db/messages/create.ts keeps its code in a same-named folder.
+  const folder = path.replace(/\.ts$/, "");
+  const parts = path.endsWith(".ts") && existsSync(folder)
+    ? readdirSync(folder).filter((name) => name.endsWith(".ts")).sort().map((name) => readFileSync(`${folder}/${name}`, "utf8"))
+    : [];
+  return [readFileSync(path, "utf8"), ...parts].join("\n");
 }
 
 test("formatActivationReason maps all AgentMessageActivationReason values to human-friendly labels", () => {
