@@ -12,19 +12,17 @@ import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answe
 import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
 import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
-import { toMessageWithReply } from "../mappers.js";
 import type { Message, MessageAttachmentRow, MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../types.js";
 import { nextRoomScopedNumber, parseScopedId } from "../utils.js";
 import { messageRowSelection, messageAttachmentUploadSelection } from "./selections.js";
-import { hydrateMessageReplies } from "./history.js";
-import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, getMessageAccountAgentRouting, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
-import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
+import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { planJevRoutingMode, type DeferredJevRoutingPlan } from "./jev-routing-hint.js";
 import { getMessageThreadRoutingProjection, resolveMessageThreadRoutingProjection, type ThreadRoutingProjection } from "./thread-routing-membership.js";
 import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
 import { finishReplyTurnsTx, planReplyTurns, queueReplyTurnWakes, releaseAgentReplyTurnHoldsTx, sequentialReplyReason, type ReleasedReplyTurn } from "./reply-turns.js";
-import type { MessageCreateTransaction, AddMessageOptions, AddMessageResult, AddMessageTransactionResult } from "./create/types.js";
+import type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 import { insertMessageReceiptRows } from "./create/receipt-rows.js";
+import { hydrateCreatedMessage } from "./create/hydrate.js";
 export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 export { chunkMessageReceiptRows } from "./create/receipt-rows.js";
 
@@ -1063,60 +1061,6 @@ async function routeAddressedMessage(
     agent_session_id: session.session_id,
     owner_account_id: session.owner_account_id,
   }];
-}
-
-// Build the complete acknowledgement before commit: a failed attachment,
-// thread, or routing read must roll back the write rather than strand an
-// unpublished message that idempotent retries can no longer publish.
-async function hydrateCreatedMessage(
-  roomId: string,
-  result: AddMessageTransactionResult,
-  options: AddMessageOptions | undefined,
-  tx: MessageCreateTransaction,
-): Promise<AddMessageResult> {
-  const [hydrated] = await hydrateMessageReplies(roomId, [result.messageRow], {
-    accountId: null,
-    executor: tx,
-  });
-  const canonicalMessage = hydrated ?? toMessageWithReply(result.messageRow, null);
-  let message = canonicalMessage;
-  const accountId = options?.account_id ?? null;
-  if (accountId) {
-    const [readOverlays, accountRouting] = await Promise.all([
-      canonicalMessage.thread
-        ? getMessageThreadReadOverlays(roomId, [{
-            root_message_id: canonicalMessage.thread.root_message_id,
-            reply_count: canonicalMessage.thread.reply_count,
-          }], [accountId], tx)
-        : Promise.resolve(new Map()),
-      options?.account_agent_routing
-        ? getMessageAccountAgentRouting(tx, roomId, accountId, [result.messageRow])
-        : Promise.resolve(new Map()),
-    ]);
-    const readOverlay = canonicalMessage.thread
-      ? readOverlays.get(accountId)?.get(canonicalMessage.thread.root_message_id)
-      : null;
-    message = {
-      ...canonicalMessage,
-      ...(canonicalMessage.thread && readOverlay
-        ? { thread: { ...canonicalMessage.thread, ...readOverlay } }
-        : {}),
-      ...(options?.account_agent_routing
-        ? { account_agent_routing: accountRouting.get(result.messageRow.number) ?? null }
-        : {}),
-    };
-  }
-  if (result.mentionNotices?.length) {
-    // Copy rather than annotate: the canonical message is the shared event.
-    message = { ...message, mention_notices: [...result.mentionNotices] };
-  }
-  return {
-    message,
-    canonical_message: canonicalMessage,
-    created: result.created,
-    recipientAgentKeys: result.recipientAgentKeys,
-    recipientAgentTargets: result.recipientAgentTargets,
-  };
 }
 
 export async function addMessage(
