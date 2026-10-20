@@ -14,6 +14,7 @@ import type { useRoomShellInspectorRunActions } from "./useRoomShellInspectorAct
 import type { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotifications } from "./useRoomShellConversation";
 import type { useRoomShellParticipants } from "./useRoomShellParticipants";
 import type { useRoomShellRoomWatchers, useRoomShellAttention } from "./useRoomShellWatchers";
+import type { useRoomShellLifecycle } from "./useRoomShellLifecycle";
 
 /** What each part of the context holds, by composable name. */
 interface RoomShellContextParts {
@@ -34,6 +35,7 @@ interface RoomShellContextParts {
   useRoomShellParticipants: ReturnType<typeof useRoomShellParticipants>;
   useRoomShellRoomWatchers: ReturnType<typeof useRoomShellRoomWatchers>;
   useRoomShellAttention: ReturnType<typeof useRoomShellAttention>;
+  useRoomShellLifecycle: ReturnType<typeof useRoomShellLifecycle>;
   useRoomShellNotifications: ReturnType<typeof useRoomShellNotifications>;
   useRoomShellInspectorWatchers: ReturnType<typeof useRoomShellInspectorWatchers>;
   useRoomShellInspectorObservations: ReturnType<typeof useRoomShellInspectorObservations>;

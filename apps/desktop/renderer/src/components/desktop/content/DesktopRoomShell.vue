@@ -316,9 +316,7 @@
 
 <script setup lang="ts">
 import { GitBranch } from "@lucide/vue";
-import { onBeforeUnmount, onMounted, ref } from "vue";
-import { appendAgentInspectorLiveBatch } from "../../../domain/agent-inspector-live";
-import { foldSupervisorActivityPush } from "../../../domain/supervisor-entries-resource";
+import { ref } from "vue";
 import AddAgentModal from "./AddAgentModal.vue";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
@@ -335,7 +333,6 @@ import RoomMemoryView from "./RoomMemoryView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import GitRoomEnvironmentPanel from "./room-shell/GitRoomEnvironmentPanel.vue";
-import { desktopIpc } from "../../../ipc/index.js";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
 import type { RoomShellContext } from "../../../composables/room-shell/context";
 import { useRoomShellState } from "../../../composables/room-shell/useRoomShellState";
@@ -348,6 +345,7 @@ import { useRoomShellInspectorRunActions } from "../../../composables/room-shell
 import { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotifications } from "../../../composables/room-shell/useRoomShellConversation";
 import { useRoomShellParticipants } from "../../../composables/room-shell/useRoomShellParticipants";
 import { useRoomShellRoomWatchers, useRoomShellAttention } from "../../../composables/room-shell/useRoomShellWatchers";
+import { useRoomShellLifecycle } from "../../../composables/room-shell/useRoomShellLifecycle";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
 
@@ -360,21 +358,18 @@ Object.assign(app, { props, emit });
 const {
   personActions, activeTab, roomChatView, revealedMessageId, actionPanelOpen, addAgentModalOpen,
   selectedAgentDetailRequest, selectedAgentDetailRequestVersion, agentInspectorInitialTab,
-  agentInspectorCompact, agentInspectorRequestState, agentInspectorLiveFeed,
-  agentInspectorWorkResource, agentInspectorWorkSourceMessageId,
-  agentInspectorConfigurationResource, agentInspectorRoomMoveResource, agentInspectorProviders,
-  agentInspectorSettingsConflict, agentInspectorBackgroundRefresh, agentInspectorDetailRequest,
+  agentInspectorCompact, agentInspectorLiveFeed, agentInspectorWorkResource,
+  agentInspectorWorkSourceMessageId, agentInspectorConfigurationResource,
+  agentInspectorRoomMoveResource, agentInspectorProviders, agentInspectorSettingsConflict,
   rulesOpen, roomLinkCopied, deliveryRetryingKeys, continuationRepairingKeys,
   roomDeliverySkippingKeys, deliveryRetryAvailable, boardSelectedTaskId, boardGovernanceSection,
   activityHistoryRequest, artifactTimelineTaskFilterId, storageBusy, storageFeedback,
-  githubEventsVisible, environmentPanelOpen, supervisorEntries, agentRosterState,
-  supervisorEntriesUpdatedAt, supervisorStatus, supervisorSyncState,
+  githubEventsVisible, environmentPanelOpen, supervisorEntries, agentRosterState, supervisorStatus,
   agentInspectorRoomMoveAvailable, continuationRepairAvailable, roomDeliverySkipAvailable,
   selectedAgentDetailTarget,
 } = Object.assign(app, useRoomShellState(app));
 const {
-  acceptSupervisorRetirementEvent, retryAgentInspectorState, refreshRoomAgents,
-  handleSupervisorEntriesVisibilityChange, stopSupervisorEntriesRefreshTimer,
+  retryAgentInspectorState, refreshRoomAgents,
 } = Object.assign(app, useRoomShellSupervisorActions(app));
 const {
   retryRoomAgentDelivery, restoreAgentConversation, skipRoomDelivery, stopAgentTurnForApproval,
@@ -410,15 +405,7 @@ const {
   selectedAgentInspectorWorkArtifacts, deliveryReceiptsByMessage,
 } = Object.assign(app, useRoomShellAgentProjections(app));
 
-const {
-  supervisorStateSubscription,
-} = Object.assign(app, useRoomShellSupervisorSync(app));
-
-let unsubscribeSupervisorActivity: (() => void) | null = null;
-
-let unsubscribeSupervisorAgentStream: (() => void) | null = null;
-
-let unsubscribeSupervisorRetirement: (() => void) | null = null;
+Object.assign(app, useRoomShellSupervisorSync(app));
 
 const {
   roomUrl, messageNamespace, soundEnabled, notificationsEnabled, notificationPermission,
@@ -448,52 +435,7 @@ Object.assign(app, useRoomShellRoomWatchers(app));
 
 Object.assign(app, useRoomShellAttention(app));
 
-onBeforeUnmount(() => {
-  agentInspectorRequestState.agentInspectorWorkRequestToken += 1;
-  agentInspectorDetailRequest.reset();
-  agentInspectorBackgroundRefresh.reset();
-  supervisorSyncState.supervisorEntriesRefreshOwnerActive = false;
-  supervisorSyncState.supervisorEntriesRefreshQueued = false;
-  supervisorSyncState.supervisorEntriesRefreshRequestId += 1;
-  stopSupervisorEntriesRefreshTimer();
-  supervisorSyncState.supervisorStatusRequestToken += 1;
-  agentInspectorRequestState.agentInspectorSettingsRequestToken += 1;
-  agentInspectorRequestState.agentInspectorRoomMoveRequestToken += 1;
-  if (agentInspectorRequestState.agentInspectorRoomMoveRecoveryTimer !== null) {
-    window.clearTimeout(agentInspectorRequestState.agentInspectorRoomMoveRecoveryTimer);
-    agentInspectorRequestState.agentInspectorRoomMoveRecoveryTimer = null;
-  }
-  document.removeEventListener("visibilitychange", handleSupervisorEntriesVisibilityChange);
-  unsubscribeSupervisorActivity?.();
-  unsubscribeSupervisorActivity = null;
-  unsubscribeSupervisorAgentStream?.();
-  unsubscribeSupervisorAgentStream = null;
-  void desktopIpc.supervisor?.watchAgentStream?.(null);
-  supervisorStateSubscription.unmount();
-  unsubscribeSupervisorRetirement?.();
-  unsubscribeSupervisorRetirement = null;
-  supervisorSyncState.retirementStatusCheckOperationId = null;
-});
-
-onMounted(() => {
-  document.addEventListener("visibilitychange", handleSupervisorEntriesVisibilityChange);
-  unsubscribeSupervisorActivity = desktopIpc.supervisor?.onActivity?.((push) => {
-    const next = foldSupervisorActivityPush(supervisorEntries.value, props.room.identifier, push);
-    if (next === supervisorEntries.value) return;
-    supervisorEntries.value = next;
-    supervisorEntriesUpdatedAt.value = new Date().toISOString();
-  }) || null;
-  supervisorStateSubscription.mount();
-  unsubscribeSupervisorRetirement = desktopIpc.supervisor?.onRetirement?.((event) => {
-    acceptSupervisorRetirementEvent(event);
-  }) || null;
-  unsubscribeSupervisorAgentStream = desktopIpc.supervisor?.onAgentStream?.((batch) => {
-    // Only accumulate for the agent whose inspector is focused; a batch for a
-    // stale focus (raced focus change) is ignored.
-    if (batch.entryId !== selectedAgentDetailProjection.value?.entryId) return;
-    agentInspectorLiveFeed.value = appendAgentInspectorLiveBatch(agentInspectorLiveFeed.value, batch);
-  }) || null;
-});
+Object.assign(app, useRoomShellLifecycle(app));
 
 const {
   tabs,
