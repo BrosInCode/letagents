@@ -17,6 +17,7 @@ import type {
   DesktopRoomAgentTurnState,
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
+import { roomShellSource } from "./room-shell-source";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -26,7 +27,7 @@ async function source(relativePath: string): Promise<string> {
 
 describe("durable room delivery UI contracts", () => {
   it("opens synthetic startup blockers in exact retained work and keeps real-message reveal", async () => {
-    const shell = await source("src/components/desktop/content/DesktopRoomShell.vue");
+    const shell = await roomShellSource();
     const handler = shell.slice(shell.indexOf("async function revealRoomMessage("), shell.indexOf("async function revealRecordedWorkMessage("))
       .replace("(messageId: string): Promise<void>", "(messageId)");
     const opened: Array<{ supervisorEntryId: string }> = [];
@@ -166,7 +167,7 @@ describe("durable room delivery UI contracts", () => {
 
     const [activity, shell, inspectorDomain] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
       source("src/domain/agent-inspector.ts"),
     ]);
     assert.doesNotMatch(activity, /desktop-room-agent-(?:reconnect|recover)|reconnect-room-agent|recover-room-agent/);
@@ -269,7 +270,7 @@ describe("durable room delivery UI contracts", () => {
   it("presents retained structural work only as room History and reveals its source message", async () => {
     const [activity, shell] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
     ]);
     assert.match(activity, /<AgentHistory v-if="activeView === 'history'"/);
     assert.match(activity, /#work-detail="\{ record \}"/);
@@ -309,7 +310,7 @@ describe("durable room delivery UI contracts", () => {
   it("hands a known cross-thread target to the mounted panel without a refresh RPC, and toasts absent failures", async () => {
     const [chat, shell, panel, messages] = await Promise.all([
       source("src/components/desktop/content/RoomChatView.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
       source("src/components/desktop/content/room-shell/useDesktopRoomMessages.ts"),
     ]);
@@ -326,7 +327,7 @@ describe("durable room delivery UI contracts", () => {
   it("carries grouped receipts, disabled retry capability, and reveal events across chat surfaces", async () => {
     const [app, shell, chat, viewport, thread, message, receipts] = await Promise.all([
       source("src/App.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
       source("src/components/desktop/content/RoomChatView.vue"),
       source("src/components/desktop/content/room-chat/RoomMessageViewport.vue"),
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),

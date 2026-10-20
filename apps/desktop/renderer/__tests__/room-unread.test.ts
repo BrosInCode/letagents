@@ -11,10 +11,11 @@ import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
 import { markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
 import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
+import { roomShellSource } from "./room-shell-source";
 
 test("per-room storage controls refresh the unread history namespace, including a local fork", async () => {
   async function functionsFrom(path: string, names: string[]): Promise<string> {
-    const { descriptor } = parse(await readFile(new URL(path, import.meta.url), "utf8"));
+    const { descriptor } = parse(path.endsWith("DesktopRoomShell.vue") ? roomShellSource() : await readFile(new URL(path, import.meta.url), "utf8"));
     const script = ts.createSourceFile("component.ts", descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true);
     return ts.transpileModule(script.statements.filter(statement =>
       ts.isFunctionDeclaration(statement) && names.includes(statement.name?.text || ""),

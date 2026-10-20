@@ -34,8 +34,9 @@ import { mergeThreadInboxPages } from "../src/composables/useNeedsYou";
 import { useSupervisorStateSubscription } from "../src/components/desktop/content/room-shell/useSupervisorStateSubscription";
 import { useRoomAttentionNavigation } from "../src/components/desktop/content/room-shell/useRoomAttentionNavigation";
 import type { AttentionNavigationIntent, RoomTabId } from "../src/components/desktop/content/room-shell/types";
+import { roomShellSource } from "./room-shell-source";
 
-const shellSource = read("../src/components/desktop/content/DesktopRoomShell.vue");
+const shellSource = roomShellSource();
 const githubEventsSource = read("../src/components/desktop/content/room-shell/useDesktopRoomGitHubEvents.ts");
 
 test("the desktop room shell keeps GitHub events and no longer owns an inbox", () => {

@@ -9,6 +9,7 @@ import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import { projectAgentInspector, type AgentInspectorProjection } from "../src/domain/agent-inspector";
 import { configurationDraft, IMAGE_INPUT_DESCRIPTION, IMAGE_INPUT_TITLE } from "../src/domain/agent-inspector-settings";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../src/domain/agent-inspector-settings";
+import { roomShellSource } from "./room-shell-source";
 
 interface HostNode {
   type: string;
@@ -749,10 +750,11 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
 });
 
 test("Overview waits for a historical identity before loading intensity and reloads on reopen", async () => {
-  const shell = await readFile(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const shell = await roomShellSource();
   const opening = shell.slice(shell.indexOf("function openAgentDetailRequest("), shell.indexOf("async function loadAgentInspectorProviders("));
   assert.doesNotMatch(opening, /loadAgentInspectorSettings\(/, "an unresolved opening must not mark settings unavailable");
-  const watcher = shell.slice(shell.indexOf("// Identity can resolve after"), shell.indexOf("function closeAgentDetail("));
+  const watcherStart = shell.indexOf("// Identity can resolve after");
+  const watcher = shell.slice(watcherStart, shell.indexOf("\n});", watcherStart) + "\n});".length);
   const projection = Vue.ref<{ entryId: string } | null>(null);
   const version = Vue.ref(0);
   const resource = Vue.ref({ status: "idle" });
@@ -776,10 +778,7 @@ test("Overview waits for a historical identity before loading intensity and relo
 });
 
 test("Settings apply uses exact authority fences and explicit reload recovers an accepted restart", async () => {
-  const shell = await readFile(
-    fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)),
-    "utf8",
-  );
+  const shell = await roomShellSource();
   const apply = await readFile(
     fileURLToPath(new URL("../src/components/desktop/content/room-shell/useAgentInspectorConfigurationApply.ts", import.meta.url)),
     "utf8",

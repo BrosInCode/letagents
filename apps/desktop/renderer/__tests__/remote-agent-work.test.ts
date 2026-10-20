@@ -9,6 +9,7 @@ import { createServer } from "vite";
 import type { DesktopAgentPresence } from "../../electron/ipc-types";
 import { remoteAgentWorkIndicators, type ManagedAgentWorkIndicator } from "../src/domain/managed-agents";
 import { mergeRoomResponseParticipants } from "../src/domain/room-response-participants";
+import { roomShellSource } from "./room-shell-source";
 
 const NOW = Date.parse("2026-10-15T10:00:00.000Z");
 
@@ -86,7 +87,7 @@ test("remote rows follow the local rows in the strip and never replace one", () 
 });
 
 test("the room shell adds remote rows after its local rows", () => {
-  const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const shell = roomShellSource();
   assert.match(shell, /\], \[\.\.\.pendingResponseParticipants\.value, [^\n]*\.\.\.remoteAgentWorkIndicators\(props\.presence,\s*supervisorEntries\.value, \[\], workWindowNow\.value\)\], props\.messages\)/);
 });
 

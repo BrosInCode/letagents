@@ -26,6 +26,7 @@ import {
   humanizeAgentInspectorTimeline,
   isCurrentAgentInspectorWorkResponse,
 } from "../src/domain/agent-inspector-work";
+import { roomShellSource } from "./room-shell-source";
 
 test("work detail source selection uses exact active source before bounded recency", () => {
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: "active" } } } as any, { items: [{ source_message_id: "newest" }] }), "active");
@@ -137,7 +138,7 @@ test("work labels present human language instead of raw causal enums", () => {
 });
 
 test("shell keeps work loading dark, fenced, stale-safe, and routed through canonical reveal", () => {
-  const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const shell = roomShellSource();
   const surface = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)), "utf8");
   const work = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorWork.vue", import.meta.url)), "utf8");
   assert.doesNotMatch(shell, /agentInspectorFoundationEnabled/);
