@@ -5,12 +5,18 @@
 
 import type { DesktopRoomShellEmit, DesktopRoomShellPropsValue } from "./props";
 import type { useRoomShellState } from "./useRoomShellState";
+import type { useRoomShellSupervisorActions, useRoomShellSupervisorSync } from "./useRoomShellSupervisor";
 
 /** What each part of the context holds, by composable name. */
 interface RoomShellContextParts {
   /** The shell's own props and emit. */
   inputs: { props: DesktopRoomShellPropsValue; emit: DesktopRoomShellEmit };
   useRoomShellState: ReturnType<typeof useRoomShellState>;
+  useRoomShellSupervisorActions: ReturnType<typeof useRoomShellSupervisorActions>;
+  useRoomShellSupervisorSync: ReturnType<typeof useRoomShellSupervisorSync>;
+  /** Names that still live in DesktopRoomShell.vue while the split is in progress. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pending: Record<string, any>;
 }
 
 type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;
