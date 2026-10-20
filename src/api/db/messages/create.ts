@@ -1,11 +1,9 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { MESSAGE_SENDER_MAX_CODE_POINTS, MESSAGE_SENDER_MAX_UTF8_BYTES, isMessageSenderWithinBounds, parseSupervisedReplySourceNumber } from "../../../../shared/message-contracts.mjs";
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import type { Message, MessageMentionNotice, MessageRecipientAgentTarget } from "../types.js";
-import { finishReplyTurnsTx, queueReplyTurnWakes, releaseAgentReplyTurnHoldsTx, type ReleasedReplyTurn } from "./reply-turns.js";
+import { queueReplyTurnWakes, releaseAgentReplyTurnHoldsTx, type ReleasedReplyTurn } from "./reply-turns.js";
 import type { AddMessageOptions, AddMessageResult } from "./create/types.js";
 import { hydrateCreatedMessage } from "./create/hydrate.js";
 import { normalizeClientMessageId, resolveMessageTargets } from "./create/validation.js";
@@ -15,6 +13,7 @@ import { finishCreatedMessage } from "./create/after-insert.js";
 import { resolveMessageRoutingContext } from "./create/routing-context.js";
 import { routeMessageToActiveSessions } from "./create/receipt-routing.js";
 import { routeAddressedMessage } from "./create/addressed.js";
+import { markAnsweredReceiptsReplied } from "./create/reply-receipts.js";
 export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 export { chunkMessageReceiptRows } from "./create/receipt-rows.js";
 
@@ -97,74 +96,7 @@ export async function addMessageWithCreateStatus(
       );
     }
 
-    // The canonical reply transition is server-owned and atomic with the
-    // reply's creation: any worker publication that answers an earlier message
-    // — an explicit reply_to, or a supervised daemon publication carrying its
-    // reply-namespace idempotency id — marks that agent's receipt replied.
-    // Supervised turns never call self-report endpoints, so this is the only
-    // path that can move their receipts.
-    const publisherAgentKey = createdMessage.publisher_agent_key;
-    if (publisherAgentKey) {
-      const replyTargetNumbers = new Set<number>();
-      if (createdMessage.reply_to_number) replyTargetNumbers.add(createdMessage.reply_to_number);
-      const supervisedTarget = parseSupervisedReplySourceNumber(clientMessageId);
-      if (supervisedTarget) replyTargetNumbers.add(supervisedTarget);
-      for (const targetNumber of replyTargetNumbers) {
-        const unresolved = await tx
-          .select({
-            id: message_agent_receipts.id,
-            receipt_state: message_agent_receipts.receipt_state,
-            turn_position: message_agent_receipts.turn_position,
-          })
-          .from(message_agent_receipts)
-          .where(and(
-            eq(message_agent_receipts.message_room_id, roomId),
-            eq(message_agent_receipts.message_number, targetNumber),
-            eq(message_agent_receipts.agent_key, publisherAgentKey),
-            inArray(message_agent_receipts.receipt_state, ["queued", "responding", "retrying", "blocked", "no_reply", "unavailable"]),
-          ));
-        for (const receipt of unresolved) {
-          // Compare-and-set: if a concurrent transition won between the read
-          // and this write, record nothing — an event may only describe a
-          // state change that actually happened.
-          const applied = await tx
-            .update(message_agent_receipts)
-            .set({
-              receipt_state: "replied",
-              // The committed reply IS the canonical answer: stamp its number
-              // so Message info can link "View reply" even for supervised
-              // publications, which never set reply_to.
-              reply_message_number: createdMessage.number,
-              updated_at: createdMessage.timestamp,
-            })
-            .where(and(
-              eq(message_agent_receipts.id, receipt.id),
-              eq(message_agent_receipts.receipt_state, receipt.receipt_state),
-            ))
-            .returning({ id: message_agent_receipts.id });
-          if (applied.length === 0) continue;
-          await tx.insert(message_agent_receipt_events).values({
-            id: `rcpt_evt_${randomUUID().replace(/-/g, "")}`,
-            receipt_id: receipt.id,
-            message_room_id: roomId,
-            message_number: targetNumber,
-            from_state: receipt.receipt_state,
-            to_state: "replied",
-            actor_session_id: createdMessage.publisher_agent_session_id,
-            timestamp: createdMessage.timestamp,
-          });
-          repliedReceiptTargets.add(targetNumber);
-          // This agent's turn is done: the next ready position may now see
-          // the message, with this reply already in its context.
-          if (receipt.turn_position !== null) {
-            releasedReplyTurns.push(...await finishReplyTurnsTx(tx, roomId, [{
-              message_number: targetNumber,
-              agent_key: publisherAgentKey,
-            }]));
-          }
-        }
-      }
-    }
+    await markAnsweredReceiptsReplied(tx, roomId, createdMessage, clientMessageId, repliedReceiptTargets, releasedReplyTurns);
 
     return hydrateCreatedMessage(roomId, {
       messageRow: createdMessage,
