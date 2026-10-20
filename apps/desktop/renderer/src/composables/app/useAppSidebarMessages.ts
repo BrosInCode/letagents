@@ -25,6 +25,7 @@ export function useAppSidebarMessages(context: unknown) {
       "useAppAccountActivityFeed"
     | "useAppNavigation"
     | "useAppReadMarkers"
+    | "useAppSidebarEntries"
     | "useAppState"
     | "appVuePending"
   >;

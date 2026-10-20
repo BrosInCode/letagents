@@ -13,7 +13,12 @@ import type { AppContextOf } from "./context";
 
 /** Sidebar layout: visibility, width and resizing, project collapse and room order, and the settings surface. */
 export function useAppSidebarLayout(context: unknown) {
-  const app = context as AppContextOf<"useAppNavigation" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<
+      "useAppNavigation"
+    | "useAppSidebarEntries"
+    | "useAppSidebarSelection"
+    | "useAppState"
+  >;
   const {
     clampSidebarWidth, isSidebarResizing, requestedSettingsPane, sidebarBatchActionBusy,
     sidebarMaxWidth, sidebarMinWidth, sidebarRoomOrder, sidebarRoomOrderStorageKey,
