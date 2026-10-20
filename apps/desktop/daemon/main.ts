@@ -1,4 +1,4 @@
-import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, type DaemonMaintenanceService } from "./maintenance-service.js";
+import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus } from "./maintenance-service.js";
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime, isLocalRoomApi } from "./local-room-runtime.js";
 import { dirname, join } from "node:path";
@@ -60,7 +60,6 @@ import { supervisedPermissionProfilesForProvider } from "./supervised-permission
 import { createGitCommand, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-authority-coordinator.js";
-import { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import { RoomTurnAttachmentStager } from "./room-turn-attachments.js";
@@ -68,6 +67,7 @@ import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-li
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
 import { type DaemonPaths, type RecoveryClock, REPLY_ATTACHMENT_RETENTION_MS } from "./main/types.js";
+import { SupervisorDaemonState } from "./main/state.js";
 
 
 
@@ -94,89 +94,62 @@ export {
 
 export type { DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 
-
-export class SupervisorDaemon {
-  private readonly stateDatabasePath: string;
-  private readonly singleton: DaemonSingleton;
-  private maintenance: DaemonMaintenanceService | null = null;
-  private readonly authority: DaemonAuthority;
-  private readonly store: ManifestStore;
+export class SupervisorDaemon extends SupervisorDaemonState {
+  protected readonly stateDatabasePath: string;
+  protected readonly singleton: DaemonSingleton;
+  protected readonly authority: DaemonAuthority;
+  protected readonly store: ManifestStore;
   /** Native activity events wait here briefly and are written in batches. */
-  private readonly activityWrites: DaemonActivityWrites;
-  private readonly manifestAdministration: ManifestAdministrationCoordinator;
-  private readonly manifestTransitions: ManifestTransitionCoordinator;
-  private readonly readModel: DaemonReadModel;
-  private readonly lifecycleAdministration: LifecycleAdministrationCoordinator;
-  private readonly desiredStates: DesiredStateCoordinator;
-  private readonly audit: AuditLog;
-  private readonly durability: WorkDurabilityStore;
-  private readonly provisioner: WorkspaceProvisioner;
-  private readonly ephemeralProvisioner: EphemeralWorkspaceProvisioner;
-  private readonly gitCommand: GitCommand;
-  private readonly workerBindings: WorkerBindingStore;
-  private readonly nativeActivity: NativeActivityPublicationCoordinator;
-  private readonly workerAuthority: WorkerAuthorityCoordinator;
-  private readonly convergencePacer: ConvergencePacer;
-  private readonly executionDelegations: ExecutionDelegationCoordinator;
+  protected readonly activityWrites: DaemonActivityWrites;
+  protected readonly manifestAdministration: ManifestAdministrationCoordinator;
+  protected readonly manifestTransitions: ManifestTransitionCoordinator;
+  protected readonly readModel: DaemonReadModel;
+  protected readonly lifecycleAdministration: LifecycleAdministrationCoordinator;
+  protected readonly desiredStates: DesiredStateCoordinator;
+  protected readonly audit: AuditLog;
+  protected readonly durability: WorkDurabilityStore;
+  protected readonly provisioner: WorkspaceProvisioner;
+  protected readonly ephemeralProvisioner: EphemeralWorkspaceProvisioner;
+  protected readonly gitCommand: GitCommand;
+  protected readonly workerBindings: WorkerBindingStore;
+  protected readonly nativeActivity: NativeActivityPublicationCoordinator;
+  protected readonly workerAuthority: WorkerAuthorityCoordinator;
+  protected readonly convergencePacer: ConvergencePacer;
+  protected readonly executionDelegations: ExecutionDelegationCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
-  private readonly supervisedInbox: SupervisedAgentInboxStore;
+  protected readonly supervisedInbox: SupervisedAgentInboxStore;
   /** Daemon-owned copies of files agents attach to their final replies. */
-  private readonly replyAttachmentSpool: ReplyAttachmentSpool;
-  private replyAttachmentSweep: NodeJS.Timeout | null = null;
-  private readonly continuationRepairs: ContinuationRepairCoordinator;
-  private readonly roomMoves: RoomMoveCoordinator;
-  private readonly supervisedDelivery: SupervisedAgentDelivery | null;
+  protected readonly replyAttachmentSpool: ReplyAttachmentSpool;
+  protected readonly continuationRepairs: ContinuationRepairCoordinator;
+  protected readonly roomMoves: RoomMoveCoordinator;
+  protected readonly supervisedDelivery: SupervisedAgentDelivery | null;
   /** Images on the message that wakes an agent, staged for one turn under the daemon's own folder. */
-  private readonly roomTurnAttachments: RoomTurnAttachmentStager;
-  private readonly supervisedDeliveryLifecycle: SupervisedDeliveryLifecycleCoordinator;
-  private readonly turnControls: TurnControlCoordinator;
-  private readonly roomDeliveryControl: RoomDeliveryControl;
-  private readonly runtimeRecovery: RuntimeRecoveryCoordinator;
-  private readonly runtimeConfigurationApply: RuntimeConfigurationApplyCoordinator;
-  private readonly boundedEffects: BoundedEffectCoordinator;
-  private readonly socket: DaemonControlSocket;
-  private readonly stateWatch: DaemonStateWatch;
-  private readonly entryConcurrency: EntryConcurrencyGate;
-  private readonly deliveryCutovers: DeliveryCutoverCoordinator;
-  private readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
-  private readonly liveHandles = new Map<string, ProviderActionHandle>();
-  private readonly providerStreams: ProviderStreamCoordinator;
-  private executionCapture: ExecutionCaptureCoordinator | null = null;
-  private typedLifecycleEffects: TypedLifecycleEffectCoordinator | null = null;
-  private roomWorkPublisher: RoomWorkPublisher | null = null;
-  private readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
-  private readonly providerCheckpoints: ProviderCheckpointCoordinator;
-  private readonly providerExecution: ProviderExecutionCoordinator | null;
-  private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
-  private readonly providerSchedulerFailures: ProviderSchedulerFailureCoordinator;
-  private readonly providerTerminals: ProviderTerminalCoordinator;
-  private readonly handoffCleanupFailures: unknown[] = [];
-  /**
-   * Control requests must be able to fence a launch while its per-entry
-   * reconciliation lane is awaiting remote authorization or capabilities.
-   * They therefore cannot rely on that same lane for ordering.
-   */
-  private readonly workerRuntimeCustody = new WorkerRuntimeCustody();
-  /** Initial-tail reads are authority-bearing admission operations. */
-  private readonly bootstrapOperations = new Set<BootstrapOperation>();
-  private readonly nowMs: () => number;
-  private readonly startedAt = new Date().toISOString();
-  private readonly agentStreamRegistry: AgentStreamRegistry;
-  private readonly liveRoomShare: LiveRoomSharePublisher;
-  private handoffScheduled = false;
-  private handoffDraining = false;
-  private readonly handoff: ProviderHandoffCoordinator;
-  private boardOwnershipActive = false;
+  protected readonly roomTurnAttachments: RoomTurnAttachmentStager;
+  protected readonly supervisedDeliveryLifecycle: SupervisedDeliveryLifecycleCoordinator;
+  protected readonly turnControls: TurnControlCoordinator;
+  protected readonly roomDeliveryControl: RoomDeliveryControl;
+  protected readonly runtimeRecovery: RuntimeRecoveryCoordinator;
+  protected readonly runtimeConfigurationApply: RuntimeConfigurationApplyCoordinator;
+  protected readonly boundedEffects: BoundedEffectCoordinator;
+  protected readonly socket: DaemonControlSocket;
+  protected readonly stateWatch: DaemonStateWatch;
+  protected readonly entryConcurrency: EntryConcurrencyGate;
+  protected readonly deliveryCutovers: DeliveryCutoverCoordinator;
+  protected readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
+  protected readonly providerStreams: ProviderStreamCoordinator;
+  protected readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
+  protected readonly providerCheckpoints: ProviderCheckpointCoordinator;
+  protected readonly providerExecution: ProviderExecutionCoordinator | null;
+  protected readonly providerReconciliation: ProviderReconciliationCoordinator | null;
+  protected readonly providerSchedulerFailures: ProviderSchedulerFailureCoordinator;
+  protected readonly providerTerminals: ProviderTerminalCoordinator;
+  protected readonly nowMs: () => number;
+  protected readonly agentStreamRegistry: AgentStreamRegistry;
+  protected readonly liveRoomShare: LiveRoomSharePublisher;
+  protected readonly handoff: ProviderHandoffCoordinator;
 
-  private get manifestGeneration(): number {
-    return this.authority.generation;
-  }
-
-  private set manifestGeneration(generation: number) {
-    this.authority.generation = generation;
-  }
-
-  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = false, private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, private readonly loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
+  constructor(paths: DaemonPaths = defaultDaemonPaths(), platform = process.platform, providerPort?: ProviderActionPort, autoConverge = false, nativeHeartbeatIntervalMs = 15_000, controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
+    super(paths, platform, providerPort, autoConverge, nativeHeartbeatIntervalMs, controlRequestBarrier, recoveryClock, supervisedDeliveryHttp, supervisorGrantHttp, loadSupervisedToolRuntime);
     this.stateDatabasePath = paths.manifestPath;
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
     const daemonAuthority = {
@@ -1142,7 +1115,7 @@ export class SupervisorDaemon {
    * network callback latency. Provider work survives; only this daemon's
    * observers and control authority are detached.
    */
-  private async stopForHandoff(): Promise<void> {
+  protected async stopForHandoff(): Promise<void> {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
     if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
@@ -1192,21 +1165,21 @@ export class SupervisorDaemon {
    * is compared with the currently-owned runtime before the in-memory bearer
    * is read, so a historical binding cannot reanimate a replacement worker.
    */
-  private async retryRoomDelivery(input: {
+  protected async retryRoomDelivery(input: {
     entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
     executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
   }): Promise<void> {
     await this.roomDeliveryControl.retry(input);
   }
 
-  private async restoreAgentConversation(input: {
+  protected async restoreAgentConversation(input: {
     entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
     executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
   }): Promise<void> {
     await this.roomDeliveryControl.restoreConversation(input);
   }
 
-  private async skipRoomDelivery(input: {
+  protected async skipRoomDelivery(input: {
     entryId: string; roomId: string; sourceMessageId: string; workAttemptId: string;
     executionGenerationId: string; agentSessionId: string; daemonGeneration: number;
   }): Promise<void> {
@@ -1219,7 +1192,7 @@ export class SupervisorDaemon {
    * This lane is serialized with lifecycle convergence so persistence and
    * handle promotion cannot race a restart or handoff.
    */
-  private async restoreMissingProviderContinuation(input: {
+  protected async restoreMissingProviderContinuation(input: {
     agent: SupervisedIngressAgent;
     item: import("./supervised-agent-inbox-store.js").SupervisedInboxItem;
     manual: boolean;
@@ -1228,17 +1201,17 @@ export class SupervisorDaemon {
   }
 
   /** Inspector reads are exact-entry scoped; a room mismatch never falls back to history. */
-  private async getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null) {
+  protected async getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null) {
     return this.readModel.inspectorDetail(entryId, roomId, sourceMessageId);
   }
 
-  private async exactActiveBoundedContext(input: {
+  protected async exactActiveBoundedContext(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number; providerTurnId?: string;
   }) {
     return this.supervisedDeliveryLifecycle.exactActiveBoundedContext(input);
   }
 
-  private async completeBoundedEffectOnce(input: {
+  protected async completeBoundedEffectOnce(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string;
     effectId: string; result?: unknown; error?: string;
@@ -1247,15 +1220,15 @@ export class SupervisorDaemon {
   }
 
   /** Compatibility seam for focused daemon integration tests; production callers use roomMoves directly. */
-  private reconcileRoomMove(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
+  protected reconcileRoomMove(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
     return this.roomMoves.reconcile(initial);
   }
 
-  private async waitForActiveRoomMoveReconciliation(entryId: string): Promise<void> {
+  protected async waitForActiveRoomMoveReconciliation(entryId: string): Promise<void> {
     await this.entryConcurrency.waitForActiveRoomMove(entryId);
   }
 
-  private wakeRoomMoveReconciliationWaiters(): void {
+  protected wakeRoomMoveReconciliationWaiters(): void {
     this.entryConcurrency.wakeRoomMoveWaiters();
   }
 
@@ -1265,24 +1238,24 @@ export class SupervisorDaemon {
    * unrelated entry work are woken and later return their captured snapshot
    * without touching a closed store.
    */
-  private async fenceAndDrainRoomMoveReconciliations(): Promise<void> {
+  protected async fenceAndDrainRoomMoveReconciliations(): Promise<void> {
     await this.entryConcurrency.fenceAndDrainRoomMoves();
   }
 
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
-  private async startSupervisedDelivery(entryId: string, mode: "refresh" | "ensure" | "wake" = "refresh"): Promise<void> {
+  protected async startSupervisedDelivery(entryId: string, mode: "refresh" | "ensure" | "wake" = "refresh"): Promise<void> {
     await this.supervisedDeliveryLifecycle.start(entryId, mode);
   }
 
-  private async restartSupervisedDeliveryOrConverge(entryId: string): Promise<void> {
+  protected async restartSupervisedDeliveryOrConverge(entryId: string): Promise<void> {
     await this.supervisedDeliveryLifecycle.restartOrConverge(entryId);
   }
 
-  private status() {
+  protected status() {
     return maintenanceStatus(this.readModel.status(), this.maintenance?.hold);
   }
 
-  private async retireForHandoff(): Promise<void> {
+  protected async retireForHandoff(): Promise<void> {
     const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
@@ -1315,7 +1288,7 @@ export class SupervisorDaemon {
     });
   }
 
-  private beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {
+  protected beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {
     const controller = new AbortController();
     const operation: BootstrapOperation = { controller, phase: "observing", operation: Promise.resolve() };
     const result = run(input, operation);
@@ -1327,15 +1300,15 @@ export class SupervisorDaemon {
   }
 
   /** Inspector configuration is a durable optimistic-concurrency resource. */
-  private async getAgentConfiguration(entryId: string, daemonGeneration: number) {
+  protected async getAgentConfiguration(entryId: string, daemonGeneration: number) {
     return this.manifestAdministration.getAgentConfiguration(entryId, daemonGeneration);
   }
 
-  private async updateAgentConfiguration(input: { entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown> }) {
+  protected async updateAgentConfiguration(input: { entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown> }) {
     return this.manifestAdministration.updateAgentConfiguration(input);
   }
 
-  private async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
+  protected async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
     return this.manifestAdministration.putManifestEntry(entry);
   }
 
@@ -1343,41 +1316,41 @@ export class SupervisorDaemon {
    * Repair mutable product identity without touching provider execution,
    * delivery cursors, credentials, or lifecycle authority.
    */
-  private async setDisplayName(id: string, displayName: string): Promise<DaemonManifestEntry> {
+  protected async setDisplayName(id: string, displayName: string): Promise<DaemonManifestEntry> {
     return this.manifestAdministration.setDisplayName(id, displayName);
   }
 
-  private admitNewTurnControl(entryId: string): void {
+  protected admitNewTurnControl(entryId: string): void {
     this.turnControls.admitNew(entryId);
   }
 
-  private async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): Promise<DaemonManifestEntry> {
+  protected async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): Promise<DaemonManifestEntry> {
     return this.manifestAdministration.updateWorkplaceLiveness(id, state, detail, observedAt);
   }
 
-  private async entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): Promise<DaemonManifestEntryView[]> {
+  protected async entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): Promise<DaemonManifestEntryView[]> {
     return this.readModel.entriesWithDerivedLiveness(entries);
   }
 
-  private notifyStateChanged(captureAgentId?: string | false): void {
+  protected notifyStateChanged(captureAgentId?: string | false): void {
     this.stateWatch.notify();
     if (captureAgentId === false) return;
     try { this.executionCapture?.refresh(captureAgentId); } catch { /* optional observation */ }
   }
 
-  private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
+  protected pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
     this.liveRoomShare.observe(entryId, this.agentStreamRegistry.push(entryId, event));
   }
 
-  private resetAgentStream(entryId: string): void {
+  protected resetAgentStream(entryId: string): void {
     this.agentStreamRegistry.reset(entryId);
   }
 
-  private endAgentStream(entryId: string): void {
+  protected endAgentStream(entryId: string): void {
     this.agentStreamRegistry.end(entryId);
   }
 
-  private async watchAgentStream(input: {
+  protected async watchAgentStream(input: {
     entryId: string;
     afterSequence: number;
     waitMs: number;
@@ -1385,7 +1358,7 @@ export class SupervisorDaemon {
     return this.agentStreamRegistry.watch(input);
   }
 
-  private async watchState(input: {
+  protected async watchState(input: {
     afterDaemonGeneration: number;
     afterSequence: number;
     waitMs: number;
@@ -1397,31 +1370,31 @@ export class SupervisorDaemon {
     return this.stateWatch.watch(input);
   }
 
-  private async entryWithDerivedLiveness(
+  protected async entryWithDerivedLiveness(
     entry: DaemonManifestEntry,
     projectedBinding?: WorkerSessionBinding | null,
   ): Promise<DaemonManifestEntryView> {
     return this.readModel.entryWithDerivedLiveness(entry, projectedBinding);
   }
 
-  private async readAttempt(id: string) {
+  protected async readAttempt(id: string) {
     return this.readModel.attempt(id);
   }
 
   /** Queue convergence without making a control-socket caller wait for launch. */
-  private requestConvergence(entryId: string, kind: ConvergenceRequestKind = "owned"): void {
+  protected requestConvergence(entryId: string, kind: ConvergenceRequestKind = "owned"): void {
     this.providerExecution?.request(entryId, kind);
   }
 
-  private bumpEntryControlEpoch(entryId: string): number {
+  protected bumpEntryControlEpoch(entryId: string): number {
     return this.entryConcurrency.bumpControlEpoch(entryId);
   }
 
-  private reserveBoundedEffectJournal<T>(operation: () => Promise<T>): Promise<T> {
+  protected reserveBoundedEffectJournal<T>(operation: () => Promise<T>): Promise<T> {
     return this.boundedEffects.reserveJournal(operation);
   }
 
-  private attachLiveProvider(
+  protected attachLiveProvider(
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean = () => true,
   ): Promise<ProviderActionHandle | null> {
@@ -1431,7 +1404,7 @@ export class SupervisorDaemon {
     return coordinator.attachLiveProvider(entry, mayStartDelivery);
   }
 
-  private installProviderHandle(
+  protected installProviderHandle(
     entryId: string,
     handle: ProviderActionHandle,
     executionGenerationId: string,
@@ -1445,7 +1418,7 @@ export class SupervisorDaemon {
     );
   }
 
-  private stageWorkerBindingAfterResume(
+  protected stageWorkerBindingAfterResume(
     entry: DaemonManifestEntry,
     priorBinding: WorkerSessionBinding,
     successorExecutionGenerationId: string,
@@ -1459,7 +1432,7 @@ export class SupervisorDaemon {
     );
   }
 
-  private handleProviderStream(
+  protected handleProviderStream(
     entryId: string,
     handle: ProviderActionHandle,
     event: ProviderActionStreamEvent,
@@ -1467,33 +1440,33 @@ export class SupervisorDaemon {
     return this.providerStreams.handle(entryId, handle, event);
   }
 
-  private serializeCursorCheckpoint<T>(
+  protected serializeCursorCheckpoint<T>(
     entryId: string,
     operation: () => Promise<T>,
   ): Promise<T> {
     return this.providerStreams.serializeCursorCheckpoint(entryId, operation);
   }
 
-  private fenceTerminalProviderHandleOnce(
+  protected fenceTerminalProviderHandleOnce(
     handle: ProviderActionHandle,
     actionId: string,
   ): Promise<void> {
     return this.providerStreams.fenceTerminalOnce(handle, actionId);
   }
 
-  private scheduleRecoveryConvergence(entryId: string, delayMs: number): void {
+  protected scheduleRecoveryConvergence(entryId: string, delayMs: number): void {
     this.providerExecution?.scheduleRecovery(entryId, delayMs);
   }
 
-  private clearRecoveryConvergence(entryId: string): void {
+  protected clearRecoveryConvergence(entryId: string): void {
     this.providerExecution?.clearRecovery(entryId);
   }
 
-  private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
+  protected async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
     return this.nativeActivity.publish(entryId, method, status, observedAt);
   }
 
-  private async updateManifestEntry(entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
+  protected async updateManifestEntry(entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
     roomMoveCancellation?: { agentId: string; detail: string }, options?: { readsNoActivity?: boolean },
   ): Promise<DaemonManifestEntry> {
     return this.manifestTransitions.updateEntry(entryId, update, roomMoveCancellation, options);
@@ -1508,7 +1481,7 @@ export class SupervisorDaemon {
     return this.manifestTransitions.transition(entryId, to, condition, cause, actor, reconciliation);
   }
 
-  private async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence): Promise<void> {
+  protected async transitionOnce(entryId: string, to: ObservedState, condition: PolicyCondition, cause: string, actor: string, reconciliation?: DaemonManifestEntry["reconciliation"], notice?: ReconciliationNotice["kind"], terminal?: ExecutionTerminalPayload, fence?: TerminalCommitFence): Promise<void> {
     await this.manifestTransitions.transitionOnce(
       entryId,
       to,
@@ -1533,7 +1506,7 @@ export class SupervisorDaemon {
     return coordinator.reconcile(entryId, input, watchdogThresholdMs, actor);
   }
 
-  private async serializeEntryTick<T>(entryId: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  protected async serializeEntryTick<T>(entryId: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     return this.entryConcurrency.run(entryId, operation, signal);
   }
 
@@ -1548,7 +1521,7 @@ export class SupervisorDaemon {
     );
   }
 
-  private async observeProviderExitOnce(entryId: string, terminal: ProviderActionTerminal, actor: string, expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
+  protected async observeProviderExitOnce(entryId: string, terminal: ProviderActionTerminal, actor: string, expectedExecutionGenerationId?: string, expectedHandle?: ProviderActionHandle): Promise<void> {
     await this.providerTerminals.observeExitOnce(
       entryId,
       terminal,
@@ -1579,11 +1552,11 @@ export class SupervisorDaemon {
     );
   }
 
-  private async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
+  protected async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
     return this.authority.serializeManifestMutation(operation);
   }
 
-  private writeManifest(
+  protected writeManifest(
     expectedGeneration: number,
     entries: DaemonManifestEntry[],
     roomMoveCancellation?: { agentId: string; detail: string },
@@ -1596,7 +1569,7 @@ export class SupervisorDaemon {
     );
   }
 
-  private fenceDaemonCommit(commit: () => Promise<void>, notification?: DaemonCommitNotification): Promise<void> {
+  protected fenceDaemonCommit(commit: () => Promise<void>, notification?: DaemonCommitNotification): Promise<void> {
     return this.authority.fenceDaemonCommit(commit, notification);
   }
 
@@ -1606,15 +1579,15 @@ export class SupervisorDaemon {
    * work, but the old daemon still owns the singleton and must leave admitted
    * state honest before releasing it to a successor.
    */
-  private fenceAdmittedTransitionCommit(commit: () => Promise<void>): Promise<void> {
+  protected fenceAdmittedTransitionCommit(commit: () => Promise<void>): Promise<void> {
     return this.authority.fenceAdmittedTransitionCommit(commit);
   }
 
-  private async serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> {
+  protected async serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> {
     return this.authority.serializeManifestCommit(operation);
   }
 
-  private settleRuntimeApprovals(entryId: string, fence?: TerminalCommitFence): Promise<void> {
+  protected settleRuntimeApprovals(entryId: string, fence?: TerminalCommitFence): Promise<void> {
     return settleRuntimeApprovalRequests(entryId, {
       settle: () => this.store.settleWitnessedRuntimeApprovalClosures(entryId, () => this.nowMs(), fence ?? (commit => this.fenceDaemonCommit(commit))),
       notifyChanged: () => this.notifyStateChanged(),
@@ -1625,12 +1598,12 @@ export class SupervisorDaemon {
   }
 
   /** A user's action on an agent goes ahead of background convergence in every pacing queue. */
-  private userAction<T>(entryId: string | null, operation: () => T): T {
+  protected userAction<T>(entryId: string | null, operation: () => T): T {
     if (entryId) this.convergencePacer.markInteractive(entryId);
     return operation();
   }
 
-  private async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
+  protected async recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void> {
     await this.providerSchedulerFailures.record(entryId, error, actor);
   }
 }
