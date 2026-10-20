@@ -315,6 +315,10 @@ export function queueReplyTurnWakes(turns: readonly ReleasedReplyTurn[]): void {
  * after intake stops and before the pool ends; DB tests call it before they
  * drop the schema.
  */
+export function pendingReplyTurnWakeCount(): number {
+  return pendingReplyTurnWakes.size;
+}
+
 export async function settleReplyTurnWakes(): Promise<void> {
   while (pendingReplyTurnWakes.size > 0) {
     await Promise.allSettled([...pendingReplyTurnWakes]);

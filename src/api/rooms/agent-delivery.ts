@@ -54,6 +54,14 @@ interface SharedDeliveryFence {
 const sharedDeliveryLeases = new Map<string, SharedDeliveryLease>();
 const sharedDeliveryLeaseCreations = new Map<string, Promise<SharedDeliveryLease>>();
 const sharedDeliveryFences = new Map<string, SharedDeliveryFence>();
+// Heartbeat and expiry checks already running. Clearing a lease's timers stops
+// future checks only; the drain must also wait for these before the pool ends.
+const inFlightDeliveryLeaseChecks = new Set<Promise<void>>();
+
+function trackDeliveryLeaseCheck(check: Promise<void>): void {
+  const tracked = check.finally(() => { inFlightDeliveryLeaseChecks.delete(tracked); });
+  inFlightDeliveryLeaseChecks.add(tracked);
+}
 
 interface PendingDeliveryRelease {
   key: string;
@@ -474,6 +482,11 @@ export async function drainRoomAgentDeliveryLeases(): Promise<void> {
       .map((fence) => fence.disconnecting)
       .filter((pending): pending is Promise<unknown> => Boolean(pending)),
   );
+  // Retiring a lease clears its timers, but a check already started still
+  // reads the database. Its own errors are logged where it runs.
+  while (inFlightDeliveryLeaseChecks.size > 0) {
+    await Promise.allSettled([...inFlightDeliveryLeaseChecks]);
+  }
   const pendingReleaseResults = await drainPendingDeliveryReleases();
   const failures = [...disconnectResults, ...fenceResults, ...pendingReleaseResults]
     .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -481,6 +494,18 @@ export async function drainRoomAgentDeliveryLeases(): Promise<void> {
   if (failures.length > 0) {
     throw new AggregateError(failures, "Failed to drain room agent delivery leases.");
   }
+}
+
+/** Process-local delivery work still pending, for diagnostics when a drain stalls. */
+export function describePendingRoomAgentDeliveryWork(): string {
+  return [
+    `leases=${[...sharedDeliveryLeases.keys()].map((key) => JSON.stringify(key)).join(",") || "none"}`,
+    `lease_creations=${sharedDeliveryLeaseCreations.size}`,
+    `disconnecting_fences=${[...sharedDeliveryFences.values()].filter((fence) => fence.disconnecting).length}`,
+    `lease_checks=${inFlightDeliveryLeaseChecks.size}`,
+    `active_releases=${activeDeliveryReleases.size}`,
+    `pending_releases=${pendingDeliveryReleases.size}`,
+  ].join(" ");
 }
 
 function getOptionalQueryString(value: unknown): string | null {
@@ -823,7 +848,7 @@ async function createSharedDeliveryLease(
     const heartbeat = setInterval(() => {
       if (heartbeatInFlight) return;
       heartbeatInFlight = true;
-      void deps.markRoomAgentDeliveryHeartbeat({
+      trackDeliveryLeaseCheck(deps.markRoomAgentDeliveryHeartbeat({
         room_id: input.roomId,
         actor_label: identity.actor_label,
         agent_session_id: identity.agent_session_id,
@@ -837,7 +862,7 @@ async function createSharedDeliveryLease(
         console.error(`[room agent delivery] failed to refresh delivery heartbeat for ${input.roomId}`, error);
       }).finally(() => {
         heartbeatInFlight = false;
-      });
+      }));
     }, deps.heartbeatIntervalMs);
     heartbeat.unref?.();
     lease = {
@@ -862,7 +887,7 @@ async function createSharedDeliveryLease(
       const delay = Math.max(0, Date.parse(identity.credential_fence.expires_at) - Date.now());
       if (Number.isFinite(delay) && delay <= 0x7fffffff) {
         lease.expiryTimer = setTimeout(() => {
-          void deps.markRoomAgentDeliveryHeartbeat({
+          trackDeliveryLeaseCheck(deps.markRoomAgentDeliveryHeartbeat({
             room_id: input.roomId,
             actor_label: identity.actor_label,
             agent_session_id: identity.agent_session_id,
@@ -876,7 +901,7 @@ async function createSharedDeliveryLease(
               retireSharedDeliveryLease(leaseKey, lease, "credential expiry");
               cleanupSharedDeliveryFence(leaseKey, fence);
             }
-          });
+          }).then(() => undefined));
         }, delay);
         lease.expiryTimer.unref?.();
       }

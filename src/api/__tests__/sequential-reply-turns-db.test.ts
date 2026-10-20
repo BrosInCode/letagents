@@ -23,17 +23,14 @@ const routes = url ? await import("../routes/rooms/messages/index.js") : null;
 const broker_module = url ? await import("../server/room-event-broker.js") : null;
 const overlays = url ? await import("../server/room-message-overlays.js") : null;
 const headerNames = url ? await import("../../shared/request-headers.js") : null;
-const delivery = url ? await import("../rooms/agent-delivery.js") : null;
-const replyTurns = url ? await import("../db/messages/reply-turns.js") : null;
+const settle = url ? await import("./settle-background-db-work.js") : null;
 const skip = { skip: !url && "set TEST_DB_URL to run sequential reply turn tests" };
 
 test.beforeEach(async () => {
   if (!client) return;
   // The previous case's idle delivery leases, release retries and after-commit
-  // wakes still query the schema. DROP SCHEMA takes its table locks one by one,
-  // so a live query on two tables deadlocks with it. Finish that work first.
-  await delivery!.drainRoomAgentDeliveryLeases();
-  await replyTurns!.settleReplyTurnWakes();
+  // wakes still query the schema; finish them before the reset.
+  await settle!.settleBackgroundDbWork({ delivery: true });
   await client.pool.query("DROP SCHEMA IF EXISTS public CASCADE");
   await client.pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
   await client.pool.query("CREATE SCHEMA public");
@@ -41,8 +38,7 @@ test.beforeEach(async () => {
   await rollout!.reconcileReplyTurnHoldRollout(client.pool);
 });
 test.after(async () => {
-  await delivery?.drainRoomAgentDeliveryLeases();
-  await replyTurns?.settleReplyTurnWakes();
+  await settle?.settleBackgroundDbWork({ delivery: true });
   await client?.pool.end();
 });
 
