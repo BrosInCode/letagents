@@ -202,7 +202,7 @@ jobs:
             # file cannot leave the set unnoticed, and paths are not quoted.
             changed=$(git -c core.quotePath=false diff --no-renames --name-only "${base}" HEAD)
             matched=0
-            grep -E -q '^(apps/desktop/package\.json|apps/desktop/tsconfig\.electron\.json|apps/desktop/electron/main/agents/(opencode-[^/]+|open-model-provider-adapter|provider-adapter)\.ts|apps/desktop/electron/scripts/opencode-runtime-contract-smoke\.mjs|\.github/workflows/ci\.yml)$' <<< "${changed}" || matched=$?
+            grep -E -q '^(apps/desktop/package\.json|apps/desktop/tsconfig\.electron\.json|apps/desktop/electron/main/agents/(opencode-[^/]+|open-model-provider-adapter|provider-adapter|open-model/[^/]+)\.ts|apps/desktop/electron/scripts/opencode-runtime-contract-smoke\.mjs|\.github/workflows/ci\.yml)$' <<< "${changed}" || matched=$?
             # grep exits 1 for no match; anything else is an error and keeps the smoke.
             if [ "${matched}" -eq 1 ]; then
               run=false
