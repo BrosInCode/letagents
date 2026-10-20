@@ -17,6 +17,7 @@ import type { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./useAppArc
 import type { useAppRoomShellActions, useAppChatScrollWatchers } from "./useAppRoomShell";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
+import type { useAppLifecycle } from "./useAppLifecycle";
 
 /** What each composable returns, by composable name. */
 interface AppContextParts {
@@ -53,6 +54,7 @@ interface AppContextParts {
   useAppArchivedRoomWatcher: ReturnType<typeof useAppArchivedRoomWatcher>;
   useAppRoomStreamWatchers: ReturnType<typeof useAppRoomStreamWatchers>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
+  useAppLifecycle: ReturnType<typeof useAppLifecycle>;
 }
 
 type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;

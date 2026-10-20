@@ -403,7 +403,7 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { defineAsyncComponent, onBeforeUnmount, onMounted } from "vue";
+import { defineAsyncComponent } from "vue";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
@@ -418,7 +418,6 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
-import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "./domain/account-activity";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import { desktopIpc } from "./ipc/index.js";
 import type { AppContext } from "./composables/app/context";
@@ -436,6 +435,7 @@ import { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./composables/ap
 import { useAppRoomShellActions, useAppChatScrollWatchers } from "./composables/app/useAppRoomShell";
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
+import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -448,24 +448,24 @@ const RentMarketplaceView = defineAsyncComponent(
 const app = {} as AppContext;
 const {
   loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
-  authDialogOpen, sidebarMinWidth, sidebarMaxWidth, SIDEBAR_METADATA_REFRESH_INTERVAL_MS,
-  selectedRootRoomIdentifier, newRoomRecentProjectFolders, sidebarWidth, sidebarRevealRequest,
-  isSidebarResizing, settingsAccountRooms, sidebarMetadataRefresh, rentalRequestCount,
-  inboxRentals, inboxRentalError, messagesUnread, openConversationId, openConversationNonce,
-  inboxSection, attentionIntent, rentMarketplaceRole, openAddAgentAfterRepoPick,
-  notificationRevealMessageId, notificationRevealNonce, chatStorageSettings, chatStorageAvailable,
-  chatStorageBusy, chatStorageFeedback, appAgentSettingsStatus, appAgentActions, appAgentBusy,
-  appAgentResult, appAgentFeedback, selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback,
-  mcpWizardStep, firstRunStage, sidebarFocusRoomConclusionTarget,
-  sidebarFocusRoomConclusionReturnFocusId, sidebarFocusRoomConclusionError, sidebarSelectionActive,
-  sidebarSelectedEntryIds, sidebarBatchActionBusy, sidebarBatchDialogAction,
-  sidebarBatchDialogTargets, sidebarBatchDialogError,
+  authDialogOpen, sidebarMinWidth, sidebarMaxWidth, selectedRootRoomIdentifier,
+  newRoomRecentProjectFolders, sidebarWidth, sidebarRevealRequest, isSidebarResizing,
+  settingsAccountRooms, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
+  openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
+  openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
+  chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
+  appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
+  selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback, mcpWizardStep, firstRunStage,
+  sidebarFocusRoomConclusionTarget, sidebarFocusRoomConclusionReturnFocusId,
+  sidebarFocusRoomConclusionError, sidebarSelectionActive, sidebarSelectedEntryIds,
+  sidebarBatchActionBusy, sidebarBatchDialogAction, sidebarBatchDialogTargets,
+  sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
 } = Object.assign(app, useAppInboxActions(app));
 const {
-  openRentMarketplace, openRentalRequestInbox, refreshRentalRequestCount,
+  openRentMarketplace, openRentalRequestInbox,
 } = Object.assign(app, useAppRentalActions(app));
 const {
   isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
@@ -474,12 +474,10 @@ const {
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));
 const {
-  initializeProjectBindings, handleRepoStatusChanged, openWorkspaceGitRoom,
-  connectActiveRoomProject, openWorktreeForAgent,
+  openWorkspaceGitRoom, connectActiveRoomProject, openWorktreeForAgent,
 } = Object.assign(app, useAppProjectRepo(app));
 const {
-  refreshSidebarRoomMetadata, refreshSidebarLatestMessages, roomHistoryMode,
-  sidebarRoomIdentifiers, latestMessageIdForEntry, markRoomEntryRead,
+  latestMessageIdForEntry, markRoomEntryRead,
 } = Object.assign(app, useAppSidebarMessages(app));
 const {
   handleSidebarEntrySelected, startSidebarRoomSelection, cancelSidebarRoomSelection,
@@ -494,16 +492,14 @@ const {
   handleSidebarFocusRoomConclusionAfterLeave,
 } = Object.assign(app, useAppFocusRoomConclusion(app));
 const {
-  handleVisibilityChange, handleWindowFocus, handleWindowBlur, handleDesktopRoomStreamEvent,
-  startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth, handleNotificationActivation,
+  startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth,
 } = Object.assign(app, useAppSessionActions(app));
 const {
-  loadChatStorageSettings, loadAppAgentSettingsStatus, loadAppAgentActions, saveAppAgentSettings,
-  refreshSettingsSurface, refreshDesktopUpdateStatus, checkDesktopUpdate, installDesktopUpdate,
+  saveAppAgentSettings, refreshSettingsSurface, checkDesktopUpdate, installDesktopUpdate,
   openAppAgentSettings, runAppAgent, setChatStorageMode, syncLocalChat,
 } = Object.assign(app, useAppSettingsActions(app));
 const {
-  leaveArchivedSelectedRoomFromSettingsList, openServiceAgent,
+  openServiceAgent,
 } = Object.assign(app, useAppArchivedRooms(app));
 const {
   handleOwnMessageSent, handleRoomShellRefresh, handleRoomMessageRevealUnavailable,
@@ -512,16 +508,12 @@ const {
 
 Object.assign(app, useAppAccountScope(app));
 
-const {
-  accountActivity,
-} = Object.assign(app, useAppAccountActivityFeed(app));
+Object.assign(app, useAppAccountActivityFeed(app));
 
 const {
   needsYouData, needsYouLoading, needsYouError, mergeInboxThreads, agentAttentionItems,
   needsYouCount, inboxStorageKey, inboxRooms, chooseInboxRooms,
 } = Object.assign(app, useAppInboxState(app));
-
-let needsYouInterval: number | null = null;
 
 const {
   activeEntry, collapsedProjects, currentParentRoom, pinnedCollapsed, repoName, roomsCollapsed,
@@ -534,22 +526,6 @@ const {
   roomAttention,
 } = Object.assign(app, useAppRoomAttention(app));
 
-let unsubscribeRoomStream: (() => void) | null = null;
-
-let unsubscribeOpenSettings: (() => void) | null = null;
-
-let unsubscribeOpenUpdates: (() => void) | null = null;
-
-let unsubscribeUpdateStatus: (() => void) | null = null;
-
-let unsubscribeNotificationReceived: (() => void) | null = null;
-
-let unsubscribeNotificationActivation: (() => void) | null = null;
-
-let unsubscribeRepoStatusChanged: (() => void) | null = null;
-
-let accountRoomsRefreshInterval: number | null = null;
-
 const {
   actionToasts, dismissActionToast, selectedRoomWithProjectContext,
   selectedGitRoomMatchesActiveRepo, selectedRoomProjectRootPath, selectedRoomIsProject,
@@ -558,7 +534,7 @@ const {
 Object.assign(app, useAppReadMarkers(app));
 
 const {
-  refreshUnreadCounts, sidebarProjectEntries, selectedRoomRenderKey, selectedRoomStorage,
+  sidebarProjectEntries, selectedRoomRenderKey, selectedRoomStorage,
 } = Object.assign(app, useAppSidebarEntries(app));
 
 Object.assign(app, useAppRentalEvents(app));
@@ -566,14 +542,12 @@ Object.assign(app, useAppRentalEvents(app));
 Object.assign(app, useAppHistoryWatchers(app));
 
 const {
-  clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, roomAgentWork,
-  roomAgentWorkStatus, roomAgentWorkTruncated, handleRoomRenamed, refresh, repoStatusValue,
-  selectedSnapshotLoading, upsertSelectedTask, authSnapshotPending,
+  roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated, handleRoomRenamed, refresh,
+  repoStatusValue, selectedSnapshotLoading, upsertSelectedTask, authSnapshotPending,
 } = Object.assign(app, useAppRoomData(app));
 
 const {
-  authBusy, authFeedback, cancelAuthFlow, clearAuthPollTimer, openVerification, pollAuthFlow,
-  signOut, startAuthFlow,
+  authBusy, authFeedback, cancelAuthFlow, openVerification, pollAuthFlow, signOut, startAuthFlow,
 } = Object.assign(app, useAppAuthFlow(app));
 
 const {
@@ -599,8 +573,8 @@ const {
   clearMcpTargetSelection, completeMcpOnboarding, continueMcpOnboarding,
   continueToRoomConfirmation, createFirstRunInviteRoom, finishFirstRunOnboarding,
   firstRunInviteCode, firstRunRoomSelected, firstRunFeedback, goBackFirstRun, goBackMcpOnboarding,
-  installSelectedMcpTargets, joinRoomCode, loadFirstRunSetup, pickRepoRoom, selectAllMcpTargets,
-  selectMcpTarget, setupApiAvailable, showFirstRunGate, showFirstRunSplash, visibleMcpInstallState,
+  installSelectedMcpTargets, joinRoomCode, pickRepoRoom, selectAllMcpTargets, selectMcpTarget,
+  setupApiAvailable, showFirstRunGate, showFirstRunSplash, visibleMcpInstallState,
   startFirstRunSetup,
 } = Object.assign(app, useAppSetupOnboarding(app));
 
@@ -616,82 +590,5 @@ Object.assign(app, useAppRoomStreamWatchers(app));
 
 Object.assign(app, useAppAuthWatchers(app));
 
-onMounted(() => {
-  void refreshNeedsYou();
-  needsYouInterval = window.setInterval(() => { if (!document.hidden) void refreshNeedsYou(); }, 60_000);
-  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
-  unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
-  unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
-  void desktopIpc.maintenance?.getStatus().then(status => { if (status.held) openUpdatesSurface(); }).catch(() => undefined);
-  unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
-    updateStatus.value = status;
-  }) || null;
-  unsubscribeNotificationReceived = desktopIpc.notifications?.onReceived?.(() => {
-    void refreshSidebarRoomMetadata();
-  }) || null;
-  unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
-    void handleNotificationActivation(target);
-  }) || null;
-  void desktopIpc.notifications?.takePendingActivation?.().then((target) => {
-    if (target) void handleNotificationActivation(target);
-  });
-  unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
-  // Keep the fallback room-list refresh alive while hidden for badges.
-  // A connected account activity stream still avoids routine room-list polling.
-  accountRoomsRefreshInterval = window.setInterval(() => {
-    void refreshUnreadCounts();
-    // Retry leaving an archived active room: the room list keeps its identity
-    // on an unchanged poll, so its watcher does not fire again by itself.
-    void leaveArchivedSelectedRoomFromSettingsList();
-    // While the activity stream is open it pushes messages and work as they
-    // happen; the room list is then refreshed only rarely, to pick up rooms
-    // that were renamed or created elsewhere.
-    if (accountActivity.connected.value
-      && Date.now() - sidebarMetadataRefresh.lastAt < ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS) {
-      // Local workers do not appear in the cloud activity stream.
-      if (sidebarRoomIdentifiers().some((id) => roomHistoryMode(id) === "local")) void refreshSidebarLatestMessages();
-      return;
-    }
-    void refreshSidebarRoomMetadata();
-  }, SIDEBAR_METADATA_REFRESH_INTERVAL_MS);
-  window.addEventListener("focus", handleWindowFocus);
-  window.addEventListener("blur", handleWindowBlur);
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-  void loadChatStorageSettings();
-  void loadAppAgentSettingsStatus();
-  void loadAppAgentActions();
-  void loadFirstRunSetup(initializeProjectBindings());
-  void refreshRentalRequestCount();
-  void refreshDesktopUpdateStatus();
-});
-
-onBeforeUnmount(() => {
-  if (needsYouInterval) window.clearInterval(needsYouInterval);
-  clearAuthPollTimer();
-  clearLiveMetadataRefreshTimer();
-  clearLiveMetadataRefreshInterval();
-  if (accountRoomsRefreshInterval) {
-    window.clearInterval(accountRoomsRefreshInterval);
-    accountRoomsRefreshInterval = null;
-  }
-  window.removeEventListener("focus", handleWindowFocus);
-  window.removeEventListener("blur", handleWindowBlur);
-  document.removeEventListener("visibilitychange", handleVisibilityChange);
-  unsubscribeRoomStream?.();
-  unsubscribeRoomStream = null;
-  unsubscribeOpenSettings?.();
-  unsubscribeOpenSettings = null;
-  unsubscribeOpenUpdates?.();
-  unsubscribeOpenUpdates = null;
-  unsubscribeUpdateStatus?.();
-  unsubscribeUpdateStatus = null;
-  unsubscribeNotificationReceived?.();
-  unsubscribeNotificationReceived = null;
-  unsubscribeNotificationActivation?.();
-  unsubscribeNotificationActivation = null;
-  unsubscribeRepoStatusChanged?.();
-  unsubscribeRepoStatusChanged = null;
-  void desktopIpc.repos?.stopStatusWatch?.();
-  void desktopIpc.room?.stopStream?.();
-});
+Object.assign(app, useAppLifecycle(app));
 </script>
