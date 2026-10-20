@@ -150,7 +150,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);
   assert.match(shell, /invalidateAgentInspectorRuntimeControl\(/);
   assert.match(shell, /readAgentInspectorWorkDetail\(/);
-  assert.match(shell, /snapshotGeneration: supervisorStateDaemonGeneration/);
+  assert.match(shell, /snapshotGeneration: (?:supervisorSyncState\.)?supervisorStateDaemonGeneration/);
   assert.match(shell, /entry: selectedAgentDetailProjection\.value\?\.entry/);
   assert.match(shell, /if \(!currentDetail \|\| !isCurrent\(\)\) return/);
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);

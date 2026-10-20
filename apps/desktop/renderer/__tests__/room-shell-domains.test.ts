@@ -265,7 +265,7 @@ function stateSnapshot(sequence: number): DesktopSupervisorStateSnapshot {
 function supervisorSubscriptionFixture() {
   const script = shellSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]!;
   const parsed = ts.createSourceFile("DesktopRoomShell.ts", script, ts.ScriptTarget.Latest, true);
-  const variableNames = new Set(["supervisorStateDaemonGeneration", "supervisorStateSequence", "supervisorEntriesMutationVersion"]);
+  const variableNames = new Set(["supervisorStateDaemonGeneration", "supervisorStateSequence", "supervisorEntriesMutationVersion", "supervisorSyncState"]);
   const source = parsed.statements.filter((statement) =>
     (ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => variableNames.has(declaration.name.getText(parsed))))
     || (ts.isFunctionDeclaration(statement) && statement.name?.text === "acceptSupervisorStateSnapshot")

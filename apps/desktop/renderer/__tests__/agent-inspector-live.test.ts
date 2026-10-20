@@ -645,7 +645,7 @@ test("Live layout remount retains the feed and subscription for the same agent/s
   const marker = '<script setup lang="ts">';
   const script = text.slice(text.indexOf(marker) + marker.length, text.indexOf("</script>"));
   const ast = ts.createSourceFile("shell.ts", script, ts.ScriptTarget.Latest, true);
-  const variables = new Set(["agentInspectorLiveFeed", "agentInspectorLiveIdentity"]);
+  const variables = new Set(["agentInspectorLiveFeed", "agentInspectorLiveIdentity", "agentInspectorRequestState"]);
   const functions = new Set(["openAgentInspectorLive", "stopAgentInspectorLive"]);
   const statements = ast.statements.filter(statement =>
     (ts.isVariableStatement(statement) && statement.declarationList.declarations.some(declaration => variables.has(declaration.name.getText(ast))))
