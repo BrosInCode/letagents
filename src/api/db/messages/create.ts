@@ -3,7 +3,7 @@ import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { assertAttachmentTotalByteSize } from "../../messages/attachments.js";
 import { messageAttachmentUploadUsableBy } from "./attachments.js";
-import { isPromptOnlyAgentMessage, normalizeAgentPromptKind } from "../../../shared/room-agent-prompts.js";
+import { isPromptOnlyAgentMessage } from "../../../shared/room-agent-prompts.js";
 import { MESSAGE_SENDER_MAX_CODE_POINTS, MESSAGE_SENDER_MAX_UTF8_BYTES, isMessageSenderWithinBounds, parseSupervisedReplySourceNumber } from "../../../../shared/message-contracts.mjs";
 import { createGlobalAgentAddressResolver, humanConversationFallback, decideAgentMessageActivation, isUntrustedExternalActivationSource, isTaskOwnerFollowUpMessageText, type ActivationIdentity } from "../../../shared/activation-routing.js";
 import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
@@ -13,7 +13,7 @@ import { getReplyTurnReadySessions, getSessionConnections } from "./session-conn
 import { db } from "../client.js";
 import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import type { Message, MessageAttachmentRow, MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../types.js";
-import { nextRoomScopedNumber, parseScopedId } from "../utils.js";
+import { nextRoomScopedNumber } from "../utils.js";
 import { messageRowSelection, messageAttachmentUploadSelection } from "./selections.js";
 import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { planJevRoutingMode, type DeferredJevRoutingPlan } from "./jev-routing-hint.js";
@@ -23,48 +23,15 @@ import { finishReplyTurnsTx, planReplyTurns, queueReplyTurnWakes, releaseAgentRe
 import type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 import { insertMessageReceiptRows } from "./create/receipt-rows.js";
 import { hydrateCreatedMessage } from "./create/hydrate.js";
+import { normalizeClientMessageId, assertDesktopReplayMatches, resolveMessageTargets } from "./create/validation.js";
 export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 export { chunkMessageReceiptRows } from "./create/receipt-rows.js";
 
 const MAX_ACTIVE_ROUTING_SESSIONS = 50_000;
 
-function normalizeClientMessageId(value?: string | null): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed.slice(0, 240) : null;
-}
-
 /** System notices keep a separate line written for people. */
 function retainsDisplayText(source: string | undefined): boolean {
   return source === "system" || source === WAKE_NOTICE_SOURCE;
-}
-
-async function assertDesktopReplayMatches(
-  tx: MessageCreateTransaction, existing: MessageRow, sender: string, text: string, options: AddMessageOptions | undefined,
-): Promise<void> {
-  // Existing internal publishers intentionally replay by key alone. Desktop
-  // keys are public correlation IDs, so they must never grant another writer
-  // access to a previous writer's successful result.
-  if (!existing.client_message_id?.startsWith("desktop-send:")) return;
-  const replyNumber = options?.reply_to_message_id ? parseScopedId(options.reply_to_message_id, "msg") : null;
-  const rootNumber = options?.thread_root_message_id ? parseScopedId(options.thread_root_message_id, "msg") : null;
-  if (existing.publisher_account_id !== (options?.account_id?.trim() || null)
-    || existing.publisher_agent_key !== (options?.publisher_agent_key?.trim() || null)
-    || existing.publisher_agent_session_id !== (options?.publisher_agent_session_id?.trim() || null)
-    || existing.source !== (options?.source || null) || existing.sender !== sender || existing.text !== text
-    || (existing.gif?.id ?? null) !== (options?.gif?.id ?? null)
-    || (existing.gif?.title ?? null) !== (options?.gif?.title ?? null)
-    || Boolean(existing.gif?.text_fallback_only) !== Boolean(options?.gif?.text_fallback_only)
-    || existing.reply_to_number !== replyNumber
-    || (existing.thread_root_number ?? existing.number) !== (rootNumber ?? existing.number)
-    || existing.agent_prompt_kind !== (options?.agent_prompt_kind || null)) {
-    throw new RequestValidationError("Outgoing message identity was reused by another writer or with different content.");
-  }
-  const attached = await tx.select({ upload_id: message_attachments.upload_id }).from(message_attachments)
-    .where(and(eq(message_attachments.room_id, existing.room_id), eq(message_attachments.message_number, existing.number)));
-  if (attached.map(item => item.upload_id).sort().join("|") !== (options?.attachments || []).map(item => item.upload_id).sort().join("|")) {
-    throw new RequestValidationError("Outgoing message identity was reused with different attachments.");
-  }
 }
 
 export async function addMessageWithCreateStatus(
@@ -91,89 +58,9 @@ export async function addMessageWithCreateStatus(
     // post-watermark reply. Bound that work—and every other statement in this
     // atomic send—so a pathological archive cannot wedge an API worker.
     await tx.execute(sql.raw("SET LOCAL statement_timeout = '15s'"));
-    const replyToNumber =
-      options?.reply_to_message_id
-        ? parseScopedId(options.reply_to_message_id, "msg")
-        : null;
-    const explicitThreadRootNumber =
-      options?.thread_root_message_id
-        ? parseScopedId(options.thread_root_message_id, "msg")
-        : null;
-
-    // Lock before looking up a replay: a previous attempt may commit while a
-    // concurrent Off update is ahead of us. Its saved message must still win.
-    const expressionSetting = options?.gif
-      ? (await tx.select({ enabled: room_settings.expressions_enabled }).from(room_settings)
-        .where(eq(room_settings.room_id, roomId)).for("share"))[0]
-      : null;
-    if (clientMessageId) {
-      const [existingMessage] = await tx
-        .select(messageRowSelection)
-        .from(messages)
-        .where(and(eq(messages.room_id, roomId), eq(messages.client_message_id, clientMessageId)))
-        .limit(1);
-
-      if (existingMessage) {
-        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
-        return hydrateCreatedMessage(roomId, {
-          messageRow: existingMessage,
-          created: false,
-          recipientAgentKeys: [],
-          recipientAgentTargets: [],
-        }, options, tx);
-      }
-    }
-
-    if (options?.gif) {
-      if (!expressionSetting?.enabled) throw new RequestValidationError("expressions_disabled: GIF sending is disabled in this room. Send text instead.");
-    }
-    if (options?.reply_to_message_id && !replyToNumber) {
-      throw new RequestValidationError("reply_to must be a valid message id");
-    }
-    if (options?.thread_root_message_id && !explicitThreadRootNumber) {
-      throw new RequestValidationError("thread_root_id must be a valid message id");
-    }
-
-    let replyTargetRootNumber: number | null = null;
-    if (replyToNumber) {
-      const [replyTarget] = await tx
-        .select(messageRowSelection)
-        .from(messages)
-        .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
-        .limit(1);
-
-      if (!replyTarget) {
-        throw new RequestValidationError("reply_to must reference an existing message in this room");
-      }
-
-      if (isPromptOnlyAgentMessage(replyTarget.text, normalizeAgentPromptKind(replyTarget.agent_prompt_kind))) {
-        throw new RequestValidationError("reply_to must reference a visible message");
-      }
-
-      replyTargetRootNumber = replyTarget.thread_root_number ?? replyTarget.number;
-    }
-
-    let threadRootNumber = explicitThreadRootNumber;
-    if (explicitThreadRootNumber) {
-      const [threadRoot] = await tx
-        .select(messageRowSelection)
-        .from(messages)
-        .where(and(eq(messages.room_id, roomId), eq(messages.number, explicitThreadRootNumber)))
-        .limit(1);
-
-      if (!threadRoot) {
-        throw new RequestValidationError("thread_root_id must reference an existing message in this room");
-      }
-
-      if (isPromptOnlyAgentMessage(threadRoot.text, normalizeAgentPromptKind(threadRoot.agent_prompt_kind))) {
-        throw new RequestValidationError("thread_root_id must reference a visible message");
-      }
-
-      threadRootNumber = threadRoot.thread_root_number ?? threadRoot.number;
-      if (replyTargetRootNumber && replyTargetRootNumber !== threadRootNumber) {
-        throw new RequestValidationError("reply_to must belong to the requested thread");
-      }
-    }
+    const targets = await resolveMessageTargets(tx, roomId, sender, text, options, clientMessageId);
+    if ("replay" in targets) return targets.replay;
+    const { replyToNumber, threadRootNumber } = targets;
 
     const message: MessageRow = {
       room_id: roomId,
