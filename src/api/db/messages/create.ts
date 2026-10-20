@@ -6,15 +6,13 @@ import { messageAttachmentUploadUsableBy } from "./attachments.js";
 import { isPromptOnlyAgentMessage } from "../../../shared/room-agent-prompts.js";
 import { MESSAGE_SENDER_MAX_CODE_POINTS, MESSAGE_SENDER_MAX_UTF8_BYTES, isMessageSenderWithinBounds, parseSupervisedReplySourceNumber } from "../../../../shared/message-contracts.mjs";
 import { createGlobalAgentAddressResolver, humanConversationFallback, decideAgentMessageActivation, isUntrustedExternalActivationSource, isTaskOwnerFollowUpMessageText, type ActivationIdentity } from "../../../shared/activation-routing.js";
-import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
 import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
 import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
 import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import type { Message, MessageAttachmentRow, MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../types.js";
-import { nextRoomScopedNumber } from "../utils.js";
-import { messageRowSelection, messageAttachmentUploadSelection } from "./selections.js";
+import { messageAttachmentUploadSelection } from "./selections.js";
 import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { planJevRoutingMode, type DeferredJevRoutingPlan } from "./jev-routing-hint.js";
 import { getMessageThreadRoutingProjection, resolveMessageThreadRoutingProjection, type ThreadRoutingProjection } from "./thread-routing-membership.js";
@@ -23,16 +21,12 @@ import { finishReplyTurnsTx, planReplyTurns, queueReplyTurnWakes, releaseAgentRe
 import type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 import { insertMessageReceiptRows } from "./create/receipt-rows.js";
 import { hydrateCreatedMessage } from "./create/hydrate.js";
-import { normalizeClientMessageId, assertDesktopReplayMatches, resolveMessageTargets } from "./create/validation.js";
+import { normalizeClientMessageId, resolveMessageTargets } from "./create/validation.js";
+import { insertMessageRow } from "./create/insert.js";
 export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 export { chunkMessageReceiptRows } from "./create/receipt-rows.js";
 
 const MAX_ACTIVE_ROUTING_SESSIONS = 50_000;
-
-/** System notices keep a separate line written for people. */
-function retainsDisplayText(source: string | undefined): boolean {
-  return source === "system" || source === WAKE_NOTICE_SOURCE;
-}
 
 export async function addMessageWithCreateStatus(
   roomId: string,
@@ -62,53 +56,11 @@ export async function addMessageWithCreateStatus(
     if ("replay" in targets) return targets.replay;
     const { replyToNumber, threadRootNumber } = targets;
 
-    const message: MessageRow = {
-      room_id: roomId,
-      number: await nextRoomScopedNumber("messages", roomId, tx),
-      reply_to_number: replyToNumber,
-      thread_root_number: threadRootNumber,
-      sender,
-      text,
-      gif: options?.gif ?? null,
-      display_text: retainsDisplayText(options?.source) ? options?.display_text?.trim() || null : null,
-      agent_prompt_kind: promptKind,
-      source: options?.source ?? null,
-      client_message_id: clientMessageId,
-      publisher_agent_key: options?.publisher_agent_key?.trim() || null,
-      publisher_agent_session_id: options?.publisher_agent_session_id?.trim() || null,
-      publisher_account_id: options?.account_id?.trim() || null,
-      routing_snapshot_version: 1,
-      timestamp: new Date().toISOString(),
-    };
-
-    let createdMessage = message;
-    if (clientMessageId) {
-      const [insertedMessage] = await tx
-        .insert(messages)
-        .values(message)
-        .onConflictDoNothing()
-        .returning(messageRowSelection);
-      if (!insertedMessage) {
-        const [existingMessage] = await tx
-          .select(messageRowSelection)
-          .from(messages)
-          .where(and(eq(messages.room_id, roomId), eq(messages.client_message_id, clientMessageId)))
-          .limit(1);
-        if (!existingMessage) {
-          throw new Error("message idempotency conflict could not be resolved");
-        }
-        await assertDesktopReplayMatches(tx, existingMessage, sender, text, options);
-        return hydrateCreatedMessage(roomId, {
-          messageRow: existingMessage,
-          created: false,
-          recipientAgentKeys: [],
-          recipientAgentTargets: [],
-        }, options, tx);
-      }
-      createdMessage = insertedMessage;
-    } else {
-      await tx.insert(messages).values(message);
-    }
+    const inserted = await insertMessageRow(
+      tx, roomId, sender, text, options, promptKind, clientMessageId, replyToNumber, threadRootNumber,
+    );
+    if ("replay" in inserted) return inserted.replay;
+    const { createdMessage } = inserted;
     let attachmentRows: MessageAttachmentRow[] = [];
     if (attachmentRefs.length > 0) {
       const uploadIds = attachmentRefs.map((attachment) => attachment.upload_id);
