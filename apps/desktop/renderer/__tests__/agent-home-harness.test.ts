@@ -19,6 +19,7 @@ import {
   ownerSetupStartHint,
 } from "../src/domain/agent-home-harness";
 import { supervisedPermissionProfileLimits } from "../src/domain/managed-agents";
+import { appSource } from "./app-source";
 import { roomShellSource } from "./room-shell-source";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -175,7 +176,7 @@ test("the mark says what the running agent has, and never that a change has reac
 });
 
 test("the app tells every agent's settings which room this is, who has been in it and who is signed in", () => {
-  const app = read("../src/App.vue");
+  const app = appSource();
   assert.match(app, /provideAgentRoomAudience\(\(\) => selectedRoomWithProjectContext\.value, \(\) => selectedSnapshot\.value\?\.participants \?\? \[\], \(\) => \[authStatus\.value\?\.account\?\.login, authStatus\.value\?\.account\?\.displayName\]\);/);
   const composable = read("../src/composables/useAgentRoomAudience.ts");
   assert.match(composable, /provide\(agentRoomAudienceKey, computed\(\(\) => agentRoomAudience\(room\(\), participants\(\), viewer\(\)\)\)\);/);

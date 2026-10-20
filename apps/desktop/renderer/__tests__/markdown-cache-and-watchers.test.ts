@@ -12,6 +12,7 @@ import {
 } from "../src/components/desktop/content/formatting/markdown";
 import { useRoomResponseParticipants } from "../src/composables/useRoomResponseParticipants";
 import { RoomResponseParticipants, roomResponseParticipantsKey } from "../src/domain/room-response-participants";
+import { appSource } from "./app-source";
 
 function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
@@ -195,7 +196,7 @@ test("participants key ignores message text and changes with every field the tra
 // ---- deep watchers --------------------------------------------------------------
 
 test("App.vue and DesktopModelPicker.vue no longer walk whole lists with deep watchers", () => {
-  const app = source("../src/App.vue");
+  const app = appSource();
   const settings = app.indexOf("() => settingsAccountRooms.value,");
   const settingsWatcher = app.slice(settings, app.indexOf("leaveArchivedSelectedRoomFromSettingsList();", settings) + 200);
   assert.doesNotMatch(settingsWatcher, /deep: true/);
