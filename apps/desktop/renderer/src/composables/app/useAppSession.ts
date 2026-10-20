@@ -17,7 +17,13 @@ import type { AppContextOf } from "./context";
 
 /** Window focus and visibility, the desktop session, sign-in entry points, and notification activation. */
 export function useAppSessionActions(context: unknown) {
-  const app = context as AppContextOf<"useAppAuthFlow" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<
+      "useAppAuthFlow"
+    | "useAppInboxActions"
+    | "useAppInboxState"
+    | "useAppState"
+    | "appVuePending"
+  >;
   const {
     accountRooms, attentionIntent, authDialogOpen, authStatus, firstRunStage, inboxRentalError,
     inboxRentals, inboxSection, loading, notificationRevealMessageId, notificationRevealNonce,
@@ -193,13 +199,18 @@ export function useAppAuthFlow(context: unknown) {
 
 /** Reset account-scoped inbox state when the account changes. */
 export function useAppAccountSwitch(context: unknown) {
-  const app = context as AppContextOf<"useAppAuthFlow" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<
+      "useAppAuthFlow"
+    | "useAppInboxActions"
+    | "useAppInboxState"
+    | "useAppState"
+  >;
   const {
-    authSessionLocked, authStatus, inboxRentalError, inboxRentals, inboxSection,
-    rentalRequestCount,
+    authSessionLocked, authStatus, inboxRentalError, inboxRentals, inboxSection, refreshNeedsYou,
+    reloadInboxRooms, rentalRequestCount, resetNeedsYou,
   } = app;
   watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; app.reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); app.resetNeedsYou(); resetHostApprovals(); if (next) void app.refreshNeedsYou(); }
+    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
   }, { flush: "sync" });
 
   const showSignedOutGate = computed(() => (

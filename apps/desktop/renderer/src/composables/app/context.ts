@@ -4,13 +4,17 @@
 // in its original registration order.
 
 import type { useAppState } from "./useAppState";
+import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 
 /** What each composable returns, by composable name. */
 interface AppContextParts {
   useAppState: ReturnType<typeof useAppState>;
+  useAppInboxActions: ReturnType<typeof useAppInboxActions>;
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
+  useAppInboxState: ReturnType<typeof useAppInboxState>;
+  useAppRoomAttention: ReturnType<typeof useAppRoomAttention>;
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;

@@ -445,8 +445,6 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { provideAgentRoomAudience } from "./composables/useAgentRoomAudience";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
-import type { PersonTarget } from "./domain/person-target";
-import { openConversationWithPerson } from "./domain/open-conversation-with-person";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
@@ -455,7 +453,7 @@ import { useDesktopUnreadCounts } from "./composables/useDesktopUnreadCounts";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, inboxRoomOpenReporter, needsYouEntry, openInboxRoom, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
 import { rememberStoredString } from "./domain/desktop-storage";
 import {
@@ -498,17 +496,12 @@ import {
   streamedLatestMessage,
 } from "./domain/account-activity";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
-import { refreshMessageReminders } from "./composables/useMessageReminders";
 import InboxView from "./components/desktop/content/InboxView.vue";
-import { useNeedsYou, useNeedsYouRoomActivity } from "./composables/useNeedsYou";
-import { useNeedsYouSignal } from "./composables/useNeedsYouSignal";
-import { useAgentAttention } from "./composables/useAgentAttention";
-import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
-import { roomNotificationPreferences } from "./composables/useRoomNotificationPreferences";
 import { gitRoomsShareRepo, roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
+import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -544,14 +537,17 @@ const {
   requestedSettingsPane, clampSidebarWidth,
 } = Object.assign(app, useAppState());
 const {
+  openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
+} = Object.assign(app, useAppInboxActions(app));
+const {
   refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
   handleDesktopRoomStreamEvent, startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth,
   handleNotificationActivation,
 } = Object.assign(app, useAppSessionActions(app));
 // Functions still in App.vue are hoisted, so they join the context first.
 Object.assign(app, {
-  openMessages, refreshNeedsYou, refreshSidebarRoomMetadata, refreshProjectBindings,
-  restartRepoStatusWatch, refreshRentalRequestCount, markActiveRoomRead, openRoomFromAppAgent,
+  refreshSidebarRoomMetadata, refreshProjectBindings, restartRepoStatusWatch,
+  refreshRentalRequestCount, markActiveRoomRead, openRoomFromAppAgent,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -566,78 +562,19 @@ const accountActivity = useAccountActivity({
     ...room.focusRooms.map((focusRoom) => focusRoom.roomIdentifier),
   ])),
 });
+Object.assign(app, { accountActivity });
 
 // While the stream was open the sidebar barely polled, so catch up the moment it drops.
 watch(() => accountActivity.connected.value, (connected, wasConnected) => {
   if (wasConnected && !connected) void refreshSidebarRoomMetadata();
 });
 
-function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
-
-/** Open the private conversation with a room participant. Create it if it does not exist yet. */
-async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
-  const viewerLogin = authStatus.value?.authenticated ? authStatus.value.account?.login ?? null : null;
-  const result = await openConversationWithPerson(target, viewerLogin, desktopIpc.conversations);
-  if (result.status === "self") {
-    pushActionToast("That is you.", "info");
-    return;
-  }
-  if (result.status === "not_found") {
-    pushActionToast(`${target.displayName} is not available for messages.`, "info");
-    return;
-  }
-  if (result.status === "ambiguous") {
-    pushActionToast("More than one account uses this login. Open Messages and search for the person.", "info");
-    return;
-  }
-  if (result.status === "failed") {
-    pushActionToast(result.message, "error");
-    return;
-  }
-  openMessages(result.conversationId);
-}
-
-const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
-Object.assign(app, { resetNeedsYou });
-
-useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
-
-const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
-
-const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
+const {
+  needsYouData, needsYouLoading, needsYouError, mergeInboxThreads, agentAttentionItems,
+  needsYouCount, inboxRoomOpens, inboxStorageKey, inboxRooms, chooseInboxRooms,
+} = Object.assign(app, useAppInboxState(app));
 
 let needsYouInterval: number | null = null;
-
-// A room opened from the Inbox loads in place; if that load fails, say so.
-const inboxRoomOpens = inboxRoomOpenReporter((error) => pushActionToast(
-  `Couldn't load this room. ${safeUserVisibleErrorDetail(error, "Try again from the sidebar.")}`, "error"));
-
-async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
-  attentionIntent.value = null;
-  notificationRevealMessageId.value = null;
-  try {
-    await openInboxRoom(intent.roomIdentifier, {
-      findEntry: (room) => findSidebarRoomEntryByIdentifier(projectEntries.value, room),
-      selectEntry: (entry) => {
-        if (activeEntry.value.id !== entry.id) inboxRoomOpens.opened(entry.id);
-        selectSidebarEntry(entry);
-      },
-      openBySnapshot: openRoomFromAppAgent,
-    });
-    attentionIntent.value = intent;
-  } catch (error) { needsYouError.value = String(error); }
-}
-
-const inboxStorageKey = computed(() => String(authStatus.value?.account?.id ?? 'local'));
-
-const { rooms: inboxRooms, open: openInboxRooms, choose: chooseInboxRooms, reload: reloadInboxRooms, prune: pruneInboxRooms } = useInboxRoomFilter(() => inboxStorageKey.value);
-Object.assign(app, { inboxRooms, reloadInboxRooms });
-
-watch(needsYouData, pruneInboxRooms);
-
-function openNeedsYou(room?: string) { openInboxRooms(room); inboxSection.value = 'needs-you'; activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
-
-async function refreshNeedsYou() { await Promise.all([loadNeedsYou(activeEntry.value.type === 'inbox'), refreshRentalRequestCount(), activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await refreshAgentApprovals(); }
 
 const {
   activeEntry,
@@ -677,20 +614,11 @@ const {
   selectedRootRoomIdentifier,
   selectedSnapshot,
 });
-Object.assign(app, { activeEntry, getAuthRoomIdentifier, selectedRoomIdentifier });
+Object.assign(app, { activeEntry, getAuthRoomIdentifier, projectEntries, selectSidebarEntry, selectedNeedsAccess, selectedRoomIdentifier, selectedRoomInfo });
 
-const roomAttention = useNeedsYouSignal(needsYouData, agentAttentionItems, {
-  ready: () => approvalsReady.value,
-  account: () => inboxStorageKey.value,
-  activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
-  inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
-});
-
-watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {
-  roomNotificationPreferences.setViewer(account ? { id: account.id, login: account.login } : null);
-  void roomNotificationPreferences.refreshAll();
-  if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
-}, { immediate: true, flush: "sync" });
+const {
+  roomAttention,
+} = Object.assign(app, useAppRoomAttention(app));
 
 let unsubscribeRoomStream: (() => void) | null = null;
 
@@ -715,6 +643,7 @@ let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
 
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
+Object.assign(app, { pushActionToast });
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 
