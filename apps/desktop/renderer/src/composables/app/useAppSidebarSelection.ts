@@ -19,6 +19,7 @@ export function useAppSidebarSelection(context: unknown) {
   const app = context as AppContextOf<
       "useAppNavigation"
     | "useAppRoomContext"
+    | "useAppRoomManagement"
     | "useAppSidebarEntries"
     | "useAppSidebarMessages"
     | "useAppState"

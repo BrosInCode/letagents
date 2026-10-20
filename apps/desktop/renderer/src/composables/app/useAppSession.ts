@@ -24,6 +24,7 @@ export function useAppSessionActions(context: unknown) {
     | "useAppNavigation"
     | "useAppProjectRepo"
     | "useAppRentalActions"
+    | "useAppRoomData"
     | "useAppSidebarMessages"
     | "useAppState"
     | "appVuePending"
@@ -170,12 +171,13 @@ export function useAppAccountScope(context: unknown) {
 export function useAppAuthFlow(context: unknown) {
   const app = context as AppContextOf<
       "useAppNavigation"
+    | "useAppRoomData"
     | "useAppSessionActions"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     authStatus, clearDesktopSessionState, firstRunStage, getAuthRoomIdentifier, mcpInstallState,
+    refresh,
   } = app;
   const {
     authBusy,
@@ -195,7 +197,7 @@ export function useAppAuthFlow(context: unknown) {
     onFirstRunAuthorized: async () => {
       firstRunStage.value = "room";
     },
-    onAuthorized: () => app.refresh(),
+    onAuthorized: () => refresh(),
     onSigningOut: clearDesktopSessionState,
     onSignedOut: async () => undefined,
   });

@@ -13,9 +13,10 @@ export function useAppFocusRoomConclusion(context: unknown) {
   const app = context as AppContextOf<
       "useAppNavigation"
     | "useAppRoomContext"
+    | "useAppRoomData"
+    | "useAppRoomManagement"
     | "useAppSidebarSelection"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     authStatus, sidebarFocusRoomConclusionError, sidebarFocusRoomConclusionParent,

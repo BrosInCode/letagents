@@ -126,14 +126,15 @@ export function useAppSelectionWatchers(context: unknown) {
   const app = context as AppContextOf<
       "useAppInboxState"
     | "useAppNavigation"
+    | "useAppRoomData"
     | "useAppSidebarMessages"
     | "useAppState"
     | "appVuePending"
   >;
   const {
     activeEntry, activeEntryStorageKey, inboxRoomOpens, loading, markActiveRoomRead,
-    projectEntries, refreshSidebarLatestMessages, rootRoomSnapshot, selectedRootRoomIdentifier,
-    selectedRootRoomStorageKey, sidebarMetadataRefresh,
+    projectEntries, refreshSelectedSnapshot, refreshSidebarLatestMessages, rootRoomSnapshot,
+    selectedRootRoomIdentifier, selectedRootRoomStorageKey, sidebarMetadataRefresh,
   } = app;
   watch(
     () => activeEntry.value,
@@ -149,7 +150,7 @@ export function useAppSelectionWatchers(context: unknown) {
       rememberStoredString(activeEntryStorageKey, nextEntry.id);
       if (!rootRoomSnapshot.value) return;
       if (nextEntry.id === previousEntry?.id) return;
-      await inboxRoomOpens.load(selectedEntryId, () => app.refreshSelectedSnapshot(rootRoomSnapshot.value));
+      await inboxRoomOpens.load(selectedEntryId, () => refreshSelectedSnapshot(rootRoomSnapshot.value));
       if (activeEntry.value.id !== selectedEntryId) return;
       markActiveRoomRead();
     }

@@ -13,6 +13,7 @@ import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSideb
 import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
+import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 
 /** What each composable returns, by composable name. */
 interface AppContextParts {
@@ -35,10 +36,13 @@ interface AppContextParts {
   useAppSidebarEntries: ReturnType<typeof useAppSidebarEntries>;
   useAppRentalEvents: ReturnType<typeof useAppRentalEvents>;
   useAppHistoryWatchers: ReturnType<typeof useAppHistoryWatchers>;
+  useAppRoomData: ReturnType<typeof useAppRoomData>;
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
+  useAppRoomManagement: ReturnType<typeof useAppRoomManagement>;
   useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
   useAppProjectRepoWatchers: ReturnType<typeof useAppProjectRepoWatchers>;
+  useAppRoomStreamWatchers: ReturnType<typeof useAppRoomStreamWatchers>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
   /** Names that still live in App.vue while the split is in progress. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
