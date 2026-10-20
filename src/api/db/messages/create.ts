@@ -13,7 +13,6 @@ import type { Message, MessageMentionNotice, MessageRecipientAgentTarget, Messag
 import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { planJevRoutingMode, type DeferredJevRoutingPlan } from "./jev-routing-hint.js";
 import { getMessageThreadRoutingProjection, resolveMessageThreadRoutingProjection, type ThreadRoutingProjection } from "./thread-routing-membership.js";
-import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
 import { finishReplyTurnsTx, planReplyTurns, queueReplyTurnWakes, releaseAgentReplyTurnHoldsTx, sequentialReplyReason, type ReleasedReplyTurn } from "./reply-turns.js";
 import type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 import { insertMessageReceiptRows } from "./create/receipt-rows.js";
@@ -21,6 +20,7 @@ import { hydrateCreatedMessage } from "./create/hydrate.js";
 import { normalizeClientMessageId, resolveMessageTargets } from "./create/validation.js";
 import { insertMessageRow } from "./create/insert.js";
 import { attachMessageUploads } from "./create/attachments.js";
+import { finishCreatedMessage } from "./create/after-insert.js";
 export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 export { chunkMessageReceiptRows } from "./create/receipt-rows.js";
 
@@ -60,35 +60,8 @@ export async function addMessageWithCreateStatus(
     if ("replay" in inserted) return inserted.replay;
     const { createdMessage } = inserted;
     await attachMessageUploads(tx, roomId, createdMessage, attachmentRefs, options);
-    const createdMessageIsPromptOnly = isPromptOnlyAgentMessage(createdMessage.text, promptKind);
-    if (createdMessageIsPromptOnly) {
-      await tx
-        .delete(messages)
-        .where(
-          and(
-            eq(messages.room_id, roomId),
-            eq(messages.sender, sender),
-            eq(messages.agent_prompt_kind, "auto"),
-            sql`BTRIM(${messages.text}) = ''`,
-            sql`${messages.number} < ${createdMessage.number}`,
-          ),
-        );
-    }
-
-    const addressedTo = options?.addressed_to ?? null;
-    let notificationEnqueueDurationMs = 0;
-    if (!createdMessageIsPromptOnly && !addressedTo) {
-      const notificationEnqueueStartedAtMs = Date.now();
-      await enqueueDesktopPushNotifications(tx, createdMessage, {
-        notify_account_ids: options?.notify_account_ids,
-        recents_account_ids: options?.recents_account_ids,
-      });
-      notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
-    }
-
-    if (options?.with_created_message_in_transaction) {
-      await options.with_created_message_in_transaction(tx, createdMessage);
-    }
+    const { createdMessageIsPromptOnly, addressedTo, notificationEnqueueDurationMs } =
+      await finishCreatedMessage(tx, roomId, sender, options, promptKind, createdMessage);
 
     // Send-time routing snapshot: resolve active worker sessions in this room and insert queued receipts
     const routingStartedAtMs = Date.now();
