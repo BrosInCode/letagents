@@ -8,7 +8,8 @@
     </span></template>
     <div class="github-update-rows">
       <div class="github-update-list">
-      <DisclosurePanel v-for="row in rows" :key="row.key" class="github-update-row" :data-tone="row.event.tone"
+      <button v-if="hiddenRowCount" type="button" class="github-update-earlier" data-testid="github-update-earlier" @click="showEarlier">Show {{ hiddenRowCount }} earlier</button>
+      <DisclosurePanel v-for="row in shownRows" :key="row.key" class="github-update-row" :data-tone="row.event.tone"
         :open="open.has(row.key)" :panel-id="panelId(row.key)" trigger-class="github-update-toggle" panel-class="github-update-disclosure"
         :instant="instant" @toggle="toggle(row.key, $event)" @settled="emit('layoutSettled')">
         <template #summary><span class="github-update-summary">
@@ -19,7 +20,7 @@
             <div class="github-history-inner">
               <div class="github-history-heading"><span>History</span><a v-if="safeUrl(row.event.url)" :href="safeUrl(row.event.url)!" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a></div>
               <div :ref="(el: unknown) => setScroller(row.key, el)" class="github-history-scroll" tabindex="0" :aria-label="`${row.label} update history`" @scroll="rememberScroll(row.key)">
-                <template v-for="message in row.messages" :key="message.id"><slot :message="message" :history="true" /></template>
+                <template v-if="!lazyHistory || rendered.has(row.key)"><template v-for="message in row.messages" :key="message.id"><slot :message="message" :history="true" /></template></template>
               </div>
               <div class="github-history-bottom"><button type="button" :class="{ available: unseen.has(row.key) }" :disabled="!unseen.has(row.key)" @click="latest(row.key)">Latest updates ↓</button></div>
             </div>
@@ -33,7 +34,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
 import DisclosurePanel from './DisclosurePanel.vue';
 import { githubUpdateRows, type GitHubUpdateEvent } from '../grouped-github-updates';
-const props = defineProps<{ anchorId?: string; messages: readonly M[]; grouped: boolean; parseEvent: (message: M) => GitHubUpdateEvent | null }>();
+const props = defineProps<{
+  anchorId?: string; messages: readonly M[]; grouped: boolean; parseEvent: (message: M) => GitHubUpdateEvent | null;
+  /** Mount a row's history only once it has been opened. */
+  lazyHistory?: boolean;
+  /** Show only the newest rows, with a button for earlier ones. */
+  rowLimit?: number;
+}>();
 defineSlots<{ default(props: { message: M; history: boolean }): unknown }>();
 const emit = defineEmits<{ rowsChanged: []; layoutStart: []; layoutSettled: [] }>();
 const element = ref<HTMLElement | null>(null);
@@ -45,6 +52,18 @@ const scrollers = new Map<string, HTMLElement>();
 const positions = new Map<string, { top: number; bottom: boolean; id?: string; offset?: number }>();
 const instanceId = useId();
 const rows = computed(() => githubUpdateRows(props.messages, props.parseEvent));
+// Bounded mode (desktop): a long run of events mounts at most rowLimit rows,
+// and no closed history. A row stays mounted once it has been opened.
+const shownCount = ref(props.rowLimit ?? Number.POSITIVE_INFINITY);
+const shownRows = computed(() => props.rowLimit ? rows.value.slice(Math.max(0, rows.value.length - shownCount.value)) : rows.value);
+const hiddenRowCount = computed(() => rows.value.length - shownRows.value.length);
+const rendered = ref(new Set<string>());
+async function showEarlier() {
+  emit('layoutStart');
+  shownCount.value += props.rowLimit ?? rows.value.length;
+  await nextTick();
+  emit('rowsChanged');
+}
 const repositories = computed(() => [...new Set(rows.value.map(row => row.event.repository).filter(Boolean))]);
 function panelId(key: string) { return `${instanceId}-${encodeURIComponent(key)}`; }
 function safeUrl(value: string | null) { try { const url = new URL(value || ''); return url.protocol === 'https:' && url.hostname === 'github.com' ? url.href : null; } catch { return null; } }
@@ -74,7 +93,7 @@ async function toggleGroup(event: MouseEvent) {
   if (!collapsed.value) for (const key of open.value) restoreHistory(key);
   emit('rowsChanged');
 }
-async function toggle(key: string, event: MouseEvent) { instant.value = event.detail === 0; emit('layoutStart'); const showing = !open.value.has(key); showing ? open.value.add(key) : open.value.delete(key); await nextTick(); if (showing) restoreHistory(key); emit('rowsChanged'); }
+async function toggle(key: string, event: MouseEvent) { instant.value = event.detail === 0; emit('layoutStart'); const showing = !open.value.has(key); if (showing) { open.value.add(key); rendered.value.add(key); } else open.value.delete(key); await nextTick(); if (showing) restoreHistory(key); emit('rowsChanged'); }
 watch(() => rows.value.map(row => ({ key: row.key, last: row.messages.at(-1)?.id, count: row.messages.length })), async (next, before) => {
   for (const row of next) {
     const position = positions.get(row.key);
@@ -89,12 +108,15 @@ watch(() => rows.value.map(row => ({ key: row.key, last: row.messages.at(-1)?.id
 // original message DOM identities inside the history; hidden rows aren't read.
 function reveal(event: Event) {
   const detail = (event as CustomEvent<{ id: string; ready: () => void }>).detail;
-  const row = rows.value.find(row => row.messages.some(message => message.id === detail.id));
+  const index = rows.value.findIndex(row => row.messages.some(message => message.id === detail.id));
+  const row = rows.value[index];
   if (!row) return;
   event.stopPropagation();
   instant.value = true;
   collapsed.value = false;
+  if (props.rowLimit) shownCount.value = Math.max(shownCount.value, rows.value.length - index);
   open.value.add(row.key);
+  rendered.value.add(row.key);
   void nextTick(() => { instant.value = false; emit('rowsChanged'); detail.ready(); });
 }
 onMounted(() => element.value?.addEventListener('reveal-github-message', reveal));
@@ -108,6 +130,8 @@ onBeforeUnmount(() => element.value?.removeEventListener('reveal-github-message'
 .github-updates-heading-copy strong { font-weight: 500; color: var(--text-secondary); }
 .github-updates-heading-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .github-update-row + .github-update-row { border-top: 1px solid var(--border, #242427); }
+.github-update-earlier { display: block; width: 100%; min-height: 36px; border: 0; border-radius: 8px; background: none; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+.github-update-earlier:focus-visible { outline: 2px solid var(--text-secondary, #97979f); outline-offset: -3px; }
 .room-github-updates .github-update-toggle { min-height: 82px; color: var(--text); }
 .github-update-summary { display: grid; grid-template-columns: 20px minmax(0, 1fr) 130px; align-items: center; gap: 14px; }
 .github-update-symbol { width: 18px; height: 18px; color: var(--text-tertiary); }
