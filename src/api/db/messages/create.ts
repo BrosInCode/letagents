@@ -1,8 +1,6 @@
 import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { assertAttachmentTotalByteSize } from "../../messages/attachments.js";
-import { messageAttachmentUploadUsableBy } from "./attachments.js";
 import { isPromptOnlyAgentMessage } from "../../../shared/room-agent-prompts.js";
 import { MESSAGE_SENDER_MAX_CODE_POINTS, MESSAGE_SENDER_MAX_UTF8_BYTES, isMessageSenderWithinBounds, parseSupervisedReplySourceNumber } from "../../../../shared/message-contracts.mjs";
 import { createGlobalAgentAddressResolver, humanConversationFallback, decideAgentMessageActivation, isUntrustedExternalActivationSource, isTaskOwnerFollowUpMessageText, type ActivationIdentity } from "../../../shared/activation-routing.js";
@@ -10,9 +8,8 @@ import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
 import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
-import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
-import type { Message, MessageAttachmentRow, MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../types.js";
-import { messageAttachmentUploadSelection } from "./selections.js";
+import { rooms, room_settings, jev_routing_jobs, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import type { Message, MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../types.js";
 import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { planJevRoutingMode, type DeferredJevRoutingPlan } from "./jev-routing-hint.js";
 import { getMessageThreadRoutingProjection, resolveMessageThreadRoutingProjection, type ThreadRoutingProjection } from "./thread-routing-membership.js";
@@ -23,6 +20,7 @@ import { insertMessageReceiptRows } from "./create/receipt-rows.js";
 import { hydrateCreatedMessage } from "./create/hydrate.js";
 import { normalizeClientMessageId, resolveMessageTargets } from "./create/validation.js";
 import { insertMessageRow } from "./create/insert.js";
+import { attachMessageUploads } from "./create/attachments.js";
 export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 export { chunkMessageReceiptRows } from "./create/receipt-rows.js";
 
@@ -61,52 +59,7 @@ export async function addMessageWithCreateStatus(
     );
     if ("replay" in inserted) return inserted.replay;
     const { createdMessage } = inserted;
-    let attachmentRows: MessageAttachmentRow[] = [];
-    if (attachmentRefs.length > 0) {
-      const uploadIds = attachmentRefs.map((attachment) => attachment.upload_id);
-      const claimedUploadRows = await tx
-        .update(message_attachment_uploads)
-        .set({
-          status: "attached",
-          attached_message_number: createdMessage.number,
-          attached_at: createdMessage.timestamp,
-        })
-        .where(
-          and(
-            eq(message_attachment_uploads.room_id, roomId),
-            inArray(message_attachment_uploads.upload_id, uploadIds),
-            eq(message_attachment_uploads.status, "pending"),
-            sql`${message_attachment_uploads.expires_at} > ${createdMessage.timestamp}`,
-            messageAttachmentUploadUsableBy(options?.attachment_uploader),
-          ),
-        )
-        .returning(messageAttachmentUploadSelection);
-      const uploadsById = new Map(claimedUploadRows.map((row) => [row.upload_id, row]));
-      const orderedUploads = uploadIds.map((uploadId) => {
-        const upload = uploadsById.get(uploadId);
-        if (!upload) {
-          throw new RequestValidationError("attachment upload not found or expired");
-        }
-        return upload;
-      });
-      assertAttachmentTotalByteSize(orderedUploads);
-      attachmentRows = orderedUploads.map((attachment, index) => ({
-        room_id: roomId,
-        message_number: createdMessage.number,
-        attachment_number: index + 1,
-        upload_id: attachment.upload_id,
-        filename: attachment.filename,
-        content_type: attachment.content_type,
-        byte_size: attachment.byte_size,
-        storage_provider: attachment.storage_provider,
-        bucket: attachment.bucket,
-        object_key: attachment.object_key,
-        created_at: createdMessage.timestamp,
-      }));
-    }
-    if (attachmentRows.length > 0) {
-      await tx.insert(message_attachments).values(attachmentRows);
-    }
+    await attachMessageUploads(tx, roomId, createdMessage, attachmentRefs, options);
     const createdMessageIsPromptOnly = isPromptOnlyAgentMessage(createdMessage.text, promptKind);
     if (createdMessageIsPromptOnly) {
       await tx
