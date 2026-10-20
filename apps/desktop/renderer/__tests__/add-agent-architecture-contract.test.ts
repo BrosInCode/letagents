@@ -2,15 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { roomShellSource } from "./room-shell-source";
 
 const modal = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/AddAgentModal.vue",
   import.meta.url,
 )), "utf8");
-const shell = readFileSync(fileURLToPath(new URL(
-  "../src/components/desktop/content/DesktopRoomShell.vue",
-  import.meta.url,
-)), "utf8");
+const shell = roomShellSource();
 const participantSurface = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue",
   import.meta.url,

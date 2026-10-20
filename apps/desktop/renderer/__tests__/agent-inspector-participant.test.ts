@@ -6,6 +6,7 @@ import {
   projectAgentInspectorParticipant,
   projectAgentInspectorStatus,
 } from "../src/domain/agent-inspector-participant";
+import { roomShellSource } from "./room-shell-source";
 
 function selection(overrides: Partial<AgentInspectorSelection> = {}): AgentInspectorSelection {
   return {
@@ -73,7 +74,7 @@ test("the responsive host has an exact 920px nonmodal boundary and compact acces
   assert.match(host, /projectAgentInspectorParticipant\(props\.selection\)/);
   assert.match(host, /latestReasoningSessionForExactIdentity/);
   assert.match(host, /ManagedAgentChangeSummaryCard|reasoning: participantReasoning\.value/);
-  assert.doesNotMatch(await readFile(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8"), /:managed-sessions=/);
+  assert.doesNotMatch(await roomShellSource(), /:managed-sessions=/);
   assert.match(css, /@media \(min-width: 560px\) and \(max-width: 919px\)/);
   assert.match(css, /width: min\(640px, 88vw\)/);
   assert.match(css, /width: 100vw/);

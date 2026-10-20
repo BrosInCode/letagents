@@ -13,6 +13,7 @@ import {
   useDesktopMessageDraft,
 } from "../src/domain/desktop-message-drafts";
 import { useAgentCorrectionHandoff } from "../src/components/desktop/content/room-shell/useAgentCorrectionHandoff";
+import { roomShellSource } from "./room-shell-source";
 
 function projection(entryId: string, canCorrect: boolean): AgentInspectorProjection {
   return {
@@ -145,7 +146,7 @@ test("an agent without a correctable turn keeps the draft, and Activity still op
 });
 
 test("the room shell releases a hand-over on close and agent switch, and applying never restores it", () => {
-  const shellSource = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const shellSource = roomShellSource();
   const body = (name: string) => shellSource.slice(shellSource.indexOf(`function ${name}(`), shellSource.indexOf("\n}\n", shellSource.indexOf(`function ${name}(`)));
   assert.match(body("closeAgentDetail"), /releaseAgentCorrectionRequest\(\{ restoreComposerText: true \}\)/);
   assert.match(body("openAgentDetailRequest"), /releaseAgentCorrectionRequest\(\{ restoreComposerText: true \}\)/);
