@@ -405,13 +405,7 @@ import type { ChatScrollPosition } from "./domain/chat-scroll";
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { defineAsyncComponent, onBeforeUnmount, onMounted, watch } from "vue";
-import type {
-  DesktopAppAgentRunInput,
-  DesktopAppAgentRunResult,
-  DesktopAppAgentSaveSettingsInput,
-  DesktopChatStorageSettings,
-  DesktopRoomSnapshot,
-} from "../../electron/ipc-types";
+import type { DesktopAppAgentRunInput, DesktopAppAgentRunResult, DesktopRoomSnapshot } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
@@ -425,16 +419,12 @@ import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutV
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
-import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
+import { settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
 import { normalizeRoomIdentifier, rememberRecentRootRooms } from "./domain/sidebar-rooms";
 import { replaceSidebarProjectId, rememberSidebarRoomOrder } from "./domain/sidebar-room-order";
-import {
-  appAgentArchivedRoomIdentifiers,
-  appAgentRefreshTargets,
-} from "./domain/app-agent";
+import { appAgentArchivedRoomIdentifiers } from "./domain/app-agent";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "./domain/account-activity";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -450,6 +440,7 @@ import { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, us
 import { useAppSidebarSelection, useAppSidebarEntries } from "./composables/app/useAppSidebarSelection";
 import { useAppFocusRoomConclusion } from "./composables/app/useAppFocusRoomConclusion";
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
+import { useAppSettingsActions, useAppSetupOnboarding } from "./composables/app/useAppSettings";
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 
@@ -463,23 +454,22 @@ const RentMarketplaceView = defineAsyncComponent(
 // slice exactly where its code used to run.
 const app = {} as AppContext;
 const {
-  loading, appInfo, updateStatus, repoStatus, workers, rootRoomSnapshot, selectedSnapshot,
-  authStatus, sessionGeneration, authDialogOpen, recentRootRoomsStorageKey,
-  sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
-  SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, recentRootRooms,
-  newRoomRecentProjectFolders, sidebarWidth, sidebarRoomOrder, sidebarRevealRequest,
-  isSidebarResizing, sidebarLatestMessages, chatScrollPositionsByRoom,
-  loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms, sidebarMetadataRefresh,
-  rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread, openConversationId,
-  openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
+  loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
+  sessionGeneration, authDialogOpen, recentRootRoomsStorageKey, sidebarRoomOrderStorageKey,
+  sidebarMinWidth, sidebarMaxWidth, SIDEBAR_METADATA_REFRESH_INTERVAL_MS,
+  selectedRootRoomIdentifier, recentRootRooms, newRoomRecentProjectFolders, sidebarWidth,
+  sidebarRoomOrder, sidebarRevealRequest, isSidebarResizing, sidebarLatestMessages,
+  chatScrollPositionsByRoom, loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms,
+  sidebarMetadataRefresh, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
+  openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
   openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
   chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
   appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
-  mcpInstallState, selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback, setupLoadError,
-  mcpWizardStep, firstRunStage, sidebarFocusRoomConclusionTarget,
-  sidebarFocusRoomConclusionReturnFocusId, sidebarFocusRoomConclusionError, sidebarSelectionActive,
-  sidebarSelectedEntryIds, sidebarBatchActionBusy, sidebarBatchDialogAction,
-  sidebarBatchDialogTargets, sidebarBatchDialogError,
+  selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback, mcpWizardStep, firstRunStage,
+  sidebarFocusRoomConclusionTarget, sidebarFocusRoomConclusionReturnFocusId,
+  sidebarFocusRoomConclusionError, sidebarSelectionActive, sidebarSelectedEntryIds,
+  sidebarBatchActionBusy, sidebarBatchDialogAction, sidebarBatchDialogTargets,
+  sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
@@ -494,8 +484,8 @@ const {
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));
 const {
-  refreshActiveRepoStatus, refreshProjectBindings, initializeProjectBindings,
-  handleRepoStatusChanged, openWorkspaceGitRoom, connectActiveRoomProject, openWorktreeForAgent,
+  refreshProjectBindings, initializeProjectBindings, handleRepoStatusChanged, openWorkspaceGitRoom,
+  connectActiveRoomProject, openWorktreeForAgent,
 } = Object.assign(app, useAppProjectRepo(app));
 const {
   refreshSidebarRoomMetadata, refreshSidebarLatestMessages, roomHistoryMode,
@@ -514,14 +504,19 @@ const {
   handleSidebarFocusRoomConclusionAfterLeave,
 } = Object.assign(app, useAppFocusRoomConclusion(app));
 const {
-  refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
-  handleDesktopRoomStreamEvent, startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth,
-  handleNotificationActivation,
+  handleVisibilityChange, handleWindowFocus, handleWindowBlur, handleDesktopRoomStreamEvent,
+  startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth, handleNotificationActivation,
 } = Object.assign(app, useAppSessionActions(app));
+const {
+  loadChatStorageSettings, loadAppAgentSettingsStatus, loadAppAgentActions, saveAppAgentSettings,
+  refreshSettingsSurface, refreshDesktopUpdateStatus, checkDesktopUpdate, installDesktopUpdate,
+  openAppAgentSettings, runAppAgent, setChatStorageMode, syncLocalChat,
+} = Object.assign(app, useAppSettingsActions(app));
 // Functions still in App.vue are hoisted, so they join the context first.
 Object.assign(app, {
-  leaveArchivedRoomIfActive, openRoomFromAppAgent, forgetLoadingChatScrollRooms,
-  activeChatScrollRoomIdentifier,
+  leaveArchivedActiveRoomAfterAppAgent, leaveArchivedRoomIfActive,
+  leaveArchivedSelectedRoomFromSettingsList, openRoomFromAppAgent, handleRoomShellRefresh,
+  forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -538,10 +533,10 @@ const {
 let needsYouInterval: number | null = null;
 
 const {
-  activeEntry, collapsedProjects, currentParentRoom, openRoomSnapshot, pinnedCollapsed, pinnedRoom,
-  rememberRootRoomSnapshot, repoName, roomsCollapsed, returnFromSettings, selectedAccess,
-  selectedFocusRooms, selectedNeedsAccess, selectedRoomIdentifier, selectedRoomInfo, sidebarMode,
-  toggleProject, togglePinnedCollapsed, toggleRoomsCollapsed,
+  activeEntry, collapsedProjects, currentParentRoom, openRoomSnapshot, pinnedCollapsed, repoName,
+  roomsCollapsed, returnFromSettings, selectedAccess, selectedFocusRooms, selectedNeedsAccess,
+  selectedRoomIdentifier, selectedRoomInfo, sidebarMode, toggleProject, togglePinnedCollapsed,
+  toggleRoomsCollapsed,
 } = Object.assign(app, useAppNavigation(app));
 
 const {
@@ -582,9 +577,8 @@ Object.assign(app, useAppHistoryWatchers(app));
 const {
   clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, roomAgentWork,
   roomAgentWorkStatus, roomAgentWorkTruncated, clearSelectedSnapshotCache, handleMessageSent,
-  handleRefreshRoom, handleRoomRenamed, refresh, refreshAccountRooms, refreshSelectedSnapshot,
-  repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream, upsertSelectedTask,
-  authSnapshotPending,
+  handleRefreshRoom, handleRoomRenamed, refresh, repoStatusValue, selectedSnapshotLoading,
+  syncSelectedRoomStream, upsertSelectedTask, authSnapshotPending,
 } = Object.assign(app, useAppRoomData(app));
 
 const {
@@ -607,218 +601,18 @@ const {
   newRoomStorage, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
   pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
   archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, leaveAccountRoom,
-  openAccountRoomFromSettings, refreshSettings, renameSidebarRoom, restoreAccountRoom,
-  settingsFeedback, settingsRoomActionBusyKey, toggleAccountRoomPin, togglePinSidebarRoom,
+  openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,
+  settingsRoomActionBusyKey, toggleAccountRoomPin, togglePinSidebarRoom,
 } = Object.assign(app, useAppRoomManagement(app));
 
 const {
-  clearMcpTargetSelection,
-  completeMcpOnboarding,
-  continueMcpOnboarding,
-  continueToRoomConfirmation,
-  createFirstRunInviteRoom,
-  finishFirstRunOnboarding,
-  firstRunInviteCode,
-  firstRunRoomSelected,
-  firstRunFeedback,
-  goBackFirstRun,
-  goBackMcpOnboarding,
-  installSelectedMcpTargets,
-  joinRoomCode,
-  loadFirstRunSetup,
-  pickRepoRoom,
-  selectAllMcpTargets,
-  selectMcpTarget,
-  setupApiAvailable,
-  showFirstRunGate,
-  showFirstRunSplash,
-  visibleMcpInstallState,
+  clearMcpTargetSelection, completeMcpOnboarding, continueMcpOnboarding,
+  continueToRoomConfirmation, createFirstRunInviteRoom, finishFirstRunOnboarding,
+  firstRunInviteCode, firstRunRoomSelected, firstRunFeedback, goBackFirstRun, goBackMcpOnboarding,
+  installSelectedMcpTargets, joinRoomCode, loadFirstRunSetup, pickRepoRoom, selectAllMcpTargets,
+  selectMcpTarget, setupApiAvailable, showFirstRunGate, showFirstRunSplash, visibleMcpInstallState,
   startFirstRunSetup,
-} = useDesktopSetupOnboarding({
-  activeEntry,
-  authFeedback,
-  authStatus,
-  firstRunStage,
-  loading,
-  mcpInstallBusy,
-  mcpInstallFeedback,
-  mcpInstallState,
-  mcpWizardStep,
-  openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
-  pinnedRoom,
-  refresh: () => refresh(),
-  repoStatus,
-  selectedMcpTargetIds,
-  setupLoadError,
-});
-Object.assign(app, { showFirstRunGate });
-
-function getChatStorageBridge(): typeof desktopIpc.chatStorage | null {
-  const bridge = desktopIpc.chatStorage;
-  if (!bridge) {
-    chatStorageAvailable.value = false;
-    chatStorageFeedback.value = {
-      state: "error",
-      message: "Restart LetAgents Desktop to enable chat storage controls.",
-    };
-    return null;
-  }
-  chatStorageAvailable.value = true;
-  return bridge;
-}
-
-async function loadChatStorageSettings(): Promise<void> {
-  const bridge = getChatStorageBridge();
-  if (!bridge) return;
-  const generation = sessionGeneration.value;
-  try {
-    const settings = await bridge.getSettings();
-    if (generation === sessionGeneration.value) chatStorageSettings.value = settings;
-  } catch (error) {
-    chatStorageFeedback.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "Chat storage settings could not be loaded.",
-    };
-  }
-}
-
-async function loadAppAgentSettingsStatus(): Promise<void> {
-  try {
-    appAgentSettingsStatus.value = await desktopIpc.appAgent.getSettingsStatus();
-  } catch (error) {
-    appAgentFeedback.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "App Agent settings could not be loaded.",
-    };
-  }
-}
-
-async function loadAppAgentActions(): Promise<void> {
-  try {
-    appAgentActions.value = await desktopIpc.appAgent.listActions();
-  } catch (error) {
-    appAgentFeedback.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "App Agent actions could not be loaded.",
-    };
-  }
-}
-
-async function saveAppAgentSettings(input: DesktopAppAgentSaveSettingsInput): Promise<void> {
-  appAgentBusy.value = true;
-  appAgentFeedback.value = null;
-  try {
-    appAgentSettingsStatus.value = await desktopIpc.appAgent.saveSettings(input);
-    appAgentFeedback.value = {
-      state: "success",
-      message: "App Agent settings saved.",
-    };
-  } catch (error) {
-    appAgentFeedback.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "App Agent settings could not be saved.",
-    };
-  } finally {
-    appAgentBusy.value = false;
-  }
-}
-
-async function refreshSettingsSurface(): Promise<void> {
-  await Promise.all([
-    refreshSettings(),
-    loadAppAgentSettingsStatus(),
-    loadAppAgentActions(),
-    refreshDesktopUpdateStatus(),
-  ]);
-}
-
-async function refreshDesktopUpdateStatus(): Promise<void> {
-  if (!desktopIpc.updates?.getStatus) return;
-  updateStatus.value = await desktopIpc.updates.getStatus();
-}
-
-async function checkDesktopUpdate(): Promise<void> {
-  if (!desktopIpc.updates?.check) return;
-  updateStatus.value = await desktopIpc.updates.check();
-}
-
-async function installDesktopUpdate(): Promise<void> {
-  if (!desktopIpc.updates?.install) return;
-  updateStatus.value = await desktopIpc.updates.install();
-}
-
-function openAppAgentSettings(): void {
-  activeEntry.value = appAgentEntry;
-}
-
-async function runAppAgent(input: DesktopAppAgentRunInput): Promise<void> {
-  appAgentBusy.value = true;
-  appAgentResult.value = null;
-  try {
-    const runInput: DesktopAppAgentRunInput = {
-      ...input,
-      activeRoomDisplayName:
-        input.activeRoomDisplayName || selectedRoomInfo.value.displayName || activeEntry.value.title,
-      activeRoomIdentifier:
-        input.activeRoomIdentifier || selectedRoomIdentifier.value || selectedRootRoomIdentifier.value,
-      activeRoomPinned:
-        input.activeRoomPinned === true || (activeEntry.value.type === "room" && activeEntry.value.pinned),
-      activeRoomGitRoom:
-        input.activeRoomGitRoom || selectedRoomInfo.value.gitRoom || null,
-    };
-    const result = await desktopIpc.appAgent.run(runInput);
-    appAgentResult.value = result;
-    if (result.settingsStatus) {
-      appAgentSettingsStatus.value = result.settingsStatus;
-    }
-    const refreshTargets = appAgentRefreshTargets(result);
-    if (refreshTargets.includes("rooms")) {
-      await refreshAccountRooms();
-    }
-    const archivedActiveRoom =
-      await leaveArchivedActiveRoomAfterAppAgent(result, runInput, {
-        deferNavigation: Boolean(result.openRoomIdentifier),
-      }) ||
-      await leaveArchivedSelectedRoomFromSettingsList();
-    if (result.openRoomIdentifier) {
-      await openRoomFromAppAgent(result.openRoomIdentifier);
-    }
-    if (refreshTargets.includes("settings")) {
-      await Promise.all([
-        refreshSettingsSurface(),
-        loadChatStorageSettings(),
-      ]);
-    }
-    if (refreshTargets.includes("active_room") && !archivedActiveRoom) {
-      await refreshSelectedSnapshot(rootRoomSnapshot.value);
-    }
-    if (refreshTargets.includes("foreground")) {
-      refreshForegroundData();
-    }
-  } catch (error) {
-    appAgentResult.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "The App Agent could not complete that request.",
-    };
-  } finally {
-    appAgentBusy.value = false;
-  }
-}
+} = Object.assign(app, useAppSetupOnboarding(app));
 
 async function leaveArchivedActiveRoomAfterAppAgent(
   result: DesktopAppAgentRunResult,
@@ -972,98 +766,6 @@ async function openServiceAgent(intent: AttentionNavigationIntent): Promise<void
     attentionIntent.value = intent;
   } catch (error) {
     pushActionToast(safeUserVisibleErrorDetail(error, "Could not open this agent’s room."), "error");
-  }
-}
-
-async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
-  await desktopIpc.room.stopStream();
-  await refreshActiveRepoStatus();
-  clearSelectedSnapshotCache();
-  selectedSnapshot.value = null;
-  const rootRoomIdentifier = selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier || null;
-  if (rootRoomIdentifier) {
-    const nextRootSnapshot = await desktopIpc.room.getSnapshot(rootRoomIdentifier);
-    rootRoomSnapshot.value = nextRootSnapshot;
-    selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
-    rememberRootRoomSnapshot(nextRootSnapshot);
-    await refreshSelectedSnapshot(nextRootSnapshot);
-  }
-  if (selectedRoomIdentifier.value) {
-    await syncSelectedRoomStream(selectedRoomIdentifier.value);
-  }
-}
-
-async function setChatStorageMode(mode: DesktopChatStorageSettings["mode"]): Promise<void> {
-  chatStorageBusy.value = true;
-  chatStorageFeedback.value = null;
-  try {
-    const bridge = getChatStorageBridge();
-    if (!bridge) return;
-    chatStorageSettings.value = await bridge.setMode(mode);
-    chatStorageFeedback.value = {
-      state: "success",
-      message:
-        mode === "local"
-          ? "Local chat storage is on. New messages stay on this computer."
-          : "Cloud chat storage is on. Local history remains local until you publish it.",
-    };
-    await refreshActiveRoomAfterChatStorageChange();
-  } catch (error) {
-    chatStorageFeedback.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "Chat storage mode could not be updated.",
-    };
-  } finally {
-    chatStorageBusy.value = false;
-  }
-}
-
-async function syncLocalChat(): Promise<void> {
-  const roomIdentifier = selectedRoomIdentifier.value || selectedRootRoomIdentifier.value;
-  const generation = sessionGeneration.value;
-  if (!roomIdentifier) {
-    chatStorageFeedback.value = {
-      state: "error",
-      message: "Open a room before publishing local chat.",
-    };
-    return;
-  }
-  chatStorageBusy.value = true;
-  chatStorageFeedback.value = null;
-  try {
-    const bridge = getChatStorageBridge();
-    if (!bridge) return;
-    const result = await bridge.syncLocalRoom(roomIdentifier);
-    if (generation !== sessionGeneration.value
-      || (selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
-    chatStorageFeedback.value = {
-      state: result.skippedCount > 0 || result.skippedTaskCount > 0 ? "info" : "success",
-      message:
-        result.skippedCount > 0 || result.skippedTaskCount > 0
-          ? `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks. ${result.skippedCount + result.skippedTaskCount} items were skipped.`
-          : `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.`,
-    };
-    if ((selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) === roomIdentifier) {
-      const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
-      if (generation !== sessionGeneration.value
-        || (selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
-      await handleRoomShellRefresh(snapshot);
-    }
-  } catch (error) {
-    if (generation !== sessionGeneration.value
-      || (selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
-    chatStorageFeedback.value = {
-      state: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "Local chat could not be published.",
-    };
-  } finally {
-    chatStorageBusy.value = false;
   }
 }
 

@@ -78,7 +78,7 @@ export function useAppRoomData(context: unknown) {
     syncRoomStream: syncDesktopRoomStream,
     workers,
   });
-  Object.assign(app, { handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, selectedSnapshotLoading, syncSelectedRoomStream });
+  Object.assign(app, { clearSelectedSnapshotCache, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
 
   const authSnapshotPending = computed(() =>
     isAuthSnapshotPending({
@@ -225,7 +225,7 @@ export function useAppRoomManagement(context: unknown) {
     },
     notify: (message, state) => pushActionToast(message, state),
   });
-  Object.assign(app, { batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned, concludeSidebarFocusRoom, settingsRoomActionBusyKey });
+  Object.assign(app, { batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned, concludeSidebarFocusRoom, refreshSettings, settingsRoomActionBusyKey });
   return {
     backFromSubstep, canSubmitJoin, canSubmitStandalone, chooseJoinIntent, chooseProjectIntent,
     chooseNewProjectIntent, chooseStandaloneIntent, closeNewRoomModal, confirmProjectRoomFromModal,

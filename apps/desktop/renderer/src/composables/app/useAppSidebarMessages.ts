@@ -26,9 +26,9 @@ export function useAppSidebarMessages(context: unknown) {
     | "useAppNavigation"
     | "useAppReadMarkers"
     | "useAppRoomData"
+    | "useAppSetupOnboarding"
     | "useAppSidebarEntries"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     accountRooms, authStatus, chatStorageSettings, readRoomMessageIds, selectedSnapshot,

@@ -11,8 +11,8 @@ export function useAppProjectRepo(context: unknown) {
   const app = context as AppContextOf<
       "useAppNavigation"
     | "useAppRoomContext"
+    | "useAppSetupOnboarding"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     authStatus, legacyRepositoryRootBindings, legacyRepositoryRootBindingsStorageKey, loading,

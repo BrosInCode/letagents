@@ -12,6 +12,7 @@ import type { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarker
 import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSidebarSelection";
 import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
+import type { useAppSettingsActions, useAppSetupOnboarding } from "./useAppSettings";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 
@@ -26,6 +27,7 @@ interface AppContextParts {
   useAppSidebarSelection: ReturnType<typeof useAppSidebarSelection>;
   useAppFocusRoomConclusion: ReturnType<typeof useAppFocusRoomConclusion>;
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
+  useAppSettingsActions: ReturnType<typeof useAppSettingsActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
   useAppAccountActivityFeed: ReturnType<typeof useAppAccountActivityFeed>;
   useAppInboxState: ReturnType<typeof useAppInboxState>;
@@ -40,6 +42,7 @@ interface AppContextParts {
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
   useAppRoomManagement: ReturnType<typeof useAppRoomManagement>;
+  useAppSetupOnboarding: ReturnType<typeof useAppSetupOnboarding>;
   useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
   useAppProjectRepoWatchers: ReturnType<typeof useAppProjectRepoWatchers>;
   useAppRoomStreamWatchers: ReturnType<typeof useAppRoomStreamWatchers>;
