@@ -12,10 +12,14 @@ const api = url ? await import("../db.js") : null;
 const schema = url ? await import("../db/schema.js") : null;
 const worker = url ? await import("../messages/jev-routing-worker.js") : null;
 const routing = url ? await import("../db/messages/jev-routing-hint.js") : null;
+const settle = url ? await import("./settle-background-db-work.js") : null;
 const skip = { skip: !url && "set TEST_DB_URL to run routing persistence tests" };
 
 test.beforeEach(async () => {
   if (!client) return;
+  // After-commit wakes from the previous case still read messages; finish
+  // them before the reset.
+  await settle!.settleBackgroundDbWork();
   await client.pool.query("DROP SCHEMA IF EXISTS public CASCADE");
   await client.pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
   await client.pool.query("CREATE SCHEMA public");
@@ -23,7 +27,10 @@ test.beforeEach(async () => {
   process.env.LETAGENTS_JEV_ROUTING = "active";
   process.env.TYPESAFE_API_KEY = "fixture-key";
 });
-test.after(async () => { await client?.pool.end(); });
+test.after(async () => {
+  await settle?.settleBackgroundDbWork();
+  await client?.pool.end();
+});
 
 async function seed(name = "routing-room", count = 4) {
   const room = await api!.createProjectWithName(name);

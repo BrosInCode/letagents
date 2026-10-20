@@ -23,19 +23,24 @@ const routes = url ? await import("../routes/rooms/messages/index.js") : null;
 const broker_module = url ? await import("../server/room-event-broker.js") : null;
 const overlays = url ? await import("../server/room-message-overlays.js") : null;
 const headerNames = url ? await import("../../shared/request-headers.js") : null;
+const settle = url ? await import("./settle-background-db-work.js") : null;
 const skip = { skip: !url && "set TEST_DB_URL to run sequential reply turn tests" };
 
 test.beforeEach(async () => {
   if (!client) return;
+  // The previous case's idle delivery leases, release retries and after-commit
+  // wakes still query the schema; finish them before the reset.
+  await settle!.settleBackgroundDbWork({ delivery: true });
   await client.pool.query("DROP SCHEMA IF EXISTS public CASCADE");
   await client.pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
   await client.pool.query("CREATE SCHEMA public");
   await migrate(client.db, { migrationsFolder: path.resolve("drizzle") });
   await rollout!.reconcileReplyTurnHoldRollout(client.pool);
 });
-// Let after-commit wakes from the previous case finish before the schema resets.
-test.afterEach(() => new Promise((resolve) => setTimeout(resolve, 50)));
-test.after(async () => { await client?.pool.end(); });
+test.after(async () => {
+  await settle?.settleBackgroundDbWork({ delivery: true });
+  await client?.pool.end();
+});
 
 type Activation = { decision: string; reason: string; turn?: { position: number; count: number; prior_speakers: string[] }; guidance?: string };
 

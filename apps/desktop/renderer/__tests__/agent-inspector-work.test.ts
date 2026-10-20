@@ -26,6 +26,7 @@ import {
   humanizeAgentInspectorTimeline,
   isCurrentAgentInspectorWorkResponse,
 } from "../src/domain/agent-inspector-work";
+import { roomShellSource } from "./room-shell-source";
 
 test("work detail source selection uses exact active source before bounded recency", () => {
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: "active" } } } as any, { items: [{ source_message_id: "newest" }] }), "active");
@@ -137,7 +138,7 @@ test("work labels present human language instead of raw causal enums", () => {
 });
 
 test("shell keeps work loading dark, fenced, stale-safe, and routed through canonical reveal", () => {
-  const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const shell = roomShellSource();
   const surface = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)), "utf8");
   const work = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorWork.vue", import.meta.url)), "utf8");
   assert.doesNotMatch(shell, /agentInspectorFoundationEnabled/);
@@ -150,7 +151,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);
   assert.match(shell, /invalidateAgentInspectorRuntimeControl\(/);
   assert.match(shell, /readAgentInspectorWorkDetail\(/);
-  assert.match(shell, /snapshotGeneration: supervisorStateDaemonGeneration/);
+  assert.match(shell, /snapshotGeneration: (?:supervisorSyncState\.)?supervisorStateDaemonGeneration/);
   assert.match(shell, /entry: selectedAgentDetailProjection\.value\?\.entry/);
   assert.match(shell, /if \(!currentDetail \|\| !isCurrent\(\)\) return/);
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);

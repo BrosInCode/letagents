@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const mainSource = read("../main.ts");
+// The entry point and the daemon class modules it re-exports from ./main/.
+const mainFiles = ["../main.ts", ...readdirSync(new URL("../main/", import.meta.url)).filter((name) => name.endsWith(".ts")).sort().map((name) => `../main/${name}`)];
+const mainSource = mainFiles.map(read).join("\n");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
 const daemonReadModelSource = read("../daemon-read-model.ts");
@@ -129,7 +131,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "worker-authority-coordinator",
     "worker-runtime-custody",
   ]) {
-    assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
+    assert.match(mainSource, new RegExp(`from "\\.\\.?/${moduleName}\\.js"`));
   }
   assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
   assert.match(daemonReadModelSource, /from "\.\/room-agent-state-projection\.js"/);
@@ -190,7 +192,11 @@ test("daemon policy and projection domains remain extracted", () => {
   // priority marks; limits, queueing and priority stay in convergence-pacer.ts.
   // 1677 -> 1678: the live activity summary port; the line, its path stripping
   // and its throttle stay in live-activity-summary-relay.ts.
-  assert.ok(mainSource.split("\n").length < 1_678, "main.ts must remain a thin composition root");
+  // 1678 -> 1900: main.ts split into ./main/ modules (one class chain, no behavior
+  // change); the budget now counts every file of the composition root, and the
+  // split added only file headers, imports, layer declarations and abstract parts.
+  assert.ok(mainSource.split("\n").length < 1_900, "main.ts must remain a thin composition root");
+  for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 
 function read(relativePath: string): string {
