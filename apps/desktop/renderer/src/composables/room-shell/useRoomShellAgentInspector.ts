@@ -268,6 +268,7 @@ export function useRoomShellAgentProjections(context: unknown) {
   >;
   const app = context as RoomShellContextOf<"useRoomShellParticipants">;
   const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
+  Object.assign(app, { agentPauseRequests });
   const roomWakeRules = useRoomWakeRules(roomIdentifierRef, computed(() => props.storage.effectiveMode !== "local"));
   provideRoomWakeRules({
     roomIdentifier: roomIdentifierRef,
@@ -291,6 +292,7 @@ export function useRoomShellAgentProjections(context: unknown) {
       pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
     });
   });
+  Object.assign(app, { agentInspectorProjections });
   const {
     correctionRequest: agentInspectorCorrectionRequest,
     correctableAgents,
@@ -391,7 +393,7 @@ export function useRoomShellInspectorObservations(context: unknown) {
     upsert: (entry, version) => upsertSupervisorEntry({ entry, roomIdentifier: entry.roomId, inspectorRequestVersion: version }),
     entriesState: supervisorEntriesState, entriesError: supervisorEntriesError,
   });
-  Object.assign(app, { openAgentInspectorWork });
+  Object.assign(app, { refreshAgentInspectorDiagnostics, openAgentInspectorWork });
   return {
     refreshAgentInspectorDiagnostics, openAgentInspectorWork,
   };

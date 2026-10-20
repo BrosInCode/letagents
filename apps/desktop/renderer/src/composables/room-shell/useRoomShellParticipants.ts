@@ -61,6 +61,7 @@ export function useRoomShellParticipants(context: unknown) {
       props.room.identifier,
     )
   );
+  Object.assign(app, { roomParticipants });
   const agentMentionInsertTextByEntryId = computed(() => {
     const result = new Map<string, string>();
     for (const entry of supervisorEntries.value) {

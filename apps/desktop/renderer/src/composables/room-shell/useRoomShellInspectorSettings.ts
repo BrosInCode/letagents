@@ -26,8 +26,8 @@ export function useRoomShellInspectorSettings(context: unknown) {
   const app = context as RoomShellContextOf<
       "useRoomShellAgentProjections"
     | "useRoomShellInspectorActions"
+    | "useRoomShellInspectorRunActions"
     | "useRoomShellSupervisorActions"
-    | "pending"
   >;
   let agentInspectorSettingsDraftVersion = 0;
 

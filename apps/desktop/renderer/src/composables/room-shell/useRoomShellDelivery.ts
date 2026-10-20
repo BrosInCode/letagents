@@ -15,8 +15,8 @@ export function useRoomShellDeliveryActions(context: unknown) {
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
   const app = context as RoomShellContextOf<
       "useRoomShellInspectorActions"
+    | "useRoomShellInspectorRunActions"
     | "useRoomShellSupervisorActions"
-    | "pending"
   >;
   async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string): Promise<void> {
     if (!deliveryRetryAvailable.value) return;
