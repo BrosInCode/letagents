@@ -42,9 +42,9 @@ export function useRoomShellInspectorActions(context: unknown) {
   const app = context as RoomShellContextOf<
       "useRoomShellAgentProjections"
     | "useRoomShellInspectorObservations"
+    | "useRoomShellInspectorSettings"
     | "useRoomShellIntegrations"
     | "useRoomShellToolActions"
-    | "pending"
   >;
   let agentInspectorProvidersRequest: Promise<void> | null = null;
   let agentInspectorMessageIdentityRequestToken = 0;
@@ -251,19 +251,22 @@ export function useRoomShellInspectorActions(context: unknown) {
 /** Pause requests, wake rules, inspector projections, correction handoff, and configuration apply. */
 export function useRoomShellAgentProjections(context: unknown) {
   const {
-    agentInspectorActionState, agentInspectorConfigurationResource, agentInspectorWorkResource,
-    continuationRepairAvailable, deliveryRetryAvailable, deliveryRetryingKeys,
-    openAgentDetailRequest, props, refreshSupervisorStatus, revealWakeMessage,
+    agentInspectorActionState, agentInspectorConfigurationResource, agentInspectorOperationCurrent,
+    agentInspectorOperationIdentityCurrent, agentInspectorSettingsSelectionCurrent,
+    agentInspectorWorkResource, beginAgentInspectorOperation, continuationRepairAvailable,
+    deliveryRetryAvailable, deliveryRetryingKeys, openAgentDetailRequest, props,
+    recoverAgentInspectorSettingsGeneration, refreshSupervisorStatus, revealWakeMessage,
     roomDeliverySkipAvailable, roomIdentifierRef, selectedAgentDetailTarget, supervisorEntries,
     supervisorEntriesState, supervisorStatus,
   } = context as RoomShellContextOf<
       "inputs"
     | "useRoomShellInspectorActions"
+    | "useRoomShellInspectorSettings"
     | "useRoomShellState"
     | "useRoomShellSupervisorActions"
     | "useRoomShellToolActions"
   >;
-  const app = context as RoomShellContextOf<"useRoomShellParticipants" | "pending">;
+  const app = context as RoomShellContextOf<"useRoomShellParticipants">;
   const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
   const roomWakeRules = useRoomWakeRules(roomIdentifierRef, computed(() => props.storage.effectiveMode !== "local"));
   provideRoomWakeRules({
@@ -313,12 +316,12 @@ export function useRoomShellAgentProjections(context: unknown) {
     configurationResource: agentInspectorConfigurationResource,
     actionState: agentInspectorActionState,
     refreshSupervisorStatus,
-    selectionCurrent: app.agentInspectorSettingsSelectionCurrent,
+    selectionCurrent: agentInspectorSettingsSelectionCurrent,
     beginOperation: (message, daemonGeneration) =>
-      app.beginAgentInspectorOperation("apply_settings", message, daemonGeneration),
-    operationIdentityCurrent: app.agentInspectorOperationIdentityCurrent,
-    operationCurrent: app.agentInspectorOperationCurrent,
-    recoverGeneration: app.recoverAgentInspectorSettingsGeneration,
+      beginAgentInspectorOperation("apply_settings", message, daemonGeneration),
+    operationIdentityCurrent: agentInspectorOperationIdentityCurrent,
+    operationCurrent: agentInspectorOperationCurrent,
+    recoverGeneration: recoverAgentInspectorSettingsGeneration,
   });
   const selectedAgentInspectorActionState = computed(() => {
     const target = selectedAgentDetailTarget.value;
@@ -344,17 +347,17 @@ export function useRoomShellAgentProjections(context: unknown) {
 /** Reset the inspector on focus changes, and follow the live session. */
 export function useRoomShellInspectorWatchers(context: unknown) {
   const {
-    agentInspectorConfigurationResource, agentInspectorRequestState, openAgentInspectorLive,
-    selectedAgentDetailProjection, selectedAgentDetailRequestVersion,
+    agentInspectorConfigurationResource, agentInspectorRequestState, loadAgentInspectorSettings,
+    openAgentInspectorLive, selectedAgentDetailProjection, selectedAgentDetailRequestVersion,
   } = context as RoomShellContextOf<
       "useRoomShellAgentProjections"
     | "useRoomShellInspectorActions"
+    | "useRoomShellInspectorSettings"
     | "useRoomShellState"
   >;
-  const app = context as RoomShellContextOf<"pending">;
   // Identity can resolve after the panel opens from a historical message.
   watch([() => selectedAgentDetailProjection.value?.entryId, selectedAgentDetailRequestVersion], ([entryId]) => {
-    if (entryId && agentInspectorConfigurationResource.value.status === "idle") void app.loadAgentInspectorSettings();
+    if (entryId && agentInspectorConfigurationResource.value.status === "idle") void loadAgentInspectorSettings();
   });
 
   watch(

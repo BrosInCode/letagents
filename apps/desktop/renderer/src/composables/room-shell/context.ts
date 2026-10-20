@@ -9,6 +9,7 @@ import type { useRoomShellSupervisorActions, useRoomShellSupervisorSync } from "
 import type { useRoomShellDeliveryActions } from "./useRoomShellDelivery";
 import type { useRoomShellToolActions, useRoomShellStorageWatcher } from "./useRoomShellTools";
 import type { useRoomShellInspectorActions, useRoomShellAgentProjections, useRoomShellInspectorWatchers, useRoomShellInspectorObservations } from "./useRoomShellAgentInspector";
+import type { useRoomShellInspectorSettings } from "./useRoomShellInspectorSettings";
 import type { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotifications } from "./useRoomShellConversation";
 import type { useRoomShellParticipants } from "./useRoomShellParticipants";
 
@@ -21,6 +22,7 @@ interface RoomShellContextParts {
   useRoomShellDeliveryActions: ReturnType<typeof useRoomShellDeliveryActions>;
   useRoomShellToolActions: ReturnType<typeof useRoomShellToolActions>;
   useRoomShellInspectorActions: ReturnType<typeof useRoomShellInspectorActions>;
+  useRoomShellInspectorSettings: ReturnType<typeof useRoomShellInspectorSettings>;
   useRoomShellStorageWatcher: ReturnType<typeof useRoomShellStorageWatcher>;
   useRoomShellAgentProjections: ReturnType<typeof useRoomShellAgentProjections>;
   useRoomShellSupervisorSync: ReturnType<typeof useRoomShellSupervisorSync>;
