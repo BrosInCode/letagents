@@ -17,7 +17,7 @@ export function useRoomShellToolActions(context: unknown) {
     pushActionToast, refreshedEnvironmentRepoStatus, revealedMessageId, roomActiveTabStorageKey,
     rulesOpen, storageBusy, storageFeedback, supervisorEntries,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
-  const app = context as RoomShellContextOf<"pending">;
+  const app = context as RoomShellContextOf<"useRoomShellConversation" | "useRoomShellIntegrations" | "pending">;
   let environmentRepoStatusRefreshRequestId = 0;
   function openBoardTask(taskId: string): void {
     boardSelectedTaskId.value = taskId;

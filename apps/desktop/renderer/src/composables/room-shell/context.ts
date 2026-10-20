@@ -8,6 +8,7 @@ import type { useRoomShellState } from "./useRoomShellState";
 import type { useRoomShellSupervisorActions, useRoomShellSupervisorSync } from "./useRoomShellSupervisor";
 import type { useRoomShellDeliveryActions } from "./useRoomShellDelivery";
 import type { useRoomShellToolActions, useRoomShellStorageWatcher } from "./useRoomShellTools";
+import type { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotifications } from "./useRoomShellConversation";
 
 /** What each part of the context holds, by composable name. */
 interface RoomShellContextParts {
@@ -19,6 +20,9 @@ interface RoomShellContextParts {
   useRoomShellToolActions: ReturnType<typeof useRoomShellToolActions>;
   useRoomShellStorageWatcher: ReturnType<typeof useRoomShellStorageWatcher>;
   useRoomShellSupervisorSync: ReturnType<typeof useRoomShellSupervisorSync>;
+  useRoomShellConversation: ReturnType<typeof useRoomShellConversation>;
+  useRoomShellIntegrations: ReturnType<typeof useRoomShellIntegrations>;
+  useRoomShellNotifications: ReturnType<typeof useRoomShellNotifications>;
   /** Names that still live in DesktopRoomShell.vue while the split is in progress. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pending: Record<string, any>;
