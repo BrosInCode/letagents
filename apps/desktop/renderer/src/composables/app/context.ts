@@ -7,6 +7,7 @@ import type { useAppState } from "./useAppState";
 import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
 import type { useAppRentalActions, useAppRentalEvents } from "./useAppRentals";
 import type { useAppSidebarLayout } from "./useAppSidebarLayout";
+import type { useAppProjectRepo, useAppProjectRepoWatchers } from "./useAppProjectRepo";
 import type { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./useAppSidebarMessages";
 import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSidebarSelection";
 import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
@@ -19,6 +20,7 @@ interface AppContextParts {
   useAppInboxActions: ReturnType<typeof useAppInboxActions>;
   useAppRentalActions: ReturnType<typeof useAppRentalActions>;
   useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
+  useAppProjectRepo: ReturnType<typeof useAppProjectRepo>;
   useAppSidebarMessages: ReturnType<typeof useAppSidebarMessages>;
   useAppSidebarSelection: ReturnType<typeof useAppSidebarSelection>;
   useAppFocusRoomConclusion: ReturnType<typeof useAppFocusRoomConclusion>;
@@ -36,6 +38,7 @@ interface AppContextParts {
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
   useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
+  useAppProjectRepoWatchers: ReturnType<typeof useAppProjectRepoWatchers>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
   /** Names that still live in App.vue while the split is in progress. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

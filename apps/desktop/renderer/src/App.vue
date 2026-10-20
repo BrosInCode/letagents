@@ -411,7 +411,6 @@ import type {
   DesktopAppAgentSaveSettingsInput,
   DesktopChatStorageSettings,
   DesktopRoomSnapshot,
-  RepoStatus,
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
@@ -428,7 +427,6 @@ import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboard
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
-import { activeRepoRoomContext, resolveActiveProjectRootPath } from "./domain/room-project-context";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
@@ -443,7 +441,6 @@ import {
   appAgentArchivedRoomIdentifiers,
   appAgentRefreshTargets,
 } from "./domain/app-agent";
-import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "./domain/account-activity";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -454,6 +451,7 @@ import { useAppState } from "./composables/app/useAppState";
 import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
 import { useAppRentalActions, useAppRentalEvents } from "./composables/app/useAppRentals";
 import { useAppSidebarLayout } from "./composables/app/useAppSidebarLayout";
+import { useAppProjectRepo, useAppProjectRepoWatchers } from "./composables/app/useAppProjectRepo";
 import { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./composables/app/useAppSidebarMessages";
 import { useAppSidebarSelection, useAppSidebarEntries } from "./composables/app/useAppSidebarSelection";
 import { useAppFocusRoomConclusion } from "./composables/app/useAppFocusRoomConclusion";
@@ -472,13 +470,13 @@ const app = {} as AppContext;
 const {
   loading, appInfo, updateStatus, repoStatus, workers, rootRoomSnapshot, selectedSnapshot,
   authStatus, sessionGeneration, authDialogOpen, recentRootRoomsStorageKey,
-  legacyRepositoryRootBindingsStorageKey, sidebarRoomOrderStorageKey, sidebarMinWidth,
-  sidebarMaxWidth, SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier,
-  recentRootRooms, newRoomRecentProjectFolders, legacyRepositoryRootBindings, projectBindings,
-  sidebarWidth, sidebarRoomOrder, sidebarRevealRequest, isSidebarResizing, sidebarLatestMessages,
-  chatScrollPositionsByRoom, loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms,
-  sidebarMetadataRefresh, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
-  openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
+  sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
+  SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, recentRootRooms,
+  newRoomRecentProjectFolders, sidebarWidth, sidebarRoomOrder, sidebarRevealRequest,
+  isSidebarResizing, sidebarLatestMessages, chatScrollPositionsByRoom,
+  loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms, sidebarMetadataRefresh,
+  rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread, openConversationId,
+  openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
   openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
   chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
   appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
@@ -500,6 +498,10 @@ const {
   handleSidebarResizeKeydown, setAllProjectsCollapsed, handleSidebarParentRoomReorder,
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));
+const {
+  refreshActiveRepoStatus, refreshProjectBindings, initializeProjectBindings,
+  handleRepoStatusChanged, openWorkspaceGitRoom, connectActiveRoomProject, openWorktreeForAgent,
+} = Object.assign(app, useAppProjectRepo(app));
 const {
   refreshSidebarRoomMetadata, refreshSidebarLatestMessages, roomHistoryMode,
   sidebarRoomIdentifiers, latestMessageIdForEntry, markActiveRoomRead, markRoomEntryRead,
@@ -523,8 +525,8 @@ const {
 } = Object.assign(app, useAppSessionActions(app));
 // Functions still in App.vue are hoisted, so they join the context first.
 Object.assign(app, {
-  activeProjectRootPath, refreshProjectBindings, restartRepoStatusWatch, leaveArchivedRoomIfActive,
-  openRoomFromAppAgent, forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
+  leaveArchivedRoomIfActive, openRoomFromAppAgent, forgetLoadingChatScrollRooms,
+  activeChatScrollRoomIdentifier,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -542,10 +544,10 @@ let needsYouInterval: number | null = null;
 
 const {
   activeEntry, collapsedProjects, currentParentRoom, openRoomSnapshot, pinnedCollapsed, pinnedRoom,
-  projectEntries, reconcileActiveEntry, rememberRootRoomSnapshot, repoName,
-  resolveSelectedRoomIdentifier, roomsCollapsed, returnFromSettings, selectedAccess,
-  selectedFocusRooms, selectedNeedsAccess, selectedRoomIdentifier, selectedRoomInfo, sidebarMode,
-  toggleProject, togglePinnedCollapsed, toggleRoomsCollapsed,
+  reconcileActiveEntry, rememberRootRoomSnapshot, repoName, resolveSelectedRoomIdentifier,
+  roomsCollapsed, returnFromSettings, selectedAccess, selectedFocusRooms, selectedNeedsAccess,
+  selectedRoomIdentifier, selectedRoomInfo, sidebarMode, toggleProject, togglePinnedCollapsed,
+  toggleRoomsCollapsed,
 } = Object.assign(app, useAppNavigation(app));
 
 const {
@@ -568,12 +570,6 @@ let unsubscribeRepoStatusChanged: (() => void) | null = null;
 
 let accountRoomsRefreshInterval: number | null = null;
 
-let repoStatusRefreshInFlight = false;
-
-let repoStatusWatchRootPath: string | null = null;
-
-let repoStatusWatchRequestId = 0;
-
 const {
   actionToasts, dismissActionToast, pushActionToast, selectedRoomWithProjectContext,
   selectedGitRoomMatchesActiveRepo, selectedRoomProjectRootPath, selectedRoomIsProject,
@@ -585,142 +581,7 @@ const {
   refreshUnreadCounts, sidebarProjectEntries, selectedRoomRenderKey, selectedRoomStorage,
 } = Object.assign(app, useAppSidebarEntries(app));
 
-async function refreshActiveRepoStatus(): Promise<void> {
-  if (showFirstRunGate.value || !authStatus.value?.authenticated || repoStatusRefreshInFlight) return;
-  const rootPath = activeProjectRootPath();
-  if (!rootPath) return;
-  repoStatusRefreshInFlight = true;
-  const generation = sessionGeneration.value;
-  try {
-    const nextRepoStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
-    if (generation === sessionGeneration.value && authStatus.value?.authenticated && nextRepoStatus) {
-      repoStatus.value = nextRepoStatus;
-    }
-  } finally {
-    repoStatusRefreshInFlight = false;
-  }
-}
-
-function activeProjectRootPath(): string | null {
-  // Derive the project context from the sidebar group that actually contains the
-  // active room, NOT the last-opened global root snapshot (which can be a stale,
-  // unrelated non-repo room). This is what keeps a focus room attached to its
-  // real repo project. Fall back to the global root only when the active entry is
-  // in no repo-backed group.
-  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
-  // Presence-based, not nullish: if the active room IS in a group, that group is
-  // authoritative even when it's a non-repo group (null identifier/gitRoom) — a
-  // grouped non-repo room must not inherit a stale repo snapshot. Fall back to the
-  // global root only when the active entry is in no group at all.
-  return resolveActiveProjectRootPath({
-    activeRootIdentifier: context
-      ? context.roomIdentifier
-      : selectedRootRoomIdentifier.value ?? rootRoomSnapshot.value?.roomIdentifier,
-    activeRootGitRoom: context
-      ? context.gitRoom
-      : rootRoomSnapshot.value?.room?.gitRoom ?? null,
-    projectBindings: projectBindings.value,
-  });
-}
-
-async function refreshProjectBindings(): Promise<void> {
-  if (!desktopIpc.repos?.listProjectBindings) return;
-  const generation = sessionGeneration.value;
-  const nextBindings = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
-  if (generation !== sessionGeneration.value) return;
-  projectBindings.value = nextBindings;
-}
-
-async function initializeProjectBindings(): Promise<void> {
-  const generation = sessionGeneration.value;
-  if (!desktopIpc.repos?.migrateProjectBindings) {
-    await refreshProjectBindings();
-    return;
-  }
-  const candidates = [
-    ...Object.entries(legacyRepositoryRootBindings).map(([roomIdentifier, rootPath]) => ({
-      legacyKey: roomIdentifier,
-      context: { roomIdentifier },
-      rootPath,
-    })),
-    ...recentRootRooms.value.flatMap((room) => room.rootPath ? [{
-      context: { roomIdentifier: room.identifier },
-      rootPath: room.rootPath,
-    }] : []),
-  ];
-  try {
-    const migration = await desktopIpc.repos.migrateProjectBindings(candidates);
-    if (generation !== sessionGeneration.value) return;
-    projectBindings.value = migration.bindings;
-    const retryBindings = Object.fromEntries(
-      migration.retryLegacyKeys.flatMap((key) => {
-        const rootPath = legacyRepositoryRootBindings[key];
-        return rootPath ? [[key, rootPath]] : [];
-      }),
-    );
-    if (Object.keys(retryBindings).length) {
-      window.localStorage.setItem(
-        legacyRepositoryRootBindingsStorageKey,
-        JSON.stringify(retryBindings),
-      );
-    } else {
-      window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
-    }
-  } catch {
-    if (generation !== sessionGeneration.value) return;
-    await refreshProjectBindings();
-  }
-}
-
-async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
-  if (!desktopIpc.repos?.startStatusWatch) return;
-  const nextRootPath = rootPath?.trim() || null;
-  if (repoStatusWatchRootPath === nextRootPath) return;
-  const requestId = ++repoStatusWatchRequestId;
-  repoStatusWatchRootPath = nextRootPath;
-  await desktopIpc.repos.stopStatusWatch?.().catch(() => undefined);
-  if (requestId !== repoStatusWatchRequestId || repoStatusWatchRootPath !== nextRootPath) return;
-  if (!nextRootPath) return;
-  const nextStatus = await desktopIpc.repos.startStatusWatch(nextRootPath).catch(() => null);
-  if (requestId === repoStatusWatchRequestId && nextStatus && activeProjectRootPath() === nextRootPath) {
-    repoStatus.value = nextStatus;
-  }
-}
-
-function handleRepoStatusChanged(nextStatus: RepoStatus): void {
-  const rootPath = activeProjectRootPath();
-  if (rootPath && nextStatus.rootPath !== rootPath) return;
-  repoStatus.value = nextStatus;
-}
-
 Object.assign(app, useAppRentalEvents(app));
-
-async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean> {
-  const rootPath = rootPathOverride || repoStatus.value?.rootPath || activeProjectRootPath();
-  if (!rootPath) return false;
-  loading.value = true;
-  try {
-    const selection = await desktopIpc.repos.openRoom(rootPath);
-    if (selection.error || !selection.snapshot) {
-      return false;
-    }
-    if (selection.repoStatus) {
-      repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, selection.repoStatus);
-    }
-    openRoomSnapshot(selection.snapshot, {
-      aliasIdentifiers: [selection.roomIdentifier],
-      rootPath: selection.repoPath || rootPath,
-      kind: "project",
-      meta: selection.repoStatus?.branch || null,
-    });
-    return true;
-  } catch (error) {
-    console.warn("Could not open the matching Git Room.", error);
-    return false;
-  } finally {
-    loading.value = false;
-  }
-}
 
 Object.assign(app, useAppHistoryWatchers(app));
 
@@ -956,42 +817,6 @@ const {
   setupLoadError,
 });
 Object.assign(app, { showFirstRunGate });
-
-async function connectActiveRoomProject(): Promise<void> {
-  const groupedContext = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
-  const context = groupedContext || {
-    roomIdentifier: selectedRoomWithProjectContext.value.identifier,
-    gitRoom: selectedRoomWithProjectContext.value.gitRoom,
-  };
-  if (!desktopIpc.repos?.connectProject) {
-    pushActionToast("Restart LetAgents Desktop to connect this project.", "error");
-    return;
-  }
-  const result = await desktopIpc.repos.connectProject(context).catch((error) => ({
-    canceled: false,
-    binding: null,
-    repoStatus: null,
-    error: error instanceof Error ? error.message : "LetAgents could not connect that project.",
-  }));
-  if (result.canceled) return;
-  if (result.error || !result.binding) {
-    pushActionToast(result.error || "LetAgents could not connect that project.", "error", 6_000);
-    return;
-  }
-  await refreshProjectBindings();
-  if (result.repoStatus) repoStatus.value = result.repoStatus;
-  pushActionToast("This room is now connected to its local project.", "success");
-}
-
-async function openWorktreeForAgent(rootPath: string): Promise<void> {
-  await openManagedAgentWorktree({
-    rootPath,
-    openWorkspaceGitRoom,
-    setReopenAddAgent: (value) => {
-      openAddAgentAfterRepoPick.value = value;
-    },
-  });
-}
 
 function getChatStorageBridge(): typeof desktopIpc.chatStorage | null {
   const bridge = desktopIpc.chatStorage;
@@ -1538,19 +1363,7 @@ function activeChatScrollRoomIdentifier(): string | null {
 
 Object.assign(app, useAppSelectionWatchers(app));
 
-watch(
-  () => activeProjectRootPath(),
-  (rootPath) => {
-    void restartRepoStatusWatch(rootPath);
-  },
-  { immediate: true }
-);
-
-// The list is only ever replaced, never edited in place, so an identity watch sees
-// every change without walking each room.
-watch(recentRootRooms, () => {
-  void refreshProjectBindings();
-});
+Object.assign(app, useAppProjectRepoWatchers(app));
 
 watch(
   [

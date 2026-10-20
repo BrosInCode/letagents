@@ -53,7 +53,7 @@ export function useAppNavigation(context: unknown) {
     selectedRootRoomIdentifier,
     selectedSnapshot,
   });
-  Object.assign(app, { activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, projectEntries, selectSidebarEntry, selectedRoomIdentifier, sidebarMode });
+  Object.assign(app, { activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, openRoomSnapshot, projectEntries, selectSidebarEntry, selectedRoomIdentifier, sidebarMode });
   return {
     activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, focusRooms,
     getAuthRoomIdentifier, openRoomSnapshot, pinnedCollapsed, pinnedRoom, projectEntries,
@@ -66,10 +66,10 @@ export function useAppNavigation(context: unknown) {
 
 /** Action toasts and the selected room's project context. */
 export function useAppRoomContext(context: unknown) {
-  const app = context as AppContextOf<"useAppNavigation" | "useAppState" | "appVuePending">;
+  const app = context as AppContextOf<"useAppNavigation" | "useAppProjectRepo" | "useAppState">;
   const {
-    activeEntry, authStatus, projectEntries, recentRootRooms, repoStatus, rootRoomSnapshot,
-    selectedRoomInfo, selectedRootRoomIdentifier, selectedSnapshot,
+    activeEntry, activeProjectRootPath, authStatus, projectEntries, recentRootRooms, repoStatus,
+    rootRoomSnapshot, selectedRoomInfo, selectedRootRoomIdentifier, selectedSnapshot,
   } = app;
   const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
   Object.assign(app, { pushActionToast });
@@ -84,6 +84,7 @@ export function useAppRoomContext(context: unknown) {
     );
     return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
   });
+  Object.assign(app, { selectedRoomWithProjectContext });
   provideAgentRoomAudience(() => selectedRoomWithProjectContext.value, () => selectedSnapshot.value?.participants ?? [], () => [authStatus.value?.account?.login, authStatus.value?.account?.displayName]);
 
   const selectedGitRoomMatchesActiveRepo = computed(() => {
@@ -100,7 +101,7 @@ export function useAppRoomContext(context: unknown) {
       === normalizeRoomIdentifier(rootRoomSnapshot.value?.roomIdentifier);
   });
 
-  const selectedRoomProjectRootPath = computed(() => app.activeProjectRootPath());
+  const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
   const selectedRoomIsProject = computed(() => {
     if (selectedRoomWithProjectContext.value.gitRoom || selectedRoomProjectRootPath.value) return true;
     const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
