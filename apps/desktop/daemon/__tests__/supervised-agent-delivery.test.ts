@@ -3191,7 +3191,7 @@ test("the origin of a series of follow-ups is found however long it is, and the 
 
 test("the daemon, the manifest wire and the desktop name the same reasons for a follow-up", () => {
   const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
-  const listed = read("../../electron/main/supervisor-daemon.ts").match(/const FOLLOW_UP_REASONS = \[([^\]]*)\]/)![1]!.match(/"[a-z_]+"/g)!.map((text) => text.slice(1, -1));
+  const listed = read("../../electron/main/supervisor-daemon/entry-mapping.ts").match(/const FOLLOW_UP_REASONS = \[([^\]]*)\]/)![1]!.match(/"[a-z_]+"/g)!.map((text) => text.slice(1, -1));
   assert.deepEqual(listed, [...FOLLOW_UP_REASONS]);
   for (const path of ["../types.ts", "../../electron/ipc-types/agents.ts"]) for (const reason of FOLLOW_UP_REASONS) assert.ok(read(path).includes(`"${reason}"`), `${path}: ${reason}`);
 });
