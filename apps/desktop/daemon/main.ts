@@ -2,20 +2,12 @@ import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, ty
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
 import { restoreLocalRoomAuthorities, localRoomRuntime, isLocalRoomApi } from "./local-room-runtime.js";
 import { dirname, join } from "node:path";
-
 import { AuditLog } from "./audit-log.js";
 import { AgentStreamRegistry } from "./agent-stream-registry.js";
 import { ReplyAttachmentSpool } from "./reply-attachment-spool.js";
 import { BoundedEffectCoordinator } from "./bounded-effect-coordinator.js";
 import { ContinuationRepairCoordinator } from "./continuation-repair-coordinator.js";
-import {
-  createLiveActivitySession,
-  productionSupervisedDeliveryHttp,
-  productionSupervisorGrantHttp,
-  updateLiveActivitySession,
-  withdrawLiveActivity,
-  type SupervisorGrantHttp,
-} from "./cloud-http.js";
+import { createLiveActivitySession, productionSupervisedDeliveryHttp, productionSupervisorGrantHttp, updateLiveActivitySession, withdrawLiveActivity, type SupervisorGrantHttp } from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
 import { createHostApprovalBridge } from "./host-approval-broker.js";
@@ -48,14 +40,11 @@ import { LiveRoomSharePublisher } from "./live-room-share-publisher.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
 import { recordedRemote, RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
-import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
+import type { ProviderActionHandle, ProviderActionPort, ProviderActionStreamEvent, ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
 import { ProviderExecutionCoordinator, type ConvergenceRequestKind } from "./provider-execution-coordinator.js";
 import { ProviderHandoffCoordinator } from "./provider-handoff-coordinator.js";
-import {
-  ProviderReconciliationCoordinator,
-  type DaemonReconcileInput,
-} from "./provider-reconciliation-coordinator.js";
+import { ProviderReconciliationCoordinator, type DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 import { ProviderSchedulerFailureCoordinator } from "./provider-scheduler-failure-coordinator.js";
 import { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
 import { ProviderTerminalCoordinator, type TerminalCommitFence } from "./provider-terminal-coordinator.js";
@@ -65,13 +54,9 @@ import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-ap
 import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { runEveryStopStep } from "./stop-steps.js";
-import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
-import {
-  deriveProviderConfigurationSnapshot,
-} from "./provider-configuration.js";
-import {
-  supervisedPermissionProfilesForProvider,
-} from "./supervised-permission-profiles.js";
+import type { DaemonActivityEvent, DaemonAgentStreamEvent, DaemonManifestEntry, DaemonManifestEntryView, DaemonRequest, DaemonRoomMoveRecord, ExecutionTerminalPayload, ObservedState, PolicyCondition, ReconciliationNotice } from "./types.js";
+import { deriveProviderConfigurationSnapshot } from "./provider-configuration.js";
+import { supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
 import { createGitCommand, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-authority-coordinator.js";
@@ -82,6 +67,9 @@ import { RoomTurnAttachmentStager } from "./room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-lifecycle-coordinator.js";
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
+import { type DaemonPaths, type RecoveryClock, REPLY_ATTACHMENT_RETENTION_MS } from "./main/types.js";
+
+
 
 export {
   productionSupervisedDeliveryHttp,
@@ -106,14 +94,6 @@ export {
 
 export type { DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 
-type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
-type RecoveryClock = {
-  nowMs?: () => number;
-  setTimeout?: typeof setTimeout;
-  clearTimeout?: typeof clearTimeout; sleep?: (delayMs: number) => Promise<void>; random?: () => number;
-};
-/** Copies for replies that never published are removed after this long. */
-const REPLY_ATTACHMENT_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
 
 export class SupervisorDaemon {
   private readonly stateDatabasePath: string;
