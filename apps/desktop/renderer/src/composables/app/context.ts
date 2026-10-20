@@ -5,6 +5,7 @@
 
 import type { useAppState } from "./useAppState";
 import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
+import type { useAppRentalActions, useAppRentalEvents } from "./useAppRentals";
 import type { useAppSidebarLayout } from "./useAppSidebarLayout";
 import type { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./useAppSidebarMessages";
 import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSidebarSelection";
@@ -16,6 +17,7 @@ import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } fro
 interface AppContextParts {
   useAppState: ReturnType<typeof useAppState>;
   useAppInboxActions: ReturnType<typeof useAppInboxActions>;
+  useAppRentalActions: ReturnType<typeof useAppRentalActions>;
   useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
   useAppSidebarMessages: ReturnType<typeof useAppSidebarMessages>;
   useAppSidebarSelection: ReturnType<typeof useAppSidebarSelection>;
@@ -29,6 +31,7 @@ interface AppContextParts {
   useAppRoomContext: ReturnType<typeof useAppRoomContext>;
   useAppReadMarkers: ReturnType<typeof useAppReadMarkers>;
   useAppSidebarEntries: ReturnType<typeof useAppSidebarEntries>;
+  useAppRentalEvents: ReturnType<typeof useAppRentalEvents>;
   useAppHistoryWatchers: ReturnType<typeof useAppHistoryWatchers>;
   useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;

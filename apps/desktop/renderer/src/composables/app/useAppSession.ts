@@ -22,6 +22,7 @@ export function useAppSessionActions(context: unknown) {
     | "useAppInboxActions"
     | "useAppInboxState"
     | "useAppNavigation"
+    | "useAppRentalActions"
     | "useAppSidebarMessages"
     | "useAppState"
     | "appVuePending"

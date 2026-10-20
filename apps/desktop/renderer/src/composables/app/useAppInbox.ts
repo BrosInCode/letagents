@@ -19,6 +19,7 @@ export function useAppInboxActions(context: unknown) {
   const app = context as AppContextOf<
       "useAppInboxState"
     | "useAppNavigation"
+    | "useAppRentalActions"
     | "useAppRoomContext"
     | "useAppState"
     | "appVuePending"

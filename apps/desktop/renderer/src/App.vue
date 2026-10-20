@@ -434,9 +434,8 @@ import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
-import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
 import { normalizeRoomIdentifier, rememberRecentRootRooms } from "./domain/sidebar-rooms";
 import { promoteSidebarProject, replaceSidebarProjectId, rememberSidebarRoomOrder } from "./domain/sidebar-room-order";
@@ -453,6 +452,7 @@ import { roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
 import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
+import { useAppRentalActions, useAppRentalEvents } from "./composables/app/useAppRentals";
 import { useAppSidebarLayout } from "./composables/app/useAppSidebarLayout";
 import { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./composables/app/useAppSidebarMessages";
 import { useAppSidebarSelection, useAppSidebarEntries } from "./composables/app/useAppSidebarSelection";
@@ -492,6 +492,9 @@ const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
 } = Object.assign(app, useAppInboxActions(app));
 const {
+  openRentMarketplace, openRentalRequestInbox, refreshRentalRequestCount,
+} = Object.assign(app, useAppRentalActions(app));
+const {
   isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
   settingsPaneForActiveEntry, openSettingsSurface, openUpdatesSurface, startSidebarResize,
   handleSidebarResizeKeydown, setAllProjectsCollapsed, handleSidebarParentRoomReorder,
@@ -520,9 +523,8 @@ const {
 } = Object.assign(app, useAppSessionActions(app));
 // Functions still in App.vue are hoisted, so they join the context first.
 Object.assign(app, {
-  activeProjectRootPath, refreshProjectBindings, restartRepoStatusWatch, refreshRentalRequestCount,
-  leaveArchivedRoomIfActive, openRoomFromAppAgent, forgetLoadingChatScrollRooms,
-  activeChatScrollRoomIdentifier,
+  activeProjectRootPath, refreshProjectBindings, restartRepoStatusWatch, leaveArchivedRoomIfActive,
+  openRoomFromAppAgent, forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
 });
 
 Object.assign(app, useAppAccountScope(app));
@@ -691,38 +693,7 @@ function handleRepoStatusChanged(nextStatus: RepoStatus): void {
   repoStatus.value = nextStatus;
 }
 
-function openRentMarketplace(): void {
-  rentMarketplaceRole.value = "renter";
-  activeEntry.value = rentMarketplaceEntry;
-}
-
-function openRentalRequestInbox(): void {
-  rentMarketplaceRole.value = "provider";
-  activeEntry.value = rentMarketplaceEntry;
-}
-
-async function refreshRentalRequestCount(): Promise<void> {
-  if (!authStatus.value?.authenticated || authSessionLocked.value) {
-    rentalRequestCount.value = 0; inboxRentals.value = []; inboxRentalError.value = '';
-    return;
-  }
-  if (!desktopIpc.rental?.getProviderDashboard) return;
-  const generation = sessionGeneration.value;
-  const accountId = authStatus.value?.account?.id;
-  try {
-    const dashboard = await loadRentalProviderDashboard();
-    if (generation !== sessionGeneration.value || accountId !== authStatus.value?.account?.id || !authStatus.value?.authenticated) return;
-    inboxRentals.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests : [];
-    rentalRequestCount.value = inboxRentals.value.length; inboxRentalError.value = '';
-  } catch {
-    if (generation !== sessionGeneration.value || accountId !== authStatus.value?.account?.id) return;
-    rentalRequestCount.value = 0; inboxRentals.value = []; inboxRentalError.value = 'Rental requests could not be checked.';
-  }
-}
-
-useRentalProviderEvents(() => {
-  void refreshRentalRequestCount();
-});
+Object.assign(app, useAppRentalEvents(app));
 
 async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean> {
   const rootPath = rootPathOverride || repoStatus.value?.rootPath || activeProjectRootPath();
@@ -823,8 +794,8 @@ const authSnapshotPending = computed(() =>
 );
 
 const {
-  authBusy, authFeedback, authSessionLocked, cancelAuthFlow, clearAuthPollTimer, openVerification,
-  pollAuthFlow, signOut, startAuthFlow,
+  authBusy, authFeedback, cancelAuthFlow, clearAuthPollTimer, openVerification, pollAuthFlow,
+  signOut, startAuthFlow,
 } = Object.assign(app, useAppAuthFlow(app));
 
 const {
