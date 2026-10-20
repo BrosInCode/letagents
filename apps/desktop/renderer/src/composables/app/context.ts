@@ -4,10 +4,19 @@
 // in its original registration order.
 
 import type { useAppState } from "./useAppState";
+import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 
 /** What each composable returns, by composable name. */
 interface AppContextParts {
   useAppState: ReturnType<typeof useAppState>;
+  useAppSessionActions: ReturnType<typeof useAppSessionActions>;
+  useAppAccountScope: ReturnType<typeof useAppAccountScope>;
+  useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
+  useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
+  useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
+  /** Names that still live in App.vue while the split is in progress. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  appVuePending: Record<string, any>;
 }
 
 type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;

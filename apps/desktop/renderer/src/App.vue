@@ -404,11 +404,6 @@
 import type { ChatScrollPosition } from "./domain/chat-scroll";
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
-import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "./composables/useRoomMessageLinkPreviews";
-import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
-import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
-import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, toRaw, watch } from "vue";
 import type {
   DesktopAppAgentRunInput,
@@ -416,18 +411,15 @@ import type {
   DesktopAppAgentSaveSettingsInput,
   DesktopChatStorageSettings,
   DesktopFocusRoomInfo,
-  DesktopNotificationTarget,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
-  DesktopRoomStreamEvent,
   RepoStatus,
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
-import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "./domain/desktop-message-drafts";
 import { preserveRoomRepoStatistics } from "./domain/repo-status";
 import { reuseUnchanged } from "./domain/reuse-unchanged";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
@@ -456,14 +448,12 @@ import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import type { PersonTarget } from "./domain/person-target";
 import { openConversationWithPerson } from "./domain/open-conversation-with-person";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
-import { clearDesktopMessageOutbox } from "./domain/message-outbox";
-import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopUnreadCounts } from "./composables/useDesktopUnreadCounts";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
-import { invalidateRentalProviderDashboard, loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
+import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { appAgentEntry, inboxRoomOpenReporter, needsYouEntry, openInboxRoom, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
@@ -508,18 +498,18 @@ import {
   streamedLatestMessage,
 } from "./domain/account-activity";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
-import { setReminderAccount, refreshMessageReminders } from "./composables/useMessageReminders";
+import { refreshMessageReminders } from "./composables/useMessageReminders";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import { useNeedsYou, useNeedsYouRoomActivity } from "./composables/useNeedsYou";
 import { useNeedsYouSignal } from "./composables/useNeedsYouSignal";
 import { useAgentAttention } from "./composables/useAgentAttention";
-import { resetHostApprovals } from "./components/desktop/content/room-chat/host-approvals";
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
 import { roomNotificationPreferences } from "./composables/useRoomNotificationPreferences";
 import { gitRoomsShareRepo, roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
+import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -553,15 +543,18 @@ const {
   sidebarBatchDialogTargets, sidebarBatchDialogError, sidebarBatchPendingToast,
   requestedSettingsPane, clampSidebarWidth,
 } = Object.assign(app, useAppState());
+const {
+  refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
+  handleDesktopRoomStreamEvent, startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth,
+  handleNotificationActivation,
+} = Object.assign(app, useAppSessionActions(app));
+// Functions still in App.vue are hoisted, so they join the context first.
+Object.assign(app, {
+  openMessages, refreshNeedsYou, refreshSidebarRoomMetadata, refreshProjectBindings,
+  restartRepoStatusWatch, refreshRentalRequestCount, markActiveRoomRead, openRoomFromAppAgent,
+});
 
-watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
-  setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
-
-watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
-  (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); setMessageLinkPreviewViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
-
-watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
-  (account) => { setTypingAccount(account); setReminderAccount(account); }, { immediate: true, flush: "sync" });
+Object.assign(app, useAppAccountScope(app));
 
 let accountReadStorageKey: string | null = null;
 
@@ -605,6 +598,7 @@ async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
 }
 
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
+Object.assign(app, { resetNeedsYou });
 
 useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
 
@@ -637,6 +631,7 @@ async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
 const inboxStorageKey = computed(() => String(authStatus.value?.account?.id ?? 'local'));
 
 const { rooms: inboxRooms, open: openInboxRooms, choose: chooseInboxRooms, reload: reloadInboxRooms, prune: pruneInboxRooms } = useInboxRoomFilter(() => inboxStorageKey.value);
+Object.assign(app, { inboxRooms, reloadInboxRooms });
 
 watch(needsYouData, pruneInboxRooms);
 
@@ -682,6 +677,7 @@ const {
   selectedRootRoomIdentifier,
   selectedSnapshot,
 });
+Object.assign(app, { activeEntry, getAuthRoomIdentifier, selectedRoomIdentifier });
 
 const roomAttention = useNeedsYouSignal(needsYouData, agentAttentionItems, {
   ready: () => approvalsReady.value,
@@ -1061,26 +1057,6 @@ function handleRepoStatusChanged(nextStatus: RepoStatus): void {
   repoStatus.value = nextStatus;
 }
 
-function refreshForegroundData(): void {
-  if (authSessionLocked.value) return;
-  if (!authStatus.value?.authenticated) {
-    // A locked OS credential store at startup is retryable on foreground return.
-    if (!loading.value && !authBusy.value) void refresh();
-    return;
-  }
-  if (activeEntry.value.type === "inbox") void refreshMessageReminders();
-  // The main-process Git watcher retains invalidations while hidden and drains
-  // them on BrowserWindow focus/show. Avoid racing it with a second full status
-  // reconstruction from the renderer.
-  void refreshProjectBindings();
-  void refreshSidebarRoomMetadata();
-  // Poll-only metadata catch-up: the periodic tick early-returns while hidden,
-  // so refresh once on foreground return. Metadata-only, NOT the full snapshot —
-  // SSE kept running while hidden, so event-fed sections are already current.
-  void refreshSelectedRoomLiveMetadata().catch(() => undefined);
-  void refreshRentalRequestCount();
-}
-
 function openRentMarketplace(): void {
   rentMarketplaceRole.value = "renter";
   activeEntry.value = rentMarketplaceEntry;
@@ -1139,27 +1115,6 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
   } finally {
     loading.value = false;
   }
-}
-
-function handleVisibilityChange(): void {
-  windowHidden.value = document.hidden;
-  windowFocused.value = document.hasFocus();
-  markActiveRoomRead();
-  if (document.visibilityState !== "visible") return;
-  refreshForegroundData();
-}
-
-function handleWindowFocus(): void {
-  windowFocused.value = true;
-  windowHidden.value = document.hidden;
-  markActiveRoomRead();
-  refreshForegroundData();
-  void roomNotificationPreferences.refreshAll();
-  if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
-}
-
-function handleWindowBlur(): void {
-  windowFocused.value = false;
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
@@ -1482,6 +1437,7 @@ const {
   sessionGeneration,
   workers,
 });
+Object.assign(app, { clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, clearSelectedRoomAgentWork, invalidateSelectedRoomAgentWork, refreshSelectedRoomLiveMetadata });
 
 const {
   clearSelectedSnapshotCache,
@@ -1521,22 +1477,7 @@ const {
   syncRoomStream: syncDesktopRoomStream,
   workers,
 });
-
-function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
-  if (event.type === "typing") { receiveRoomTyping(event.roomIdentifier, event.signal); return; }
-  if (event.type === "open" || event.type === "error" || event.type === "session_disconnect") receiveRoomTyping(event.roomIdentifier);
-  if (["open", "github_event", "artifact_update"].includes(event.type)) invalidateRoomMessageLinkPreviews(event.roomIdentifier);
-  if (event.type === "resource_invalidation") {
-    if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
-    else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);
-    else if (event.resource === "message_reactions") invalidateRoomMessageReactions(event.roomIdentifier);
-    else invalidateSelectedRoomAgentWork(event.roomIdentifier);
-    return;
-  }
-  // A stream that just (re)connected may have missed a reaction or pin change.
-  if (event.type === "open") { invalidateRoomMessageReactions(event.roomIdentifier); invalidateRoomMessagePins(event.roomIdentifier); }
-  handleRoomStreamEvent(event);
-}
+Object.assign(app, { handleRoomStreamEvent, invalidateSession, refresh, syncSelectedRoomStream });
 
 const authSnapshotPending = computed(() =>
   isAuthSnapshotPending({
@@ -1547,73 +1488,13 @@ const authSnapshotPending = computed(() =>
 );
 
 const {
-  authBusy,
-  authFeedback,
-  authSessionLocked,
-  cancelAuthFlow,
-  clearAuthPollTimer,
-  openVerification,
-  pollAuthFlow,
-  scheduleAuthPoll,
-  signOut,
-  startAuthFlow,
-} = useDesktopAuthFlow({
-  authStatus,
-  getRoomIdentifier: () => getAuthRoomIdentifier(),
-  isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
-  onFirstRunAuthorized: async () => {
-    firstRunStage.value = "room";
-  },
-  onAuthorized: () => refresh(),
-  onSigningOut: clearDesktopSessionState,
-  onSignedOut: async () => undefined,
-});
+  authBusy, authFeedback, authSessionLocked, cancelAuthFlow, clearAuthPollTimer, openVerification,
+  pollAuthFlow, signOut, startAuthFlow,
+} = Object.assign(app, useAppAuthFlow(app));
 
-watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-  if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
-}, { flush: "sync" });
-
-const showSignedOutGate = computed(() => (
-  authSessionLocked.value || !authStatus.value?.authenticated
-));
-
-function startSignedOutAuthFlow(): Promise<void> {
-  return startAuthFlow(null);
-}
-
-function clearDesktopSessionState(): void {
-  invalidateRentalProviderDashboard();
-  attentionIntent.value = null;
-  inboxRentals.value = []; inboxRentalError.value = ''; inboxRooms.value = []; inboxSection.value = 'needs-you';
-  resetNeedsYou();
-  resetHostApprovals();
-  clearDesktopMessageOutbox();
-  clearDesktopMessageDrafts();
-  invalidateSession();
-  clearLiveMetadataRefreshTimer();
-  clearLiveMetadataRefreshInterval();
-  clearSelectedRoomAgentWork();
-  rootRoomSnapshot.value = null;
-  selectedSnapshot.value = null;
-  workers.value = [];
-  accountRooms.value = [];
-  settingsAccountRooms.value = [];
-  sidebarLatestMessages.value = {};
-  rentalRequestCount.value = 0;
-  repoStatus.value = null;
-  authDialogOpen.value = false;
-  void syncSelectedRoomStream(null).catch(() => undefined);
-  void restartRepoStatusWatch(null);
-}
-
-async function openAccountAuthFlow(): Promise<void> {
-  authDialogOpen.value = true;
-  if (authStatus.value?.pendingDeviceAuth) {
-    scheduleAuthPoll();
-    return;
-  }
-  await startAuthFlow();
-}
+const {
+  showSignedOutGate,
+} = Object.assign(app, useAppAccountSwitch(app));
 
 const {
   backFromSubstep,
@@ -2031,11 +1912,6 @@ const {
   setupLoadError,
 });
 
-async function startFirstRunRoomAuth(): Promise<void> {
-  firstRunStage.value = "github";
-  await startAuthFlow();
-}
-
 async function connectActiveRoomProject(): Promise<void> {
   const groupedContext = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
   const context = groupedContext || {
@@ -2394,18 +2270,6 @@ async function openServiceAgent(intent: AttentionNavigationIntent): Promise<void
   }
 }
 
-async function handleNotificationActivation(target: DesktopNotificationTarget): Promise<void> {
-  try {
-    if (target.conversationId) { openMessages(target.conversationId); return; }
-    if (!target.roomIdentifier) return;
-    await openRoomFromAppAgent(target.roomIdentifier);
-    notificationRevealMessageId.value = target.messageId;
-    notificationRevealNonce.value += 1;
-  } catch (error) {
-    console.warn("Could not open the room for this notification.", error);
-  }
-}
-
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
   await desktopIpc.room.stopStream();
   await refreshActiveRepoStatus();
@@ -2712,23 +2576,7 @@ watch(
   }
 );
 
-watch(
-  () => authStatus.value?.pendingDeviceAuth?.requestId,
-  (requestId) => {
-    if (requestId) {
-      scheduleAuthPoll();
-      return;
-    }
-    clearAuthPollTimer();
-  }
-);
-
-watch(
-  () => authStatus.value?.authenticated,
-  (authenticated) => {
-    if (authenticated) authDialogOpen.value = false;
-  },
-);
+Object.assign(app, useAppAuthWatchers(app));
 
 onMounted(() => {
   void refreshNeedsYou();
