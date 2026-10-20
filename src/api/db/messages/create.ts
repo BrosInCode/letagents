@@ -1,36 +1,11 @@
-import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-
-import {
-  assertAttachmentTotalByteSize,
-  type MessageAttachmentUploader,
-  type NormalizedMessageAttachmentReference,
-} from "../../messages/attachments.js";
+import { assertAttachmentTotalByteSize } from "../../messages/attachments.js";
 import { messageAttachmentUploadUsableBy } from "./attachments.js";
-import {
-  isPromptOnlyAgentMessage,
-  normalizeAgentPromptKind,
-  type AgentPromptKind,
-} from "../../../shared/room-agent-prompts.js";
-import {
-  MESSAGE_SENDER_MAX_CODE_POINTS,
-  MESSAGE_SENDER_MAX_UTF8_BYTES,
-  isMessageSenderWithinBounds,
-  parseSupervisedReplySourceNumber,
-} from "../../../../shared/message-contracts.mjs";
-import {
-} from "../../../shared/agent-presence.js";
-import {
-  createGlobalAgentAddressResolver,
-  humanConversationFallback,
-  decideAgentMessageActivation,
-  isUntrustedExternalActivationSource,
-  isTaskOwnerFollowUpMessageText,
-  type ActivationIdentity,
-  type AgentMessageActivationReason,
-} from "../../../shared/activation-routing.js";
+import { isPromptOnlyAgentMessage, normalizeAgentPromptKind } from "../../../shared/room-agent-prompts.js";
+import { MESSAGE_SENDER_MAX_CODE_POINTS, MESSAGE_SENDER_MAX_UTF8_BYTES, isMessageSenderWithinBounds, parseSupervisedReplySourceNumber } from "../../../../shared/message-contracts.mjs";
+import { createGlobalAgentAddressResolver, humanConversationFallback, decideAgentMessageActivation, isUntrustedExternalActivationSource, isTaskOwnerFollowUpMessageText, type ActivationIdentity } from "../../../shared/activation-routing.js";
 import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
 import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
@@ -38,48 +13,18 @@ import { getReplyTurnReadySessions, getSessionConnections } from "./session-conn
 import { db } from "../client.js";
 import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
-import type {
-  Message,
-  MessageAttachmentRow,
-  MessageMentionNotice,
-  MessageRecipientAgentTarget,
-  MessageRow,
-} from "../types.js";
+import type { Message, MessageAttachmentRow, MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../types.js";
 import { nextRoomScopedNumber, parseScopedId } from "../utils.js";
-import {
-  messageRowSelection,
-  messageAttachmentUploadSelection,
-} from "./selections.js";
+import { messageRowSelection, messageAttachmentUploadSelection } from "./selections.js";
 import { hydrateMessageReplies } from "./history.js";
-import {
-  createAccountRoutingTargetBudget,
-  getBoundedActiveWorkLeaseOwners,
-  getRecentHumanConversationRecipient,
-  getHumanThreadRootRecipientOwners,
-  getMessageAccountAgentRouting,
-  MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES,
-  MAX_ACCOUNT_ROUTING_TARGETS,
-} from "./account-agent-routing.js";
+import { createAccountRoutingTargetBudget, getBoundedActiveWorkLeaseOwners, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, getMessageAccountAgentRouting, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { getMessageThreadReadOverlays } from "./thread-read-overlays.js";
-import {
-  planJevRoutingMode,
-  type DeferredJevRoutingPlan,
-} from "./jev-routing-hint.js";
-import {
-  getMessageThreadRoutingProjection,
-  resolveMessageThreadRoutingProjection,
-  type ThreadRoutingProjection,
-} from "./thread-routing-membership.js";
+import { planJevRoutingMode, type DeferredJevRoutingPlan } from "./jev-routing-hint.js";
+import { getMessageThreadRoutingProjection, resolveMessageThreadRoutingProjection, type ThreadRoutingProjection } from "./thread-routing-membership.js";
 import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
-import {
-  finishReplyTurnsTx,
-  planReplyTurns,
-  queueReplyTurnWakes,
-  releaseAgentReplyTurnHoldsTx,
-  sequentialReplyReason,
-  type ReleasedReplyTurn,
-  type ReplyTurnFields,
-} from "./reply-turns.js";
+import { finishReplyTurnsTx, planReplyTurns, queueReplyTurnWakes, releaseAgentReplyTurnHoldsTx, sequentialReplyReason, type ReleasedReplyTurn, type ReplyTurnFields } from "./reply-turns.js";
+import type { MessageCreateTransaction, AddMessageOptions, AddMessageResult, AddMessageTransactionResult } from "./create/types.js";
+export type { MessageCreateTransaction, AddMessageOptions, AddMessageResult } from "./create/types.js";
 
 const MESSAGE_RECEIPT_INSERT_BATCH_SIZE = 500;
 const MAX_ACTIVE_ROUTING_SESSIONS = 50_000;
@@ -143,72 +88,9 @@ function normalizeClientMessageId(value?: string | null): string | null {
   return trimmed ? trimmed.slice(0, 240) : null;
 }
 
-/** The transaction handle message creation runs in, for atomic side effects. */
-export type MessageCreateTransaction = Parameters<Parameters<(typeof db)["transaction"]>[0]>[0];
-
-export interface AddMessageOptions {
-  source?: string;
-  display_text?: string | null;
-  agent_prompt_kind?: AgentPromptKind | null;
-  reply_to_message_id?: string | null;
-  thread_root_message_id?: string | null;
-  attachments?: NormalizedMessageAttachmentReference[];
-  /** The request credential; only its own (or unowned legacy) uploads attach. */
-  attachment_uploader?: MessageAttachmentUploader | null;
-  gif?: RoomGif | null;
-  client_message_id?: string | null;
-  publisher_agent_key?: string | null;
-  publisher_agent_session_id?: string | null;
-  account_id?: string | null;
-  account_agent_routing?: boolean;
-  /**
-   * Accounts to notify by desktop push even when they have no recents row for
-   * the room (for example a GitHub review request). Resolved and access-checked by the caller.
-   */
-  notify_account_ids?: readonly string[];
-  /**
-   * Accounts that get a recents row for the room in the message transaction.
-   * Only accounts whose room access was allowed belong here.
-   */
-  recents_account_ids?: readonly string[];
-  /**
-   * Runs inside the message-insert transaction after the row is created, so
-   * callers can persist state that must be atomic with message creation
-   * (e.g. liveness announcement markers). A throw rolls the message back too.
-   * Not invoked on the idempotent-replay path: a deduped message means a
-   * prior transaction already committed both the message and this side
-   * effect together.
-   */
-  with_created_message_in_transaction?: (tx: MessageCreateTransaction, message: MessageRow) => Promise<void>;
-  /**
-   * A system notice for exactly one agent. Routing is skipped: this agent
-   * receives the only receipt, with this reason, and nobody else is woken or
-   * notified. When the agent has no live session the receipt goes to its
-   * latest one, which its next session inherits.
-   */
-  addressed_to?: { agent_key: string; reason: AgentMessageActivationReason };
-}
-
 /** System notices keep a separate line written for people. */
 function retainsDisplayText(source: string | undefined): boolean {
   return source === "system" || source === WAKE_NOTICE_SOURCE;
-}
-
-export interface AddMessageResult {
-  message: Message;
-  canonical_message: Message;
-  created: boolean;
-  /** Durable recipients resolved in the same transaction as the message. */
-  recipientAgentKeys: readonly string[];
-  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
-}
-
-interface AddMessageTransactionResult {
-  messageRow: MessageRow;
-  created: boolean;
-  recipientAgentKeys: readonly string[];
-  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
-  mentionNotices?: readonly MessageMentionNotice[];
 }
 
 async function assertDesktopReplayMatches(
