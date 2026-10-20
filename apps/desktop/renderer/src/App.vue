@@ -409,30 +409,20 @@ import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "
 import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
 import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, toRaw, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
-  DesktopAppAgentActionMetadata,
   DesktopAppAgentRunInput,
   DesktopAppAgentRunResult,
   DesktopAppAgentSaveSettingsInput,
-  DesktopAppAgentSettingsStatus,
-  DesktopAppInfo,
-  DesktopAuthStatus,
   DesktopChatStorageSettings,
   DesktopFocusRoomInfo,
-  DesktopMcpInstallState,
-  DesktopMcpInstallTargetId,
-  DesktopUpdateStatus,
   DesktopNotificationTarget,
-  DesktopProjectBinding,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
-  DiagnosticsSnapshot,
   RepoStatus,
-  WorkerSnapshot,
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
@@ -452,17 +442,11 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import {
-  activeRepoRoomContext,
-  readRepositoryRootBindings,
-  resolveActiveProjectRootPath,
-  roomWithInheritedProjectContext,
-} from "./domain/room-project-context";
+import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
 import type {
   FocusRoomConcludedEvent,
   FocusRoomConclusionInput,
 } from "./domain/focus-room-conclusion";
-import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import {
   useDesktopAccountRoomSettings,
@@ -476,7 +460,7 @@ import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
-import { recentProjectFoldersFromRooms, useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
+import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopUnreadCounts } from "./composables/useDesktopUnreadCounts";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
@@ -484,7 +468,7 @@ import { invalidateRentalProviderDashboard, loadRentalProviderDashboard, useRent
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { appAgentEntry, inboxRoomOpenReporter, needsYouEntry, openInboxRoom, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
-import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
+import { rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
   isRoomBeingRead,
@@ -494,12 +478,7 @@ import {
   roomReadMarkerKey,
   seedRoomReadMarker,
 } from "./domain/desktop-room-read-state";
-import {
-  normalizeRoomIdentifier,
-  findSidebarRoomEntryByIdentifier,
-  readStoredRecentRootRooms,
-  rememberRecentRootRooms,
-} from "./domain/sidebar-rooms";
+import { normalizeRoomIdentifier, findSidebarRoomEntryByIdentifier, rememberRecentRootRooms } from "./domain/sidebar-rooms";
 import {
   flattenSidebarRoomEntries,
   isSidebarRoomSelectable,
@@ -511,7 +490,6 @@ import {
   orderedSidebarChildRooms,
   promoteSidebarProject,
   replaceSidebarProjectId,
-  readStoredSidebarRoomOrder,
   rememberSidebarRoomOrder,
   reorderSidebarChildRooms,
   reorderSidebarParentRooms,
@@ -533,8 +511,6 @@ import {
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
 import { setReminderAccount, refreshMessageReminders } from "./composables/useMessageReminders";
 import InboxView from "./components/desktop/content/InboxView.vue";
-import type { InboxSection } from "./components/desktop/content/room-inbox/universal";
-import type { DesktopRentalRequest } from "../../electron/ipc-types.js";
 import { useNeedsYou, useNeedsYouRoomActivity } from "./composables/useNeedsYou";
 import { useNeedsYouSignal } from "./composables/useNeedsYouSignal";
 import { useAgentAttention } from "./composables/useAgentAttention";
@@ -542,64 +518,53 @@ import { resetHostApprovals } from "./components/desktop/content/room-chat/host-
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
 import { roomNotificationPreferences } from "./composables/useRoomNotificationPreferences";
+import type { AppContext } from "./composables/app/context";
+import { useAppState } from "./composables/app/useAppState";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
 );
 
-const loading = ref(false);
-const appInfo = ref<DesktopAppInfo | null>(null);
-const updateStatus = ref<DesktopUpdateStatus | null>(null);
-const repoStatus = ref<RepoStatus | null>(null);
-const workers = ref<WorkerSnapshot[]>([]);
-const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
-const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
-const authStatus = ref<DesktopAuthStatus | null>(null);
+// App.vue holds the template and this wiring. The context fills in the original
+// order: state, then the function composables (only function definitions, like
+// the hoisted declarations they came from), then each watcher and composable
+// slice exactly where its code used to run.
+const app = {} as AppContext;
+const {
+  loading, appInfo, updateStatus, repoStatus, workers, rootRoomSnapshot, selectedSnapshot,
+  authStatus, sessionGeneration, authDialogOpen, selectedRootRoomStorageKey, activeEntryStorageKey,
+  recentRootRoomsStorageKey, legacyRepositoryRootBindingsStorageKey, readRoomMessagesStorageKey,
+  sidebarWidthStorageKey, sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
+  SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, recentRootRooms,
+  newRoomRecentProjectFolders, legacyRepositoryRootBindings, projectBindings, windowFocused,
+  windowHidden, readRoomMessageIds, sidebarWidth, sidebarRoomOrder, sidebarRevealRequest,
+  isSidebarResizing, sidebarLatestMessages, chatScrollPositionsByRoom,
+  loadingChatScrollRoomIdentifiers, accountRooms, settingsAccountRooms, sidebarMetadataRefresh,
+  rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread, openConversationId,
+  openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
+  openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
+  chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
+  appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
+  diagnostics, mcpInstallState, selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback,
+  setupLoadError, mcpWizardStep, firstRunStage, sidebarFocusRoomConclusionTarget,
+  sidebarFocusRoomConclusionParent, sidebarFocusRoomConclusionReturnFocusId,
+  sidebarFocusRoomConclusionError, sidebarFocusRoomConclusionPendingToast, sidebarSelectionActive,
+  sidebarSelectedEntryIds, sidebarBatchActionBusy, sidebarBatchDialogAction,
+  sidebarBatchDialogTargets, sidebarBatchDialogError, sidebarBatchPendingToast,
+  requestedSettingsPane, clampSidebarWidth,
+} = Object.assign(app, useAppState());
+
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
+
 watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
   (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); setMessageLinkPreviewViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
+
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   (account) => { setTypingAccount(account); setReminderAccount(account); }, { immediate: true, flush: "sync" });
-const sessionGeneration = ref(0);
-const authDialogOpen = ref(false);
-const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
-const activeEntryStorageKey = "letagents-desktop:active-entry";
-const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
-const legacyRepositoryRootBindingsStorageKey = "letagents-desktop:repository-root-bindings";
-const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
-const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
-const sidebarRoomOrderStorageKey = "letagents-desktop:sidebar-room-order";
-const sidebarMinWidth = 260;
-const sidebarMaxWidth = 440;
-const sidebarDefaultWidth = 296;
-// Sidebar room metadata poll cadence. Since PR #820 this is one light
-// `/account/rooms` request per tick, and `refreshForegroundData` already fires
-// the same work on focus/visibility, so a 15s steady-state interval is plenty —
-// an aggressive 5s cadence was redundant against the foreground-return refresh.
-const SIDEBAR_METADATA_REFRESH_INTERVAL_MS = 15_000;
-const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
-const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
-const newRoomRecentProjectFolders = computed(() => recentProjectFoldersFromRooms(recentRootRooms.value));
-const legacyRepositoryRootBindings = readRepositoryRootBindings(
-  window.localStorage,
-  legacyRepositoryRootBindingsStorageKey,
-  recentRootRooms.value,
-);
-const projectBindings = ref<DesktopProjectBinding[]>([]);
-const windowFocused = ref(document.hasFocus());
-const windowHidden = ref(document.hidden);
-const readRoomMessageIds = ref<Record<string, string>>({});
+
 let accountReadStorageKey: string | null = null;
-const sidebarWidth = ref(readStoredSidebarWidth());
-const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
-const sidebarRevealRequest = ref<{ entryId: string; sequence: number } | null>(null);
-const isSidebarResizing = ref(false);
-const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
-const chatScrollPositionsByRoom = ref<Record<string, ChatScrollPosition>>({});
-const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
-const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
-const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+
 // Who is working in each room, and each room's latest message, pushed by the server.
 const accountActivity = useAccountActivity({
   authenticated: computed(() => Boolean(authStatus.value?.authenticated)),
@@ -608,19 +573,14 @@ const accountActivity = useAccountActivity({
     ...room.focusRooms.map((focusRoom) => focusRoom.roomIdentifier),
   ])),
 });
-// Shared by the metadata refresh, its watcher, and the periodic room-list tick.
-const sidebarMetadataRefresh = { inFlight: false, lastAt: 0 };
+
 // While the stream was open the sidebar barely polled, so catch up the moment it drops.
 watch(() => accountActivity.connected.value, (connected, wasConnected) => {
   if (wasConnected && !connected) void refreshSidebarRoomMetadata();
 });
-const rentalRequestCount = ref(0);
-const inboxRentals = ref<DesktopRentalRequest[]>([]);
-const inboxRentalError = ref('');
-const messagesUnread = ref(0);
-const openConversationId = ref<string | null>(null);
-const openConversationNonce = ref(0);
+
 function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
+
 /** Open the private conversation with a room participant. Create it if it does not exist yet. */
 async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
   const viewerLogin = authStatus.value?.authenticated ? authStatus.value.account?.login ?? null : null;
@@ -643,16 +603,21 @@ async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
   }
   openMessages(result.conversationId);
 }
-const inboxSection = ref<InboxSection>('needs-you');
+
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
+
 useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
+
 const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
+
 const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
-const attentionIntent = ref<AttentionNavigationIntent | null>(null);
+
 let needsYouInterval: number | null = null;
+
 // A room opened from the Inbox loads in place; if that load fails, say so.
 const inboxRoomOpens = inboxRoomOpenReporter((error) => pushActionToast(
   `Couldn't load this room. ${safeUserVisibleErrorDetail(error, "Try again from the sidebar.")}`, "error"));
+
 async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
   attentionIntent.value = null;
   notificationRevealMessageId.value = null;
@@ -668,32 +633,17 @@ async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
     attentionIntent.value = intent;
   } catch (error) { needsYouError.value = String(error); }
 }
+
 const inboxStorageKey = computed(() => String(authStatus.value?.account?.id ?? 'local'));
+
 const { rooms: inboxRooms, open: openInboxRooms, choose: chooseInboxRooms, reload: reloadInboxRooms, prune: pruneInboxRooms } = useInboxRoomFilter(() => inboxStorageKey.value);
+
 watch(needsYouData, pruneInboxRooms);
+
 function openNeedsYou(room?: string) { openInboxRooms(room); inboxSection.value = 'needs-you'; activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
+
 async function refreshNeedsYou() { await Promise.all([loadNeedsYou(activeEntry.value.type === 'inbox'), refreshRentalRequestCount(), activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await refreshAgentApprovals(); }
-const rentMarketplaceRole = ref<"renter" | "provider">("renter");
-const openAddAgentAfterRepoPick = ref(false);
-const notificationRevealMessageId = ref<string | null>(null);
-const notificationRevealNonce = ref(0);
-const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
-const chatStorageAvailable = ref(true);
-const chatStorageBusy = ref(false);
-const chatStorageFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
-const appAgentSettingsStatus = ref<DesktopAppAgentSettingsStatus | null>(null);
-const appAgentActions = ref<DesktopAppAgentActionMetadata[]>([]);
-const appAgentBusy = ref(false);
-const appAgentResult = ref<DesktopAppAgentRunResult | null>(null);
-const appAgentFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
-const diagnostics = ref<DiagnosticsSnapshot | null>(null);
-const mcpInstallState = ref<DesktopMcpInstallState | null>(null);
-const selectedMcpTargetIds = ref<DesktopMcpInstallTargetId[]>([]);
-const mcpInstallBusy = ref(false);
-const mcpInstallFeedback = ref<string | null>(null);
-const setupLoadError = ref<string | null>(null);
-const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
-const firstRunStage = ref<FirstRunWizardStage>("welcome");
+
 const {
   activeEntry,
   collapsedProjects,
@@ -747,39 +697,33 @@ watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null :
 }, { immediate: true, flush: "sync" });
 
 let unsubscribeRoomStream: (() => void) | null = null;
+
 let unsubscribeOpenSettings: (() => void) | null = null;
+
 let unsubscribeOpenUpdates: (() => void) | null = null;
+
 let unsubscribeUpdateStatus: (() => void) | null = null;
+
 let unsubscribeNotificationReceived: (() => void) | null = null;
+
 let unsubscribeNotificationActivation: (() => void) | null = null;
+
 let unsubscribeRepoStatusChanged: (() => void) | null = null;
+
 let accountRoomsRefreshInterval: number | null = null;
+
 let repoStatusRefreshInFlight = false;
+
 let repoStatusWatchRootPath: string | null = null;
+
 let repoStatusWatchRequestId = 0;
 
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
-const sidebarFocusRoomConclusionTarget = ref<RoomEntry | null>(null);
-const sidebarFocusRoomConclusionParent = ref<RoomEntry | null>(null);
-const sidebarFocusRoomConclusionReturnFocusId = ref<string | null>(null);
-const sidebarFocusRoomConclusionError = ref<string | null>(null);
-const sidebarFocusRoomConclusionPendingToast = ref<{
-  message: string;
-  state: "error" | "success";
-} | null>(null);
-const sidebarSelectionActive = ref(false);
-const sidebarSelectedEntryIds = ref<string[]>([]);
-const sidebarBatchActionBusy = ref<SidebarRoomBatchActionId | null>(null);
-const sidebarBatchDialogAction = ref<"conclude" | "hide" | null>(null);
-const sidebarBatchDialogTargets = ref<RoomEntry[]>([]);
-const sidebarBatchDialogError = ref<string | null>(null);
-const sidebarBatchPendingToast = ref<{
-  message: string;
-  state: "error" | "success";
-} | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
+
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
+
 const desktopShellStyle = computed(() => ({
   "--sidebar-width": `${sidebarWidth.value}px`,
   "--sidebar-min-width": `${sidebarMinWidth}px`,
@@ -809,6 +753,7 @@ const selectedRoomWithProjectContext = computed(() => {
   );
   return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
 });
+
 provideAgentRoomAudience(() => selectedRoomWithProjectContext.value, () => selectedSnapshot.value?.participants ?? [], () => [authStatus.value?.account?.login, authStatus.value?.account?.displayName]);
 
 const selectedGitRoomMatchesActiveRepo = computed(() => {
@@ -826,6 +771,7 @@ const selectedGitRoomMatchesActiveRepo = computed(() => {
 });
 
 const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
+
 const selectedRoomIsProject = computed(() => {
   if (selectedRoomWithProjectContext.value.gitRoom || selectedRoomProjectRootPath.value) return true;
   const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
@@ -849,6 +795,7 @@ function gitRoomsShareRepo(
   const rightRepo = right.repository.id || `${right.host}:${right.repository.fullName}`.toLowerCase();
   return left.provider === right.provider && left.host === right.host && leftRepo === rightRepo;
 }
+
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, (accountId) => {
   accountReadStorageKey = accountId ? `${readRoomMessagesStorageKey}:${encodeURIComponent(accountId)}` : null;
   sidebarLatestMessages.value = {};
@@ -893,6 +840,7 @@ const sidebarProjectEntries = computed(() =>
     focusRooms: project.focusRooms.map(withRoomUnreadState),
   })), sidebarRoomOrder.value)
 );
+
 const sidebarSelectedEntries = computed(() => {
   const selectedIds = new Set(sidebarSelectedEntryIds.value);
   return flattenSidebarRoomEntries(sidebarProjectEntries.value)
@@ -901,6 +849,7 @@ const sidebarSelectedEntries = computed(() => {
       && entries.findIndex((candidate) => candidate.id === entry.id) === index
     );
 });
+
 watch(sidebarProjectEntries, (projects) => {
   if (!sidebarSelectionActive.value || !sidebarSelectedEntryIds.value.length) return;
   const availableIds = new Set(flattenSidebarRoomEntries(projects).map((entry) => entry.id));
@@ -909,6 +858,7 @@ watch(sidebarProjectEntries, (projects) => {
     sidebarSelectedEntryIds.value = nextSelection;
   }
 });
+
 const selectedRoomRenderKey = computed(() =>
   selectedRoomIdentifier.value
   || selectedSnapshot.value?.room?.identifier
@@ -916,6 +866,7 @@ const selectedRoomRenderKey = computed(() =>
   || selectedRoomInfo.value.identifier
   || activeEntry.value.id
 );
+
 const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
   selectedSnapshot.value?.storage || {
     roomIdentifier: selectedRoomInfo.value.identifier || null,
@@ -928,8 +879,6 @@ const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
     localFilesPath: chatStorageSettings.value?.localFilesPath || "",
   }
 );
-
-const requestedSettingsPane = ref<SettingsPaneId | null>(null);
 
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
   if (requestedSettingsPane.value) return requestedSettingsPane.value;
@@ -950,15 +899,6 @@ function openSettingsSurface(): void {
 function openUpdatesSurface(): void {
   requestedSettingsPane.value = "system:updates";
   activeEntry.value = settingsEntry;
-}
-
-function readStoredSidebarWidth(): number {
-  const parsed = Number(readStoredString(sidebarWidthStorageKey));
-  return clampSidebarWidth(Number.isFinite(parsed) ? parsed : sidebarDefaultWidth);
-}
-
-function clampSidebarWidth(value: number): number {
-  return Math.min(sidebarMaxWidth, Math.max(sidebarMinWidth, Math.round(value)));
 }
 
 function startSidebarResize(event: PointerEvent): void {
@@ -1754,6 +1694,7 @@ const {
       ? "local"
       : "cloud",
 });
+
 const {
   batchConcludeSidebarFocusRooms,
   batchHideSidebarRooms,
