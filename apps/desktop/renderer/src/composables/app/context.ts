@@ -14,6 +14,7 @@ import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 import type { useAppSettingsActions, useAppSetupOnboarding } from "./useAppSettings";
 import type { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./useAppArchivedRooms";
+import type { useAppRoomShellActions, useAppChatScrollWatchers } from "./useAppRoomShell";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 
@@ -30,6 +31,7 @@ interface AppContextParts {
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppSettingsActions: ReturnType<typeof useAppSettingsActions>;
   useAppArchivedRooms: ReturnType<typeof useAppArchivedRooms>;
+  useAppRoomShellActions: ReturnType<typeof useAppRoomShellActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
   useAppAccountActivityFeed: ReturnType<typeof useAppAccountActivityFeed>;
   useAppInboxState: ReturnType<typeof useAppInboxState>;
@@ -45,14 +47,12 @@ interface AppContextParts {
   useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
   useAppRoomManagement: ReturnType<typeof useAppRoomManagement>;
   useAppSetupOnboarding: ReturnType<typeof useAppSetupOnboarding>;
+  useAppChatScrollWatchers: ReturnType<typeof useAppChatScrollWatchers>;
   useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
   useAppProjectRepoWatchers: ReturnType<typeof useAppProjectRepoWatchers>;
   useAppArchivedRoomWatcher: ReturnType<typeof useAppArchivedRoomWatcher>;
   useAppRoomStreamWatchers: ReturnType<typeof useAppRoomStreamWatchers>;
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
-  /** Names that still live in App.vue while the split is in progress. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  appVuePending: Record<string, any>;
 }
 
 type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;

@@ -13,9 +13,9 @@ export function useAppSettingsActions(context: unknown) {
     | "useAppProjectRepo"
     | "useAppRoomData"
     | "useAppRoomManagement"
+    | "useAppRoomShellActions"
     | "useAppSessionActions"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
     appAgentActions, appAgentBusy, appAgentFeedback, appAgentResult, appAgentSettingsStatus,

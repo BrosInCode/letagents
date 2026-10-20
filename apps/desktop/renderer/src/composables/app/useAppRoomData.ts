@@ -78,7 +78,7 @@ export function useAppRoomData(context: unknown) {
     syncRoomStream: syncDesktopRoomStream,
     workers,
   });
-  Object.assign(app, { clearSelectedSnapshotCache, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
+  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
 
   const authSnapshotPending = computed(() =>
     isAuthSnapshotPending({

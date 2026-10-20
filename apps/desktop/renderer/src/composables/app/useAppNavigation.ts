@@ -127,13 +127,14 @@ export function useAppSelectionWatchers(context: unknown) {
       "useAppInboxState"
     | "useAppNavigation"
     | "useAppRoomData"
+    | "useAppRoomShellActions"
     | "useAppSidebarMessages"
     | "useAppState"
-    | "appVuePending"
   >;
   const {
-    activeEntry, activeEntryStorageKey, inboxRoomOpens, loading, markActiveRoomRead,
-    projectEntries, refreshSelectedSnapshot, refreshSidebarLatestMessages, rootRoomSnapshot,
+    activeChatScrollRoomIdentifier, activeEntry, activeEntryStorageKey,
+    forgetLoadingChatScrollRooms, inboxRoomOpens, loading, markActiveRoomRead, projectEntries,
+    refreshSelectedSnapshot, refreshSidebarLatestMessages, rootRoomSnapshot,
     selectedRootRoomIdentifier, selectedRootRoomStorageKey, sidebarMetadataRefresh,
   } = app;
   watch(
@@ -141,10 +142,10 @@ export function useAppSelectionWatchers(context: unknown) {
     async (nextEntry, previousEntry) => {
       const selectedEntryId = nextEntry.id;
       const previousRoomIdentifier = previousEntry?.type === "room" ? previousEntry.roomIdentifier : null;
-      app.forgetLoadingChatScrollRooms([app.activeChatScrollRoomIdentifier()]);
+      forgetLoadingChatScrollRooms([activeChatScrollRoomIdentifier()]);
       if (previousRoomIdentifier) {
         void nextTick(() => {
-          app.forgetLoadingChatScrollRooms([previousRoomIdentifier]);
+          forgetLoadingChatScrollRooms([previousRoomIdentifier]);
         });
       }
       rememberStoredString(activeEntryStorageKey, nextEntry.id);

@@ -401,11 +401,9 @@
 </template>
 
 <script setup lang="ts">
-import type { ChatScrollPosition } from "./domain/chat-scroll";
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { defineAsyncComponent, onBeforeUnmount, onMounted, watch } from "vue";
-import type { DesktopRoomSnapshot } from "../../electron/ipc-types";
+import { defineAsyncComponent, onBeforeUnmount, onMounted } from "vue";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
@@ -419,10 +417,7 @@ import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutV
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
-import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { settingsEntry } from "./domain/desktop-navigation";
-import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
-import { replaceSidebarProjectId, rememberSidebarRoomOrder } from "./domain/sidebar-room-order";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "./domain/account-activity";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import { desktopIpc } from "./ipc/index.js";
@@ -438,6 +433,7 @@ import { useAppFocusRoomConclusion } from "./composables/app/useAppFocusRoomConc
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
 import { useAppSettingsActions, useAppSetupOnboarding } from "./composables/app/useAppSettings";
 import { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./composables/app/useAppArchivedRooms";
+import { useAppRoomShellActions, useAppChatScrollWatchers } from "./composables/app/useAppRoomShell";
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 
@@ -452,20 +448,18 @@ const RentMarketplaceView = defineAsyncComponent(
 const app = {} as AppContext;
 const {
   loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
-  sessionGeneration, authDialogOpen, sidebarRoomOrderStorageKey, sidebarMinWidth, sidebarMaxWidth,
-  SIDEBAR_METADATA_REFRESH_INTERVAL_MS, selectedRootRoomIdentifier, newRoomRecentProjectFolders,
-  sidebarWidth, sidebarRoomOrder, sidebarRevealRequest, isSidebarResizing, sidebarLatestMessages,
-  chatScrollPositionsByRoom, loadingChatScrollRoomIdentifiers, settingsAccountRooms,
-  sidebarMetadataRefresh, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
-  openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
-  openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
-  chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
-  appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
-  selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback, mcpWizardStep, firstRunStage,
-  sidebarFocusRoomConclusionTarget, sidebarFocusRoomConclusionReturnFocusId,
-  sidebarFocusRoomConclusionError, sidebarSelectionActive, sidebarSelectedEntryIds,
-  sidebarBatchActionBusy, sidebarBatchDialogAction, sidebarBatchDialogTargets,
-  sidebarBatchDialogError,
+  authDialogOpen, sidebarMinWidth, sidebarMaxWidth, SIDEBAR_METADATA_REFRESH_INTERVAL_MS,
+  selectedRootRoomIdentifier, newRoomRecentProjectFolders, sidebarWidth, sidebarRevealRequest,
+  isSidebarResizing, settingsAccountRooms, sidebarMetadataRefresh, rentalRequestCount,
+  inboxRentals, inboxRentalError, messagesUnread, openConversationId, openConversationNonce,
+  inboxSection, attentionIntent, rentMarketplaceRole, openAddAgentAfterRepoPick,
+  notificationRevealMessageId, notificationRevealNonce, chatStorageSettings, chatStorageAvailable,
+  chatStorageBusy, chatStorageFeedback, appAgentSettingsStatus, appAgentActions, appAgentBusy,
+  appAgentResult, appAgentFeedback, selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback,
+  mcpWizardStep, firstRunStage, sidebarFocusRoomConclusionTarget,
+  sidebarFocusRoomConclusionReturnFocusId, sidebarFocusRoomConclusionError, sidebarSelectionActive,
+  sidebarSelectedEntryIds, sidebarBatchActionBusy, sidebarBatchDialogAction,
+  sidebarBatchDialogTargets, sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
@@ -480,12 +474,12 @@ const {
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));
 const {
-  refreshProjectBindings, initializeProjectBindings, handleRepoStatusChanged, openWorkspaceGitRoom,
+  initializeProjectBindings, handleRepoStatusChanged, openWorkspaceGitRoom,
   connectActiveRoomProject, openWorktreeForAgent,
 } = Object.assign(app, useAppProjectRepo(app));
 const {
   refreshSidebarRoomMetadata, refreshSidebarLatestMessages, roomHistoryMode,
-  sidebarRoomIdentifiers, latestMessageIdForEntry, markActiveRoomRead, markRoomEntryRead,
+  sidebarRoomIdentifiers, latestMessageIdForEntry, markRoomEntryRead,
 } = Object.assign(app, useAppSidebarMessages(app));
 const {
   handleSidebarEntrySelected, startSidebarRoomSelection, cancelSidebarRoomSelection,
@@ -511,10 +505,10 @@ const {
 const {
   leaveArchivedSelectedRoomFromSettingsList, openServiceAgent,
 } = Object.assign(app, useAppArchivedRooms(app));
-// Functions still in App.vue are hoisted, so they join the context first.
-Object.assign(app, {
-  handleRoomShellRefresh, forgetLoadingChatScrollRooms, activeChatScrollRoomIdentifier,
-});
+const {
+  handleOwnMessageSent, handleRoomShellRefresh, handleRoomMessageRevealUnavailable,
+  rememberChatScrollPosition, chatScrollPositionForRoom,
+} = Object.assign(app, useAppRoomShellActions(app));
 
 Object.assign(app, useAppAccountScope(app));
 
@@ -557,7 +551,7 @@ let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
 
 const {
-  actionToasts, dismissActionToast, pushActionToast, selectedRoomWithProjectContext,
+  actionToasts, dismissActionToast, selectedRoomWithProjectContext,
   selectedGitRoomMatchesActiveRepo, selectedRoomProjectRootPath, selectedRoomIsProject,
 } = Object.assign(app, useAppRoomContext(app));
 
@@ -573,9 +567,8 @@ Object.assign(app, useAppHistoryWatchers(app));
 
 const {
   clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, roomAgentWork,
-  roomAgentWorkStatus, roomAgentWorkTruncated, handleMessageSent, handleRefreshRoom,
-  handleRoomRenamed, refresh, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
-  upsertSelectedTask, authSnapshotPending,
+  roomAgentWorkStatus, roomAgentWorkTruncated, handleRoomRenamed, refresh, repoStatusValue,
+  selectedSnapshotLoading, upsertSelectedTask, authSnapshotPending,
 } = Object.assign(app, useAppRoomData(app));
 
 const {
@@ -611,134 +604,7 @@ const {
   startFirstRunSetup,
 } = Object.assign(app, useAppSetupOnboarding(app));
 
-function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]): void {
-  handleMessageSent(message);
-  markActiveRoomRead();
-}
-
-async function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): Promise<void> {
-  const generation = sessionGeneration.value;
-  const selectedIdentifier = selectedSnapshot.value?.roomIdentifier;
-  const rootIdentifier = selectedRootRoomIdentifier.value;
-  const entryId = activeEntry.value.id;
-  const localIdentifier = normalizeRoomIdentifier(snapshot?.storage?.localRoom?.roomIdentifier);
-  const previousProject = localIdentifier && sidebarProjectEntries.value.find((project) =>
-    [project.parent, ...project.branchRooms, ...project.focusRooms]
-      .some((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === localIdentifier));
-  const identityChanged = snapshot?.roomIdentifier
-    && snapshot.roomIdentifier !== selectedSnapshot.value?.roomIdentifier;
-  const storageChanged = snapshot?.storage
-    && snapshot.storage.effectiveMode !== roomHistoryMode(snapshot.roomIdentifier);
-  if (storageChanged) {
-    await loadChatStorageSettings();
-    if (generation !== sessionGeneration.value
-      || selectedIdentifier !== selectedSnapshot.value?.roomIdentifier
-      || rootIdentifier !== selectedRootRoomIdentifier.value
-      || entryId !== activeEntry.value.id) return;
-    sidebarLatestMessages.value = {};
-  }
-  handleRefreshRoom(snapshot);
-  if (!snapshot?.roomIdentifier) return;
-  if (identityChanged && previousProject) {
-    const nextProject = sidebarProjectEntries.value.find((project) =>
-      [project.parent, ...project.branchRooms, ...project.focusRooms]
-        .some((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === normalizeRoomIdentifier(snapshot.roomIdentifier)));
-    if (nextProject && previousProject.id !== nextProject.id) {
-      sidebarRoomOrder.value = replaceSidebarProjectId(sidebarRoomOrder.value, previousProject.id, nextProject.id);
-      rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, sidebarRoomOrder.value);
-    }
-  }
-  void syncSelectedRoomStream(snapshot.roomIdentifier);
-  if (identityChanged) {
-    await refreshProjectBindings();
-    await refreshSidebarRoomMetadata();
-  }
-  if (storageChanged) await refreshSidebarLatestMessages();
-}
-
-function handleRoomMessageRevealUnavailable(_messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"): void {
-  if (reason === "not_found") {
-    pushActionToast("That message is not available.", "info");
-  } else if (reason === "too_far_back") {
-    pushActionToast("That message is too far back to open here yet.", "info");
-  } else {
-    pushActionToast("That earlier message is not available in the loaded room history.", "info");
-  }
-}
-
-function rememberChatScrollPosition(roomIdentifier: string, position: ChatScrollPosition): void {
-  const storageKey = chatScrollPositionKey(roomIdentifier) || roomIdentifier;
-  if (!shouldRememberChatScrollPosition({
-    roomIdentifier,
-    selectedRoomIdentifier: selectedRoomInfo.value.identifier,
-    selectedSnapshotLoading: selectedSnapshotLoading.value,
-    suppressedRoomIdentifiers: loadingChatScrollRoomIdentifiers.value,
-  })) {
-    return;
-  }
-  chatScrollPositionsByRoom.value = {
-    ...chatScrollPositionsByRoom.value,
-    [storageKey]: position,
-  };
-}
-
-function chatScrollPositionForRoom(roomIdentifier: string): ChatScrollPosition | null {
-  const storageKey = chatScrollPositionKey(roomIdentifier);
-  if (storageKey && chatScrollPositionsByRoom.value[storageKey] !== undefined) {
-    return chatScrollPositionsByRoom.value[storageKey];
-  }
-  return chatScrollPositionsByRoom.value[roomIdentifier] ?? null;
-}
-
-function rememberLoadingChatScrollRoom(roomIdentifier: string | null | undefined): void {
-  const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
-  if (!normalizedRoomIdentifier || loadingChatScrollRoomIdentifiers.value.has(normalizedRoomIdentifier)) return;
-  loadingChatScrollRoomIdentifiers.value = new Set([
-    ...loadingChatScrollRoomIdentifiers.value,
-    normalizedRoomIdentifier,
-  ]);
-}
-
-function forgetLoadingChatScrollRooms(roomIdentifiers: Array<string | null | undefined>): void {
-  const normalizedRoomIdentifiers = roomIdentifiers
-    .map(normalizeRoomIdentifier)
-    .filter((roomIdentifier): roomIdentifier is string => Boolean(roomIdentifier));
-  if (!normalizedRoomIdentifiers.length) return;
-  const nextRoomIdentifiers = new Set(loadingChatScrollRoomIdentifiers.value);
-  for (const roomIdentifier of normalizedRoomIdentifiers) {
-    nextRoomIdentifiers.delete(roomIdentifier);
-  }
-  if (nextRoomIdentifiers.size === loadingChatScrollRoomIdentifiers.value.size) return;
-  loadingChatScrollRoomIdentifiers.value = nextRoomIdentifiers;
-}
-
-watch(
-  [() => selectedSnapshotLoading.value, () => activeChatScrollRoomIdentifier()] as const,
-  ([loading, roomIdentifier]) => {
-    if (loading) rememberLoadingChatScrollRoom(roomIdentifier);
-  },
-  { flush: "sync" }
-);
-
-watch(
-  [
-    () => selectedSnapshotLoading.value,
-    () => selectedSnapshot.value?.roomIdentifier || null,
-    () => selectedSnapshot.value?.room?.identifier || null,
-  ] as const,
-  ([loading, roomIdentifier, roomInfoIdentifier]) => {
-    if (loading) return;
-    forgetLoadingChatScrollRooms([roomIdentifier, roomInfoIdentifier]);
-  },
-  { flush: "sync" }
-);
-
-function activeChatScrollRoomIdentifier(): string | null {
-  if (activeEntry.value.type === "room") {
-    return activeEntry.value.roomIdentifier || selectedRoomInfo.value.identifier || null;
-  }
-  return selectedRoomInfo.value.identifier || null;
-}
+Object.assign(app, useAppChatScrollWatchers(app));
 
 Object.assign(app, useAppSelectionWatchers(app));
 
