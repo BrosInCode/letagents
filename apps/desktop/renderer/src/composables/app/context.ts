@@ -8,6 +8,7 @@ import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "
 import type { useAppSidebarLayout } from "./useAppSidebarLayout";
 import type { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./useAppSidebarMessages";
 import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSidebarSelection";
+import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
 import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
 import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
 
@@ -18,6 +19,7 @@ interface AppContextParts {
   useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
   useAppSidebarMessages: ReturnType<typeof useAppSidebarMessages>;
   useAppSidebarSelection: ReturnType<typeof useAppSidebarSelection>;
+  useAppFocusRoomConclusion: ReturnType<typeof useAppFocusRoomConclusion>;
   useAppSessionActions: ReturnType<typeof useAppSessionActions>;
   useAppAccountScope: ReturnType<typeof useAppAccountScope>;
   useAppAccountActivityFeed: ReturnType<typeof useAppAccountActivityFeed>;

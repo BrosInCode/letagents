@@ -410,7 +410,6 @@ import type {
   DesktopAppAgentRunResult,
   DesktopAppAgentSaveSettingsInput,
   DesktopChatStorageSettings,
-  DesktopFocusRoomInfo,
   DesktopRoomSnapshot,
   RepoStatus,
 } from "../../electron/ipc-types";
@@ -429,12 +428,7 @@ import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboard
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
-import type { RoomEntry } from "./components/desktop/types";
 import { activeRepoRoomContext, resolveActiveProjectRootPath } from "./domain/room-project-context";
-import type {
-  FocusRoomConcludedEvent,
-  FocusRoomConclusionInput,
-} from "./domain/focus-room-conclusion";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
@@ -444,7 +438,7 @@ import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composab
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
-import { normalizeRoomIdentifier, findSidebarRoomEntryByIdentifier, rememberRecentRootRooms } from "./domain/sidebar-rooms";
+import { normalizeRoomIdentifier, rememberRecentRootRooms } from "./domain/sidebar-rooms";
 import { promoteSidebarProject, replaceSidebarProjectId, rememberSidebarRoomOrder } from "./domain/sidebar-room-order";
 import {
   appAgentArchivedRoomIdentifiers,
@@ -462,6 +456,7 @@ import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./com
 import { useAppSidebarLayout } from "./composables/app/useAppSidebarLayout";
 import { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./composables/app/useAppSidebarMessages";
 import { useAppSidebarSelection, useAppSidebarEntries } from "./composables/app/useAppSidebarSelection";
+import { useAppFocusRoomConclusion } from "./composables/app/useAppFocusRoomConclusion";
 import { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./composables/app/useAppSession";
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 
@@ -489,8 +484,7 @@ const {
   appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
   diagnostics, mcpInstallState, selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback,
   setupLoadError, mcpWizardStep, firstRunStage, sidebarFocusRoomConclusionTarget,
-  sidebarFocusRoomConclusionParent, sidebarFocusRoomConclusionReturnFocusId,
-  sidebarFocusRoomConclusionError, sidebarFocusRoomConclusionPendingToast, sidebarSelectionActive,
+  sidebarFocusRoomConclusionReturnFocusId, sidebarFocusRoomConclusionError, sidebarSelectionActive,
   sidebarSelectedEntryIds, sidebarBatchActionBusy, sidebarBatchDialogAction,
   sidebarBatchDialogTargets, sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
@@ -513,6 +507,12 @@ const {
   handleSidebarBatchAction, closeSidebarBatchDialog, confirmSidebarBatchAction,
   handleSidebarBatchDialogAfterLeave,
 } = Object.assign(app, useAppSidebarSelection(app));
+const {
+  handleRoomDetailsFocusRoomConcluded, sidebarFocusRoomConclusionBusy,
+  openSidebarFocusRoomConclusion, openRoomDetailsFocusRoomConclusion,
+  closeSidebarFocusRoomConclusion, submitSidebarFocusRoomConclusion,
+  handleSidebarFocusRoomConclusionAfterLeave,
+} = Object.assign(app, useAppFocusRoomConclusion(app));
 const {
   refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
   handleDesktopRoomStreamEvent, startSignedOutAuthFlow, openAccountAuthFlow, startFirstRunRoomAuth,
@@ -753,41 +753,6 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
 
 Object.assign(app, useAppHistoryWatchers(app));
 
-async function handleRoomDetailsFocusRoomConcluded(event: FocusRoomConcludedEvent): Promise<void> {
-  const focusRoomIdentifier = normalizeRoomIdentifier(event.focusRoomIdentifier);
-  const parentRoomIdentifier = normalizeRoomIdentifier(event.parentRoomIdentifier);
-  const targetWasActive = activeEntry.value.type === "room"
-    && normalizeRoomIdentifier(activeEntry.value.roomIdentifier) === focusRoomIdentifier;
-  const parentBeforeRefresh = findSidebarRoomEntryByIdentifier(
-    projectEntries.value,
-    parentRoomIdentifier,
-  );
-
-  let refreshError: unknown = null;
-  try {
-    await refresh();
-  } catch (error) {
-    refreshError = error;
-  }
-
-  if (targetWasActive) {
-    const parentAfterRefresh = findSidebarRoomEntryByIdentifier(
-      projectEntries.value,
-      parentRoomIdentifier,
-    ) || parentBeforeRefresh;
-    if (parentAfterRefresh) handleSidebarEntrySelected(parentAfterRefresh);
-  }
-
-  if (refreshError) {
-    pushActionToast(
-      `${event.displayName} concluded, but the room list could not be refreshed.`,
-      "error",
-    );
-    return;
-  }
-  pushActionToast(`${event.displayName} concluded.`, "success");
-}
-
 const {
   clearLiveMetadataRefreshInterval,
   clearLiveMetadataRefreshTimer,
@@ -977,99 +942,7 @@ const {
   },
   notify: (message, state) => pushActionToast(message, state),
 });
-Object.assign(app, { batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned });
-
-const sidebarFocusRoomConclusionBusy = computed(() => {
-  const target = sidebarFocusRoomConclusionTarget.value;
-  if (!target) return false;
-  return settingsRoomActionBusyKey.value
-    === `conclude-focus:${target.roomIdentifier || target.focusKey}`;
-});
-
-function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
-  if (!authStatus.value?.authenticated) {
-    pushActionToast("Connect GitHub from the account menu to conclude this Focus Room.", "info");
-    return;
-  }
-  if (
-    entry.kind !== "focus"
-    || entry.focusStatus === "concluded"
-    || !entry.focusKey
-    || !entry.parentRoomIdentifier
-  ) return;
-
-  sidebarFocusRoomConclusionTarget.value = entry;
-  sidebarFocusRoomConclusionParent.value = findSidebarRoomEntryByIdentifier(
-    projectEntries.value,
-    entry.parentRoomIdentifier,
-  );
-  sidebarFocusRoomConclusionReturnFocusId.value = entry.id;
-  sidebarFocusRoomConclusionError.value = null;
-  sidebarFocusRoomConclusionPendingToast.value = null;
-}
-
-function openRoomDetailsFocusRoomConclusion(focusRoom: DesktopFocusRoomInfo): void {
-  const focusRoomIdentifier = normalizeRoomIdentifier(focusRoom.identifier || focusRoom.roomId);
-  const parentRoomIdentifier = normalizeRoomIdentifier(focusRoom.parentRoomId);
-  const entry = projectEntries.value
-    .flatMap((project) => project.focusRooms)
-    .find((candidate) => {
-      if (
-        focusRoomIdentifier
-        && normalizeRoomIdentifier(candidate.roomIdentifier) === focusRoomIdentifier
-      ) return true;
-      return Boolean(
-        focusRoom.focusKey
-        && candidate.focusKey === focusRoom.focusKey
-        && normalizeRoomIdentifier(candidate.parentRoomIdentifier) === parentRoomIdentifier
-      );
-    });
-  if (!entry) {
-    pushActionToast("This focus room is no longer available to conclude.", "error");
-    return;
-  }
-  openSidebarFocusRoomConclusion(entry);
-}
-
-function closeSidebarFocusRoomConclusion(): void {
-  if (sidebarFocusRoomConclusionBusy.value) return;
-  sidebarFocusRoomConclusionTarget.value = null;
-  sidebarFocusRoomConclusionError.value = null;
-  sidebarFocusRoomConclusionPendingToast.value = null;
-}
-
-async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput): Promise<void> {
-  const target = sidebarFocusRoomConclusionTarget.value;
-  if (!target || sidebarFocusRoomConclusionBusy.value) return;
-
-  const parent = sidebarFocusRoomConclusionParent.value;
-  const targetWasActive = activeEntry.value.id === target.id;
-  sidebarFocusRoomConclusionError.value = null;
-  const result = await concludeSidebarFocusRoom(target, input);
-  if (!result.ok) {
-    sidebarFocusRoomConclusionError.value = result.error;
-    return;
-  }
-
-  sidebarFocusRoomConclusionReturnFocusId.value = parent?.id || null;
-  const displayName = target.title || "Focus room";
-  sidebarFocusRoomConclusionPendingToast.value = result.refreshError
-    ? {
-        message: `${displayName} concluded, but the room list could not be refreshed: ${result.refreshError}`,
-        state: "error",
-      }
-    : { message: `${displayName} concluded.`, state: "success" };
-  sidebarFocusRoomConclusionTarget.value = null;
-  if (targetWasActive && parent) {
-    handleSidebarEntrySelected(parent);
-  }
-}
-
-function handleSidebarFocusRoomConclusionAfterLeave(): void {
-  const toast = sidebarFocusRoomConclusionPendingToast.value;
-  sidebarFocusRoomConclusionPendingToast.value = null;
-  if (toast) pushActionToast(toast.message, toast.state);
-}
+Object.assign(app, { batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned, concludeSidebarFocusRoom, settingsRoomActionBusyKey });
 
 const {
   clearMcpTargetSelection,
