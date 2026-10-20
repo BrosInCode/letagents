@@ -411,7 +411,6 @@ import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, toRaw, watch } from "vue";
 import type {
-  DesktopAccountRoomEntry,
   DesktopAppAgentRunInput,
   DesktopAppAgentRunResult,
   DesktopAppAgentSaveSettingsInput,
@@ -518,6 +517,7 @@ import { resetHostApprovals } from "./components/desktop/content/room-chat/host-
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
 import { roomNotificationPreferences } from "./composables/useRoomNotificationPreferences";
+import { gitRoomsShareRepo, roomAliasSet, roomMatchesAliases } from "./domain/app-room-aliases";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
 
@@ -785,16 +785,6 @@ const selectedRoomIsProject = computed(() => {
     room.kind === "project" && normalizeRoomIdentifier(room.identifier) === identifier
   );
 });
-
-function gitRoomsShareRepo(
-  left: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],
-  right: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],
-): boolean {
-  if (!left || !right) return false;
-  const leftRepo = left.repository.id || `${left.host}:${left.repository.fullName}`.toLowerCase();
-  const rightRepo = right.repository.id || `${right.host}:${right.repository.fullName}`.toLowerCase();
-  return left.provider === right.provider && left.host === right.host && leftRepo === rightRepo;
-}
 
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, (accountId) => {
   accountReadStorageKey = accountId ? `${readRoomMessagesStorageKey}:${encodeURIComponent(accountId)}` : null;
@@ -2361,22 +2351,6 @@ function currentActiveRoomAliases(input?: Partial<DesktopAppAgentRunInput>): Set
     activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
     activeEntry.value.title,
   ]);
-}
-
-function roomAliasSet(values: readonly (string | null | undefined)[]): Set<string> {
-  return new Set(
-    values
-      .map(normalizeRoomIdentifier)
-      .filter((value): value is string => Boolean(value)),
-  );
-}
-
-function roomMatchesAliases(room: DesktopAccountRoomEntry, aliases: Set<string>): boolean {
-  return [
-    room.roomIdentifier,
-    room.displayName,
-    room.name,
-  ].some((value) => aliases.has(normalizeRoomIdentifier(value) || ""));
 }
 
 function forgetRecentRootRoomAliases(aliases: Set<string>): void {
