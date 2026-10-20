@@ -53,7 +53,7 @@ const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
 /**
  * The desktop gives up on a bootstrap request 45 s after sending it
- * (BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS in electron/main/supervisor-daemon.ts)
+ * (BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS in electron/main/supervisor-daemon/constants.ts)
  * and then treats the new agent's claim as failed. Whatever the queue did,
  * the daemon finishes or fails the bootstrap this long after receiving it,
  * so it never commits a room boundary for a claim the desktop has abandoned.
