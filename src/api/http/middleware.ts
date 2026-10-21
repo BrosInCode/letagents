@@ -51,18 +51,14 @@ export function registerHttpMiddleware(
 
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {
-      // A remote MCP session's in-process call: the account was bound when the
-      // session's /mcp request authenticated. Only in-process sockets have one.
-      const internal = inProcessPrincipal(req);
-      if (internal) {
-        req.sessionAccount = internal.account;
-        req.authKind = "owner_token";
-        req.agentSession = null;
-        req.supervisorGrant = null;
-        next();
+      const auth = await deps.resolveRequestAuth(req);
+      // A remote MCP session's in-process call resolves to its bound owner
+      // token (see resolveRequestAuth). Once that token is revoked it must not
+      // fall back to anonymous access.
+      if (inProcessPrincipal(req) && auth.authKind !== "owner_token") {
+        _res.status(401).json({ error: INVALID_BEARER_MESSAGE });
         return;
       }
-      const auth = await deps.resolveRequestAuth(req);
       req.sessionAccount = auth.account;
       req.authKind = auth.authKind;
       req.agentSession = auth.agentSession ?? null;

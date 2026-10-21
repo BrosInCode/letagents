@@ -25,22 +25,32 @@ export interface SealedRemoteMcpState {
   data: string;
 }
 
-export function sealRemoteMcpState(state: unknown, key: Buffer, sessionId: string): SealedRemoteMcpState {
+/** What a sealed state is bound to: its format, session and account. */
+export interface RemoteMcpStateBinding {
+  sessionId: string;
+  accountId: string;
+}
+
+function additionalData(binding: RemoteMcpStateBinding): Buffer {
+  return Buffer.from(`letagents remote mcp state\nv1\n${binding.sessionId}\n${binding.accountId}`, "utf8");
+}
+
+export function sealRemoteMcpState(state: unknown, key: Buffer, binding: RemoteMcpStateBinding): SealedRemoteMcpState {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(Buffer.from(sessionId, "utf8"));
+  cipher.setAAD(additionalData(binding));
   const data = Buffer.concat([cipher.update(JSON.stringify(state), "utf8"), cipher.final()]);
   return { v: 1, iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: data.toString("base64") };
 }
 
-/** The saved state, or null when it does not open with this key and session. */
-export function openRemoteMcpState(sealed: unknown, key: Buffer, sessionId: string): unknown | null {
+/** The saved state, or null when it does not open with this key, session and account. */
+export function openRemoteMcpState(sealed: unknown, key: Buffer, binding: RemoteMcpStateBinding): unknown | null {
   const value = sealed as Partial<SealedRemoteMcpState> | null;
   if (!value || value.v !== 1 || typeof value.iv !== "string" || typeof value.tag !== "string"
     || typeof value.data !== "string") return null;
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64"), { authTagLength: 16 });
-    decipher.setAAD(Buffer.from(sessionId, "utf8"));
+    decipher.setAAD(additionalData(binding));
     decipher.setAuthTag(Buffer.from(value.tag, "base64"));
     const plain = Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]);
     return JSON.parse(plain.toString("utf8"));

@@ -20,6 +20,8 @@ import { runOutsideSessionScope } from "../../mcp/server/runtime/session-scope.j
  */
 export interface InProcessPrincipal {
   readonly account: OwnerTokenAccount;
+  /** SHA-256 hex of the owner token; each request re-checks that it still exists. */
+  readonly tokenHash: string;
   readonly remoteMcpSessionId: string;
 }
 

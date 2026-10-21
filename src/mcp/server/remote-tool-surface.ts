@@ -51,7 +51,7 @@ export const REMOTE_EXCLUDED_TOOL_PREFIXES: readonly string[] = ["rental_"];
 /**
  * Array elements plus object keys allowed in one remote tool call's
  * arguments. Far above any real call (the largest are task and message
- * payloads), far below what exhausts the child's heap.
+ * payloads), far below what makes SDK validation expensive for the API process.
  */
 export const REMOTE_MAX_TOOL_INPUT_ELEMENTS = 10_000;
 

@@ -10,7 +10,7 @@ import { registerHttpMiddleware } from "../http/middleware.js";
 import type { AuthenticatedRequest, ResolvedRequestAuth } from "../http/helpers.js";
 import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
 import type { RemoteMcpSessions } from "../remote-mcp/sessions.js";
-import { InProcessDispatcher } from "../remote-mcp/in-process-dispatch.js";
+import { InProcessDispatcher, inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { currentSessionScope, runInSessionScope, type McpSessionScope } from "../../mcp/server/runtime/session-scope.js";
 
 // Route-level refusals with stub auth and no database: every refusal happens
@@ -33,6 +33,9 @@ async function startApp(sessions: RemoteMcpSessions): Promise<{ server: Server; 
   const app = express();
   registerHttpMiddleware(app, {
     async resolveRequestAuth(req) {
+      // The real resolver re-checks the bound token's hash; the stub trusts it.
+      const internal = inProcessPrincipal(req);
+      if (internal) return { account: internal.account, authKind: "owner_token" };
       const match = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "");
       return match ? ACCOUNTS[match[1]] ?? { account: null, authKind: null } : { account: null, authKind: null };
     },
@@ -110,6 +113,7 @@ test("only in-process connections carry a bound principal, and they cannot re-en
 
     const dispatch = new InProcessDispatcher(app).bind({
       account: { account_id: "acct_bound", login: "bound" } as never,
+      tokenHash: "00",
       remoteMcpSessionId: "session-x",
     });
     const scope = { sessionId: "scope-under-test", memory: new Map() } as unknown as McpSessionScope;

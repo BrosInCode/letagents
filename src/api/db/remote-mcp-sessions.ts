@@ -1,4 +1,4 @@
-import { and, asc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, eq, lt, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { owner_tokens, remote_mcp_sessions } from "./schema.js";
@@ -73,10 +73,13 @@ export async function listRemoteMcpSessionsForAccount(accountId: string): Promis
     .orderBy(asc(remote_mcp_sessions.last_seen_at));
 }
 
-/** Delete sessions idle since before `cutoffIso`; returns their ids. */
-export async function deleteIdleRemoteMcpSessions(cutoffIso: string): Promise<string[]> {
+/** Delete sessions idle since before `cutoffIso`, except busy ones; returns their ids. */
+export async function deleteIdleRemoteMcpSessions(cutoffIso: string, busySessionIds: string[] = []): Promise<string[]> {
   const rows = await db.delete(remote_mcp_sessions)
-    .where(lt(remote_mcp_sessions.last_seen_at, cutoffIso))
+    .where(and(
+      lt(remote_mcp_sessions.last_seen_at, cutoffIso),
+      busySessionIds.length ? notInArray(remote_mcp_sessions.session_id, busySessionIds) : undefined,
+    ))
     .returning({ session_id: remote_mcp_sessions.session_id });
   return rows.map((row) => row.session_id);
 }

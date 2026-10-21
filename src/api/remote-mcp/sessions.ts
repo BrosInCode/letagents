@@ -24,6 +24,7 @@ import {
   type McpSessionScope,
 } from "../../mcp/server/runtime/session-scope.js";
 import type { InProcessDispatcher } from "./in-process-dispatch.js";
+import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
 import { RemoteMcpBusyError, RemoteMcpStateTooLargeError } from "./errors.js";
 import {
   deriveRemoteMcpStateKey,
@@ -57,6 +58,8 @@ export interface RemoteMcpLimits {
 
 
 
+const IDLE_MARGIN_MS = 5 * 60_000;
+
 function positiveIntEnv(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -65,8 +68,10 @@ function positiveIntEnv(name: string, fallback: number): number {
 export function remoteMcpLimitsFromEnv(): RemoteMcpLimits {
   return {
     maxSessionsPerAccount: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT", 16),
-    // Each request refreshes last_seen, so this need not follow LETAGENTS_POLL_MAX_MS.
-    idleTimeoutMs: positiveIntEnv("LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS", 30 * 60_000),
+    // last_seen is refreshed when a request starts, so the timeout must outlast
+    // the longest request (a long-poll up to LETAGENTS_POLL_MAX_MS) plus a margin.
+    idleTimeoutMs: Math.max(positiveIntEnv("LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS", 30 * 60_000),
+      getPollTimeoutCapMs() + IDLE_MARGIN_MS),
     maxInFlightPerAccount: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT", 8),
     maxInFlight: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT", 256),
     maxStateBytes: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES", 256 * 1024),
@@ -86,14 +91,27 @@ function isRecord(value: unknown): value is JsonRecord {
 /**
  * Combine two saves of one session. Maps (agent sessions, workers, room
  * sessions, pinned connections, ...) are unioned key by key; where both have
- * a key, or for single values, `prefer` wins. Nothing either side added is lost.
+ * a key, or for single values, `prefer` wins, except that an ended entry
+ * stays ended. Nothing either side added is lost.
  */
 export function mergeSessionStates(ours: McpSessionPersistentState, theirs: McpSessionPersistentState,
   prefer: "ours" | "theirs"): McpSessionPersistentState {
   const pick = <T>(a: T, b: T): T => (prefer === "ours" ? a : b);
+  // An entry that one side ended stays ended: an ended agent session is never revived.
+  const pickEntry = (a: unknown, b: unknown): unknown => {
+    const endedA = isRecord(a) && Boolean(a.ended_at);
+    const endedB = isRecord(b) && Boolean(b.ended_at);
+    if (endedA !== endedB) return endedA ? a : b;
+    return pick(a, b);
+  };
   const unionMap = (a: unknown, b: unknown): unknown => {
     if (!isRecord(a) || !isRecord(b)) return pick(a, b) ?? a ?? b;
-    return prefer === "ours" ? { ...b, ...a } : { ...a, ...b };
+    const merged: JsonRecord = { ...a, ...b };
+    for (const key of Object.keys(merged)) {
+      if (key in a && key in b) merged[key] = pickEntry(a[key], b[key]);
+      else merged[key] = key in a ? a[key] : b[key];
+    }
+    return merged;
   };
   const local: JsonRecord = {};
   for (const key of new Set([...Object.keys(ours.local), ...Object.keys(theirs.local)])) {
@@ -166,6 +184,8 @@ export class RemoteMcpSessions {
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly counters = { opened: 0, evicted: 0, swept: 0, busy: 0, conflicts: 0 };
   private readonly inFlightByAccount = new Map<string, number>();
+  /** Sessions with a request in flight on this process; the sweep skips them. */
+  private readonly inFlightBySession = new Map<string, number>();
   private inFlight = 0;
 
   constructor(options: RemoteMcpSessionsOptions) {
@@ -194,6 +214,9 @@ export class RemoteMcpSessions {
   }
 
   /** Create a session for an authenticated initialize request. */
+  // Two initializes for one account racing here may both see room under the
+  // cap and leave it one or two over; the account's next open trims it back.
+  // Rare, and bounded by the 10-per-minute create limit.
   async open(input: { accountId: string; token: string; clientName: string | null }): Promise<string> {
     const existing = await listRemoteMcpSessionsForAccount(input.accountId);
     const excess = existing.length - this.limits.maxSessionsPerAccount + 1;
@@ -212,7 +235,7 @@ export class RemoteMcpSessions {
       tokenHash: hashRemoteMcpToken(input.token),
       agentInstanceId: randomUUID(),
       clientName: input.clientName?.slice(0, 200) ?? null,
-      state: sealRemoteMcpState(emptyState(), key, sessionId) as unknown as Record<string, unknown>,
+      state: sealRemoteMcpState(emptyState(), key, { sessionId, accountId: input.accountId }) as unknown as Record<string, unknown>,
     });
     this.counters.opened += 1;
     return sessionId;
@@ -242,7 +265,7 @@ export class RemoteMcpSessions {
       current.lastUsedAt = Date.now();
       return current;
     }
-    const opened = openRemoteMcpState(row.state, stateKey, row.session_id);
+    const opened = openRemoteMcpState(row.state, stateKey, { sessionId: row.session_id, accountId: row.account_id });
     if (opened === null) return null;
     const incoming = readState(opened);
     if (current) {
@@ -275,11 +298,14 @@ export class RemoteMcpSessions {
   async handle(session: LoadedRemoteMcpSession, account: OwnerTokenAccount, req: IncomingMessage,
     res: ServerResponse, body: unknown): Promise<void> {
     if (account.account_id !== session.accountId) throw new Error("Remote MCP session account mismatch.");
-    const release = this.enter(session.accountId);
+    const release = this.enter(session.accountId, session.sessionId);
+    // Mark the session used now, not only when a call saves: a long-poll may
+    // run longer than a sweep interval.
+    await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
     // A dropped client ends the request's in-process calls (long-polls included).
     const disconnected = new AbortController();
     res.once("close", () => disconnected.abort());
-    const bound = this.dispatcher.bind({ account, remoteMcpSessionId: session.sessionId });
+    const bound = this.dispatcher.bind({ account, tokenHash: session.tokenHash, remoteMcpSessionId: session.sessionId });
     const scope: McpSessionScope = {
       sessionId: session.sessionId,
       accountId: session.accountId,
@@ -320,7 +346,7 @@ export class RemoteMcpSessions {
   }
 
   /** Count one request in flight, or refuse it at the caps. */
-  private enter(accountId: string): () => void {
+  private enter(accountId: string, sessionId: string): () => void {
     const own = this.inFlightByAccount.get(accountId) ?? 0;
     if (own >= this.limits.maxInFlightPerAccount || this.inFlight >= this.limits.maxInFlight) {
       this.counters.busy += 1;
@@ -330,12 +356,16 @@ export class RemoteMcpSessions {
         : new RemoteMcpBusyError(503, "The remote MCP endpoint is busy. Retry shortly.");
     }
     this.inFlightByAccount.set(accountId, own + 1);
+    this.inFlightBySession.set(sessionId, (this.inFlightBySession.get(sessionId) ?? 0) + 1);
     this.inFlight += 1;
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.inFlight -= 1;
+      const sessionCount = (this.inFlightBySession.get(sessionId) ?? 1) - 1;
+      if (sessionCount > 0) this.inFlightBySession.set(sessionId, sessionCount);
+      else this.inFlightBySession.delete(sessionId);
       const next = (this.inFlightByAccount.get(accountId) ?? 1) - 1;
       if (next > 0) this.inFlightByAccount.set(accountId, next);
       else this.inFlightByAccount.delete(accountId);
@@ -350,12 +380,13 @@ export class RemoteMcpSessions {
   /** Delete idle sessions and sessions whose owner token was revoked. */
   async sweep(now = Date.now()): Promise<void> {
     const cutoff = new Date(now - this.limits.idleTimeoutMs).toISOString();
-    const removed = [...await deleteIdleRemoteMcpSessions(cutoff), ...await deleteRevokedRemoteMcpSessions()];
+    const busy = [...this.inFlightBySession.keys()];
+    const removed = [...await deleteIdleRemoteMcpSessions(cutoff, busy), ...await deleteRevokedRemoteMcpSessions()];
     for (const id of removed) this.loaded.delete(id);
     this.counters.swept += removed.length;
     // This process's decrypted copies go too, once unused for the idle time.
     for (const [id, session] of this.loaded) {
-      if (now - session.lastUsedAt >= this.limits.idleTimeoutMs) this.loaded.delete(id);
+      if (now - session.lastUsedAt >= this.limits.idleTimeoutMs && !this.inFlightBySession.has(id)) this.loaded.delete(id);
     }
   }
 
@@ -386,7 +417,7 @@ export class RemoteMcpSessions {
         const version = await saveRemoteMcpSessionState({
           sessionId: session.sessionId,
           expectedVersion: session.version,
-          state: sealRemoteMcpState(state, session.stateKey, session.sessionId) as unknown as Record<string, unknown>,
+          state: sealRemoteMcpState(state, session.stateKey, { sessionId: session.sessionId, accountId: session.accountId }) as unknown as Record<string, unknown>,
           roomId,
           workerSessionId: pinned?.session_id ?? currentId ?? null,
           readCursor: roomId ? state.local.room_sessions?.[roomId]?.last_message_id ?? null : null,
@@ -405,7 +436,7 @@ export class RemoteMcpSessions {
           this.loaded.delete(session.sessionId);
           return;
         }
-        const theirs = openRemoteMcpState(row.state, session.stateKey, session.sessionId);
+        const theirs = openRemoteMcpState(row.state, session.stateKey, { sessionId: session.sessionId, accountId: session.accountId });
         if (theirs === null) return;
         this.counters.conflicts += 1;
         Object.assign(session.state, mergeSessionStates(session.state, readState(theirs), "ours"));

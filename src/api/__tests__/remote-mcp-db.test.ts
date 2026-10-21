@@ -278,20 +278,163 @@ test("a save that races another replica's save merges instead of losing either",
     await call(client, "join_room", { name: "remote-mcp-merge-first" });
     const row = await remoteSessionsDb!.getRemoteMcpSession(sessionId);
     const key = stateCrypto.deriveRemoteMcpStateKey("remote_mcp_token_merge", sessionId);
-    const theirs = stateCrypto.openRemoteMcpState(row!.state, key, sessionId) as Record<string, any>;
+    const theirs = stateCrypto.openRemoteMcpState(row!.state, key, { sessionId, accountId: row!.account_id }) as Record<string, any>;
     theirs.local.room_sessions = { ...theirs.local.room_sessions, "other-replica-room": {
       room_id: "other-replica-room", joined_via: "join_room", joined_at: "2026-10-21T00:00:00Z", last_seen_at: "2099-01-01T00:00:00Z" } };
     // Another replica saved a newer version this process has not seen.
     await dbClient!.pool.query("UPDATE remote_mcp_sessions SET state = $1, version = version + 1 WHERE session_id = $2",
-      [JSON.stringify(stateCrypto.sealRemoteMcpState(theirs, key, sessionId)), sessionId]);
+      [JSON.stringify(stateCrypto.sealRemoteMcpState(theirs, key, { sessionId, accountId: row!.account_id })), sessionId]);
 
     await call(client, "join_room", { name: "remote-mcp-merge-second" });
     const saved = await remoteSessionsDb!.getRemoteMcpSession(sessionId);
-    const merged = stateCrypto.openRemoteMcpState(saved!.state, key, sessionId) as Record<string, any>;
+    const merged = stateCrypto.openRemoteMcpState(saved!.state, key, { sessionId, accountId: row!.account_id }) as Record<string, any>;
     assert.ok(merged.local.room_sessions["other-replica-room"], "the other replica's change survived");
     assert.equal(merged.currentRoom.room_id, "remote-mcp-merge-second", "this process's change survived");
     assert.ok(saved!.version > row!.version + 1);
   } finally {
     await client.close();
+  }
+});
+
+test("concurrent sessions keep their own room, worker and instance, also within one account", { skip, timeout: 60_000 }, async () => {
+  await createOwner("iso-c", "remote_mcp_token_iso_c");
+  await createOwner("iso-d", "remote_mcp_token_iso_d");
+  const a = await connect("remote_mcp_token_iso_c");
+  const b = await connect("remote_mcp_token_iso_d");
+  const a2 = await connect("remote_mcp_token_iso_c");
+  try {
+    await call(a.client, "join_room", { name: "remote-mcp-iso-a" });
+    // A long-polls while B and A's second session join and register.
+    const waiting = a.client.callTool({ name: "wait_for_messages", arguments: { timeout: 60_000 } });
+    const [joinedB, joinedA2] = await Promise.all([
+      call(b.client, "join_room", { name: "remote-mcp-iso-b" }),
+      call(a2.client, "join_room", { name: "remote-mcp-iso-a2" }),
+    ]);
+    const [workerB, workerA2] = await Promise.all([
+      call(b.client, "register_agent_session", { room_id: joinedB.room_id, display_name: "Iso B" }),
+      call(a2.client, "register_agent_session", { room_id: joinedA2.room_id, display_name: "Iso A2" }),
+    ]);
+    await waiting;
+    const workerA = await call(a.client, "register_agent_session", { room_id: "remote-mcp-iso-a", display_name: "Iso A" });
+    assert.equal((await call(a.client, "get_current_room")).room_id, "remote-mcp-iso-a");
+    assert.equal((await call(b.client, "get_current_room")).room_id, "remote-mcp-iso-b");
+    assert.equal((await call(a2.client, "get_current_room")).room_id, "remote-mcp-iso-a2");
+    const instances = [workerA, workerB, workerA2].map((worker) => worker.agent_session?.agent_instance_id);
+    assert.equal(new Set(instances).size, 3, `each session is its own agent instance: ${JSON.stringify(instances)}`);
+    const rows = await Promise.all([a, b, a2].map((c) => remoteSessionsDb!.getRemoteMcpSession(c.transport.sessionId!)));
+    assert.deepEqual(rows.map((row) => row?.room_id), ["remote-mcp-iso-a", "remote-mcp-iso-b", "remote-mcp-iso-a2"]);
+    assert.equal(new Set(rows.map((row) => row?.agent_instance_id)).size, 3);
+  } finally {
+    await Promise.all([a.client.close(), b.client.close(), a2.client.close()]);
+  }
+});
+
+test("a long-poll keeps its session alive through the idle sweep", { skip, timeout: 60_000 }, async () => {
+  await createOwner("idle", "remote_mcp_token_idle");
+  const { client, transport } = await connect("remote_mcp_token_idle");
+  const sessionId = transport.sessionId!;
+  const age = "UPDATE remote_mcp_sessions SET last_seen_at = now() - interval '2 days' WHERE session_id = $1";
+  try {
+    await call(client, "join_room", { name: "remote-mcp-idle" });
+    const waiting = client.callTool({ name: "wait_for_messages", arguments: { timeout: 60_000 } });
+    await new Promise((done) => setTimeout(done, 300));
+    // As if the poll had run for hours: only the in-flight mark protects it.
+    await dbClient!.pool.query(age, [sessionId]);
+    await sessions().sweep();
+    assert.ok(await remoteSessionsDb!.getRemoteMcpSession(sessionId), "a session with a request in flight is not swept");
+    await waiting;
+    assert.equal((await call(client, "get_current_room")).room_id, "remote-mcp-idle", "the room survived the poll");
+    const row = await remoteSessionsDb!.getRemoteMcpSession(sessionId);
+    assert.ok(Date.parse(row!.last_seen_at) > Date.now() - 60_000, "a request refreshes last_seen");
+    await dbClient!.pool.query(age, [sessionId]);
+    await sessions().sweep();
+    assert.equal(await remoteSessionsDb!.getRemoteMcpSession(sessionId), null, "an idle session is swept");
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+});
+
+test("an in-process call re-resolves its owner token: rechecks pass until revocation", { skip, timeout: 60_000 }, async (t) => {
+  const express = (await import("express")).default;
+  const { registerHttpMiddleware } = await import("../http/middleware.js");
+  const { resolveRequestAuth } = await import("../request/auth.js");
+  const { InProcessDispatcher } = await import("../remote-mcp/in-process-dispatch.js");
+  const rooms = await import("../db/rooms.js");
+  const access = await import("../rooms/access.js");
+  const { createServer } = await import("node:http");
+
+  // A public repository room: rechecks consult GitHub, served by a stub.
+  const github = createServer((req, res) => {
+    const found = req.url?.toLowerCase().startsWith("/repos/brosincode/remote-mcp-public");
+    res.writeHead(found ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(found ? { private: false, owner: { login: "BrosInCode" } } : { message: "Not Found" }));
+  });
+  github.listen(0, "127.0.0.1");
+  await once(github, "listening");
+  const previousBaseUrl = process.env.GITHUB_API_BASE_URL;
+  process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${(github.address() as AddressInfo).port}`;
+  t.after(() => {
+    if (previousBaseUrl === undefined) delete process.env.GITHUB_API_BASE_URL;
+    else process.env.GITHUB_API_BASE_URL = previousBaseUrl;
+    github.close();
+  });
+
+  const project = await rooms.createProjectWithName("github.com/brosincode/remote-mcp-public");
+  assert.equal(access.isRepoBackedProject(project), true);
+  const token = "remote_mcp_token_recheck";
+  const created = await createOwner("recheck", token);
+  const account = await ownerTokens!.getOwnerTokenAccountByToken(token);
+
+  // The route checks once, waits for the test, then checks again (a live recheck).
+  const steps = { firstChecked: () => {}, gate: Promise.resolve() };
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  app.get("/recheck", async (req, res) => {
+    const first = await access.reauthorizeGitRoomParticipant(req as never, project);
+    steps.firstChecked();
+    await steps.gate;
+    const second = await access.reauthorizeGitRoomParticipant(req as never, project);
+    res.json({ first, second });
+  });
+  const dispatch = new InProcessDispatcher(app).bind({
+    account: account!, tokenHash: stateCrypto.hashRemoteMcpToken(token), remoteMcpSessionId: "recheck-session",
+  });
+  const arm = () => {
+    const firstChecked = new Promise<void>((done) => { steps.firstChecked = done; });
+    let release!: () => void;
+    steps.gate = new Promise<void>((done) => { release = done; });
+    return { firstChecked, release };
+  };
+
+  // A repository-access invalidation: the live check runs again and still passes.
+  const kept = arm();
+  const keptResponse = dispatch("/recheck", {});
+  await kept.firstChecked;
+  kept.release();
+  assert.deepEqual(await (await keptResponse).json(), { first: true, second: true });
+
+  // Revocation while the request is open: the next live check fails.
+  const ended = arm();
+  const endedResponse = dispatch("/recheck", {});
+  await ended.firstChecked;
+  await ownerTokens!.deleteOwnerTokenById(created.token_id);
+  ended.release();
+  assert.deepEqual(await (await endedResponse).json(), { first: true, second: false });
+  assert.equal((await dispatch("/recheck", {})).status, 401, "a revoked session's new in-process calls are refused");
+});
+
+test("merging two saves keeps an ended agent session ended", { skip }, async () => {
+  const { mergeSessionStates } = await import("../remote-mcp/sessions.js");
+  const live = { session_id: "s1", room_id: "r", session_token: "t", ended_at: null } as never;
+  const ended = { session_id: "s1", room_id: "r", session_token: "t", ended_at: "2026-10-21T00:00:00Z" } as never;
+  const base = { currentRoom: null, fullPromptDelivered: false };
+  for (const prefer of ["ours", "theirs"] as const) {
+    const merged = mergeSessionStates(
+      { ...base, local: { agent_sessions: { s1: live } }, pinnedConnections: { s1: live } },
+      { ...base, local: { agent_sessions: { s1: ended } }, pinnedConnections: { s1: ended } },
+      prefer,
+    );
+    assert.equal((merged.local.agent_sessions!.s1 as { ended_at: string | null }).ended_at, "2026-10-21T00:00:00Z", prefer);
+    assert.equal(merged.pinnedConnections.s1!.ended_at, "2026-10-21T00:00:00Z", prefer);
   }
 });
