@@ -19,6 +19,7 @@ else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 // API and MCP tools share this process, so one cap applies to both.
 process.env.LETAGENTS_POLL_MAX_MS = "1500";
 process.env.LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT = "3";
+process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT = "3";
 
 const skip = testDatabaseUrl ? false : "set TEST_DB_URL to run the DB-backed remote MCP tests";
 const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
@@ -28,6 +29,7 @@ const remoteSessionsDb = testDatabaseUrl ? await import("../db/remote-mcp-sessio
 const appModule = testDatabaseUrl ? await import("../server/app.js") : null;
 const routesModule = testDatabaseUrl ? await import("../server/routes.js") : null;
 const surface = await import("../../mcp/server/remote-tool-surface.js");
+const stateCrypto = await import("../remote-mcp/state-crypto.js");
 
 let server: Server | null = null;
 let baseUrl = "";
@@ -248,4 +250,48 @@ test("revoking the owner token refuses its requests and the sweep deletes its se
   await sessions().sweep();
   assert.equal(await remoteSessionsDb!.getRemoteMcpSession(transport.sessionId!), null);
   await client.close().catch(() => undefined);
+});
+
+test("an account's in-flight requests are capped", { skip, timeout: 60_000 }, async () => {
+  await createOwner("in-flight", "remote_mcp_token_in_flight");
+  const { client, transport } = await connect("remote_mcp_token_in_flight");
+  try {
+    await call(client, "join_room", { name: "remote-mcp-in-flight" });
+    const waits = Array.from({ length: 3 }, () => client.callTool({ name: "wait_for_messages", arguments: { timeout: 60_000 } }));
+    await new Promise((done) => setTimeout(done, 300));
+    const refused = await rawPost("remote_mcp_token_in_flight", transport.sessionId!,
+      { jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "get_current_room", arguments: {} } });
+    assert.equal(refused.status, 429, "a fourth request in flight is refused");
+    await Promise.all(waits);
+    const after = await call(client, "get_current_room");
+    assert.equal(after.room_id, "remote-mcp-in-flight", "requests are served again once the polls end");
+  } finally {
+    await client.close();
+  }
+});
+
+test("a save that races another replica's save merges instead of losing either", { skip, timeout: 60_000 }, async () => {
+  await createOwner("merge", "remote_mcp_token_merge");
+  const { client, transport } = await connect("remote_mcp_token_merge");
+  const sessionId = transport.sessionId!;
+  try {
+    await call(client, "join_room", { name: "remote-mcp-merge-first" });
+    const row = await remoteSessionsDb!.getRemoteMcpSession(sessionId);
+    const key = stateCrypto.deriveRemoteMcpStateKey("remote_mcp_token_merge", sessionId);
+    const theirs = stateCrypto.openRemoteMcpState(row!.state, key, sessionId) as Record<string, any>;
+    theirs.local.room_sessions = { ...theirs.local.room_sessions, "other-replica-room": {
+      room_id: "other-replica-room", joined_via: "join_room", joined_at: "2026-10-21T00:00:00Z", last_seen_at: "2099-01-01T00:00:00Z" } };
+    // Another replica saved a newer version this process has not seen.
+    await dbClient!.pool.query("UPDATE remote_mcp_sessions SET state = $1, version = version + 1 WHERE session_id = $2",
+      [JSON.stringify(stateCrypto.sealRemoteMcpState(theirs, key, sessionId)), sessionId]);
+
+    await call(client, "join_room", { name: "remote-mcp-merge-second" });
+    const saved = await remoteSessionsDb!.getRemoteMcpSession(sessionId);
+    const merged = stateCrypto.openRemoteMcpState(saved!.state, key, sessionId) as Record<string, any>;
+    assert.ok(merged.local.room_sessions["other-replica-room"], "the other replica's change survived");
+    assert.equal(merged.currentRoom.room_id, "remote-mcp-merge-second", "this process's change survived");
+    assert.ok(saved!.version > row!.version + 1);
+  } finally {
+    await client.close();
+  }
 });

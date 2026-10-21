@@ -6,6 +6,7 @@ import { parseBearerAuthorization } from "../../request/bearer-authorization.js"
 import { buildAllowedOrigins, INVALID_BEARER_MESSAGE } from "../../http/middleware.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 import type { RemoteMcpSessions } from "../../remote-mcp/sessions.js";
+import { RemoteMcpBusyError } from "../../remote-mcp/errors.js";
 import type { OwnerTokenAccount } from "../../db/types/auth.js";
 import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.js";
 
@@ -94,6 +95,14 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       return;
     }
     const token = authorization.token;
+    const serve = async (session: Parameters<RemoteMcpSessions["handle"]>[0]) => {
+      try {
+        await sessions.handle(session, account, req, res, req.body);
+      } catch (error) {
+        if (!(error instanceof RemoteMcpBusyError) || res.headersSent) throw error;
+        jsonRpcError(res, error.status, error.message);
+      }
+    };
 
     const sessionId = req.headers["mcp-session-id"];
     if (typeof sessionId === "string" && sessionId) {
@@ -114,7 +123,7 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
         jsonRpcError(res, 405, "This server does not offer a notification stream.");
         return;
       }
-      await sessions.handle(session, account, req, res, req.body);
+      await serve(session);
       return;
     }
 
@@ -138,7 +147,7 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 500, "The remote MCP session could not start.");
       return;
     }
-    await sessions.handle(session, account, req, res, req.body);
+    await serve(session);
   };
 
   app.post(REMOTE_MCP_PATH, handler);

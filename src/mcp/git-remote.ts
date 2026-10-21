@@ -13,7 +13,7 @@
 //   ssh://git@gitlab.com/team/project.git → gitlab.com/team/project
 
 import { execFileSync } from "child_process";
-import { currentSessionScope } from "./server/runtime/session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted } from "./server/runtime/session-scope.js";
 
 export type GitRefRoomType = "branch" | "tag";
 
@@ -69,6 +69,7 @@ export function normalizeGitRemote(url: string): string {
 function execGit(args: string[], cwd?: string): string | null {
   // A remote session never runs git on the API server.
   if (currentSessionScope()) return null;
+  requireScopeWhenHosted("git");
   try {
     const output = execFileSync("git", args, {
       cwd: cwd || process.cwd(),

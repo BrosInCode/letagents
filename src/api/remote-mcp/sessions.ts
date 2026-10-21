@@ -13,15 +13,18 @@ import {
   insertRemoteMcpSession,
   listRemoteMcpSessionsForAccount,
   saveRemoteMcpSessionState,
+  touchRemoteMcpSession,
   type RemoteMcpSessionRow,
 } from "../db/remote-mcp-sessions.js";
 import { createLetAgentsMcpServer } from "../../mcp/server/letagents-server.js";
 import {
+  markHostedMcpRuntime,
   runInSessionScope,
   type McpSessionPersistentState,
   type McpSessionScope,
 } from "../../mcp/server/runtime/session-scope.js";
 import type { InProcessDispatcher } from "./in-process-dispatch.js";
+import { RemoteMcpBusyError, RemoteMcpStateTooLargeError } from "./errors.js";
 import {
   deriveRemoteMcpStateKey,
   hashRemoteMcpToken,
@@ -44,7 +47,15 @@ export interface RemoteMcpLimits {
   maxSessionsPerAccount: number;
   /** A session unused for this long is deleted. */
   idleTimeoutMs: number;
+  /** Requests one account may have in flight at once (long-polls included). */
+  maxInFlightPerAccount: number;
+  /** Requests in flight at once on this process, all accounts together. */
+  maxInFlight: number;
+  /** Largest saved state, in bytes before sealing. */
+  maxStateBytes: number;
 }
+
+
 
 function positiveIntEnv(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? "", 10);
@@ -56,11 +67,60 @@ export function remoteMcpLimitsFromEnv(): RemoteMcpLimits {
     maxSessionsPerAccount: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT", 16),
     // Each request refreshes last_seen, so this need not follow LETAGENTS_POLL_MAX_MS.
     idleTimeoutMs: positiveIntEnv("LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS", 30 * 60_000),
+    maxInFlightPerAccount: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT", 8),
+    maxInFlight: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT", 256),
+    maxStateBytes: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES", 256 * 1024),
   };
 }
 
 function emptyState(): McpSessionPersistentState {
   return { local: {}, currentRoom: null, fullPromptDelivered: false, pinnedConnections: {} };
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Combine two saves of one session. Maps (agent sessions, workers, room
+ * sessions, pinned connections, ...) are unioned key by key; where both have
+ * a key, or for single values, `prefer` wins. Nothing either side added is lost.
+ */
+export function mergeSessionStates(ours: McpSessionPersistentState, theirs: McpSessionPersistentState,
+  prefer: "ours" | "theirs"): McpSessionPersistentState {
+  const pick = <T>(a: T, b: T): T => (prefer === "ours" ? a : b);
+  const unionMap = (a: unknown, b: unknown): unknown => {
+    if (!isRecord(a) || !isRecord(b)) return pick(a, b) ?? a ?? b;
+    return prefer === "ours" ? { ...b, ...a } : { ...a, ...b };
+  };
+  const local: JsonRecord = {};
+  for (const key of new Set([...Object.keys(ours.local), ...Object.keys(theirs.local)])) {
+    const a = (ours.local as JsonRecord)[key];
+    const b = (theirs.local as JsonRecord)[key];
+    local[key] = a === undefined ? b : b === undefined ? a : unionMap(a, b);
+  }
+  return {
+    local,
+    currentRoom: pick(ours.currentRoom, theirs.currentRoom) ?? ours.currentRoom ?? theirs.currentRoom,
+    fullPromptDelivered: ours.fullPromptDelivered || theirs.fullPromptDelivered,
+    pinnedConnections: unionMap(ours.pinnedConnections, theirs.pinnedConnections) as McpSessionPersistentState["pinnedConnections"],
+  };
+}
+
+/** Drop what can never be used again, so the saved state stays small. */
+function pruneState(state: McpSessionPersistentState): void {
+  for (const [id, connection] of Object.entries(state.pinnedConnections)) {
+    if (connection.ended_at) delete state.pinnedConnections[id];
+  }
+  const rooms = state.local.room_sessions;
+  if (rooms) {
+    const keep = Object.entries(rooms)
+      .sort(([, a], [, b]) => String(b.last_seen_at ?? "").localeCompare(String(a.last_seen_at ?? "")))
+      .slice(0, 32);
+    state.local.room_sessions = Object.fromEntries(keep);
+  }
 }
 
 function readState(value: unknown): McpSessionPersistentState {
@@ -84,6 +144,9 @@ export interface LoadedRemoteMcpSession {
   readonly clientName: string | null;
   state: McpSessionPersistentState;
   version: number;
+  /** Set by tool calls that changed the state; cleared by a successful save. */
+  dirty: boolean;
+  lastUsedAt: number;
   readonly memory: Map<string, unknown>;
   saving: Promise<void>;
 }
@@ -101,7 +164,9 @@ export class RemoteMcpSessions {
   private readonly dispatcher: InProcessDispatcher;
   private readonly publicBaseUrl: string;
   private readonly sweepTimer: NodeJS.Timeout;
-  private readonly counters = { opened: 0, evicted: 0, swept: 0 };
+  private readonly counters = { opened: 0, evicted: 0, swept: 0, busy: 0, conflicts: 0 };
+  private readonly inFlightByAccount = new Map<string, number>();
+  private inFlight = 0;
 
   constructor(options: RemoteMcpSessionsOptions) {
     this.dispatcher = options.dispatcher;
@@ -110,11 +175,12 @@ export class RemoteMcpSessions {
       ?? "https://letagents.chat").replace(/\/+$/, "");
     this.sweepTimer = setInterval(() => void this.sweep().catch(() => undefined), options.sweepIntervalMs ?? 60_000);
     this.sweepTimer.unref();
+    markHostedMcpRuntime();
   }
 
   /** Sessions loaded in this process, and process-lifetime counts. */
-  stats(): { loaded: number; opened: number; evicted: number; swept: number } {
-    return { loaded: this.loaded.size, ...this.counters };
+  stats(): { loaded: number; inFlight: number; opened: number; evicted: number; swept: number; busy: number; conflicts: number } {
+    return { loaded: this.loaded.size, inFlight: this.inFlight, ...this.counters };
   }
 
   /** Forget this process's copies, as a restart would. Saved sessions remain. */
@@ -172,10 +238,21 @@ export class RemoteMcpSessions {
 
   private adopt(row: RemoteMcpSessionRow, stateKey: Buffer): LoadedRemoteMcpSession | null {
     const current = this.loaded.get(row.session_id);
-    // Keep this process's copy unless another replica saved a newer state.
-    if (current && current.version >= row.version) return current;
+    if (current && current.version >= row.version) {
+      current.lastUsedAt = Date.now();
+      return current;
+    }
     const opened = openRemoteMcpState(row.state, stateKey, row.session_id);
     if (opened === null) return null;
+    const incoming = readState(opened);
+    if (current) {
+      // Another replica saved newer state. Merge it into the object that this
+      // process's in-flight calls already hold, so none of them keeps a stale copy.
+      Object.assign(current.state, mergeSessionStates(current.state, incoming, current.dirty ? "ours" : "theirs"));
+      current.version = row.version;
+      current.lastUsedAt = Date.now();
+      return current;
+    }
     const loaded: LoadedRemoteMcpSession = {
       sessionId: row.session_id,
       accountId: row.account_id,
@@ -183,10 +260,12 @@ export class RemoteMcpSessions {
       stateKey,
       agentInstanceId: row.agent_instance_id,
       clientName: row.client_name,
-      state: readState(opened),
+      state: incoming,
       version: row.version,
-      memory: current?.memory ?? new Map(),
-      saving: current?.saving ?? Promise.resolve(),
+      dirty: false,
+      lastUsedAt: Date.now(),
+      memory: new Map(),
+      saving: Promise.resolve(),
     };
     this.loaded.set(row.session_id, loaded);
     return loaded;
@@ -196,34 +275,71 @@ export class RemoteMcpSessions {
   async handle(session: LoadedRemoteMcpSession, account: OwnerTokenAccount, req: IncomingMessage,
     res: ServerResponse, body: unknown): Promise<void> {
     if (account.account_id !== session.accountId) throw new Error("Remote MCP session account mismatch.");
+    const release = this.enter(session.accountId);
+    // A dropped client ends the request's in-process calls (long-polls included).
+    const disconnected = new AbortController();
+    res.once("close", () => disconnected.abort());
+    const bound = this.dispatcher.bind({ account, remoteMcpSessionId: session.sessionId });
     const scope: McpSessionScope = {
       sessionId: session.sessionId,
       accountId: session.accountId,
       agentInstanceId: session.agentInstanceId,
       clientName: session.clientName,
       publicBaseUrl: this.publicBaseUrl,
-      dispatch: this.dispatcher.bind({ account, remoteMcpSessionId: session.sessionId }),
+      dispatch: (path, init) => bound(path, {
+        ...init,
+        signal: init.signal ? AbortSignal.any([init.signal, disconnected.signal]) : disconnected.signal,
+      }),
       state: session.state,
-      dirty: false,
+      get dirty() { return session.dirty; },
+      set dirty(value: boolean) { session.dirty = session.dirty || value; },
       memory: session.memory,
       persist: () => this.save(session),
     };
-    // Each request gets its own server object and stateless transport; the
-    // session id and state live in Postgres, not in transport memory.
-    const server = createLetAgentsMcpServer({ profile: "autonomous_mcp_worker", supervisedProvider: null, remote: true });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    await server.connect(transport);
-    res.setHeader("Mcp-Session-Id", session.sessionId);
-    const finished = new Promise<void>((resolve) => res.once("close", resolve));
     try {
-      await runInSessionScope(scope, () => transport.handleRequest(req, res, body));
-      await finished;
+      // Each request gets its own server object and stateless transport; the
+      // session id and state live in Postgres, not in transport memory.
+      const server = createLetAgentsMcpServer({ profile: "autonomous_mcp_worker", supervisedProvider: null, remote: true });
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      res.setHeader("Mcp-Session-Id", session.sessionId);
+      const finished = new Promise<void>((resolve) => res.once("close", resolve));
+      try {
+        await runInSessionScope(scope, () => transport.handleRequest(req, res, body));
+        await finished;
+      } finally {
+        await server.close().catch(() => undefined);
+        session.lastUsedAt = Date.now();
+        // Tool calls saved before answering; this saves anything a call that
+        // outlived its client changed, and otherwise only marks the session used.
+        await this.save(session).catch(() => undefined);
+      }
     } finally {
-      await server.close().catch(() => undefined);
-      // Tool calls already saved before answering; this also covers other
-      // requests and a call that outlived a dropped client.
-      await this.save(session);
+      release();
     }
+  }
+
+  /** Count one request in flight, or refuse it at the caps. */
+  private enter(accountId: string): () => void {
+    const own = this.inFlightByAccount.get(accountId) ?? 0;
+    if (own >= this.limits.maxInFlightPerAccount || this.inFlight >= this.limits.maxInFlight) {
+      this.counters.busy += 1;
+      console.warn("Remote MCP request refused at the in-flight cap:", JSON.stringify(this.stats()));
+      throw own >= this.limits.maxInFlightPerAccount
+        ? new RemoteMcpBusyError(429, "Too many remote MCP requests in flight for this account.")
+        : new RemoteMcpBusyError(503, "The remote MCP endpoint is busy. Retry shortly.");
+    }
+    this.inFlightByAccount.set(accountId, own + 1);
+    this.inFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.inFlight -= 1;
+      const next = (this.inFlightByAccount.get(accountId) ?? 1) - 1;
+      if (next > 0) this.inFlightByAccount.set(accountId, next);
+      else this.inFlightByAccount.delete(accountId);
+    };
   }
 
   async delete(sessionId: string): Promise<void> {
@@ -237,29 +353,65 @@ export class RemoteMcpSessions {
     const removed = [...await deleteIdleRemoteMcpSessions(cutoff), ...await deleteRevokedRemoteMcpSessions()];
     for (const id of removed) this.loaded.delete(id);
     this.counters.swept += removed.length;
+    // This process's decrypted copies go too, once unused for the idle time.
+    for (const [id, session] of this.loaded) {
+      if (now - session.lastUsedAt >= this.limits.idleTimeoutMs) this.loaded.delete(id);
+    }
   }
 
-  /** Saves for one session run one at a time, each writing the latest state. */
+  /**
+   * Saves for one session run one at a time. A save writes only when a call
+   * changed the state, and only over the version it started from; when another
+   * replica saved in between, the two states are merged and written again.
+   */
   private save(session: LoadedRemoteMcpSession): Promise<void> {
     const run = session.saving.then(async () => {
-      const state = session.state;
-      const room = (state.currentRoom as { room_id?: unknown } | null)?.room_id;
-      const roomId = typeof room === "string" ? room : null;
-      // A durable worker handle (pinned) or the legacy current session for the room.
-      const pinned = Object.values(state.pinnedConnections)
-        .filter((connection) => !roomId || connection.room_id === roomId)
-        .sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")))[0];
-      const currentId = roomId ? state.local.current_agent_session_ids?.[roomId] : undefined;
-      const cursor = roomId ? state.local.room_sessions?.[roomId]?.last_message_id ?? null : null;
-      const version = await saveRemoteMcpSessionState({
-        sessionId: session.sessionId,
-        state: sealRemoteMcpState(state, session.stateKey, session.sessionId) as unknown as Record<string, unknown>,
-        roomId,
-        workerSessionId: pinned?.session_id ?? currentId ?? null,
-        readCursor: cursor,
-      });
-      if (version === null) this.loaded.delete(session.sessionId);
-      else session.version = version;
+      if (!session.dirty) {
+        await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
+        return;
+      }
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const state = session.state;
+        pruneState(state);
+        const plain = JSON.stringify(state);
+        if (Buffer.byteLength(plain) > this.limits.maxStateBytes) throw new RemoteMcpStateTooLargeError();
+        const room = (state.currentRoom as { room_id?: unknown } | null)?.room_id;
+        const roomId = typeof room === "string" ? room : null;
+        // A durable worker handle (pinned) or the legacy current session for the room.
+        const pinned = Object.values(state.pinnedConnections)
+          .filter((connection) => !roomId || connection.room_id === roomId)
+          .sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")))[0];
+        const currentId = roomId ? state.local.current_agent_session_ids?.[roomId] : undefined;
+        session.dirty = false;
+        const version = await saveRemoteMcpSessionState({
+          sessionId: session.sessionId,
+          expectedVersion: session.version,
+          state: sealRemoteMcpState(state, session.stateKey, session.sessionId) as unknown as Record<string, unknown>,
+          roomId,
+          workerSessionId: pinned?.session_id ?? currentId ?? null,
+          readCursor: roomId ? state.local.room_sessions?.[roomId]?.last_message_id ?? null : null,
+        }).catch((error: unknown) => {
+          session.dirty = true;
+          throw error;
+        });
+        if (version !== null) {
+          session.version = version;
+          return;
+        }
+        // Not saved: the row is gone, or another replica saved first.
+        session.dirty = true;
+        const row = await getRemoteMcpSession(session.sessionId);
+        if (!row) {
+          this.loaded.delete(session.sessionId);
+          return;
+        }
+        const theirs = openRemoteMcpState(row.state, session.stateKey, session.sessionId);
+        if (theirs === null) return;
+        this.counters.conflicts += 1;
+        Object.assign(session.state, mergeSessionStates(session.state, readState(theirs), "ours"));
+        session.version = row.version;
+      }
+      throw new Error("The remote MCP session state kept changing; retry the call.");
     });
     session.saving = run.catch(() => undefined);
     return run;

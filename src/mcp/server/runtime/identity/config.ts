@@ -1,5 +1,5 @@
 import { execSync } from "child_process";
-import { currentSessionScope } from "../session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted } from "../session-scope.js";
 
 import {
   inferAgentIdeLabel,
@@ -28,6 +28,7 @@ export const EXPLICIT_AGENT_IDENTITY_KEY = getExplicitAgentIdentityStorageKey();
 export function readCommandOutput(command: string, cwd = process.cwd()): string | null {
   // A remote session never runs programs on the API server.
   if (currentSessionScope()) return null;
+  requireScopeWhenHosted("A local program");
   try {
     const output = execSync(command, {
       cwd,

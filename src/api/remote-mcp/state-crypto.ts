@@ -39,7 +39,7 @@ export function openRemoteMcpState(sealed: unknown, key: Buffer, sessionId: stri
   if (!value || value.v !== 1 || typeof value.iv !== "string" || typeof value.tag !== "string"
     || typeof value.data !== "string") return null;
   try {
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64"));
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64"), { authTagLength: 16 });
     decipher.setAAD(Buffer.from(sessionId, "utf8"));
     decipher.setAuthTag(Buffer.from(value.tag, "base64"));
     const plain = Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]);

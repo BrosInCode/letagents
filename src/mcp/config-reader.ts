@@ -11,7 +11,7 @@
 
 import { readFileSync, existsSync } from "fs";
 import { join, dirname, resolve } from "path";
-import { currentSessionScope } from "./server/runtime/session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted } from "./server/runtime/session-scope.js";
 
 export interface LetagentsConfig {
   room: string;
@@ -38,6 +38,7 @@ export function findLetagentsConfig(
 ): LetagentsConfig | null {
   // A remote session reads no files on the API server.
   if (currentSessionScope()) return null;
+  requireScopeWhenHosted("A local config file");
   let dir = resolve(startDir || process.cwd());
   const root = dirname(dir) === dir ? dir : "/"; // filesystem root
 

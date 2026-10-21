@@ -11,6 +11,7 @@ import type { AuthenticatedRequest, ResolvedRequestAuth } from "../http/helpers.
 import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
 import type { RemoteMcpSessions } from "../remote-mcp/sessions.js";
 import { InProcessDispatcher } from "../remote-mcp/in-process-dispatch.js";
+import { currentSessionScope, runInSessionScope, type McpSessionScope } from "../../mcp/server/runtime/session-scope.js";
 
 // Route-level refusals with stub auth and no database: every refusal happens
 // before any session is looked up, opened or served.
@@ -38,7 +39,8 @@ async function startApp(sessions: RemoteMcpSessions): Promise<{ server: Server; 
   });
   registerRemoteMcpRoutes(app, { sessions });
   app.get("/whoami", (req: AuthenticatedRequest, res) => {
-    res.json({ authKind: req.authKind ?? null, account: (req.sessionAccount as { account_id?: string } | null)?.account_id ?? null });
+    res.json({ authKind: req.authKind ?? null, account: (req.sessionAccount as { account_id?: string } | null)?.account_id ?? null,
+      ...(currentSessionScope() ? { scope: currentSessionScope()!.sessionId } : {}) });
   });
   const server = createServer(app);
   server.listen(0, "127.0.0.1");
@@ -110,9 +112,11 @@ test("only in-process connections carry a bound principal, and they cannot re-en
       account: { account_id: "acct_bound", login: "bound" } as never,
       remoteMcpSessionId: "session-x",
     });
-    const inside = await dispatch("/whoami", { headers: { Authorization: "Bearer owner-a", Cookie: "letagents_session=x" } });
+    const scope = { sessionId: "scope-under-test", memory: new Map() } as unknown as McpSessionScope;
+    const inside = await runInSessionScope(scope, () =>
+      dispatch("/whoami", { headers: { Authorization: "Bearer owner-a", Cookie: "letagents_session=x" } }));
     assert.deepEqual(await inside.json(), { authKind: "owner_token", account: "acct_bound" },
-      "the bound account wins; credentials passed in are dropped");
+      "the bound account wins, credentials passed in are dropped, and the route runs outside the session scope");
     const reenter = await dispatch("/mcp", { method: "POST", body: JSON.stringify(initializeBody),
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" } });
     assert.equal(reenter.status, 403);

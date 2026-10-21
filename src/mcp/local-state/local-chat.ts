@@ -86,7 +86,7 @@ export type LocalChatMessagePage = {
 
 export type { LocalTask } from "../../../shared/local-task-store.mjs";
 import type { LocalTask } from "../../../shared/local-task-store.mjs";
-import { currentSessionScope, refuseLocalMachineInSession } from "../server/runtime/session-scope.js";
+import { currentSessionScope, refuseLocalMachineInSession, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
 
 type SqliteStatement = {
   all: (...params: unknown[]) => Record<string, unknown>[];
@@ -468,6 +468,7 @@ async function initializeDb(): Promise<SqliteDatabase> {
 async function getDb(): Promise<SqliteDatabase> {
   // A remote session has no local chat database on the API server.
   refuseLocalMachineInSession("Local chat storage");
+  requireScopeWhenHosted("Local chat storage");
   if (db) return db;
   dbInitialization ??= initializeDb();
   try {

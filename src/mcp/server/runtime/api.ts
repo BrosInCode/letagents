@@ -7,7 +7,7 @@ import {
 } from "../../../shared/request-headers.js";
 import { endStoredAgentSession } from "../../local-state/agent-sessions.js";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
-import { currentSessionScope } from "./session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted } from "./session-scope.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import {
   borrowCurrentSupervisedWorkerCredential,
@@ -84,6 +84,7 @@ export async function getLetagentsToken(): Promise<string> {
     // A remote session's identity is bound to its in-process dispatcher.
     throw new Error("A remote MCP session has no token to read.");
   }
+  requireScopeWhenHosted("An MCP token");
   const runtime = requireValidWorkerBearerRuntime();
   if (runtime.mode === "worker") {
     return runtime.bearer;

@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 
 import type { LetagentsLocalState } from "./types.js";
-import { currentSessionScope } from "../server/runtime/session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
 
 const DEFAULT_STATE_PATH = join(homedir(), ".letagents", "mcp-state.json");
 
@@ -19,6 +19,7 @@ export function getLocalStatePath(): string {
   // A remote session has no state file; the name keys per-session maps.
   const scope = currentSessionScope();
   if (scope) return `remote-mcp-session:${scope.sessionId}`;
+  requireScopeWhenHosted("The MCP state file");
   return process.env.LETAGENTS_STATE_PATH || DEFAULT_STATE_PATH;
 }
 
@@ -49,6 +50,7 @@ export function readLocalStateSnapshot(): LocalStateSnapshot {
   const scope = currentSessionScope();
   // Callers own what they read, as with a fresh parse of the file.
   if (scope) return { state: structuredClone(scope.state.local), complete: true };
+  requireScopeWhenHosted("The MCP state file");
   return readLocalStateSnapshotFromPath(getLocalStatePath());
 }
 
@@ -60,6 +62,7 @@ export function readLocalState(): LetagentsLocalState {
 export function withLocalStateReadLock<T>(callback: (snapshot: LocalStateSnapshot) => T): T {
   // A session's state is in memory and its callbacks are synchronous.
   if (currentSessionScope()) return callback(readLocalStateSnapshot());
+  requireScopeWhenHosted("The MCP state file");
   return withStateLock((statePath) => callback(readLocalStateSnapshotFromPath(statePath)));
 }
 
@@ -88,6 +91,7 @@ export function updateLocalState(
     scope.dirty = true;
     return updated;
   }
+  requireScopeWhenHosted("The MCP state file");
   return withStateLock((statePath) => {
     const current = readLocalStateFromPath(statePath);
     const updated = updater(current) ?? current;

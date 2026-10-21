@@ -1,11 +1,12 @@
 import { execSync } from "child_process";
 import { existsSync } from "fs";
 import { dirname, join } from "path";
-import { currentSessionScope } from "./runtime/session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted } from "./runtime/session-scope.js";
 
 export function resolveGitRoot(dir: string): string | null {
   // A remote session has no checkout on the API server.
   if (currentSessionScope()) return null;
+  requireScopeWhenHosted("git");
   try {
     const root = execSync("git rev-parse --show-toplevel", {
       cwd: dir,

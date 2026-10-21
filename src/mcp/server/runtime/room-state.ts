@@ -17,7 +17,7 @@ import {
   getCurrentAgentIdentityKey,
 } from "./identity.js";
 import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
-import { currentSessionScope, scopedValue } from "./session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted, scopedValue } from "./session-scope.js";
 import {
   getCurrentSupervisedRoomAuthority,
   runWithSupervisedRoomAuthority,
@@ -42,12 +42,14 @@ let processCurrentRoom: RoomState | null = null;
 /** The room this runtime joined: per session in a remote scope, per process otherwise. */
 export function getCurrentRoom(): RoomState | null {
   const scope = currentSessionScope();
+  if (!scope) requireScopeWhenHosted("The MCP current room");
   return scope ? scope.state.currentRoom as RoomState | null : processCurrentRoom;
 }
 
 function setCurrentRoom(state: RoomState | null): void {
   const scope = currentSessionScope();
   if (!scope) {
+    requireScopeWhenHosted("The MCP current room");
     processCurrentRoom = state;
     return;
   }

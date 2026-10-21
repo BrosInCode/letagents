@@ -53,6 +53,7 @@ export interface McpSessionScope {
 }
 
 const scopes = new AsyncLocalStorage<McpSessionScope>();
+let hosted = false;
 
 export function currentSessionScope(): McpSessionScope | null {
   return scopes.getStore() ?? null;
@@ -60,6 +61,33 @@ export function currentSessionScope(): McpSessionScope | null {
 
 export function runInSessionScope<T>(scope: McpSessionScope, callback: () => T): T {
   return scopes.run(scope, callback);
+}
+
+/** Run outside any session scope (for work that must not capture one). */
+export function runOutsideSessionScope<T>(callback: () => T): T {
+  return scopes.exit(callback);
+}
+
+/**
+ * The API marks its process as hosting remote sessions. From then on the MCP
+ * runtime fails closed: process-wide state, the state file, tokens from env,
+ * git and programs all throw if reached without a session scope, instead of
+ * silently falling back to stdio behaviour shared by every session.
+ */
+export function markHostedMcpRuntime(): void {
+  hosted = true;
+}
+
+export class MissingSessionScopeError extends Error {
+  constructor(what: string) {
+    super(`${what} was reached without a remote MCP session scope.`);
+    this.name = "MissingSessionScopeError";
+  }
+}
+
+/** Throw when the runtime is hosted and no session scope is active. */
+export function requireScopeWhenHosted(what: string): void {
+  if (hosted && !scopes.getStore()) throw new MissingSessionScopeError(what);
 }
 
 export function markSessionDirty(): void {
@@ -82,6 +110,7 @@ export function scopedValue<T>(key: string, initial: () => T): { get(): T; set(v
         if (!scope.memory.has(key)) scope.memory.set(key, initial());
         return scope.memory.get(key) as T;
       }
+      requireScopeWhenHosted(`Runtime value ${key}`);
       if (!processSet) {
         processValue = initial();
         processSet = true;
@@ -94,6 +123,7 @@ export function scopedValue<T>(key: string, initial: () => T): { get(): T; set(v
         scope.memory.set(key, value);
         return;
       }
+      requireScopeWhenHosted(`Runtime value ${key}`);
       processValue = value;
       processSet = true;
     },

@@ -29,9 +29,11 @@ export async function getRemoteMcpSession(sessionId: string): Promise<RemoteMcpS
   return row ?? null;
 }
 
-/** Save a session's state; returns the new version, or null when the row is gone. */
+/** Save a session's state; returns the new version, or null when the row is gone or newer. */
 export async function saveRemoteMcpSessionState(input: {
   sessionId: string;
+  /** Write only over this version (optimistic concurrency). */
+  expectedVersion: number;
   state: Record<string, unknown>;
   roomId: string | null;
   workerSessionId: string | null;
@@ -44,8 +46,10 @@ export async function saveRemoteMcpSessionState(input: {
     read_cursor: input.readCursor,
     version: sql`${remote_mcp_sessions.version} + 1`,
     last_seen_at: sql`now()`,
-  }).where(eq(remote_mcp_sessions.session_id, input.sessionId))
-    .returning({ version: remote_mcp_sessions.version });
+  }).where(and(
+    eq(remote_mcp_sessions.session_id, input.sessionId),
+    eq(remote_mcp_sessions.version, input.expectedVersion),
+  )).returning({ version: remote_mcp_sessions.version });
   return row?.version ?? null;
 }
 

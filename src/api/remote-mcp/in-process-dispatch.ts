@@ -2,6 +2,7 @@ import { Agent, createServer, request, type IncomingMessage, type RequestListene
 import { duplexPair } from "node:stream";
 
 import type { OwnerTokenAccount } from "../db/types/auth.js";
+import { runOutsideSessionScope } from "../../mcp/server/runtime/session-scope.js";
 
 /**
  * Runs API requests for remote MCP sessions inside this process.
@@ -53,7 +54,9 @@ export class InProcessDispatcher {
     }
     const [clientSide, serverSide] = duplexPair();
     principals.set(serverSide, principal);
-    this.server.emit("connection", serverSide);
+    // The API handles the request outside the session's scope: nothing the
+    // route starts (timers, brokers) may capture one session's state.
+    runOutsideSessionScope(() => this.server.emit("connection", serverSide));
 
     const headers: Record<string, string> = {};
     new Headers(init.headers).forEach((value, name) => {

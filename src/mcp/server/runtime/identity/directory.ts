@@ -110,8 +110,10 @@ export async function resolveOwnerContext(): Promise<ResolvedOwnerContext> {
     // Never fall back to the API server's git or OS user for a remote session.
     throw new Error("Could not load this session's LetAgents account. Retry the call.");
   }
-  if (authLogin || authLabel || AGENT_OWNER_LABEL) {
-    const label = AGENT_OWNER_LABEL || authLabel || authLogin || "Owner";
+  // The API process's env never labels a remote session's owner.
+  const ownerLabel = currentSessionScope() ? "" : AGENT_OWNER_LABEL;
+  if (authLogin || authLabel || ownerLabel) {
+    const label = ownerLabel || authLabel || authLogin || "Owner";
     const slug = normalizeSlugSegment(authLogin || label, "owner");
     return { slug, label, login: authLogin };
   }

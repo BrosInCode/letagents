@@ -105,7 +105,11 @@ bound to the session's account, with no network hop and no token (`src/api/remot
 The runtime state the npm package keeps in module variables and `~/.letagents/mcp-state.json` (joined room, agent
 identity, worker handles, read cursors) is kept per session and saved in the `remote_mcp_sessions` table (migration
 0119) before each tool result is returned. Any API replica can serve the next request, and a session survives a
-restart. Inside a session the runtime refuses files, git and programs on the API server.
+restart. Saves write only over the version they started from; when two replicas save one session at once, the states
+are merged. The saved state holds agent session tokens, so it is sealed (AES-256-GCM) with a key derived from the
+owner token; the table keeps only the token's SHA-256. Inside a session the runtime refuses files, git and programs
+on the API server, and once the API hosts sessions, runtime code that runs without a session scope throws instead of
+falling back to process-wide state. A client that disconnects ends its in-flight calls.
 
 **Sessions.** The session id is bound to the account and the exact token that opened it; any other token gets `404`
 and must initialize its own session. `DELETE` removes the session. There is no server-initiated stream (`GET` gets
@@ -126,6 +130,9 @@ npm-package agent does.
 | `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min | A session with no request for this long is deleted. |
 | `LETAGENTS_POLL_MAX_MS` | 180000 | Cap for `wait_for_messages`, the same value the poll route uses. |
 | `LETAGENTS_REMOTE_MCP_MAX_BODY_BYTES` | 262144 | Larger request bodies get `413` before the MCP SDK validates them. |
+| `LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT` | 8 | Requests one account may have open at once (long-polls included); more get `429`. |
+| `LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT` | 256 | Requests open at once on one API process; more get `503`. |
+| `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES` | 262144 | Largest saved session state; a call that would exceed it fails. |
 
 Each account may open 10 sessions and send 600 requests per minute. A tool call may hold at most 10 000 array
 elements and object keys. Once a minute, sessions that are idle or whose owner token was revoked are deleted. A

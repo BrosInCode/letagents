@@ -112,3 +112,17 @@ test("inside a session scope, state is per session and the local machine is out 
     await assert.rejects(getLetagentsToken(), /no token/);
   });
 });
+
+test("a hosted runtime fails closed when a session scope is missing", async () => {
+  const { markHostedMcpRuntime } = await import("../server/runtime/session-scope.js");
+  const { getCurrentRoom } = await import("../server/runtime/room-state.js");
+  const { readLocalState } = await import("../local-state/storage.js");
+  const { getLetagentsToken } = await import("../server/runtime/api.js");
+  const { getGitCurrentBranch } = await import("../git-remote.js");
+  markHostedMcpRuntime(); // last test in this file: the flag is process-wide
+  assert.throws(() => getCurrentRoom(), /without a remote MCP session scope/);
+  assert.throws(() => readLocalState(), /without a remote MCP session scope/);
+  assert.throws(() => getGitCurrentBranch(process.cwd()), /without a remote MCP session scope/);
+  await assert.rejects(getLetagentsToken(), /without a remote MCP session scope/);
+  runInSessionScope(fakeScope(), () => assert.equal(getCurrentRoom(), null, "inside a scope it works"));
+});

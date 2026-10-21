@@ -26,7 +26,9 @@ export interface LetAgentsToolContext {
 export function registerLetAgentsTools(server: McpServer, context: LetAgentsToolContext): void {
   registerRoomResources(server);
   registerTools(server, context.profile, context.supervisedProvider, { remote: context.remote });
-  registerRuntimeReadinessResource(server, context.profile, context.supervisedProvider);
+  // The readiness resource describes the full local registry; remote callers
+  // see only their allow list (tools/list), so it is not offered to them.
+  if (!context.remote) registerRuntimeReadinessResource(server, context.profile, context.supervisedProvider);
 }
 
 /** A new MCP server object with the LetAgents tools registered. */
