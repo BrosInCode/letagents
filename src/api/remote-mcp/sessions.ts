@@ -41,7 +41,7 @@ function positiveIntEnv(name: string, fallback: number): number {
 
 export function remoteMcpLimitsFromEnv(): RemoteMcpLimits {
   return {
-    maxSessions: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS", 32),
+    maxSessions: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS", 16),
     maxSessionsPerAccount: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT", 4),
     // A call in flight (a long-poll included) keeps a session from going idle,
     // so this does not need to follow LETAGENTS_POLL_MAX_MS.
@@ -147,6 +147,7 @@ export class RemoteMcpSessionManager {
   private readonly pendingByAccount = new Map<string, number>();
   private pendingCreates = 0;
   private root: string | null = null;
+  private readonly counters = { created: 0, refusedAccountCap: 0, refusedGlobalCap: 0, evicted: 0 };
 
   constructor(options: RemoteMcpSessionManagerOptions = {}) {
     this.limits = { ...remoteMcpLimitsFromEnv(), ...options.limits };
@@ -159,6 +160,22 @@ export class RemoteMcpSessionManager {
 
   get size(): number {
     return this.sessions.size;
+  }
+
+  /** Sessions in use now, and process-lifetime counts of creates, refusals and evictions. */
+  stats(): { inUse: number; starting: number; created: number; refusedAccountCap: number;
+    refusedGlobalCap: number; evicted: number; maxSessions: number } {
+    return { inUse: this.sessions.size, starting: this.pendingCreates, ...this.counters,
+      maxSessions: this.limits.maxSessions };
+  }
+
+  private refuse(status: 429 | 503, message: string): never {
+    if (status === 429) this.counters.refusedAccountCap += 1;
+    else this.counters.refusedGlobalCap += 1;
+    // Counts only: no account id or token in server logs.
+    console.warn(`Remote MCP session refused (${status === 429 ? "account" : "global"} cap):`,
+      JSON.stringify(this.stats()));
+    throw new RemoteMcpCapacityError(status, message);
   }
 
   /**
@@ -229,6 +246,7 @@ export class RemoteMcpSessionManager {
       session.http = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => session.id,
         onsessioninitialized: (id) => {
+          this.counters.created += 1;
           this.release(session);
           this.sessions.set(id, session);
         },
@@ -335,17 +353,19 @@ export class RemoteMcpSessionManager {
     let ownVictim: RemoteMcpSession | null = null;
     if (own.length + (this.pendingByAccount.get(accountId) ?? 0) >= this.limits.maxSessionsPerAccount) {
       ownVictim = leastRecent(own);
-      if (!ownVictim) {
-        throw new RemoteMcpCapacityError(429, "Too many open remote MCP sessions for this account. Close one and retry.");
-      }
+      if (!ownVictim) this.refuse(429, "Too many open remote MCP sessions for this account. Close one and retry.");
     }
     let globalVictim: RemoteMcpSession | null = null;
     if (this.sessions.size + this.pendingCreates - (ownVictim ? 1 : 0) >= this.limits.maxSessions) {
       globalVictim = leastRecent(live.filter((session) => session !== ownVictim
         && now - session.lastActivityAt >= CROSS_ACCOUNT_EVICTION_IDLE_MS));
-      if (!globalVictim) throw new RemoteMcpCapacityError(503, "The remote MCP endpoint is at capacity. Retry later.");
+      if (!globalVictim) this.refuse(503, "The remote MCP endpoint is at capacity. Retry later.");
     }
-    for (const victim of [ownVictim, globalVictim]) if (victim) void this.close(victim);
+    for (const victim of [ownVictim, globalVictim]) {
+      if (!victim) continue;
+      this.counters.evicted += 1;
+      void this.close(victim);
+    }
   }
 
   private bridge(session: RemoteMcpSession): void {

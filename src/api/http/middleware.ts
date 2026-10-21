@@ -10,11 +10,13 @@ import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
 
+export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
+
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
 }
 
-function buildAllowedOrigins(): Set<string> {
+export function buildAllowedOrigins(): Set<string> {
   return new Set([
     "https://letagents.chat",
     "http://localhost:3001",
@@ -58,7 +60,7 @@ export function registerHttpMiddleware(
       // expired saved credentials; it exposes no room access or mutations.
       const isAuthStatusProbe = req.method === "GET" && req.path === "/auth/session";
       if (!req.authKind && !isAuthStatusProbe && parseBearerAuthorization(req.headers.authorization).kind !== "none") {
-        _res.status(401).json({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." });
+        _res.status(401).json({ error: INVALID_BEARER_MESSAGE });
         return;
       }
       if (req.authKind === "supervisor_grant") {

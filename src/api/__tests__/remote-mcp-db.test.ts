@@ -123,3 +123,29 @@ test("wait_for_messages over HTTP is capped by LETAGENTS_POLL_MAX_MS", { skip, t
     await client.close();
   }
 });
+
+test("revoking the owner token refuses its requests and closes its sessions", { skip, timeout: 90_000 }, async () => {
+  const revocable = "remote_mcp_token_to_revoke";
+  const account = await accountSessions!.upsertAccount({
+    provider: "github", provider_user_id: "remote-mcp-2", login: "remote-mcp-revoked", display_name: "Revoked",
+  });
+  const created = await ownerTokens!.createOwnerToken({ accountId: account.id, githubUserId: "remote-mcp-2", token: revocable });
+  const client = await connect(revocable);
+  const transport = client.transport as StreamableHTTPClientTransport;
+  const sessions = routesModule!.remoteMcpSessionsForTest()!;
+  const before = sessions.size;
+  await ownerTokens!.deleteOwnerTokenById(created.token_id);
+
+  const refused = await fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${revocable}`, "Mcp-Session-Id": transport.sessionId!,
+      "Mcp-Protocol-Version": "2025-06-18", "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }),
+  });
+  assert.equal(refused.status, 401, "the middleware refuses the revoked token on its open session");
+
+  sessions.sweep();
+  for (let i = 0; i < 100 && sessions.size >= before; i += 1) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(sessions.size, before - 1, "the sweep closed the revoked token's session");
+  await client.close().catch(() => undefined);
+});

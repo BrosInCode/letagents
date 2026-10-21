@@ -26,7 +26,7 @@ writes, as an npm-package agent does.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `LETAGENTS_REMOTE_MCP_MAX_SESSIONS` | 32 | Sessions open at once on one API process. When full, a session idle for 2 min or more closes to make room; otherwise `503`. |
+| `LETAGENTS_REMOTE_MCP_MAX_SESSIONS` | 16 | Sessions open at once on one API process. When full, a session idle for 2 min or more closes to make room; otherwise `503`. |
 | `LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT` | 4 | At the cap, the account's least recently used idle session closes. If all are busy, `429`. |
 | `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min | A session with no call in flight and no traffic for this long closes. A long-poll in progress is a call in flight. |
 | `LETAGENTS_REMOTE_MCP_MAX_LIFETIME_MS` | 24 h | A session older than this closes. The client initializes again. |
@@ -39,7 +39,27 @@ the next sweep (once a minute).
 When a session closes, the client gets `404` and initializes a new one. The agent must then join its room and
 register its worker again.
 
-**Proxy note.** `wait_for_messages` holds one HTTP response open for up to `LETAGENTS_POLL_MAX_MS`. A reverse proxy
-in front of the API must allow at least that read timeout on `/mcp`, as it already must for the room poll route.
+Limits are per account, so people who share one token share them. Each person should use their own owner token.
+Refusals are logged at warn level with counts only (sessions in use, starting, created, refused at the account cap,
+refused at the global cap, evicted); `RemoteMcpSessionManager.stats()` returns the same counts.
+
+**Proxy note.** `wait_for_messages` holds one streamed HTTP response open for up to `LETAGENTS_POLL_MAX_MS`. The
+reverse proxy in front of the API must forward `/mcp` with response buffering off, no gzip on `text/event-stream`, and
+a read timeout at or above `LETAGENTS_POLL_MAX_MS`.
+
+**Why one process per session.** The MCP runtime keeps the joined room, the agent identity, worker handles and
+presence timers in module-level state and in a state file under `HOME`. Running the shared registry inside the API
+process would need every one of those to become per-connection state first, a large refactor of `src/mcp/server/runtime`
+where one missed global leaks one caller's room or worker to another. A child per session gets that isolation from
+the operating system and runs the exact code the npm package runs. The cost is memory: one idle child measured about
+107 MB resident (compiled build, Node 22, macOS), with its heap capped at 256 MB. The default cap of 16 sessions is
+therefore about 1.7 GB when all are idle; raise `LETAGENTS_REMOTE_MCP_MAX_SESSIONS` only with container memory to
+match. Moving the runtime to per-connection state in-process, which would cut this to a few MB per session, is a
+possible later change.
+
+**Follow-up: separate user.** The children run as the API's operating-system user. The env allowlist keeps database
+and app secrets out of their environment, and the remote tool list has no tool that takes a path, but the operating
+system does not stop a child from reading the API's files. Running the children under a separate uid or service
+(read-only filesystem apart from the session folder, no access to the API's `/proc` entries) is a follow-up.
 
 Setup steps for the Claude app are in `AGENTS.md`, section "Remote connector (Claude app)".

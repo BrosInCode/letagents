@@ -3,6 +3,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
+import { buildAllowedOrigins, INVALID_BEARER_MESSAGE } from "../../http/middleware.js";
 import {
   RemoteMcpCapacityError,
   RemoteMcpSessionManager,
@@ -65,13 +66,23 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
   const allowSessionCreate = deps.allowSessionCreate
     ?? buildInMemoryListingsRateLimiter({ capacity: 10, windowMs: 60_000 });
 
+  const allowedOrigins = buildAllowedOrigins();
+
   const handler = async (req: AuthenticatedRequest, res: Response) => {
+    // The MCP transport spec requires Origin validation (DNS rebinding). Server
+    // clients such as Claude's connector send no Origin; browsers always do.
+    const origin = req.headers.origin;
+    if (origin !== undefined && !allowedOrigins.has(origin)) {
+      jsonRpcError(res, 403, "This Origin may not use the MCP endpoint.");
+      return;
+    }
     // Only an owner token sent as a bearer (LETAGENTS_TOKEN) opens this
     // endpoint. Browser cookies, app sessions, worker bearers and host grants
     // do not. Invalid bearers were already refused by the auth middleware.
     const authorization = parseBearerAuthorization(req.headers.authorization);
     if (authorization.kind !== "token" || req.authKind !== "owner_token" || !req.sessionAccount) {
-      jsonRpcError(res, 401, "A LetAgents owner token is required as 'Authorization: Bearer <LETAGENTS_TOKEN>'.",
+      jsonRpcError(res, 401, authorization.kind === "token" ? INVALID_BEARER_MESSAGE
+        : "A LetAgents owner token is required as 'Authorization: Bearer <LETAGENTS_TOKEN>'.",
         { "WWW-Authenticate": 'Bearer realm="letagents"' });
       return;
     }

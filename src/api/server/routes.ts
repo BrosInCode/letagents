@@ -261,6 +261,10 @@ function getRoomEventBroker(): RoomEventBroker {
 
 let sharedRemoteMcpSessions: RemoteMcpSessionManager | null = null;
 
+export function remoteMcpSessionsForTest(): RemoteMcpSessionManager | null {
+  return sharedRemoteMcpSessions;
+}
+
 export function closeApiRouteEventBroker(): void {
   void sharedRemoteMcpSessions?.closeAll();
   sharedRemoteMcpSessions = null;

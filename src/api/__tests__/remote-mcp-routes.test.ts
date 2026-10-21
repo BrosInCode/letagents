@@ -17,7 +17,7 @@ import { registerHttpMiddleware } from "../http/middleware.js";
 import type { ResolvedRequestAuth } from "../http/helpers.js";
 import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
 import { RemoteMcpSessionManager } from "../remote-mcp/sessions.js";
-import { isRemoteExcludedTool, REMOTE_EXCLUDED_TOOLS } from "../../mcp/server/remote-tool-surface.js";
+import { isRemoteExcludedTool, REMOTE_ALLOWED_TOOLS, REMOTE_EXCLUDED_TOOLS } from "../../mcp/server/remote-tool-surface.js";
 
 // Route-level behaviour with stub auth: real MCP child processes, no database.
 const ACCOUNTS: Record<string, ResolvedRequestAuth> = {
@@ -88,12 +88,19 @@ test("the remote endpoint refuses requests without an owner bearer before starti
   const sessions = new RemoteMcpSessionManager();
   const { server, url } = await startApp(sessions);
   try {
+    const badOrigin = await post(url, { Authorization: "Bearer owner-a", Origin: "https://evil.example" });
+    assert.equal(badOrigin.status, 403, "a browser Origin outside the allow list is refused before auth");
+    const goodOrigin = await post(url, { Origin: "https://letagents.chat" });
+    assert.equal(goodOrigin.status, 401, "an allowed Origin still needs the bearer");
     const missing = await post(url, {});
     assert.equal(missing.status, 401);
     assert.match(missing.headers.get("www-authenticate") ?? "", /^Bearer/);
     assert.equal((await post(url, { Authorization: "Bearer not-a-token" })).status, 401, "unknown bearer");
     assert.equal((await post(url, { Authorization: "Bearer" })).status, 401, "malformed bearer");
-    assert.equal((await post(url, { Authorization: "Bearer app-session" })).status, 401, "app sessions are not owner tokens");
+    const appSession = await post(url, { Authorization: "Bearer app-session" });
+    assert.equal(appSession.status, 401, "app sessions are not owner tokens");
+    assert.match((await appSession.json()).error.message, /bearer credential is invalid or expired/,
+      "a valid bearer of the wrong kind gets the middleware's message");
     const cookieOnly = await post(url, { Cookie: "letagents_session=whatever" });
     assert.equal(cookieOnly.status, 401, "a browser cookie never opens the MCP endpoint");
     const notInitialize = await post(url, { Authorization: "Bearer owner-a" },
@@ -114,7 +121,7 @@ test("the remote endpoint refuses requests without an owner bearer before starti
   }
 });
 
-test("HTTP exposes the stdio tool list minus the documented local-machine tools", { timeout: 60_000 }, async () => {
+test("HTTP exposes exactly the remote allow list, and stdio has nothing unclassified", { timeout: 60_000 }, async () => {
   const sessions = new RemoteMcpSessionManager();
   const { server, url } = await startApp(sessions);
   try {
@@ -124,7 +131,9 @@ test("HTTP exposes the stdio tool list minus the documented local-machine tools"
     for (const name of Object.keys(REMOTE_EXCLUDED_TOOLS)) {
       assert.equal(stdioNames.includes(name), true, `${name} is a real stdio tool, so its exclusion is meaningful`);
     }
-    assert.deepEqual(httpNames, stdioNames.filter((name) => !isRemoteExcludedTool(name)));
+    assert.deepEqual(httpNames, [...REMOTE_ALLOWED_TOOLS].sort(), "HTTP exposes exactly the allow list");
+    assert.deepEqual(stdioNames.filter((name) => !isRemoteExcludedTool(name)), httpNames,
+      "every stdio tool is either exposed remotely or excluded with a reason");
     for (const tool of tools) {
       assert.equal(Object.hasOwn(tool.inputSchema.properties ?? {}, "cwd"), false, `${tool.name} takes no local path remotely`);
     }
@@ -202,6 +211,7 @@ test("the global cap refuses new sessions with 503", { timeout: 60_000 }, async 
     const refused = await post(url, { Authorization: "Bearer owner-b" });
     assert.equal(refused.status, 503);
     assert.equal(sessions.size, 1);
+    assert.deepEqual({ inUse: sessions.stats().inUse, refused: sessions.stats().refusedGlobalCap }, { inUse: 1, refused: 1 });
     await first.client.close();
   } finally {
     await sessions.closeAll();
@@ -219,6 +229,7 @@ test("concurrent initializes from one account respect the account cap", { timeou
     assert.equal(statuses.filter((status) => status === 200).length, 2, `two creates proceed: ${statuses}`);
     assert.equal(statuses.filter((status) => status === 429).length, 4, `the rest are refused: ${statuses}`);
     assert.ok(sessions.size <= 2);
+    assert.equal(sessions.stats().refusedAccountCap, 4);
   } finally {
     await sessions.closeAll();
     server.close();
