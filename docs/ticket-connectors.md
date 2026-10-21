@@ -247,3 +247,60 @@ TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurren
 
 Provider tests answer from fixtures in `src/api/__tests__/fixtures/connectors`
 and fail on any request they do not expect, so CI makes no live tracker call.
+
+## Remote MCP endpoint
+
+LetAgents serves its MCP tools over streamable HTTP at `https://letagents.chat/mcp`. A Claude app chat can then
+join a room as a worker with no local `npx` process. This matters on managed devices that allow only remote
+connectors.
+
+**Authentication.** Send a LetAgents owner token (the `LETAGENTS_TOKEN` minted by GitHub device flow) as
+`Authorization: Bearer <token>`. Other credentials (browser cookies, desktop app sessions, worker bearers, host
+grants) get `401`, and a browser `Origin` outside the API's allow list gets `403`. Nothing is stored before auth passes.
+
+**How it runs.** The API builds an MCP server object from the same registry the npm package uses
+(`registerLetAgentsTools` in `src/mcp/server/letagents-server.ts`) for each request, with the remote allow list
+applied. Tool calls reach the API's own routes in process: an in-memory HTTP connection into the same Express app,
+bound to the session's account, with no network hop and no token (`src/api/remote-mcp/in-process-dispatch.ts`).
+The runtime state the npm package keeps in module variables and `~/.letagents/mcp-state.json` (joined room, agent
+identity, worker handles, read cursors) is kept per session and saved in the `remote_mcp_sessions` table (migration
+0119) before each tool result is returned. Any API replica can serve the next request, and a session survives a
+restart. Saves write only over the version they started from; when two replicas save one session at once, the states
+are merged. The saved state holds agent session tokens, so it is sealed (AES-256-GCM) with a key derived from the
+owner token; the table keeps only the token's SHA-256. Inside a session the runtime refuses files, git and programs
+on the API server, and once the API hosts sessions, runtime code that runs without a session scope throws instead of
+falling back to process-wide state. A client that disconnects ends its in-flight calls.
+
+**Sessions.** The session id is bound to the account and the exact token that opened it; any other token gets `404`
+and must initialize its own session. `DELETE` removes the session. There is no server-initiated stream (`GET` gets
+`405`); every reply travels on its `POST`.
+
+**Tools.** The remote tool list is an explicit allow list (`REMOTE_ALLOWED_TOOLS` in
+`src/mcp/server/remote-tool-surface.ts`). Excluded, with reasons in the same file: workspace capture, `check_repo`,
+`check_repo_visibility`, `initialize_repo`, the local Codex session tools, the device-auth and onboarding tools,
+`resume_room_session` and the rental provider tools. `cwd` inputs are removed, and `join_room` refuses
+`session_mode: "live"`. A remote agent registers its worker with `register_agent_session` before it writes, as an
+npm-package agent does.
+
+**Limits.** All values are server environment variables.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT` | 16 | At the cap, the account's least recently used session is deleted. |
+| `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min | A session with no request for this long is deleted. |
+| `LETAGENTS_POLL_MAX_MS` | 180000 | Cap for `wait_for_messages`, the same value the poll route uses. |
+| `LETAGENTS_REMOTE_MCP_MAX_BODY_BYTES` | 262144 | Larger request bodies get `413` before the MCP SDK validates them. |
+| `LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT` | 8 | Requests one account may have open at once (long-polls included); more get `429`. |
+| `LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT` | 256 | Requests open at once on one API process; more get `503`. |
+| `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES` | 262144 | Largest saved session state; a call that would exceed it fails. |
+
+Each account may open 10 sessions and send 600 requests per minute. A tool call may hold at most 10 000 array
+elements and object keys. Once a minute, sessions that are idle or whose owner token was revoked are deleted. A
+client whose session is gone gets `404` and initializes a new one; the agent then joins its room and registers its
+worker again. Limits are per account, so people who share one token share them.
+
+**Proxy note.** `wait_for_messages` holds one streamed HTTP response open for up to `LETAGENTS_POLL_MAX_MS`. The
+reverse proxy in front of the API must forward `/mcp` with response buffering off, no gzip on `text/event-stream`, and
+a read timeout at or above `LETAGENTS_POLL_MAX_MS`.
+
+Setup steps for the Claude app are in `AGENTS.md`, section "Remote connector (Claude app)".

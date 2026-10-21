@@ -22,6 +22,7 @@ const domainDeclarations = {
   "owner-tokens": [
     "createOwnerToken:export",
     "getOwnerTokenAccountByToken:export",
+    "getOwnerTokenAccountByTokenHash:export",
     "deleteOwnerTokenById:export",
   ],
   "agent-identities": [

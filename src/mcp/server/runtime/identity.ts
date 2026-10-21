@@ -9,7 +9,7 @@ import type {
 import { type AgentPresenceStatus } from "../../../shared/agent-presence.js";
 import {
   apiCall,
-  getLetagentsToken,
+  hasLetagentsCredential,
 } from "./api.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { currentWorkerCall } from "../../worker-call-context.js";
@@ -26,19 +26,21 @@ import {
 } from "./identity/names.js";
 import { toPublicAgentIdentity } from "./identity/public.js";
 import {
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
   ensureAgentIdentityKey,
   getConversationIdentity,
   setConversationIdentity,
   storeCurrentAgentIdentity,
+  agentInstanceUuid,
   AGENT_INSTANCE_UUID,
 } from "./identity/state.js";
 
 export {
   AGENT_INSTANCE_UUID,
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  agentInstanceUuid,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
   getConversationIdentity,
@@ -53,14 +55,14 @@ export async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
   const worker = currentWorkerCall();
   if (worker) return identityFromAgentSession(worker);
   const owner = await resolveOwnerContext();
-  const authAvailable = requireValidWorkerBearerRuntime().mode === "owner" && Boolean(await getLetagentsToken());
+  const authAvailable = requireValidWorkerBearerRuntime().mode === "owner" && await hasLetagentsCredential();
   const ideLabel = detectAgentIdeLabel();
   const identityKey = ensureAgentIdentityKey();
   const ownerAttribution = formatOwnerAttribution(owner.label);
   const { name, display_name: displayName } = await resolveAgentName({
     authAvailable,
     identityKey,
-    currentIdentity: currentAgentIdentity,
+    currentIdentity: getCurrentAgentIdentity(),
   });
   const actorLabel = buildAgentActorLabel({
     display_name: displayName,
@@ -81,18 +83,19 @@ export async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
     resolved_at: new Date().toISOString(),
   };
 
+  const current = getCurrentAgentIdentity();
   if (
-    currentAgentIdentity &&
-    currentAgentIdentity.name === resolved.name &&
-    currentAgentIdentity.display_name === resolved.display_name &&
-    currentAgentIdentity.owner_label === resolved.owner_label &&
-    currentAgentIdentity.owner_attribution === resolved.owner_attribution &&
-    currentAgentIdentity.ide_label === resolved.ide_label &&
-    currentAgentIdentity.actor_label === resolved.actor_label &&
-    currentAgentIdentity.runtime_key === resolved.runtime_key &&
-    (!authAvailable || currentAgentIdentity.source === "api")
+    current &&
+    current.name === resolved.name &&
+    current.display_name === resolved.display_name &&
+    current.owner_label === resolved.owner_label &&
+    current.owner_attribution === resolved.owner_attribution &&
+    current.ide_label === resolved.ide_label &&
+    current.actor_label === resolved.actor_label &&
+    current.runtime_key === resolved.runtime_key &&
+    (!authAvailable || current.source === "api")
   ) {
-    return currentAgentIdentity;
+    return current;
   }
 
   if (authAvailable) {
@@ -136,8 +139,8 @@ export async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
     }
   }
 
-  if (sameAgentIdentity(currentAgentIdentity, resolved)) {
-    return currentAgentIdentity ?? resolved;
+  if (sameAgentIdentity(getCurrentAgentIdentity(), resolved)) {
+    return getCurrentAgentIdentity() ?? resolved;
   }
 
   return storeCurrentAgentIdentity(

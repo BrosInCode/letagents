@@ -11,12 +11,13 @@ import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { normalizeRoutingHandle, normalizeRoutingSender } from "../../../../shared/routing-aliases.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getGitCurrentBranch } from "../../git-remote.js";
-import { apiCall, apiCallWhenFree, getApiUrl, getLetagentsToken } from "./api.js";
+import { apiCall, apiCallWhenFree, getApiUrl, hasLetagentsCredential } from "./api.js";
 import { resolveOwnerContext } from "./identity/directory.js";
 import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.js";
 import { getProcessHostId, getSessionLivenessRegistration } from "./identity/liveness.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { holdProcessConnection } from "./process-connection.js";
+import { scopedMap } from "./session-scope.js";
 
 export type AdoptedTaskLease = { lease_id: string; task_id: string; kind: string };
 type WorkerConnection = {
@@ -28,8 +29,8 @@ type WorkerConnection = {
   adopted_task_leases?: AdoptedTaskLease[];
 };
 // What the room said of the registration just made, kept for its caller.
-const adoptedBySession = new Map<string, AdoptedTaskLease[]>();
-const connecting = new Map<string, Promise<WorkerConnection>>();
+const adoptedBySession = scopedMap<string, AdoptedTaskLease[]>("adopted-task-leases");
+const connecting = scopedMap<string, Promise<WorkerConnection>>("connecting-workers");
 
 function snapshot() {
   const result = readLocalStateSnapshot();
@@ -41,7 +42,7 @@ async function workerScope(): Promise<string> {
   if (requireValidWorkerBearerRuntime().mode !== "owner") {
     throw new Error("Worker handles are for independent MCP chats; supervised identity is supplied by its supervisor.");
   }
-  const hasAccountToken = Boolean(await getLetagentsToken());
+  const hasAccountToken = await hasLetagentsCredential();
   const owner = await resolveOwnerContext();
   if (hasAccountToken && !owner.login) {
     throw new Error("Could not verify your LetAgents account. Check your connection or sign-in, then retry with the same worker_id or registration_key. Saved worker identities have not been changed.");
@@ -167,21 +168,21 @@ export async function registerMcpWorker(input: {
   const worker = getWorker(workerId!, scope);
   const local = await isLocalRoomStorageEnabled(input.roomId);
   const key = `${getLocalStatePath()}\n${worker.worker_id}\n${roomId}`;
-  const inFlight = connecting.get(key);
+  const inFlight = connecting().get(key);
   if (inFlight) return inFlight;
   const result = connectWorker(input, worker, scope, roomId, local);
-  connecting.set(key, result);
+  connecting().set(key, result);
   try {
     const connection = await result;
-    const adopted = adoptedBySession.get(connection.session.session_id);
-    adoptedBySession.delete(connection.session.session_id);
+    const adopted = adoptedBySession().get(connection.session.session_id);
+    adoptedBySession().delete(connection.session.session_id);
     return {
       ...connection,
       ...(nameHeldHere ? { name_held_here: nameHeldHere } : {}),
       ...(adopted?.length ? { adopted_task_leases: adopted } : {}),
     };
   } finally {
-    connecting.delete(key);
+    connecting().delete(key);
   }
 }
 
@@ -251,7 +252,7 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
       const { assigned_base_display_name, worker_bearer: _unusedBearer, adopted_task_leases, ...record } = created;
       session = { ...record, requested_base_display_name: assigned_base_display_name ?? worker.display_name };
       const adopted = readAdoptedTaskLeases(adopted_task_leases);
-      if (adopted.length > 0) adoptedBySession.set(session.session_id, adopted);
+      if (adopted.length > 0) adoptedBySession().set(session.session_id, adopted);
     }
     updateLocalState((state) => {
       const target = state.mcp_workers?.[worker.worker_id]?.rooms[roomId];

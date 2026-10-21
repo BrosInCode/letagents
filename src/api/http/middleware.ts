@@ -9,12 +9,15 @@ import { requiredAgentSessionRouteCapability } from "../request/agent-session-ro
 import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route-registry.js";
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
+import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
+
+export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
 }
 
-function buildAllowedOrigins(): Set<string> {
+export function buildAllowedOrigins(): Set<string> {
   return new Set([
     "https://letagents.chat",
     "http://localhost:3001",
@@ -49,6 +52,13 @@ export function registerHttpMiddleware(
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {
       const auth = await deps.resolveRequestAuth(req);
+      // A remote MCP session's in-process call resolves to its bound owner
+      // token (see resolveRequestAuth). Once that token is revoked it must not
+      // fall back to anonymous access.
+      if (inProcessPrincipal(req) && auth.authKind !== "owner_token") {
+        _res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+        return;
+      }
       req.sessionAccount = auth.account;
       req.authKind = auth.authKind;
       req.agentSession = auth.agentSession ?? null;
@@ -58,7 +68,7 @@ export function registerHttpMiddleware(
       // expired saved credentials; it exposes no room access or mutations.
       const isAuthStatusProbe = req.method === "GET" && req.path === "/auth/session";
       if (!req.authKind && !isAuthStatusProbe && parseBearerAuthorization(req.headers.authorization).kind !== "none") {
-        _res.status(401).json({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." });
+        _res.status(401).json({ error: INVALID_BEARER_MESSAGE });
         return;
       }
       if (req.authKind === "supervisor_grant") {

@@ -1,6 +1,8 @@
 import type { Request } from "express";
 import { parseBearerAuthorization } from "./bearer-authorization.js";
 
+import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
+import { getOwnerTokenAccountByTokenHash } from "../db/auth/owner-tokens.js";
 import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
@@ -14,6 +16,16 @@ import {
 import { isAgentSessionBearerCapability, isAgentSessionBearerFeatureEnabled } from "../../shared/agent-session-bearer.js";
 
 export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestAuth> {
+  // A remote MCP session's in-process call: re-resolve the bound owner token
+  // from its hash, so a fresh check (live rechecks, revocation) sees the
+  // session's current account, or nothing once the token is revoked.
+  const internal = inProcessPrincipal(req);
+  if (internal) {
+    const account = await getOwnerTokenAccountByTokenHash(internal.tokenHash);
+    return account && account.account_id === internal.account.account_id
+      ? { account, authKind: "owner_token" }
+      : { account: null, authKind: null };
+  }
   const cookies = parseCookies(req.headers?.cookie);
   const sessionToken = cookies.letagents_session;
   let cookieSessionAccount = null;

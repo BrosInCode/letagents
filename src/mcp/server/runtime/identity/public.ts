@@ -3,7 +3,7 @@ import {
   formatOwnerAttribution,
   inferAgentIdeLabel,
 } from "../../../../shared/agent-identity.js";
-import { AGENT_INSTANCE_UUID } from "./state.js";
+import { agentInstanceUuid } from "./state.js";
 
 export function toPublicAgentIdentity(
   identity: StoredAgentIdentityState | null
@@ -21,7 +21,7 @@ export function toPublicAgentIdentity(
     actor_label: identity.actor_label,
     canonical_key: identity.canonical_key ?? null,
     runtime_key: identity.runtime_key ?? null,
-    agent_instance_id: AGENT_INSTANCE_UUID,
+    agent_instance_id: agentInstanceUuid(),
     source: identity.source,
   };
 }
