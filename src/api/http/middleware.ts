@@ -9,6 +9,7 @@ import { requiredAgentSessionRouteCapability } from "../request/agent-session-ro
 import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route-registry.js";
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
+import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 
 export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
 
@@ -50,6 +51,17 @@ export function registerHttpMiddleware(
 
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {
+      // A remote MCP session's in-process call: the account was bound when the
+      // session's /mcp request authenticated. Only in-process sockets have one.
+      const internal = inProcessPrincipal(req);
+      if (internal) {
+        req.sessionAccount = internal.account;
+        req.authKind = "owner_token";
+        req.agentSession = null;
+        req.supervisorGrant = null;
+        next();
+        return;
+      }
       const auth = await deps.resolveRequestAuth(req);
       req.sessionAccount = auth.account;
       req.authKind = auth.authKind;

@@ -4,9 +4,10 @@ import type { StoredAccount } from "../../../local-state.js";
 import { normalizeSlugSegment } from "../../../../shared/codenames.js";
 import {
   apiCall,
-  getLetagentsToken,
+  hasLetagentsCredential,
 } from "../api.js";
 import { requireValidWorkerBearerRuntime } from "../worker-bearer.js";
+import { currentSessionScope } from "../session-scope.js";
 import {
   getAuthenticatedAccountCache,
   setAuthenticatedAccountCache,
@@ -49,11 +50,8 @@ export async function getAuthenticatedAgentDirectory(): Promise<{
       return null;
     }
 
-    setAuthenticatedAccountCache(
-      account,
-      process.env.LETAGENTS_TOKEN?.trim() ? "env" : "stored",
-      process.env.LETAGENTS_TOKEN?.trim() || null
-    );
+    const envToken = currentSessionScope() ? "" : process.env.LETAGENTS_TOKEN?.trim() ?? "";
+    setAuthenticatedAccountCache(account, envToken ? "env" : "stored", envToken || null);
 
     return {
       account,
@@ -68,7 +66,7 @@ async function getAuthenticatedAccountProfile(): Promise<StoredAccount | null> {
   if (requireValidWorkerBearerRuntime().mode !== "owner") {
     return null;
   }
-  const envToken = (process.env.LETAGENTS_TOKEN || "").trim();
+  const envToken = currentSessionScope() ? "" : (process.env.LETAGENTS_TOKEN || "").trim();
   const cache = getAuthenticatedAccountCache();
   if (envToken) {
     if (
@@ -90,7 +88,7 @@ async function getAuthenticatedAccountProfile(): Promise<StoredAccount | null> {
     return storedAccount;
   }
 
-  if (!await getLetagentsToken()) {
+  if (!await hasLetagentsCredential()) {
     setAuthenticatedAccountCache(undefined, null, null);
     return null;
   }
@@ -108,6 +106,10 @@ export async function resolveOwnerContext(): Promise<ResolvedOwnerContext> {
   const authLogin = account?.login?.trim() || null;
   const authLabel = account?.display_name?.trim() || authLogin;
 
+  if (currentSessionScope() && !authLogin) {
+    // Never fall back to the API server's git or OS user for a remote session.
+    throw new Error("Could not load this session's LetAgents account. Retry the call.");
+  }
   if (authLogin || authLabel || AGENT_OWNER_LABEL) {
     const label = AGENT_OWNER_LABEL || authLabel || authLogin || "Owner";
     const slug = normalizeSlugSegment(authLogin || label, "owner");

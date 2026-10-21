@@ -86,6 +86,7 @@ export type LocalChatMessagePage = {
 
 export type { LocalTask } from "../../../shared/local-task-store.mjs";
 import type { LocalTask } from "../../../shared/local-task-store.mjs";
+import { currentSessionScope, refuseLocalMachineInSession } from "../server/runtime/session-scope.js";
 
 type SqliteStatement = {
   all: (...params: unknown[]) => Record<string, unknown>[];
@@ -465,6 +466,8 @@ async function initializeDb(): Promise<SqliteDatabase> {
 }
 
 async function getDb(): Promise<SqliteDatabase> {
+  // A remote session has no local chat database on the API server.
+  refuseLocalMachineInSession("Local chat storage");
   if (db) return db;
   dbInitialization ??= initializeDb();
   try {
@@ -560,6 +563,7 @@ function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): n
 }
 
 export async function isLocalChatStorageEnabled(): Promise<boolean> {
+  if (currentSessionScope()) return false;
   const envMode = process.env.LETAGENTS_CHAT_STORAGE?.trim().toLowerCase();
   if (envMode === "local") return true;
   if (envMode === "cloud") return false;
@@ -576,6 +580,8 @@ export async function isLocalChatStorageEnabled(): Promise<boolean> {
 export async function isLocalRoomStorageEnabled(
   roomId?: string | null,
 ): Promise<boolean> {
+  // Every room of a remote session is a hosted room.
+  if (currentSessionScope()) return false;
   const envMode = process.env.LETAGENTS_CHAT_STORAGE?.trim().toLowerCase();
   if (envMode === "local") return true;
   if (envMode === "cloud") return false;
@@ -641,6 +647,7 @@ export async function resolveLocalRoomStorageIdentifiers(
 ): Promise<{ localRoomId: string | null; cloudRoomId: string | null }> {
   const normalizedRoomId = roomId?.trim() || "";
   if (!normalizedRoomId) return { localRoomId: null, cloudRoomId: null };
+  if (currentSessionScope()) return { localRoomId: normalizedRoomId, cloudRoomId: normalizedRoomId };
   try {
     const database = await getDb();
     const row = database
@@ -879,6 +886,7 @@ export const listLocalActiveTaskOwnerLeases = localTasks.listLocalActiveTaskOwne
 export const getLocalTask = localTasks.getLocalTask;
 
 async function mutateLocalTask<T>(operation: string, args: unknown[]): Promise<T> {
+  refuseLocalMachineInSession("The local task board");
   assertWorkerConnection();
   const result = await requestLocalBoard<T>("mutate", { domain: "mcp", operation, args,
     databasePath: localChatDatabasePath, statePath: getLocalStatePath(), worker: currentWorkerCall() ?? null });

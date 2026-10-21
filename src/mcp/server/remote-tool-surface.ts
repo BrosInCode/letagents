@@ -1,10 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-
-/**
- * Set by the API's remote MCP endpoint on the per-connection child process.
- * The npm package never sets it, so stdio behaviour is unchanged.
- */
-export const LETAGENTS_REMOTE_TOOL_SURFACE_ENV = "LETAGENTS_REMOTE_TOOL_SURFACE";
+import { currentSessionScope } from "./runtime/session-scope.js";
 
 /**
  * Tools the remote (streamable HTTP) endpoint does not expose, with reasons. Each one reads
@@ -63,10 +58,6 @@ export const REMOTE_MAX_TOOL_INPUT_ELEMENTS = 10_000;
 /** Input fields that name a local path. They are removed from remote tool schemas. */
 export const REMOTE_STRIPPED_INPUT_FIELDS: readonly string[] = ["cwd"];
 
-export function isRemoteToolSurface(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[LETAGENTS_REMOTE_TOOL_SURFACE_ENV]?.trim() === "1";
-}
-
 export function isRemoteExcludedTool(name: string): boolean {
   return Object.hasOwn(REMOTE_EXCLUDED_TOOLS, name)
     || REMOTE_EXCLUDED_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
@@ -91,6 +82,20 @@ function withoutLocalPaths(schema: Record<string, unknown>): Record<string, unkn
  * registration. Throws on a shape it does not recognise, so a new form can
  * never keep `cwd` by accident.
  */
+/**
+ * Save the session before a tool result goes back, so a client that sees a
+ * result can rely on its state being stored (any replica can serve next).
+ */
+function persistingCallback(callback: (...args: unknown[]) => unknown): (...args: unknown[]) => Promise<unknown> {
+  return async (...args: unknown[]) => {
+    try {
+      return await callback(...args);
+    } finally {
+      await currentSessionScope()?.persist();
+    }
+  };
+}
+
 function stripToolRegistration(name: string, registration: unknown[]): unknown[] {
   const callback = registration.at(-1);
   if (typeof callback !== "function") throw new Error(`Remote tool ${name}: registration has no callback.`);
@@ -104,13 +109,16 @@ function stripToolRegistration(name: string, registration: unknown[]): unknown[]
     throw new Error(`Remote tool ${name}: unrecognised registration shape.`);
   }
   const schemaIndex = middle.findIndex(isPlainObject);
-  return registration.map((part, index) => index === schemaIndex ? withoutLocalPaths(part as Record<string, unknown>) : part);
+  return [
+    ...middle.map((part, index) => index === schemaIndex ? withoutLocalPaths(part as Record<string, unknown>) : part),
+    persistingCallback(callback as (...args: unknown[]) => unknown),
+  ];
 }
 
 /**
  * Wrap a server so only allowed tools register and local-path input fields
- * are dropped. The tool callbacks then fall back to the process working
- * directory, which the remote endpoint sets to an empty per-connection folder.
+ * are dropped. Inside a remote session the runtime also refuses files, git
+ * and programs on the API server (see runtime/session-scope.ts).
  */
 export function remoteToolServer(server: McpServer): McpServer {
   return new Proxy(server, {
@@ -132,7 +140,8 @@ export function remoteToolServer(server: McpServer): McpServer {
           }
           const nextConfig = config.inputSchema === undefined ? config
             : { ...config, inputSchema: withoutLocalPaths(config.inputSchema as Record<string, unknown>) };
-          return (target.registerTool as (...input: unknown[]) => unknown).call(target, name, nextConfig, callback);
+          return (target.registerTool as (...input: unknown[]) => unknown)
+            .call(target, name, nextConfig, persistingCallback(callback as (...args: unknown[]) => unknown));
         };
       }
       return typeof value === "function" ? value.bind(target) : value;

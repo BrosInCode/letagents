@@ -827,6 +827,13 @@
       "when": 1792510000000,
       "tag": "0117_task_external_refs",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1792700000000,
+      "tag": "0119_remote_mcp_sessions",
+      "breakpoints": true
     }
   ]
 }

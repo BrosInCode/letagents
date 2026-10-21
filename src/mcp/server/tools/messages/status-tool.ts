@@ -6,7 +6,7 @@ import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   agentSessionCredentials,
   addLocalChatMessage,
-  currentRoom,
+  getCurrentRoom,
   getFallbackProjectId,
   getRememberedRoomPresence,
   getTargetRoomId,
@@ -55,12 +55,12 @@ export function registerPostStatusTool(server: McpServer): void {
       }
 
       const { identity, agentSession } = await resolveWorkerToolIdentity({
-        roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+        roomId: targetRoomId ?? getCurrentRoom()?.room_id ?? null,
         agentSessionId: agent_session_id,
       });
       const sender = identity.actor_label;
       const statusText = `[status] ${status}`;
-      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
+      const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
 
       if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
         const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
@@ -83,10 +83,10 @@ export function registerPostStatusTool(server: McpServer): void {
         });
       }
 
-      await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+      await syncRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity, {
         status: classifyPresenceStatusText(
           status,
-          getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
+          getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity).status
         ),
         status_text: status,
       }, agentSession);

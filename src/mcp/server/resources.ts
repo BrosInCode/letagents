@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   appendIncludePromptOnly,
-  currentRoom,
+  getCurrentRoom,
   getLocalChatMessages,
   getStoredCurrentRoom,
   getStoredRoomSession,
@@ -60,7 +60,7 @@ export function registerRoomResources(server: McpServer): void {
 
       const storedSession =
         getStoredRoomSession(normalizedRoomId) ??
-        (currentRoom?.room_id === normalizedRoomId ? getStoredCurrentRoom() : null);
+        (getCurrentRoom()?.room_id === normalizedRoomId ? getStoredCurrentRoom() : null);
 
       // Paginate through all pages to return full message history
       const allMessages: unknown[] = [];

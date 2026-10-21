@@ -1,21 +1,12 @@
 #!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerRoomResources } from "./server/resources.js";
-import { registerTools } from "./server/register-tools.js";
 import { attachMcpServer, autoJoinFromContext, shutdownRuntime } from "./server/runtime.js";
 import { requireValidWorkerBearerRuntime } from "./server/runtime/worker-bearer.js";
 import { announceProcessExit } from "./server/runtime/process-connection.js";
 import { executionProfile } from "./server/runtime/execution-profile.js";
 import { setMcpClientNameSource } from "./server/runtime/identity/config.js";
-import { WORKSPACE_CAPTURE_INSTRUCTIONS } from "./server/tools/workspace.js";
-import { isRemoteToolSurface, REMOTE_MAX_TOOL_INPUT_ELEMENTS } from "./server/remote-tool-surface.js";
-import { ROOM_EXPRESSION_GUIDANCE } from "../../shared/room-expressions.mjs";
-import {
-  LETAGENTS_RUNTIME_CONTRACT_ARG,
-  letAgentsRuntimeContract,
-  registerRuntimeReadinessResource,
-} from "./server/runtime-contract.js";
+import { LETAGENTS_RUNTIME_CONTRACT_ARG, letAgentsRuntimeContract } from "./server/runtime-contract.js";
+import { createLetAgentsMcpServer } from "./server/letagents-server.js";
 
 const CLIENT_INITIALIZE_WAIT_MS = 5_000;
 
@@ -26,23 +17,9 @@ async function main() {
   }
   const profile = executionProfile();
   const supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null;
-  // Set only by the API's remote MCP endpoint, which runs this process per connection.
-  const remote = isRemoteToolSurface();
-  const server = new McpServer({
-    name: "letagents",
-    version: "0.2.0",
-  }, {
-    instructions: remote ? ROOM_EXPRESSION_GUIDANCE
-      : profile === "autonomous_mcp_worker" || profile === "interactive_desktop"
-        ? `${WORKSPACE_CAPTURE_INSTRUCTIONS}\n\n${ROOM_EXPRESSION_GUIDANCE}` : undefined,
-    // Remote callers reach SDK validation over HTTP; bound its work per call
-    // (GHSA-46jr-4wx8-v453). stdio servers are not exposed to it.
-    ...(remote ? { maxToolInputElements: REMOTE_MAX_TOOL_INPUT_ELEMENTS } : {}),
-  });
+  // The stdio binding. The API's remote endpoint builds the same server object.
+  const server = createLetAgentsMcpServer({ profile, supervisedProvider, remote: false });
   attachMcpServer(server);
-  registerRoomResources(server);
-  registerTools(server, profile, supervisedProvider, { remote });
-  registerRuntimeReadinessResource(server, profile, supervisedProvider);
   requireValidWorkerBearerRuntime();
   // Auto-join resolves the agent identity, whose IDE label comes from the
   // host's clientInfo, so wait (briefly) for the host to finish initialize.
@@ -57,8 +34,7 @@ async function main() {
     initialized,
     new Promise<void>((resolve) => setTimeout(resolve, CLIENT_INITIALIZE_WAIT_MS).unref()),
   ]);
-  // A remote connection has no caller checkout to derive a room from.
-  if (!remote) await autoJoinFromContext();
+  await autoJoinFromContext();
 }
 
 let exiting = false;

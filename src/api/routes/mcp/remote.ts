@@ -1,13 +1,13 @@
+import { createHash } from "node:crypto";
 import type { Express, Response } from "express";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
 import { buildAllowedOrigins, INVALID_BEARER_MESSAGE } from "../../http/middleware.js";
-import {
-  RemoteMcpCapacityError,
-  RemoteMcpSessionManager,
-} from "../../remote-mcp/sessions.js";
+import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
+import type { RemoteMcpSessions } from "../../remote-mcp/sessions.js";
+import type { OwnerTokenAccount } from "../../db/types/auth.js";
 import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.js";
 
 /**
@@ -30,9 +30,7 @@ export function remoteMcpMaxBodyBytes(): number {
 }
 
 export interface RemoteMcpRouteDeps {
-  sessions?: RemoteMcpSessionManager;
-  /** Base URL the per-connection MCP child uses to call this API. */
-  apiUrlForRequest?: (req: AuthenticatedRequest) => string;
+  sessions: RemoteMcpSessions;
   /** Per-account request budget; true allows the request. */
   allowRequest?: (accountId: string) => boolean;
   /** Per-account budget for opening new sessions. */
@@ -44,31 +42,29 @@ function jsonRpcError(res: Response, status: number, message: string, headers: R
   res.status(status).json({ jsonrpc: "2.0", error: { code: -32000, message }, id: null });
 }
 
-/**
- * The child calls back into this same server on the address the request
- * arrived on, so it works whatever HOST/PORT the process listens on.
- * LETAGENTS_REMOTE_MCP_API_URL overrides it.
- */
-export function defaultRemoteMcpApiUrl(req: AuthenticatedRequest): string {
-  const configured = process.env.LETAGENTS_REMOTE_MCP_API_URL?.trim();
-  if (configured) return configured.replace(/\/+$/, "");
-  const raw = req.socket.localAddress ?? "127.0.0.1";
-  const address = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
-  const host = address === "::" || address === "0.0.0.0" ? "127.0.0.1"
-    : address.includes(":") ? `[${address}]` : address;
-  return `http://${host}:${req.socket.localPort}`;
+/** Sessions store the SHA-256 hex of their token, as owner_tokens does. */
+export function hashRemoteMcpToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps = {}): RemoteMcpSessionManager {
-  const sessions = deps.sessions ?? new RemoteMcpSessionManager();
-  const apiUrlForRequest = deps.apiUrlForRequest ?? defaultRemoteMcpApiUrl;
+function clientNameOf(body: unknown): string | null {
+  const name = (body as { params?: { clientInfo?: { name?: unknown } } })?.params?.clientInfo?.name;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
+export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps): void {
+  const { sessions } = deps;
   const allowRequest = deps.allowRequest ?? buildInMemoryListingsRateLimiter({ capacity: 600, windowMs: 60_000 });
   const allowSessionCreate = deps.allowSessionCreate
     ?? buildInMemoryListingsRateLimiter({ capacity: 10, windowMs: 60_000 });
-
   const allowedOrigins = buildAllowedOrigins();
 
   const handler = async (req: AuthenticatedRequest, res: Response) => {
+    // A remote session's own in-process calls never re-enter the endpoint.
+    if (inProcessPrincipal(req)) {
+      jsonRpcError(res, 403, "The MCP endpoint is not available to in-process calls.");
+      return;
+    }
     // The MCP transport spec requires Origin validation (DNS rebinding). Server
     // clients such as Claude's connector send no Origin; browsers always do.
     const origin = req.headers.origin;
@@ -91,7 +87,8 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
         { "WWW-Authenticate": 'Bearer realm="letagents"' });
       return;
     }
-    const accountId = req.sessionAccount.account_id;
+    const account = req.sessionAccount as OwnerTokenAccount;
+    const accountId = account.account_id;
     if (!allowRequest(accountId)) {
       jsonRpcError(res, 429, "Too many remote MCP requests. Slow down.");
       return;
@@ -102,16 +99,28 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
       jsonRpcError(res, 413, "The MCP request body is too large.");
       return;
     }
+    const tokenHash = hashRemoteMcpToken(authorization.token);
 
     const sessionId = req.headers["mcp-session-id"];
     if (typeof sessionId === "string" && sessionId) {
-      const session = sessions.find(sessionId, authorization.token);
+      const session = await sessions.find(sessionId, tokenHash, accountId);
       if (!session) {
         // Unknown, expired, or opened with another token: the client re-initializes.
         jsonRpcError(res, 404, "Session not found.");
         return;
       }
-      await sessions.handle(session, req, res, req.body);
+      if (req.method === "DELETE") {
+        await sessions.delete(session.sessionId);
+        res.status(200).end();
+        return;
+      }
+      if (req.method === "GET") {
+        // No server-initiated stream: every reply travels on its POST.
+        res.setHeader("Allow", "POST, DELETE");
+        jsonRpcError(res, 405, "This server does not offer a notification stream.");
+        return;
+      }
+      await sessions.handle(session, account, req, res, req.body);
       return;
     }
 
@@ -119,7 +128,7 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
       jsonRpcError(res, 400, "Send an initialize request first, without an Mcp-Session-Id header.");
       return;
     }
-    // The transport would refuse these with 406; refuse them before a child starts.
+    // The transport would refuse these with 406; refuse them before a session is stored.
     const accept = String(req.headers.accept ?? "");
     if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
       jsonRpcError(res, 406, "Accept must include application/json and text/event-stream.");
@@ -129,23 +138,16 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
       jsonRpcError(res, 429, "Too many new remote MCP sessions. Slow down.");
       return;
     }
-    let session;
-    try {
-      session = await sessions.create({ accountId, token: authorization.token, apiUrl: apiUrlForRequest(req) });
-    } catch (error) {
-      if (error instanceof RemoteMcpCapacityError) {
-        jsonRpcError(res, error.status, error.message);
-        return;
-      }
-      console.error("Remote MCP session start failed:", error instanceof Error ? error.name : "unknown");
+    const opened = await sessions.open({ accountId, tokenHash, clientName: clientNameOf(req.body) });
+    const session = await sessions.find(opened, tokenHash, accountId);
+    if (!session) {
       jsonRpcError(res, 500, "The remote MCP session could not start.");
       return;
     }
-    await sessions.handle(session, req, res, req.body);
+    await sessions.handle(session, account, req, res, req.body);
   };
 
   app.post(REMOTE_MCP_PATH, handler);
   app.get(REMOTE_MCP_PATH, handler);
   app.delete(REMOTE_MCP_PATH, handler);
-  return sessions;
 }

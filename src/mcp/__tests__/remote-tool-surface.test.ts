@@ -6,12 +6,12 @@ import { registerTools } from "../server/register-tools.js";
 import {
   isRemoteAllowedTool,
   isRemoteExcludedTool,
-  LETAGENTS_REMOTE_TOOL_SURFACE_ENV,
   REMOTE_ALLOWED_TOOLS,
   REMOTE_EXCLUDED_TOOLS,
   remoteToolServer,
 } from "../server/remote-tool-surface.js";
 import { normalizeJoinSessionMode } from "../server/runtime/rooms.js";
+import { runInSessionScope, type McpSessionScope } from "../server/runtime/session-scope.js";
 
 function discovered(remote: boolean): Map<string, Record<string, unknown>> {
   const tools = new Map<string, Record<string, unknown>>();
@@ -60,16 +60,55 @@ test("the remote proxy strips cwd from registerTool and refuses shapes it does n
     /no callback/);
 });
 
-test("a remote connection cannot start a live local agent session", () => {
-  const previous = process.env[LETAGENTS_REMOTE_TOOL_SURFACE_ENV];
-  try {
-    delete process.env[LETAGENTS_REMOTE_TOOL_SURFACE_ENV];
-    assert.equal(normalizeJoinSessionMode("live"), "live");
-    process.env[LETAGENTS_REMOTE_TOOL_SURFACE_ENV] = "1";
+function fakeScope(): McpSessionScope {
+  return {
+    sessionId: "session-test", accountId: "acct", agentInstanceId: "instance-test", clientName: "Claude",
+    publicBaseUrl: "https://letagents.chat",
+    dispatch: async () => { throw new Error("no API in this test"); },
+    state: { local: {}, currentRoom: null, fullPromptDelivered: false, pinnedConnections: {} },
+    dirty: false, memory: new Map(), persist: async () => undefined,
+  };
+}
+
+test("a remote session cannot start a live local agent session", () => {
+  assert.equal(normalizeJoinSessionMode("live"), "live", "stdio keeps live sessions");
+  runInSessionScope(fakeScope(), () => {
     assert.equal(normalizeJoinSessionMode("current"), "current");
     assert.throws(() => normalizeJoinSessionMode("LIVE"), /not available over the remote MCP endpoint/);
-  } finally {
-    if (previous === undefined) delete process.env[LETAGENTS_REMOTE_TOOL_SURFACE_ENV];
-    else process.env[LETAGENTS_REMOTE_TOOL_SURFACE_ENV] = previous;
-  }
+  });
+});
+
+test("inside a session scope, state is per session and the local machine is out of reach", async () => {
+  const { getCurrentRoom, rememberRoom } = await import("../server/runtime/room-state.js");
+  const { readLocalState, updateLocalState } = await import("../local-state/storage.js");
+  const { getGitCurrentBranch } = await import("../git-remote.js");
+  const { findLetagentsConfig } = await import("../config-reader.js");
+  const { readCommandOutput } = await import("../server/runtime/identity/config.js");
+  const { agentInstanceUuid, AGENT_INSTANCE_UUID } = await import("../server/runtime/identity/state.js");
+  const { getLetagentsToken } = await import("../server/runtime/api.js");
+  const a = fakeScope();
+  const b = { ...fakeScope(), sessionId: "session-b", agentInstanceId: "instance-b",
+    state: { local: {}, currentRoom: null, fullPromptDelivered: false, pinnedConnections: {} }, memory: new Map() };
+  runInSessionScope(a, () => {
+    rememberRoom({ room_id: "room-a", joined_via: "join_room" });
+    updateLocalState((state) => { state.local_host_id = "host-a"; });
+  });
+  runInSessionScope(b, () => {
+    assert.equal(getCurrentRoom(), null, "B does not see A's room");
+    assert.equal(readLocalState().local_host_id, undefined, "B does not see A's local state");
+    assert.equal(agentInstanceUuid(), "instance-b");
+  });
+  runInSessionScope(a, () => {
+    assert.equal(getCurrentRoom()?.room_id, "room-a");
+    assert.equal(getGitCurrentBranch(process.cwd()), null, "no git on the API server");
+    assert.equal(findLetagentsConfig(process.cwd()), null, "no config files on the API server");
+    assert.equal(readCommandOutput("echo leaked"), null, "no programs on the API server");
+  });
+  assert.equal(a.state.local.local_host_id, "host-a");
+  assert.equal(a.dirty, true);
+  assert.equal(getCurrentRoom(), null, "the process (stdio) room is untouched");
+  assert.equal(agentInstanceUuid(), AGENT_INSTANCE_UUID);
+  await runInSessionScope(a, async () => {
+    await assert.rejects(getLetagentsToken(), /no token/);
+  });
 });

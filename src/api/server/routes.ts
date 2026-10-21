@@ -162,8 +162,8 @@ import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
-import { RemoteMcpSessionManager } from "../remote-mcp/sessions.js";
-import { ownerTokenHashExists } from "../db/auth/owner-tokens.js";
+import { RemoteMcpSessions } from "../remote-mcp/sessions.js";
+import { InProcessDispatcher } from "../remote-mcp/in-process-dispatch.js";
 import {
   createListing,
   updateListing,
@@ -259,14 +259,14 @@ function getRoomEventBroker(): RoomEventBroker {
   return sharedRoomEventBroker;
 }
 
-let sharedRemoteMcpSessions: RemoteMcpSessionManager | null = null;
+let sharedRemoteMcpSessions: RemoteMcpSessions | null = null;
 
-export function remoteMcpSessionsForTest(): RemoteMcpSessionManager | null {
+export function remoteMcpSessionsForTest(): RemoteMcpSessions | null {
   return sharedRemoteMcpSessions;
 }
 
 export function closeApiRouteEventBroker(): void {
-  void sharedRemoteMcpSessions?.closeAll();
+  sharedRemoteMcpSessions?.close();
   sharedRemoteMcpSessions = null;
   sharedRoomEventBroker?.close();
   sharedRoomEventBroker = null;
@@ -519,7 +519,9 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
   registerHealthRoutes(app);
-  sharedRemoteMcpSessions ??= new RemoteMcpSessionManager({ isTokenValid: ownerTokenHashExists });
+  // Remote MCP tool calls run this same app in process (no network, no token).
+  sharedRemoteMcpSessions?.close();
+  sharedRemoteMcpSessions = new RemoteMcpSessions({ dispatcher: new InProcessDispatcher(app) });
   registerRemoteMcpRoutes(app, { sessions: sharedRemoteMcpSessions });
 
   registerGitHubAppCallbackRoute(app);

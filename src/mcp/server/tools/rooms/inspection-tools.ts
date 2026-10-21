@@ -11,10 +11,10 @@ import {
   getGitRoomContext,
 } from "../../../git-remote.js";
 import {
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
   currentRoomMatchesLocator,
-  currentRoom,
+  getCurrentRoom,
   getConversationIdentity,
   getCurrentLiveSessionPayload,
   getStoredAgentIdentity,
@@ -80,7 +80,7 @@ export async function getCurrentRoomPayload(conversationId?: string) {
   const localCodexDetails = runtime.mode !== "owner"
     ? { current_local_codex_session: null, local_codex_session_count: 0 }
     : {
-        current_local_codex_session: getCurrentLiveSessionPayload(currentRoom?.room_id),
+        current_local_codex_session: getCurrentLiveSessionPayload(getCurrentRoom()?.room_id),
         local_codex_session_count: listStoredCodexLiveSessions().length,
       };
   if (!publicCurrentRoom) {
@@ -104,8 +104,8 @@ export async function getCurrentRoomPayload(conversationId?: string) {
     agent_identity: toPublicAgentIdentity(daemonContext
       ? identityFromAgentSession(daemonContext.agentSession)
       : getConversationIdentity(conversationId)
-        ?? currentAgentIdentity
-        ?? getStoredAgentIdentity(currentAgentIdentityKey)),
+        ?? getCurrentAgentIdentity()
+        ?? getStoredAgentIdentity(getCurrentAgentIdentityKey())),
     auth: workerAuth ?? (auth
       ? {
           source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
@@ -179,7 +179,7 @@ function currentRoomScope(
   currentRoomMatchesContext: boolean,
   detectedRoom: string | null
 ): string {
-  if (!currentRoom) return "none";
+  if (!getCurrentRoom()) return "none";
   return currentRoomMatchesContext && detectedRoom
     ? "matches_detected_repo_context"
     : "existing_joined_session_not_derived_from_inspected_cwd";
@@ -190,10 +190,10 @@ function repoWarning(input: {
   detectedRoom: string | null;
   currentRoomMatchesContext: boolean;
 }): string | null {
-  if (!input.repoRoot && currentRoom) {
+  if (!input.repoRoot && getCurrentRoom()) {
     return "The inspected cwd is not inside a git repo. current_room is only the previously joined MCP room session, not a room derived from this cwd.";
   }
-  if (input.repoRoot && currentRoom && input.detectedRoom && !input.currentRoomMatchesContext) {
+  if (input.repoRoot && getCurrentRoom() && input.detectedRoom && !input.currentRoomMatchesContext) {
     return "The current joined room differs from the room detected for this repo context.";
   }
   return null;

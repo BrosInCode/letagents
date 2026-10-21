@@ -22,6 +22,7 @@ export {
   apiCall,
   getAuthorizationHeader,
   getLetagentsToken,
+  hasLetagentsCredential,
   isMissingRouteError,
   parseApiErrorPayload,
   resolveApiPath,
@@ -39,8 +40,9 @@ export {
 } from "./runtime/device-auth.js";
 export {
   AGENT_INSTANCE_UUID,
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  agentInstanceUuid,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
@@ -78,7 +80,7 @@ export {
   withJoinRoomAgentPrompt,
 } from "./runtime/messages.js";
 export {
-  currentRoom,
+  getCurrentRoom,
   currentRoomMatchesLocator,
   attachMcpServer,
   getCurrentSupervisedRoomAuthority,
