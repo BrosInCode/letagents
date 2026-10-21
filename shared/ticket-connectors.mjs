@@ -51,3 +51,33 @@ export function isTicketState(value) {
 export function isTrackerProvider(value) {
   return typeof value === "string" && TRACKER_PROVIDERS.includes(value);
 }
+
+/** `created_by` of a card that sync imported from a tracker: `tracker:jira`, `tracker:linear`. */
+export const TRACKER_IMPORT_CREATOR_PREFIX = "tracker:";
+
+export function trackerImportCreator(provider) {
+  return `${TRACKER_IMPORT_CREATOR_PREFIX}${provider}`;
+}
+
+/** Whether sync created the card (an imported card), not a person or an agent. */
+export function isTrackerImportCreator(createdBy) {
+  return typeof createdBy === "string"
+    && TRACKER_PROVIDERS.some((provider) => createdBy === trackerImportCreator(provider));
+}
+
+/**
+ * Room events written by tracker sync. They are quiet (Events tab only, never a
+ * chat message) and carry `metadata.source = "tracker_sync"`, so rules that act
+ * on repo events must skip them (ticket connectors invariant 4).
+ */
+export const TRACKER_SYNC_EVENT_TYPE = "tracker_ticket";
+export const TRACKER_SYNC_EVENT_SOURCE = "tracker_sync";
+
+export function isTrackerSyncEvent(event) {
+  if (!event || typeof event !== "object") return false;
+  if (event.event_type === TRACKER_SYNC_EVENT_TYPE) return true;
+  const metadata = event.metadata;
+  return Boolean(metadata && typeof metadata === "object" && metadata.source === TRACKER_SYNC_EVENT_SOURCE);
+}
+
+export const ROOM_TRACKER_FILTER_MAX_LENGTH = 2_000;

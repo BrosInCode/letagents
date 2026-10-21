@@ -395,6 +395,23 @@ test("healthy SSE with an empty snapshot establishes the first cursor before rea
   }
 });
 
+test("a task_remove frame drops the card from the board", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    await startDesktopRoomStream(ROOM);
+    await waitUntil(() => emitted.some((event) => event.type === "open"));
+    sse.pushRaw(`event: task_remove\ndata: ${JSON.stringify({ task_id: "task_9", room_id: ROOM })}\n\n`);
+    await waitUntil(() => emitted.some((event) => event.type === "task_remove"));
+    assert.ok(emitted.some((event) => event.type === "task_remove" && (event as { taskId?: string }).taskId === "task_9"));
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
 test("SSE sends the snapshot cursor and forwards the revision handshake", async () => {
   const router = installFetchRouter();
   try {

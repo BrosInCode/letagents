@@ -13,6 +13,8 @@
       :owner-options="ownerOptions"
       :status-filter="statusFilter"
       :status-options="statusOptions"
+      :show-source-filter="showSourceFilter"
+      :source-filter="sourceFilter"
       :sort="sort"
       :busy="busyAction !== null"
       :manager-mode="boardManagerMode"
@@ -23,6 +25,7 @@
       @update:active-filter="setActiveFilter"
       @update:owner-filter="ownerFilter = $event"
       @update:status-filter="setStatusFilter"
+      @update:source-filter="setSourceFilter"
       @update:sort="setSort"
       @clear-filters="clearFilters"
       @open-governance="openGovernance"
@@ -191,8 +194,11 @@ const {
   selectTask,
   setActiveFilter,
   setSort,
+  setSourceFilter,
   setStatusFilter,
+  showSourceFilter,
   sort,
+  sourceFilter,
   statusFilter,
   statusOptions,
   toggleGroup,

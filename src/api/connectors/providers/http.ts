@@ -79,7 +79,12 @@ export async function trackerRequest(
       : response.status >= 500 && request.write
         ? "ambiguous"
         : "definite";
-    throw new TrackerProviderError(outcome, `Tracker at ${url.host} answered ${response.status}${detail ? `: ${detail}` : ""}`, response.status);
+    throw new TrackerProviderError(
+      outcome,
+      `Tracker at ${url.host} answered ${response.status}${detail ? `: ${detail}` : ""}`,
+      response.status,
+      parseRetryAfterMs(response.headers.get("retry-after")),
+    );
   }
   return { status: response.status, json };
 }
@@ -109,4 +114,15 @@ export function asRecord(value: unknown): Record<string, unknown> {
 
 export function asString(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
+}
+
+const MAX_RETRY_AFTER_MS = 60 * 60_000;
+
+/** `Retry-After` in seconds or as an HTTP date, bounded to an hour; null when absent or unreadable. */
+export function parseRetryAfterMs(value: string | null, now = Date.now()): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const ms = /^\d+$/.test(trimmed) ? Number(trimmed) * 1000 : Date.parse(trimmed) - now;
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  return Math.min(ms, MAX_RETRY_AFTER_MS);
 }

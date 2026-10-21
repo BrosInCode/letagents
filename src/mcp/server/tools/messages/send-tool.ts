@@ -6,7 +6,7 @@ import {
   agentSessionCredentials,
   addLocalChatMessage,
   appendIncludePromptOnly,
-  currentRoom,
+  getCurrentRoom,
   getFallbackProjectId,
   getLocalChatMessages,
   getRememberedRoomPresence,
@@ -123,10 +123,10 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
   }
 
   const { identity, agentSession } = await resolveWorkerToolIdentity({
-    roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+    roomId: targetRoomId ?? getCurrentRoom()?.room_id ?? null,
     agentSessionId: input.agent_session_id,
   });
-  const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
+  const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
   const { replyTarget, shouldResolveThreadRoot } = initialReplyTarget(input);
   // The quote/chip reference stays the literal target the caller pointed at; the
   // thread root is resolved separately from that target's explicit thread_root_id,
@@ -178,9 +178,9 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
   });
   touchCurrentRoom();
   await syncRoomPresence(
-    targetRoomId ?? currentRoom?.room_id ?? null,
+    targetRoomId ?? getCurrentRoom()?.room_id ?? null,
     identity,
-    getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity),
+    getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, identity),
     agentSession
   );
 

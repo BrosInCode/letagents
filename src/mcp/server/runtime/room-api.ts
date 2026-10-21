@@ -9,7 +9,7 @@ import {
 } from "./api.js";
 import { maybeHandleRepoRoomAuthRequired } from "./device-auth.js";
 import { getLastMessageId } from "./messages.js";
-import { currentRoom, getCurrentSupervisedRoomAuthority } from "./room-state.js";
+import { getCurrentRoom, getCurrentSupervisedRoomAuthority } from "./room-state.js";
 import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
 import { currentWorkerCall } from "../../worker-call-context.js";
 
@@ -40,8 +40,8 @@ export async function roomScopedApiCall<T>(input: {
   if (exactRoomAuthority) {
     if (originHeaderKey) delete headers[originHeaderKey];
     headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = exactRoomAuthority;
-  } else if ((currentWorkerCall()?.room_id || currentRoom?.room_id) && !originHeaderKey) {
-    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentWorkerCall()?.room_id ?? currentRoom!.room_id;
+  } else if ((currentWorkerCall()?.room_id || getCurrentRoom()?.room_id) && !originHeaderKey) {
+    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentWorkerCall()?.room_id ?? getCurrentRoom()!.room_id;
   }
   const options = {
     ...input.options,

@@ -164,6 +164,18 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:update-task", roomIdentifier, taskId, updates),
     getTaskMentions: (roomIdentifier: string, taskId: string) =>
       ipcRenderer.invoke("desktop:room:get-task-mentions", roomIdentifier, taskId),
+    getTaskTicket: (roomIdentifier: string, taskId: string) =>
+      ipcRenderer.invoke("desktop:room:get-task-ticket", roomIdentifier, taskId),
+    listTrackerFilters: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:list-tracker-filters", roomIdentifier),
+    saveTrackerFilter: (roomIdentifier: string, input) =>
+      ipcRenderer.invoke("desktop:room:save-tracker-filter", roomIdentifier, input),
+    setTrackerFilterEnabled: (roomIdentifier: string, id: string, enabled: boolean) =>
+      ipcRenderer.invoke("desktop:room:set-tracker-filter-enabled", roomIdentifier, id, enabled),
+    removeTrackerFilter: (roomIdentifier: string, id: string) =>
+      ipcRenderer.invoke("desktop:room:remove-tracker-filter", roomIdentifier, id),
+    testTrackerFilter: (roomIdentifier: string, input) =>
+      ipcRenderer.invoke("desktop:room:test-tracker-filter", roomIdentifier, input),
     updateTaskLease: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:update-task-lease", roomIdentifier, taskId, input),
     updateTaskReviewLease: (roomIdentifier: string, taskId: string, input) =>
@@ -328,6 +340,7 @@ const api: DesktopApi = {
     test: (id) => ipcRenderer.invoke("desktop:connectors:test", id),
     update: (id, patch) => ipcRenderer.invoke("desktop:connectors:update", id, patch),
     remove: (id) => ipcRenderer.invoke("desktop:connectors:remove", id),
+    webhook: (id) => ipcRenderer.invoke("desktop:connectors:webhook", id),
   },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),

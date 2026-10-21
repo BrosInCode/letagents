@@ -9,6 +9,7 @@ import { startAttachmentUploadCleanup, stopAttachmentUploadCleanup } from "./ser
 import { startLiveActivityCleanup, stopLiveActivityCleanup } from "./server/live-activity-cleanup.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
 import { startWakeRuleScheduler } from "./wake-rules/scheduler.js";
+import { startTrackerSyncWorker } from "./connectors/sync.js";
 import { githubRoomEvents, taskEvents, wakeRuleEvents } from "./server/events.js";
 import { assertMessageThreadProjectionReady } from "./db/messages/projection-readiness.js";
 import { closeApiRouteEventBroker } from "./server/routes.js";
@@ -46,6 +47,8 @@ const stopJevRoutingWorker = startJevRoutingWorker();
 // Writes room history summaries when the server holds a summarizer key.
 const stopRoomHistoryWorker = startRoomHistoryWorker();
 const stopWakeRuleScheduler = startWakeRuleScheduler({ taskEvents, githubRoomEvents, wakeRuleEvents });
+// Polls room ticket filters; idle without a connector key or any filter.
+const stopTrackerSyncWorker = startTrackerSyncWorker();
 process.once("exit", closeApiRouteEventBroker);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -64,7 +67,7 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopAttachmentUploadCleanup(), stopLiveActivityCleanup(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopRoomHistoryWorker(), stopWakeRuleScheduler()]);
+    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopAttachmentUploadCleanup(), stopLiveActivityCleanup(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopRoomHistoryWorker(), stopWakeRuleScheduler(), stopTrackerSyncWorker()]);
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: async () => {
