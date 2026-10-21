@@ -2,6 +2,7 @@
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../../shared/codex-thread-history.mjs";
 import type { CodexAppServerLaunch } from "../codex-app-server.js";
 import { codexReadOnlyProfileId } from "../codex-agent-home.js";
+import { CODEX_GUEST_TOOL_OVERRIDES, codexGuestToolsLocked } from "../codex-guest-lock.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";
 import type { RpcNotification, TurnStartResult } from "../codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "../codex-dev-mcp-entry.js";
@@ -156,6 +157,13 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     // own room and workspace. An agent that collects its own messages runs them
     // in the room server with the caller's `cwd`, so none of its tools is.
     const readOnlyRoomTools = boundedMcp && readOnlyLevel;
+    // A guest (an agent given to someone else's room) runs Read-only with no tool that reaches this Mac.
+    // Fail closed unless this exact Codex shows, with the guest switches and this model, that it offers none.
+    const guest = req.supervisorEntryId?.startsWith("supervised_rental_") === true;
+    if (guest && !readOnlyLevel) throw new Error("A given Codex agent runs Read-only with no local tools.");
+    if (guest && !await codexGuestToolsLocked(this.codexBin, process.env, req.model ?? null)) {
+      throw new Error("Codex offered tools that can reach this Mac, so the given agent was not started. Update Codex, then try again.");
+    }
     const serverUrl = await this.deps.resolveServerUrl();
     // The launch's own overrides, the room's server among them. Kept with the handle: a later check lists Codex's servers as this launch does.
     const launchOverrides = [
@@ -168,6 +176,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
       // Read-only only: no other access level's launch changes.
       ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
+      ...(guest ? CODEX_GUEST_TOOL_OVERRIDES : []),
     ];
     const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,

@@ -8,6 +8,12 @@ const routes = [
     component: () => import('./pages/Landing.vue'),
   },
   {
+    path: '/ask/:token',
+    name: 'ask',
+    component: () => import('./pages/AskLink.vue'),
+    props: true,
+  },
+  {
     path: '/docs',
     name: 'docs',
     component: () => import('./pages/Docs.vue'),

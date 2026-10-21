@@ -327,9 +327,11 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           return { ...result, boardScreenshotReady: true };
         }
 
-        const addAgentButton = await waitFor("composer add-agent button", () => document.querySelector('[data-testid="desktop-composer-add-agent"]'));
+        const addAgentButton = await waitFor("composer add-agent button", () => document.querySelector('[data-testid="desktop-composer-add-agent-button"]'));
         result.addAgentButton = true;
         addAgentButton.click();
+        const addAgentMenuItem = await waitFor("composer add-agent menu item", () => document.querySelector('[data-testid="desktop-composer-menu-add-agent"]'));
+        addAgentMenuItem.click();
 
         await waitFor("add-agent modal", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
         result.addAgentModal = true;

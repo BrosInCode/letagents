@@ -1,6 +1,6 @@
 export type SlashPlatform = 'desktop' | 'web';
 export interface SlashCommand {
-  readonly name: 'task' | 'search' | 'agent';
+  readonly name: 'task' | 'search' | 'agent' | 'ask';
   readonly usage: string;
   readonly description: string;
   readonly argument: 'required' | 'none';

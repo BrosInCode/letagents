@@ -214,6 +214,7 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
+          @open-ask-agent="askAgentOpen = true"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           :attention="roomAttention"
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
@@ -302,6 +303,15 @@
       @open-settings="openAppAgentSettings"
       @run="runAppAgent"
     />
+
+    <AskAgentDialog
+      :open="askAgentOpen"
+      :room-identifier="selectedRoomWithProjectContext?.identifier ?? null"
+      :rooms="settingsAccountRooms"
+      @close="askAgentOpen = false"
+      @created="void app.refreshAccountRooms?.()"
+    />
+    <GiveAgentDialog :token="giveAgentToken" @close="giveAgentToken = null" />
 
     <Transition name="new-room-modal">
       <DesktopNewRoomModal
@@ -410,6 +420,9 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
+import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
+import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
@@ -591,4 +604,6 @@ Object.assign(app, useAppRoomStreamWatchers(app));
 Object.assign(app, useAppAuthWatchers(app));
 
 Object.assign(app, useAppLifecycle(app));
+
+const { askAgentOpen, giveAgentToken } = useAppAgentAsks();
 </script>

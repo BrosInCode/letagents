@@ -511,6 +511,17 @@ jobs:
           src/api/__tests__/message-reminders-db.test.ts
           src/api/__tests__/message-reminders-routes.test.ts
 
+      - name: Run ask-for-an-agent tests
+        if: matrix.group == 1
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          --test-concurrency=1
+          src/api/__tests__/agent-asks-db.test.ts
+          src/api/__tests__/agent-asks-routes.test.ts
+          src/api/__tests__/agent-ask-workspace-db.test.ts
+
       - name: Run webhook integration tests
         if: matrix.group == 1
         run: >-

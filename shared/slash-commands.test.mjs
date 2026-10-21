@@ -4,7 +4,7 @@ import { decideComposerSubmitAction, getSlashCommands, resolveSlashInput } from 
 
 for (const platform of ['desktop', 'web']) {
   test(`${platform}: registry and parser honor the composer command boundary`, () => {
-    assert.deepEqual(getSlashCommands(platform).map(command => command.name), platform === 'desktop' ? ['task', 'search', 'agent'] : ['task', 'search']);
+    assert.deepEqual(getSlashCommands(platform).map(command => command.name), platform === 'desktop' ? ['task', 'search', 'agent', 'ask'] : ['task', 'search']);
     assert.deepEqual(resolveSlashInput({ text: '/', platform }).commands.map(command => command.name), getSlashCommands(platform).map(command => command.name));
     for (const [text, action] of [
       ['/t', 'complete_command'], ['/se', 'complete_command'],
@@ -13,6 +13,7 @@ for (const platform of ['desktop', 'web']) {
       ['/TASK\tTitle', 'execute_command'],
       ['/agent', platform === 'desktop' ? 'execute_command' : 'send_message'],
       ['/agent extra', platform === 'desktop' ? 'show_hint' : 'send_message'],
+      ['/ask', platform === 'desktop' ? 'execute_command' : 'send_message'],
       ['/usr/bin', 'send_message'], ['/tasker title', 'send_message'], ['/t title', 'send_message'],
       [' /task title', 'send_message'], ['Hello /task title', 'send_message'],
       ['/task first\nsecond', 'send_message'], ['/task title\r', 'send_message'],

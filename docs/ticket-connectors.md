@@ -575,7 +575,7 @@ All under the desktop app's session bearer, for a connection the account owns.
 
 ### Tables
 
-Migration `0121_tracker_rules`: `tracker_rules`, `tracker_rule_versions` (unique per rule and version), and
+Migration `0123_tracker_rules`: `tracker_rules`, `tracker_rule_versions` (unique per rule and version), and
 `tracker_rule_runs` (unique per rule and delivery, indexed by room and time, and by rule, ticket and time for
 the debounce).
 

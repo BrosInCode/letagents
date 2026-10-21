@@ -26,7 +26,7 @@ import { suggestLetAgentsCodename } from "./agents/codenames.js";
 import { agentDisplayNameKey, isPlaceholderAgentDisplayName } from "../../../../shared/agent-codenames.mjs";
 import { PacedQueue } from "../../../../shared/paced-queue.mjs";
 import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
-import { assertRentalSafePermissionProfile } from "./agents/rental-permission-profiles.js";
+import { assertGuestSafePermissionProfile, assertRentalSafePermissionProfile, isGivenAgentEntryId } from "./agents/rental-permission-profiles.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
@@ -445,7 +445,9 @@ export class SupervisorGrantCoordinator {
     if (supervisedDeliveryModeForProvider(input.providerId) !== "daemon_inbox") {
       throw new Error("Rented agents require daemon-owned room delivery.");
     }
-    assertRentalSafePermissionProfile(input.providerId, input.permissionProfileId);
+    // A given agent (Ask for an agent) is held to the guest list; a rental to the marketplace's.
+    if (isGivenAgentEntryId(entryId)) assertGuestSafePermissionProfile(input.providerId, input.permissionProfileId);
+    else assertRentalSafePermissionProfile(input.providerId, input.permissionProfileId);
     return this.serialize(entryId, async () => {
       await this.daemon.ensureRunning();
       const roomId = await this.resolveRoomId(input.roomIdentifier);

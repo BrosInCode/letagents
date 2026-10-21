@@ -3,6 +3,7 @@ export const SLASH_COMMANDS = Object.freeze([
   Object.freeze({ name: 'task', usage: '/task <title>', description: 'Create a task on the board', argument: 'required', platforms: ['desktop', 'web'] }),
   Object.freeze({ name: 'search', usage: '/search <query>', description: 'Search messages in this room', argument: 'required', platforms: ['desktop', 'web'] }),
   Object.freeze({ name: 'agent', usage: '/agent', description: 'Add an agent to this room', argument: 'none', platforms: ['desktop'] }),
+  Object.freeze({ name: 'ask', usage: '/ask', description: 'Ask someone to add an agent to this room', argument: 'none', platforms: ['desktop'] }),
 ]);
 
 export function getSlashCommands(platform) {
@@ -27,7 +28,7 @@ export function resolveSlashInput({ text, platform, hasAttachments, isReply, men
     return { kind: 'invalid', command, hint: command.name === 'task' ? 'Add a task title' : 'Add a search query' };
   }
   if (command.argument === 'none' && argument) {
-    return { kind: 'invalid', command, hint: '/agent does not take arguments' };
+    return { kind: 'invalid', command, hint: `${command.usage} does not take arguments` };
   }
   return { kind: 'execute', command, argument };
 }

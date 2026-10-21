@@ -16,12 +16,63 @@ const RENTAL_SAFE_PROFILE_IDS: Partial<
   cursor: ["sandboxed_write"],
 };
 
+/**
+ * An agent given to someone else's room (Ask for an agent) does its code work
+ * through LetAgents' tools, so it may also run with no local tools at all.
+ * These pairs are for given agents only; the rental marketplace keeps its list.
+ */
+const GUEST_SAFE_PROFILE_IDS: Partial<
+  Record<DesktopAgentProviderId, readonly DesktopManagedAgentPermissionProfileId[]>
+> = {
+  cursor: ["sandboxed_write"],
+  // Read-only with no built-in tools at all: the spawn attestation requires
+  // the empty tool list and the adapter refuses to start unless Claude itself
+  // reports no tool outside LetAgents'.
+  "claude-code": ["read_only"],
+  // Read-only with its shell, image, web and app tools switched off
+  // (codex-guest-lock.ts); the launch probes this exact Codex's tool list.
+  codex: ["read_only"],
+};
+
+/** Entries for agents given through Ask for an agent (see asks/give-coordinator.ts). */
+export function isGivenAgentEntryId(entryId: string | null | undefined): boolean {
+  return Boolean(entryId?.startsWith("supervised_rental_ask_"));
+}
+
+function profilesFrom(
+  table: typeof RENTAL_SAFE_PROFILE_IDS,
+  providerId: DesktopAgentProviderId,
+): DesktopManagedAgentPermissionProfile[] {
+  const allowed = new Set(table[providerId] ?? []);
+  return listManagedAgentPermissionProfiles(providerId)
+    // Codex Read-only is listed as gated here only because it needs daemon
+    // delivery, and a given agent is always daemon-delivered.
+    .filter((profile) => (profile.status === "available"
+      || (table === GUEST_SAFE_PROFILE_IDS && providerId === "codex" && profile.id === "read_only"))
+      && allowed.has(profile.id));
+}
+
 export function listRentalSafePermissionProfiles(
   providerId: DesktopAgentProviderId,
 ): DesktopManagedAgentPermissionProfile[] {
-  const allowed = new Set(RENTAL_SAFE_PROFILE_IDS[providerId] ?? []);
-  return listManagedAgentPermissionProfiles(providerId)
-    .filter((profile) => profile.status === "available" && allowed.has(profile.id));
+  return profilesFrom(RENTAL_SAFE_PROFILE_IDS, providerId);
+}
+
+export function listGuestSafePermissionProfiles(
+  providerId: DesktopAgentProviderId,
+): DesktopManagedAgentPermissionProfile[] {
+  return profilesFrom(GUEST_SAFE_PROFILE_IDS, providerId);
+}
+
+/** The guest-safe check a given agent's install must pass. */
+export function assertGuestSafePermissionProfile(
+  providerId: DesktopAgentProviderId,
+  requestedProfileId: string | null | undefined,
+): DesktopManagedAgentPermissionProfile {
+  const requested = String(requestedProfileId ?? "").trim();
+  const selected = listGuestSafePermissionProfiles(providerId).find((profile) => profile.id === requested);
+  if (!selected) throw new Error(`${providerId} can't be given with the '${requested || "default"}' access level.`);
+  return selected;
 }
 
 export function isRentalSafePermissionProfile(
