@@ -380,6 +380,10 @@ export class RemoteMcpSessions {
   /** Delete idle sessions and sessions whose owner token was revoked. */
   async sweep(now = Date.now()): Promise<void> {
     const cutoff = new Date(now - this.limits.idleTimeoutMs).toISOString();
+    // The in-flight skip only knows this process's requests. What protects a
+    // session from another replica's sweep is that every request refreshes
+    // last_seen when it starts and that the idle timeout is clamped above the
+    // longest request (LETAGENTS_POLL_MAX_MS plus a margin).
     const busy = [...this.inFlightBySession.keys()];
     const removed = [...await deleteIdleRemoteMcpSessions(cutoff, busy), ...await deleteRevokedRemoteMcpSessions()];
     for (const id of removed) this.loaded.delete(id);

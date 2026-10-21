@@ -438,3 +438,63 @@ test("merging two saves keeps an ended agent session ended", { skip }, async () 
     assert.equal(merged.pinnedConnections.s1!.ended_at, "2026-10-21T00:00:00Z", prefer);
   }
 });
+
+test("a Git-room long-poll survives a repo-access invalidation and ends when the token is revoked", { skip, timeout: 90_000 }, async (t) => {
+  const { createServer } = await import("node:http");
+  const { clearGitHubRepoAccessCacheForRoom } = await import("../github/repo-access.js");
+  const roomName = "github.com/brosincode/remote-mcp-live";
+  // A public repository: GitHub answers through a stub.
+  const github = createServer((req, res) => {
+    const found = req.url?.toLowerCase().startsWith("/repos/brosincode/remote-mcp-live");
+    res.writeHead(found ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(found
+      ? { private: false, full_name: "BrosInCode/remote-mcp-live", owner: { login: "BrosInCode" }, default_branch: "main" }
+      : { message: "Not Found" }));
+  });
+  github.listen(0, "127.0.0.1");
+  await once(github, "listening");
+  const previous = { base: process.env.GITHUB_API_BASE_URL, cap: process.env.LETAGENTS_POLL_MAX_MS };
+  process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${(github.address() as AddressInfo).port}`;
+  // A longer cap so "still waiting" and "ended early" are far apart.
+  process.env.LETAGENTS_POLL_MAX_MS = "6000";
+  t.after(() => {
+    if (previous.base === undefined) delete process.env.GITHUB_API_BASE_URL;
+    else process.env.GITHUB_API_BASE_URL = previous.base;
+    process.env.LETAGENTS_POLL_MAX_MS = previous.cap;
+    github.close();
+  });
+
+  const token = "remote_mcp_token_live_git";
+  const created = await createOwner("live-git", token);
+  const { client } = await connect(token);
+  try {
+    const joined = await call(client, "join_room", { name: roomName });
+    assert.equal(joined.isError, undefined, JSON.stringify(joined));
+    const roomId = String(joined.room_id);
+
+    const poll = async () => {
+      const started = Date.now();
+      const result = await client.callTool({ name: "wait_for_messages", arguments: { room_id: roomId, timeout: 60_000 } });
+      return { elapsed: Date.now() - started, result };
+    };
+
+    // Still valid: an invalidation re-checks the session and the poll goes on.
+    const kept = poll();
+    await new Promise((done) => setTimeout(done, 700));
+    clearGitHubRepoAccessCacheForRoom(roomName);
+    const keptResult = await kept;
+    assert.notEqual(keptResult.result.isError, true, JSON.stringify(keptResult.result.content));
+    assert.ok(keptResult.elapsed >= 5_000, `the poll kept waiting after the invalidation (${keptResult.elapsed} ms)`);
+
+    // Revoked: the next invalidation ends the open poll early.
+    const ended = poll();
+    await new Promise((done) => setTimeout(done, 700));
+    await ownerTokens!.deleteOwnerTokenById(created.token_id);
+    clearGitHubRepoAccessCacheForRoom(roomName);
+    const endedResult = await ended.catch((error: unknown) => ({ elapsed: 0, result: { isError: true, content: [String(error)] } }));
+    assert.ok(endedResult.elapsed < 4_000, `the poll ended soon after revocation (${endedResult.elapsed} ms)`);
+    assert.notEqual(JSON.stringify(endedResult.result.content).includes("remote-mcp-live\",\"messages\":[{"), true);
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+});
