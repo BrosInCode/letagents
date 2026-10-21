@@ -25,6 +25,9 @@
               <button class="ghost-button" type="button" :disabled="busyId === connection.id" @click="test(connection)">
                 {{ busyId === connection.id && busyAction === "test" ? "Testing" : "Test connection" }}
               </button>
+              <button class="ghost-button" type="button" :disabled="busyId === connection.id" @click="toggleWebhook(connection)">
+                {{ webhooks[connection.id] ? "Hide webhook" : "Webhook" }}
+              </button>
               <button
                 class="ghost-button"
                 type="button"
@@ -37,6 +40,15 @@
             </div>
           </template>
         </SettingsRow>
+
+        <div v-if="webhooks[connection.id]" class="settings-connector-webhook" :data-testid="`settings-connector-webhook-${connection.id}`">
+          <p class="settings-control-description">
+            Optional. Add this webhook in {{ trackerLabel(connection.provider) }} for issue events, so ticket states
+            change on the board at once instead of at the next poll. Keep the secret private.
+          </p>
+          <label>URL <input class="settings-input" type="text" readonly :value="webhooks[connection.id]!.url" @focus="selectAll"></label>
+          <label>Secret <input class="settings-input" type="text" readonly :value="webhooks[connection.id]!.secret" @focus="selectAll"></label>
+        </div>
 
         <ul v-if="testResults[connection.id]?.length" class="settings-connector-items" aria-label="Tickets assigned to you">
           <li v-for="item in testResults[connection.id]" :key="item.key">
@@ -141,6 +153,7 @@ import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import type {
   TrackerConnectionView,
   TrackerItemSummary,
+  TrackerWebhookSetup,
   TrackerProvider,
   TrackerProviderAvailability,
 } from "../../../../../../../../shared/ticket-connectors.mjs";
@@ -168,6 +181,7 @@ const busyId = ref<string | null>(null);
 const busyAction = ref<"test" | "save" | "oauth" | "update" | null>(null);
 const confirmRemoveId = ref<string | null>(null);
 const testResults = reactive<Record<string, TrackerItemSummary[]>>({});
+const webhooks = reactive<Record<string, TrackerWebhookSetup>>({});
 const mapDrafts = reactive<Record<string, StatusMapRow[]>>({});
 const newStatus = reactive<Record<string, string>>({});
 const form = ref<TrackerProvider | null>(null);
@@ -219,6 +233,20 @@ async function run(id: string | null, action: NonNullable<typeof busyAction.valu
     busyId.value = null;
     busyAction.value = null;
   }
+}
+
+function toggleWebhook(connection: TrackerConnectionView) {
+  if (webhooks[connection.id]) {
+    delete webhooks[connection.id];
+    return;
+  }
+  return run(connection.id, "update", async () => {
+    webhooks[connection.id] = await api().webhook(connection.id);
+  });
+}
+
+function selectAll(event: FocusEvent) {
+  (event.target as HTMLInputElement).select();
 }
 
 function test(connection: TrackerConnectionView) {
@@ -325,6 +353,12 @@ onBeforeUnmount(() => window.removeEventListener("focus", onFocus));
   gap: 8px;
 }
 
+.settings-connector-webhook {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+.settings-connector-webhook label { display: grid; gap: 2px; font-size: 12px; }
 .settings-connector-items {
   display: grid;
   gap: 6px;

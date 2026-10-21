@@ -2,6 +2,7 @@ import { mapTicketState } from "../status-map.js";
 import { isAtlassianCloudId, normalizeJiraSiteUrl } from "../site-url.js";
 import { asRecord, asString, trackerRequest } from "./http.js";
 import { freshCredentials, type TokenRefresher } from "./oauth-refresh.js";
+import { parseJiraWebhook, verifyJiraWebhook } from "./webhooks.js";
 import {
   type ExternalItem,
   type JiraCredentials,
@@ -313,5 +314,8 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       }
       return null;
     },
+
+    verifyWebhook: verifyJiraWebhook,
+    parseWebhook: parseJiraWebhook,
   };
 }

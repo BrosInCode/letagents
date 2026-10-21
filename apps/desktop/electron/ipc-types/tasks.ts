@@ -55,6 +55,27 @@ export interface DesktopTaskSummary {
   updatedAt: string;
 }
 
+/** The tracker record behind a card (ticket connectors). */
+export interface DesktopTaskTicket {
+  externalRef: string;
+  provider: "jira" | "linear";
+  key: string;
+  title: string;
+  ticketState: string;
+  rawStatus: string;
+  assigneeLabel: string | null;
+  url: string | null;
+  trackerUpdatedAt: string | null;
+  syncedAt: string;
+}
+
+/** A room ticket filter to save or test. */
+export interface DesktopTrackerFilterInput {
+  connectionId: string;
+  filter: string;
+  enabled?: boolean;
+}
+
 /** A room message that names a card's ticket key. */
 export interface DesktopTaskMention {
   messageId: string;

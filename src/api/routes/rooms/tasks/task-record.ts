@@ -15,7 +15,9 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
+import { ImportedCardBusyError, mergeImportedCardIntoNative } from "../../../connectors/card-merge.js";
 import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
+import { getTaskTicketDetails } from "../../../connectors/ticket-details.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import {
@@ -74,6 +76,21 @@ export function registerTaskRecordRoutes(
 
     const mentions = await getTaskMentions(project.id, task.id);
     res.json({ room_id: project.id, task_id: task.id, mentions });
+  });
+
+  /** The tracker record behind a card that names a ticket in a room that imports it. */
+  app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)\/ticket$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const ticket = await getTaskTicketDetails(project.id, taskId);
+    res.json({ room_id: project.id, task_id: taskId, ticket });
   });
 
   app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
@@ -292,6 +309,17 @@ export function registerTaskRecordRoutes(
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;
 
+      if (updates.external_ref && updates.external_ref !== task.external_ref) {
+        // A card sync imported for this ticket folds into this card, which
+        // keeps the key (ticket connectors PR3, native card link).
+        const merge = await mergeImportedCardIntoNative({
+          room_id: project.id,
+          native_task_id: taskId,
+          external_ref: updates.external_ref,
+        });
+        if (merge.merged) delete updates.external_ref;
+      }
+
       const updated = await deps.updateTask(
         project.id,
         taskId,
@@ -354,6 +382,10 @@ export function registerTaskRecordRoutes(
     } catch (error) {
       if (error instanceof TaskExternalRefConflictError) {
         res.status(409).json({ error: error.message, code: error.code, task_id: error.existingTaskId });
+        return;
+      }
+      if (error instanceof ImportedCardBusyError) {
+        res.status(409).json({ error: error.message, code: error.code, task_id: error.importedTaskId });
         return;
       }
       if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {

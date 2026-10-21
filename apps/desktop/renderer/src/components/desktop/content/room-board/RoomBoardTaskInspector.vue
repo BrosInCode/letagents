@@ -11,6 +11,12 @@
           <span class="desktop-task-status-badge" :data-status="task.status">
             {{ readableStatus(task.status) }}
           </span>
+          <span
+            v-if="ticket && ticketState"
+            class="desktop-task-ticket-state"
+            :data-ticket-state="task.ticketState"
+            :title="`${ticket.providerLabel} state. The other badge is the work state.`"
+          >{{ ticket.providerLabel }}: {{ ticketState }}</span>
         </div>
         <h3>{{ task.title }}</h3>
       </div>
@@ -154,6 +160,42 @@
       </button>
     </section>
 
+    <section v-if="ticket && task.ticketState" class="desktop-task-detail-section" aria-label="Ticket" data-testid="room-board-ticket-section">
+      <h4>Ticket</h4>
+      <p v-if="ticketDetailsError" class="desktop-task-detail-muted">{{ ticketDetailsError }}</p>
+      <p v-else-if="!ticketDetails" class="desktop-task-detail-muted">Loading ticket...</p>
+      <template v-else>
+        <div class="desktop-task-detail-grid">
+          <span>
+            <small>{{ ticket.providerLabel }} status</small>
+            <strong>{{ ticketDetails.rawStatus }}</strong>
+          </span>
+          <span>
+            <small>Ticket state</small>
+            <strong>{{ ticketStateLabel(ticketDetails.ticketState) }}</strong>
+          </span>
+          <span>
+            <small>Assignee</small>
+            <strong>{{ ticketDetails.assigneeLabel || "Unassigned" }}</strong>
+          </span>
+          <span>
+            <small>Synced</small>
+            <strong>{{ relativeTime(ticketDetails.syncedAt, now) }}</strong>
+          </span>
+        </div>
+        <a
+          v-if="ticketDetails.url"
+          class="desktop-task-detail-link"
+          :href="ticketDetails.url"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <small>{{ ticket.providerLabel }}</small>
+          <span>Open {{ ticket.key }}</span>
+        </a>
+      </template>
+    </section>
+
     <section v-if="ticket" class="desktop-task-detail-section" aria-label="Linked threads">
       <h4>Linked threads</h4>
       <p v-if="mentionsError" class="desktop-task-detail-muted">{{ mentionsError }}</p>
@@ -196,9 +238,9 @@
 import { computed, ref, watch } from "vue";
 import { Pencil } from '@lucide/vue';
 import MarkdownBlock from '../formatting/MarkdownBlock.vue';
-import type { DesktopAgentPresence, DesktopTaskMention, DesktopTaskSummary } from "../../../../../../electron/ipc-types";
+import type { DesktopAgentPresence, DesktopTaskMention, DesktopTaskSummary, DesktopTaskTicket } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc/index.js";
-import { ticketRefParts } from "./ticket-ref";
+import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
 import { useNow } from "../../../../composables/useNow";
 
@@ -270,6 +312,34 @@ watch(
   { immediate: true },
 );
 
+const ticketState = computed(() => ticketStateLabel(props.task.ticketState));
+const ticketDetails = ref<DesktopTaskTicket | null>(null);
+const ticketDetailsError = ref<string | null>(null);
+let ticketRequest = 0;
+
+// Only cards with a tracker state ask for the ticket, so other cards make no call.
+watch(
+  () => [props.roomIdentifier, props.task.id, props.task.ticketState, props.task.updatedAt] as const,
+  async ([roomIdentifier, taskId, ticketStateValue]) => {
+    const request = ++ticketRequest;
+    if (!roomIdentifier || !ticketStateValue) {
+      ticketDetails.value = null;
+      ticketDetailsError.value = null;
+      return;
+    }
+    try {
+      const next = await desktopIpc.room.getTaskTicket(roomIdentifier, taskId);
+      if (request !== ticketRequest) return;
+      ticketDetails.value = next;
+      ticketDetailsError.value = next ? null : "The ticket has not synced yet.";
+    } catch {
+      if (request !== ticketRequest) return;
+      ticketDetailsError.value = "The ticket could not be loaded.";
+    }
+  },
+  { immediate: true },
+);
+
 const showAuthority = computed(() => shouldShowAuthority(props.task));
 const authorityState = computed(() => executionAuthorityState(props.task));
 const showReviewPanel = computed(() => shouldShowReviewPanel(props.task));
@@ -324,6 +394,14 @@ function onReviewerChange(event: Event): void {
   padding: 1px 6px;
   border: 1px solid var(--border-strong);
   border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.desktop-task-ticket-state {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 16px;

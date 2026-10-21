@@ -39,7 +39,8 @@ export function registerHttpMiddleware(
       limit: "1mb",
       verify(req, _res, buf) {
         const request = req as AuthenticatedRequest & { originalUrl?: string };
-        if (request.originalUrl?.startsWith("/webhooks/github")) {
+        // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
+        if (request.originalUrl?.startsWith("/webhooks/")) {
           request.rawBody = Buffer.from(buf);
         }
       },

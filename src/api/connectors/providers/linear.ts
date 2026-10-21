@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mapTicketState } from "../status-map.js";
 import { asRecord, asString, trackerRequest } from "./http.js";
 import { freshCredentials, type TokenRefresher } from "./oauth-refresh.js";
+import { parseLinearWebhook, verifyLinearWebhook } from "./webhooks.js";
 import {
   type ExternalItem,
   type LinearCredentials,
@@ -308,5 +309,8 @@ export function createLinearProvider(options: LinearProviderOptions = {}): WorkI
     },
 
     findComment,
+
+    verifyWebhook: verifyLinearWebhook,
+    parseWebhook: parseLinearWebhook,
   };
 }
