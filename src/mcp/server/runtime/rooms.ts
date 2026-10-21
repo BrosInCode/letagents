@@ -43,11 +43,17 @@ import {
   type RoomState,
 } from "./room-state.js";
 import { hasSupervisedWorkerAuthority, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { isRemoteToolSurface } from "../remote-tool-surface.js";
 
 export type JoinSessionMode = "live" | "current";
 
 export function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
-  return String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
+  const mode = String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
+  if (mode === "live" && isRemoteToolSurface()) {
+    // A live session starts a local agent process; remotely that would be the server.
+    throw new Error("session_mode 'live' is not available over the remote MCP endpoint. Join with session_mode 'current'.");
+  }
+  return mode;
 }
 
 export function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {

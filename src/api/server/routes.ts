@@ -161,6 +161,8 @@ import { registerExecutionApprovalPublicationRoutes } from "../routes/execution-
 import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
+import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
+import { RemoteMcpSessionManager } from "../remote-mcp/sessions.js";
 import {
   createListing,
   updateListing,
@@ -256,7 +258,11 @@ function getRoomEventBroker(): RoomEventBroker {
   return sharedRoomEventBroker;
 }
 
+let sharedRemoteMcpSessions: RemoteMcpSessionManager | null = null;
+
 export function closeApiRouteEventBroker(): void {
+  void sharedRemoteMcpSessions?.closeAll();
+  sharedRemoteMcpSessions = null;
   sharedRoomEventBroker?.close();
   sharedRoomEventBroker = null;
   sharedRoomMessageOverlayBatcher?.close();
@@ -508,6 +514,8 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
   registerHealthRoutes(app);
+  sharedRemoteMcpSessions ??= new RemoteMcpSessionManager();
+  registerRemoteMcpRoutes(app, { sessions: sharedRemoteMcpSessions });
 
   registerGitHubAppCallbackRoute(app);
 

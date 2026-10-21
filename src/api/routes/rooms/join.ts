@@ -119,7 +119,10 @@ export function registerRoomJoinRoutes(
       req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ??
       req.socket.remoteAddress ??
       "unknown";
-    if (!checkJoinRateLimit(ip)) {
+    // Signed-in callers get their own budget: remote MCP sessions all reach
+    // this route from the server's own address.
+    const rateLimitKey = req.sessionAccount?.account_id ? `account:${req.sessionAccount.account_id}` : ip;
+    if (!checkJoinRateLimit(rateLimitKey)) {
       res.status(429).json({
         error: "Too many join attempts. Please slow down.",
         code: "RATE_LIMITED",
