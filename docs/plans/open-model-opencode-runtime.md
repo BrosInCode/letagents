@@ -294,9 +294,9 @@ unverifiable PID, and users create a fresh OpenCode-backed Open Model agent.
   are removed.
 - `apps/desktop/electron/__tests__/open-model.test.ts` covers runtime preflight,
   pinned installation, settings validation, and product copy.
-- `apps/desktop/daemon/__tests__/daemon.test.ts` covers exact-generation
-  credential handoff and proves provider credentials do not enter durable
-  daemon state.
+- `apps/desktop/daemon/__tests__/daemon-runtime-recovery.test.ts` and
+  `daemon-handoff-ingress.test.ts` cover exact-generation credential handoff
+  and prove provider credentials do not enter durable daemon state.
 - `apps/desktop/daemon/__tests__/provider-action-port-router.test.ts` covers
   OpenCode adapter selection and connection inference.
 - `apps/desktop/electron/scripts/package-artifact.mjs` rejects a mismatched
