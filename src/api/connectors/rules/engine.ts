@@ -33,7 +33,7 @@ export interface RoomRuleConnection {
 }
 
 export interface TrackerRuleEngineDeps {
-  store: Pick<TrackerRuleStore, "forRoom" | "claimRun" | "getRun" | "appendEffect" | "finishRun" | "pendingRuns">;
+  store: Pick<TrackerRuleStore, "forRoom" | "claimRun" | "getRun" | "appendEffect" | "finishRun" | "takePendingRuns" | "stallOldRuns">;
   /** Cached; one indexed query per room every 30 s, none for most rooms. */
   roomScope(roomId: string): Promise<RoomTrackerScope>;
   /** The room's enabled filter for this tracker, set by the connection's owner, on an active connection. */
@@ -229,7 +229,13 @@ function isPlannedAction(value: unknown): value is PlannedTrackerAction {
     || (entry!.kind === "tracker_comment" && typeof entry!.body === "string"));
 }
 
+/** Each liveness tick continues at most this many runs, this many at once, and waits at most this long. */
+export const ADVANCE_RUNS_PER_TICK = 10;
+export const ADVANCE_CONCURRENCY = 3;
+export const ADVANCE_BUDGET_MS = 20_000;
+
 export function createTrackerRuleEngine(deps: TrackerRuleEngineDeps) {
+  const inFlight = new Set<string>();
   function trackerInput(run: TrackerRuleRunRow, index: number, connection: RoomRuleConnection): SubmitTrackerEffectInput | null {
     const planned = (run.planned_actions as unknown[])[index];
     const ref = parseExternalRef(run.external_ref);
@@ -409,15 +415,39 @@ export function createTrackerRuleEngine(deps: TrackerRuleEngineDeps) {
      * settled reserves its next one, and a run left with no journal row (the
      * process stopped right after the claim) reserves its first.
      */
-    async advancePendingRuns(limit = 50): Promise<number> {
-      const ids = await deps.store.pendingRuns(limit);
-      for (const id of ids) {
-        try {
-          await advance(id, null);
-        } catch (error) {
-          console.warn("[ticket-connectors] a pending tracker rule run could not continue:", errorText(error));
+    async advancePendingRuns(options: { limit?: number; concurrency?: number; budgetMs?: number } = {}): Promise<number> {
+      const limit = options.limit ?? ADVANCE_RUNS_PER_TICK;
+      const concurrency = Math.max(1, options.concurrency ?? ADVANCE_CONCURRENCY);
+      const budgetMs = options.budgetMs ?? ADVANCE_BUDGET_MS;
+      await deps.store.stallOldRuns();
+      // Runs a slow tracker still holds from an earlier tick are not taken again.
+      const ids = (await deps.store.takePendingRuns(limit + inFlight.size)).filter((id) => !inFlight.has(id)).slice(0, limit);
+      const queue = [...ids];
+      const worker = async () => {
+        for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+          inFlight.add(id);
+          try {
+            await advance(id, null);
+          } catch (error) {
+            console.warn("[ticket-connectors] a pending tracker rule run could not continue:", errorText(error));
+          } finally {
+            inFlight.delete(id);
+          }
         }
-      }
+      };
+      const work = Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
+      // The liveness tick waits at most `budgetMs`. Writes still running go on
+      // in the background, and the runs not started wait for the next tick.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const budget = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          queue.length = 0;
+          resolve();
+        }, budgetMs);
+        timer.unref?.();
+      });
+      await Promise.race([work, budget]);
+      clearTimeout(timer);
       return ids.length;
     },
   };

@@ -504,7 +504,10 @@ name to a transition at run time, as for any tracker write. A `comment` template
    checks the write, and the rule run sweep that follows it (`advancePendingRuns`, every liveness tick) continues
    the run once it succeeded. A write with no attempts left, or one held for a person, ends the run; later actions
    are never reserved. The sweep also starts a run that has no journal row yet (the process stopped right after
-   the claim). Pending runs are continued for 7 days.
+   the claim). Each tick takes at most 10 pending runs, least recently visited first, and marks them visited, so
+   runs that wait on a slow write never starve a ready one. It runs 3 at a time and holds the liveness tick for
+   at most 20 seconds; writes still running then go on in the background and are not taken again until they
+   finish. A run still pending after 7 days ends as `error` with the reason `stalled`, shown in the audit.
 10. The run's outcome is `succeeded`, `failed`, `quarantined`, `error` (the connection was removed or changed),
    `skipped`, or `pending`. While a run is pending, the audit shows its current journal row, so a write the sweep is
    still retrying reads `failed` until it lands. The audit shows a fixed sentence for each reason; the provider's
@@ -604,7 +607,8 @@ the debounce, and by update time for pending runs).
   write once; a filter its owner did not set writes nothing; an outside author (recorded as skipped) and an unbound
   card write nothing; the debounce; a transition refused once is retried by the sweep and the comment then posts;
   a transition refused until no attempts are left ends the run without the comment; a `pr_url` set by hand with a
-  work lease runs no rule; an owner who lost room admin is skipped; versions and rollback.
+  work lease runs no rule; an owner who lost room admin is skipped; pending runs rotate so 51 waiting runs do not
+  starve a ready one; a run pending for 8 days ends as stalled; versions and rollback.
 - `src/api/__tests__/tracker-rule-routes.test.ts`: owner-only access, versions, rollback, strict validation.
 - `apps/desktop/renderer/__tests__/settings-connector-rules.test.ts`: the editor and the audit text.
 

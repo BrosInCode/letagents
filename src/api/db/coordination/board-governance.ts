@@ -38,6 +38,7 @@ const TRACKER_RULE_RUN_DETAIL_TEXT: Record<string, string> = {
   reservation_failed: "Not written: the connection was removed or changed.",
   connection_unavailable: "Not written: the room no longer imports with this connection.",
   journal_row_missing: "Not written: the journal row for this write is gone.",
+  stalled: "Stopped: the tracker could not confirm a write within 7 days. Check the ticket.",
 };
 
 const BOARD_GOVERNANCE_AUDIT_EVENT_TYPES = [

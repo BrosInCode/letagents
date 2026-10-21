@@ -455,3 +455,44 @@ test("a rule stops when the filter's owner is no longer a room admin", options, 
   assert.equal(context.tracker.created.length, 0);
   assert.deepEqual((await runRows(context.room.id)).map((run) => [run.outcome, run.detail]), [["skipped", "owner_not_admin"]]);
 });
+
+async function insertPendingRun(roomId: string, label: string, times: { created_at: string; updated_at: string }) {
+  const id = `trun_${crypto.randomUUID()}`;
+  await client!.db.insert(schema!.tracker_rule_runs).values({
+    id, rule_id: null, rule_version: 1, rule_name: label, connection_id: "tcon_x", room_id: roomId, task_id: "task_1",
+    external_ref: "jira:HT-1", delivery_id: unique("d"), event_type: "pull_request", event_action: "opened", event_url: null,
+    planned_actions: [], effect_ids: [], outcome: "pending", detail: null, ...times,
+  });
+  return id;
+}
+
+test("pending runs are taken in rotation, so 51 waiting runs never starve a ready one", options, async () => {
+  const context = await setup("rotation");
+  await client!.pool.query("UPDATE tracker_rule_runs SET outcome = 'error' WHERE outcome = 'pending'");
+  const now = Date.now();
+  const waiting: string[] = [];
+  for (let index = 0; index < 51; index += 1) {
+    const at = new Date(now - 60 * 60_000 + index).toISOString();
+    waiting.push(await insertPendingRun(context.room.id, `waiting ${index}`, { created_at: at, updated_at: at }));
+  }
+  const readyAt = new Date(now - 1_000).toISOString();
+  const ready = await insertPendingRun(context.room.id, "ready", { created_at: readyAt, updated_at: readyAt });
+  const seen: string[][] = [];
+  for (let tick = 0; tick < 6; tick += 1) seen.push(await rules!.trackerRuleStore.takePendingRuns(10, new Date(now + tick * 1_000)));
+  const tickOfReady = seen.findIndex((ids) => ids.includes(ready));
+  assert.ok(tickOfReady >= 0 && tickOfReady <= 5, `the ready run was taken by tick ${tickOfReady}`);
+  assert.equal(new Set(seen.flat()).size, 52, "every run was visited once before any was visited twice");
+  await client!.pool.query("UPDATE tracker_rule_runs SET outcome = 'error' WHERE id = ANY($1)", [[...waiting, ready]]);
+});
+
+test("a run still pending after 7 days ends as stalled and says so in the audit", options, async () => {
+  const context = await setup("stalled");
+  const old = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+  const id = await insertPendingRun(context.room.id, "Old rule", { created_at: old, updated_at: old });
+  assert.ok(await rules!.trackerRuleStore.stallOldRuns() >= 1);
+  const [run] = (await client!.pool.query("SELECT outcome, detail FROM tracker_rule_runs WHERE id = $1", [id])).rows;
+  assert.deepEqual([run.outcome, run.detail], ["error", "stalled"]);
+  assert.ok(!(await rules!.trackerRuleStore.takePendingRuns(100)).includes(id));
+  const audit = await governance!.listBoardGovernanceAudit(context.room.id);
+  assert.match(audit.find((entry) => entry.id === id)?.reason ?? "", /within 7 days/);
+});

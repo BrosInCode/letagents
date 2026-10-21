@@ -327,16 +327,49 @@ export const trackerRuleStore = {
       .where(and(eq(tracker_rule_runs.id, id), eq(tracker_rule_runs.outcome, "pending")));
   },
 
-  /** Pending runs to continue, least recently touched first, from the last week. */
-  async pendingRuns(limit = 50, now = new Date()): Promise<string[]> {
-    const rows = await db.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
-      .where(and(
-        eq(tracker_rule_runs.outcome, "pending"),
-        gt(tracker_rule_runs.created_at, new Date(now.getTime() - TRACKER_RULE_RUN_RESUME_MS).toISOString()),
-      ))
-      .orderBy(asc(tracker_rule_runs.updated_at))
-      .limit(limit);
-    return rows.map((row) => row.id);
+  /**
+   * Takes up to `limit` pending runs from the last week to continue, least
+   * recently visited first, and marks them visited. A run that still waits
+   * goes to the back, so runs waiting on a slow write never starve a run
+   * that is ready. SKIP LOCKED keeps two API processes off the same runs.
+   */
+  async takePendingRuns(limit: number, now = new Date()): Promise<string[]> {
+    const at = now.toISOString();
+    const since = new Date(now.getTime() - TRACKER_RULE_RUN_RESUME_MS).toISOString();
+    const runs = tracker_rule_runs;
+    const result = await db.execute<{ id: string }>(sql`
+      UPDATE ${runs} SET updated_at = ${at}
+       WHERE ${runs.id} IN (
+         SELECT ${runs.id} FROM ${runs}
+          WHERE ${runs.outcome} = 'pending' AND ${runs.created_at} > ${since}
+          ORDER BY ${runs.updated_at} ASC
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+       )
+      RETURNING ${runs.id} AS id
+    `);
+    return result.rows.map((row) => row.id);
+  },
+
+  /**
+   * Ends runs still pending after the resume window (a comment the journal
+   * could neither confirm nor safely send again): `error` with `stalled`, so
+   * the audit says so instead of "pending" for ever.
+   */
+  async stallOldRuns(now = new Date(), limit = 200): Promise<number> {
+    const before = new Date(now.getTime() - TRACKER_RULE_RUN_RESUME_MS).toISOString();
+    const runs = tracker_rule_runs;
+    const result = await db.execute<{ id: string }>(sql`
+      UPDATE ${runs} SET outcome = 'error', detail = 'stalled', updated_at = ${now.toISOString()}
+       WHERE ${runs.id} IN (
+         SELECT ${runs.id} FROM ${runs}
+          WHERE ${runs.outcome} = 'pending' AND ${runs.created_at} <= ${before}
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+       )
+      RETURNING ${runs.id} AS id
+    `);
+    return result.rows.length;
   },
 
   /** Rooms with a filter on this connection, enabled or not: the rooms a rule may name. */

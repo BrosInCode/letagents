@@ -175,7 +175,7 @@ type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["drive"]>>;
 type RunRow = Awaited<ReturnType<TrackerRuleEngineDeps["store"]["getRun"]>> & object;
 
 /** The engine on in-memory runs and journal rows. `outcomes` says what each drive of an action index returns. */
-function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; trusted?: boolean; outcomes?: Record<number, string[]> } = {}) {
+function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; trusted?: boolean; outcomes?: Record<number, string[]>; driveMs?: number } = {}) {
   const runs = new Map<string, RunRow>();
   const effects = new Map<string, WorkflowEffectLike>();
   const reserved: string[] = [];
@@ -202,7 +202,8 @@ function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; t
         const run = runs.get(id)!;
         if (run.outcome === "pending") Object.assign(run, input);
       },
-      pendingRuns: async () => [...runs.values()].filter((run) => run.outcome === "pending").map((run) => run.id),
+      takePendingRuns: async (limit) => [...runs.values()].filter((run) => run.outcome === "pending").map((run) => run.id).slice(0, limit),
+      stallOldRuns: async () => 0,
     },
     roomScope: async () => ({ sources: [{ filter_id: "f", connection_id: "tcon_1", provider: "jira", filter: "project = HT" }], linearTeamKeys: [] }),
     roomConnection: async () => ({ connection_id: "tcon_1", account_id: "acct_1", provider: "jira" }),
@@ -223,6 +224,7 @@ function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; t
       const count = drives.get(index) ?? 0;
       drives.set(index, count + 1);
       driven.push(entry.effect.id);
+      if (options.driveMs) await new Promise((resolve) => setTimeout(resolve, options.driveMs));
       const state = options.outcomes?.[index]?.[count] ?? "succeeded";
       const effect = { ...effects.get(entry.effect.id)!, state, ...(state === "dead" ? { state: "failed", attempt_count: 3 } : {}) } as WorkflowEffectLike;
       effects.set(effect.id, effect);
@@ -360,4 +362,21 @@ test("a cut comment never ends in half an escape", () => {
   const body = renderTrackerRuleTemplate(`${"a".repeat(15_997)}{{pr_title}}`, { pr_title: "**" }, "linear");
   assert.ok(body.length < 16_000);
   assert.equal(/\\*$/.exec(body)![0].length % 2, 0);
+});
+
+test("a slow tracker does not hold the liveness tick past its budget", async () => {
+  const harness = engineHarness([loadedRule], { outcomes: { 0: ["failed", "failed", "failed", "failed"] }, driveMs: 400 });
+  for (let index = 0; index < 4; index += 1) {
+    await harness.engine.runForRepoEvent({ ...keyedInput, deliveryId: `slow-${index}` });
+  }
+  await harness.settle();
+  // Every run waits on its first write; the sweep settles them, and the next ones are slow.
+  for (const effect of harness.effects.values()) harness.effects.set(effect.id, { ...effect, state: "succeeded" });
+  const started = Date.now();
+  const taken = await harness.engine.advancePendingRuns({ limit: 10, concurrency: 2, budgetMs: 100 });
+  assert.equal(taken, 4);
+  assert.ok(Date.now() - started < 350, `the tick returned after ${Date.now() - started} ms`);
+  // The runs still writing are not taken again by the next tick.
+  assert.equal(await harness.engine.advancePendingRuns({ limit: 10, concurrency: 2, budgetMs: 10 }), 2);
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
 });
