@@ -16,8 +16,9 @@ export interface AccountRoomActivity {
   latest_message_at: string | null;
   working: AccountWorkingAgent[];
   /**
-   * When a card in the room last changed or was removed, as this server saw
-   * it; null until one does. My work re-reads its cards when this moves.
+   * When a card in the room, or a pull request, review or check run in it,
+   * last changed, as this server saw it; null until one does. My work re-reads
+   * its cards when this moves.
    */
   tasks_changed_at: string | null;
 }
@@ -40,6 +41,9 @@ export interface AccountActivityWatch {
 }
 
 type Watcher = { onChange: (activity: AccountRoomActivity) => void; ready: boolean };
+/** GitHub events that change a My work row's PR column or its review request. */
+const MY_WORK_GITHUB_EVENT_TYPES = new Set(["pull_request", "pull_request_review", "check_run"]);
+
 type Pending = { working: boolean; latest: boolean; tasks?: boolean };
 
 export interface AccountActivityHubOptions {
@@ -61,8 +65,8 @@ export interface AccountActivityHubOptions {
  * - An agent starting or stopping work arrives as a presence change (a
  *   database trigger, delivered at commit) and re-reads that room's workers.
  * - A new message re-reads that room's latest visible message.
- * - A card changing or being removed stamps the room's `tasks_changed_at`,
- *   with no database read.
+ * - A card changing or being removed, or a pull request, review or check run
+ *   event, stamps the room's `tasks_changed_at`, with no database read.
  * - An agent that stops sending heartbeats cannot announce it; the one timer
  *   per room, set for when its first working agent would go quiet, covers that.
  *
@@ -106,7 +110,7 @@ export class AccountActivityHub {
     this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer as NodeJS.Timeout));
   }
 
-  attach(sources: { presence: EventEmitter; messages: EventEmitter; tasks?: EventEmitter }): void {
+  attach(sources: { presence: EventEmitter; messages: EventEmitter; tasks?: EventEmitter; github?: EventEmitter }): void {
     this.detach?.();
     const onPresence = (roomId: unknown) => {
       if (typeof roomId === "string") this.invalidate(roomId, { working: true, latest: false });
@@ -122,17 +126,25 @@ export class AccountActivityHub {
       const roomId = (payload as { projectId?: unknown } | null)?.projectId;
       if (typeof roomId === "string") this.invalidate(roomId, { working: false, latest: false, tasks: true });
     };
+    const onGitHub = (payload: unknown) => {
+      const value = payload as { projectId?: unknown; event?: { event_type?: unknown } } | null;
+      if (typeof value?.projectId === "string" && MY_WORK_GITHUB_EVENT_TYPES.has(String(value.event?.event_type))) {
+        this.invalidate(value.projectId, { working: false, latest: false, tasks: true });
+      }
+    };
     sources.presence.on(PRESENCE_CHANGED, onPresence);
     sources.presence.on(PRESENCE_RESYNC, onResync);
     sources.messages.on("message:created", onMessage);
     sources.tasks?.on("task:updated", onTask);
     sources.tasks?.on("task:removed", onTask);
+    sources.github?.on("github_event:updated", onGitHub);
     this.detach = () => {
       sources.presence.off(PRESENCE_CHANGED, onPresence);
       sources.presence.off(PRESENCE_RESYNC, onResync);
       sources.messages.off("message:created", onMessage);
       sources.tasks?.off("task:updated", onTask);
       sources.tasks?.off("task:removed", onTask);
+      sources.github?.off("github_event:updated", onGitHub);
     };
   }
 

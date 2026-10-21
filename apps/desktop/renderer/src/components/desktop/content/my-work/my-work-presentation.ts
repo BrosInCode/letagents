@@ -35,12 +35,12 @@ export function myWorkTrackerOptions(page: Pick<MyWorkPage, "providers"> | null)
   ];
 }
 
-/** Room filter choices: rooms that hold a loaded card, plus the chosen room. */
-export function myWorkRoomOptions(cards: readonly MyWorkCard[], chosen: string, chosenName?: string | null): Array<{ id: string; label: string }> {
-  const rooms = new Map<string, string>();
-  for (const card of cards) rooms.set(card.room_id, card.room_name);
-  if (chosen && !rooms.has(chosen)) rooms.set(chosen, chosenName || chosen);
-  return [...rooms].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label));
+/** Room filter choices: rooms that held a loaded card, plus the chosen room. */
+export function myWorkRoomOptions(rooms: ReadonlyArray<Pick<MyWorkCard, "room_id" | "room_name">>, chosen: string): Array<{ id: string; label: string }> {
+  const names = new Map<string, string>();
+  for (const room of rooms) names.set(room.room_id, room.room_name);
+  if (chosen && !names.has(chosen)) names.set(chosen, chosen);
+  return [...names].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label));
 }
 
 const NEEDS_ME_LABELS: Record<MyWorkNeedsMeReason, string> = {

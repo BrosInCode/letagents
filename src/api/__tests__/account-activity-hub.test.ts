@@ -19,6 +19,7 @@ function world() {
   const presence = new EventEmitter();
   const messages = new EventEmitter();
   const tasks = new EventEmitter();
+  const github = new EventEmitter();
   let failNextRead = false;
   let latestGate: Promise<void> | null = null;
   const hub = new AccountActivityHub({
@@ -47,9 +48,9 @@ function world() {
     setTimer: (run, ms) => { const id = nextTimer++; timers.set(id, { at: now + ms, run }); return id; },
     clearTimer: (id) => { timers.delete(id as number); },
   });
-  hub.attach({ presence, messages, tasks });
+  hub.attach({ presence, messages, tasks, github });
   return {
-    hub, presence, messages, tasks, working, latest, reads, timers,
+    hub, presence, messages, tasks, github, working, latest, reads, timers,
     failNextRead: () => { failNextRead = true; },
     /** Hold the next latest-message read until the returned function is called. */
     holdNextLatestRead() {
@@ -288,5 +289,19 @@ test('a card change or removal stamps the room without a database read', async (
   await w.advance(10);
   assert.equal(seen.length, 2);
   assert.equal(seen[1]?.tasks_changed_at, new Date(w.now).toISOString());
+  watch.close();
+});
+
+test('a pull request, review or check run event stamps the room; other GitHub events do not', async () => {
+  const w = world();
+  const seen: AccountRoomActivity[] = [];
+  const watch = await w.hub.watch(['room-a'], activity => seen.push(activity));
+  w.github.emit('github_event:updated', { projectId: 'room-a', event: { event_type: 'issue_comment' } });
+  await w.advance(10);
+  assert.equal(seen.length, 0);
+  w.github.emit('github_event:updated', { projectId: 'room-a', event: { event_type: 'pull_request_review' } });
+  await w.advance(10);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.tasks_changed_at, new Date(w.now).toISOString());
   watch.close();
 });

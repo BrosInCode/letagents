@@ -238,7 +238,7 @@ let sharedAccountActivityHub: AccountActivityHub | null = null;
 function getAccountActivityHub(): AccountActivityHub {
   if (!sharedAccountActivityHub) {
     sharedAccountActivityHub = new AccountActivityHub(databaseAccountActivityLoaders);
-    sharedAccountActivityHub.attach({ presence: presenceChangeEvents, messages: messageEvents, tasks: taskEvents });
+    sharedAccountActivityHub.attach({ presence: presenceChangeEvents, messages: messageEvents, tasks: taskEvents, github: githubRoomEvents });
   }
   return sharedAccountActivityHub;
 }

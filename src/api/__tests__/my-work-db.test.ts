@@ -203,8 +203,24 @@ test("needs me: review requested of me, an open request on the card, a done tick
   assert.deepEqual(rest.cards.map((entry) => entry.task_id), [review]);
   assert.equal(rest.next_cursor, null);
 
+  // A room the account can no longer read drops out, and the page still fills from the rest.
+  const denied = await myWork!.listMyWork({ accountId: me.id, login: me.login }, { canReadRoom: async (_account, id) => id !== roomId });
+  assert.deepEqual(denied.cards, []);
+  assert.equal(denied.next_cursor, null);
+
   // Filters: room and tracker.
   assert.equal((await myWork!.listMyWork({ accountId: me.id, login: me.login, tracker: "native" })).cards.length, 0);
   assert.equal((await myWork!.listMyWork({ accountId: me.id, login: me.login, roomId: "no-such-room" })).cards.length, 0);
   assert.equal((await myWork!.listMyWork({ accountId: me.id, login: me.login, tracker: "jira", roomId })).cards.length, 4);
+});
+
+test("finished work leaves the page unless its ticket is still open", options, async () => {
+  const me = await account("finisher");
+  const conn = await connection(me.id, unique("acme.atlassian.net"), "u-fin");
+  const roomId = await room("finished", me.id);
+  const open = await card(roomId, "Merged, ticket open", { updatedMinute: 1, ref: "jira:HT-20", item: { connectionId: conn, assigneeId: "u-fin", ticketState: "in_review" }, status: "merged" });
+  await card(roomId, "Done everywhere", { updatedMinute: 2, ref: "jira:HT-21", item: { connectionId: conn, assigneeId: "u-fin", ticketState: "done" }, status: "done" });
+  await card(roomId, "Cancelled native", { updatedMinute: 3, assignee: me.login, status: "cancelled" });
+  const page = await myWork!.listMyWork({ accountId: me.id, login: me.login });
+  assert.deepEqual(page.cards.map((entry) => entry.task_id), [open]);
 });

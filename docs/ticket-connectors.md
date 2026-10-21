@@ -283,7 +283,10 @@ state, its agent work and its pull request in one row.
    cancelled is listed only while its ticket is still open in the tracker.
 
 The rooms are the rooms of your room list (`/account/rooms`, at most 100 rooms
-and their focus rooms). Archived rooms are not read.
+and their focus rooms). Archived rooms are not read. Before a room's cards are
+shown, the server checks that you may still read the room (the cached access
+decision that room notifications use); a private Git Room you lost access to is
+left out.
 
 ### What each row shows
 
@@ -310,8 +313,10 @@ already exist:
    the card's open pull requests is a review request. A review you submitted
    later, or a removed request, clears it. A new request sets it again.
 2. **A request waits for you**: an open room request (a Needs-you record that
-   nobody answered, closed or archived) names the card's key or card id, or
-   was asked from a message that names the card's ticket.
+   nobody answered, closed or archived) names the card's key or card id, in
+   any case, or was asked from a message that names the card's ticket. A
+   request is not addressed to one person, so in a room with several people
+   it shows for each of them.
 3. **Ticket is done, PR still open**: the tracker says the ticket is done
    while one of the card's pull requests is open or a draft.
 
@@ -342,13 +347,15 @@ bare key matches a card of either tracker.
 ### How the page stays current
 
 The page re-reads its cards when a card changes or is removed in one of your
-rooms. The server's account activity stream (`/account/activity/stream`, the
-stream the sidebar already uses) now carries `tasks_changed_at` per room: on
-`task:updated` or `task:removed` the server stamps the room with no database
-read and sends the room's frame. The page then reads again, at most once every
+rooms, or when a pull request, review or check run event arrives there. The
+server's account activity stream (`/account/activity/stream`, the stream the
+sidebar already uses) now carries `tasks_changed_at` per room: on
+`task:updated`, `task:removed` or such a GitHub event the server stamps the
+room with no database read and sends the room's frame. The page then reads again, at most once every
 3 seconds, and only while it is open; a change while it is closed is read when
 it opens. A dropped and reopened stream also triggers one read. The page does
-not poll.
+not poll. A new or answered room request does not stamp the room, so its
+**Needs me** flag shows on the next read or **Refresh**.
 
 ### HTTP route
 
@@ -360,7 +367,11 @@ not poll.
 | `cursor` | The `next_cursor` of the previous page. |
 | `tracker` | `jira`, `linear` or `native`. |
 | `room` | One room id. |
-| `needs_me` | `true` lists only rows that need you. Such a request reads at most 500 candidate cards; `next_cursor` continues after the last card it read. |
+| `needs_me` | `true` lists only rows that need you. |
+
+A request reads at most 500 candidate cards. With `needs_me` a page can come
+back short, or empty, with a `next_cursor`: the next page continues after the
+last card read.
 
 The answer is `{ cards, next_cursor, has_connections, providers }`. Each card
 has `task_id`, `room_id`, `room_name`, `title`, `external_ref`, `key`,
@@ -376,8 +387,9 @@ Each page costs a bounded set of queries: one for the cards (through the
 `tasks` room index, over at most the account's rooms), then, for the page's
 cards and rooms only, agent presence, linked-thread counts, the board's PR
 status (`getTasksGitHubArtifactStatus`, a few rooms at a time), the newest 500
-review events about you, and the newest 500 open room requests. No migration
-was needed.
+review events about you, and the newest 500 open room requests. Each room's PR
+status, review events and requests are read once per request, however many
+batches it reads. No migration was needed.
 
 ### Tests
 

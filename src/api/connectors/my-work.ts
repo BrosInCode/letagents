@@ -43,7 +43,7 @@ export const MY_WORK_DEFAULT_LIMIT = 50;
 export const MY_WORK_MAX_LIMIT = 100;
 /** The same room cap as `/account/rooms` and the account activity stream. */
 const MY_WORK_ROOM_LIMIT = 100;
-/** With `needs_me`, a request reads at most this many candidate cards. */
+/** A request reads at most this many candidate cards (it matters with `needs_me`). */
 const MY_WORK_NEEDS_ME_SCAN = 500;
 /** Newest review events and open requests read per page. */
 const SIGNAL_ROW_LIMIT = 500;
@@ -117,10 +117,16 @@ export function openReviewRequests(events: readonly ReviewSignalEvent[]): Set<st
   return requested;
 }
 
-function pullRequestUrl(value: string | null): string | null {
+/**
+ * One spelling per pull request: lower case, without a fragment, query or a
+ * path after the number (`/files`, a trailing `/`). Review events carry the
+ * review URL (`…/pull/88#pullrequestreview-1`); cards may carry any form.
+ */
+export function pullRequestUrl(value: string | null): string | null {
   if (!value) return null;
-  const marker = value.indexOf("#");
-  return marker >= 0 ? value.slice(0, marker) : value;
+  const trimmed = value.trim().replace(/[#?].*$/, "");
+  const match = /^(https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/\d+)(?:\/.*)?$/i.exec(trimmed);
+  return (match ? match[1]! : trimmed.replace(/\/+$/, "")).toLowerCase();
 }
 
 /** An unanswered, unarchived room request (`room_knowledge` type `attention`). */
@@ -152,7 +158,10 @@ function isOpenPullRequest(pr: Pick<MyWorkPullRequest, "state" | "merged">): boo
 
 function namesCard(text: string, card: NeedsMeInput): boolean {
   const words = [card.task_id, card.key].filter((word): word is string => Boolean(word));
-  return words.some((word) => new RegExp(`(^|[^A-Za-z0-9_-])${word.replace(/[-]/g, "\\-")}(?![A-Za-z0-9_]|-\\d)`).test(text));
+  return words.some((word) => new RegExp(
+    `(^|[^A-Za-z0-9_-])${word.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")}(?![A-Za-z0-9_]|-\\d)`,
+    "i",
+  ).test(text));
 }
 
 /**
@@ -164,7 +173,7 @@ function namesCard(text: string, card: NeedsMeInput): boolean {
  */
 export function needsMeReasons(card: NeedsMeInput, signals: NeedsMeSignals): MyWorkNeedsMeReason[] {
   const reasons: MyWorkNeedsMeReason[] = [];
-  if (card.pull_requests.some((pr) => isOpenPullRequest(pr) && signals.reviewRequests.has(`${card.room_id}\n${pr.url}`))) {
+  if (card.pull_requests.some((pr) => isOpenPullRequest(pr) && signals.reviewRequests.has(`${card.room_id}\n${pullRequestUrl(pr.url)}`))) {
     reasons.push("review_requested");
   }
   if (signals.openRequests.some((request) => request.room_id === card.room_id && (
@@ -403,6 +412,7 @@ async function readOpenRequests(roomIds: readonly string[]): Promise<OpenRequest
       sql`jsonb_typeof(${k.value}->'response') IS DISTINCT FROM 'object'`,
       sql`COALESCE((${k.value}->>'archived')::boolean, false) = false`,
     ))
+    .orderBy(desc(sql`${k.value}->>'created_at'`))
     .limit(SIGNAL_ROW_LIMIT);
   return rows.map((row) => {
     const value = row.value as unknown as Record<string, unknown>;
@@ -420,7 +430,7 @@ function pullRequestsFor(row: CandidateRow, status: TaskGitHubArtifactStatus | u
   const list: MyWorkPullRequest[] = [];
   const seen = new Set<string>();
   if (status?.pr_url) {
-    seen.add(status.pr_url);
+    seen.add(pullRequestUrl(status.pr_url)!);
     list.push({
       url: status.pr_url,
       number: status.pr_number,
@@ -435,8 +445,9 @@ function pullRequestsFor(row: CandidateRow, status: TaskGitHubArtifactStatus | u
   const artifacts = (row.workflow_artifacts ?? []).filter((artifact) =>
     artifact.provider === "github" && artifact.kind === "pull_request" && typeof artifact.url === "string");
   for (const artifact of artifacts) {
-    if (seen.has(artifact.url!)) continue;
-    seen.add(artifact.url!);
+    const url = pullRequestUrl(artifact.url!)!;
+    if (seen.has(url)) continue;
+    seen.add(url);
     list.push({
       url: artifact.url!,
       number: artifact.number != null ? String(artifact.number) : null,
@@ -448,7 +459,7 @@ function pullRequestsFor(row: CandidateRow, status: TaskGitHubArtifactStatus | u
       check_summary: null,
     });
   }
-  if (row.pr_url && !seen.has(row.pr_url)) {
+  if (row.pr_url && !seen.has(pullRequestUrl(row.pr_url)!)) {
     list.push({ url: row.pr_url, number: null, title: null, state: null, draft: null, merged: null, review_summary: null, check_summary: null });
   }
   return list;
@@ -461,21 +472,49 @@ function splitRef(ref: string | null): { provider: TrackerProvider | null; key: 
   return { provider: isTrackerProvider(provider) ? provider : null, key: separator > 0 ? ref.slice(separator + 1) : null };
 }
 
+/**
+ * Room-level reads one request shares across its batches: each room's PR
+ * status, review signals and open requests are read once per request.
+ */
+interface RequestCache {
+  prStatus: Map<string, Map<string, TaskGitHubArtifactStatus>>;
+  reviewEvents: Map<string, ReviewSignalEvent[]>;
+  openRequests: Map<string, OpenRequestSignal[]>;
+}
+
+const newRequestCache = (): RequestCache => ({ prStatus: new Map(), reviewEvents: new Map(), openRequests: new Map() });
+
+async function fillRequestCache(cache: RequestCache, roomIds: readonly string[], login: string | null): Promise<void> {
+  const missing = roomIds.filter((id) => !cache.prStatus.has(id));
+  if (!missing.length) return;
+  const [prStatus, reviewEvents, openRequests] = await Promise.all([
+    readPullRequestStatus(missing),
+    readReviewSignals(missing, login),
+    readOpenRequests(missing),
+  ]);
+  for (const id of missing) {
+    cache.prStatus.set(id, prStatus.get(id) ?? new Map());
+    cache.reviewEvents.set(id, reviewEvents.filter((event) => event.room_id === id));
+    cache.openRequests.set(id, openRequests.filter((request) => request.room_id === id));
+  }
+}
+
 async function buildCards(
   rows: CandidateRow[],
   roomNames: Map<string, string>,
   login: string | null,
+  cache: RequestCache,
 ): Promise<MyWorkCard[]> {
   if (!rows.length) return [];
   const pageRoomIds = [...new Set(rows.map((row) => row.room_id))];
-  const [presence, mentions, prStatus, reviewEvents, openRequests] = await Promise.all([
+  const [presence, mentions] = await Promise.all([
     readPresence(rows),
     readMentions(rows),
-    readPullRequestStatus(pageRoomIds),
-    readReviewSignals(pageRoomIds, login),
-    readOpenRequests(pageRoomIds),
+    fillRequestCache(cache, pageRoomIds, login),
   ]);
-  const reviewRequests = openReviewRequests(reviewEvents);
+  const prStatus = cache.prStatus;
+  const reviewRequests = openReviewRequests(pageRoomIds.flatMap((id) => cache.reviewEvents.get(id) ?? []));
+  const openRequests = pageRoomIds.flatMap((id) => cache.openRequests.get(id) ?? []);
   return rows.map((row) => {
     const taskId = `task_${row.number}`;
     const ref = splitRef(row.external_ref);
@@ -526,6 +565,8 @@ async function buildCards(
 
 export interface MyWorkDeps {
   listRoomNames(accountId: string, login: string | null): Promise<Map<string, string>>;
+  /** Whether the account may read the room now. Only rooms that hold a candidate card are asked. */
+  canReadRoom(accountId: string, roomId: string): Promise<boolean>;
 }
 
 async function listRoomNames(accountId: string, login: string | null): Promise<Map<string, string>> {
@@ -538,10 +579,23 @@ async function listRoomNames(accountId: string, login: string | null): Promise<M
   return names;
 }
 
-const defaultDeps: MyWorkDeps = { listRoomNames };
+/**
+ * The room list remembers rooms the account once opened; a private Git Room
+ * may have dropped the account since. The cached access decision the push
+ * path uses answers that: a room that is not backed by a repository allows
+ * every account. Only a confirmed allow counts.
+ */
+async function canReadRoom(accountId: string, roomId: string): Promise<boolean> {
+  const { filterAccountIdsWithRoomAccess } = await import("../server/events.js");
+  const access = await filterAccountIdsWithRoomAccess(roomId, [accountId]);
+  return access.recents.includes(accountId);
+}
+
+const defaultDeps: MyWorkDeps = { listRoomNames, canReadRoom };
 
 /** One page of the account's work, newest change first. */
-export async function listMyWork(query: MyWorkQuery, deps: MyWorkDeps = defaultDeps): Promise<MyWorkPage> {
+export async function listMyWork(query: MyWorkQuery, overrides: Partial<MyWorkDeps> = {}): Promise<MyWorkPage> {
+  const deps: MyWorkDeps = { ...defaultDeps, ...overrides };
   const limit = Math.min(Math.max(Math.trunc(query.limit ?? MY_WORK_DEFAULT_LIMIT) || MY_WORK_DEFAULT_LIMIT, 1), MY_WORK_MAX_LIMIT);
   let cursor = query.cursor ? decodeMyWorkCursor(query.cursor) : null;
   const connectionRows = await db
@@ -558,12 +612,17 @@ export async function listMyWork(query: MyWorkQuery, deps: MyWorkDeps = defaultD
   if (query.roomId) roomIds = roomIds.filter((id) => id === query.roomId);
   if (!roomIds.length) return page;
 
-  // Without `needs_me` one read fills the page. With it, read candidates in
-  // batches until the page is full or the scan bound is reached.
+  // Read candidates in batches until the page is full, the candidates run
+  // out, or the scan bound is reached. Without `needs_me` one batch usually
+  // fills the page; rows in rooms the account can no longer read are skipped.
+  const cache = newRequestCache();
+  const readable = new Map<string, boolean>();
   let scanned = 0;
   for (;;) {
-    const want = limit - page.cards.length;
-    const batchSize = query.needsMe ? Math.min(MY_WORK_MAX_LIMIT, MY_WORK_NEEDS_ME_SCAN - scanned) : want;
+    const batchSize = Math.min(
+      query.needsMe ? MY_WORK_MAX_LIMIT : limit - page.cards.length,
+      MY_WORK_NEEDS_ME_SCAN - scanned,
+    );
     const rows = await readCandidates({
       accountId: query.accountId,
       login: query.login,
@@ -577,19 +636,29 @@ export async function listMyWork(query: MyWorkQuery, deps: MyWorkDeps = defaultD
     const batch = rows.slice(0, batchSize);
     if (!batch.length) return page;
     scanned += batch.length;
-    const cards = await buildCards(batch, roomNames, query.login);
+    for (const roomId of new Set(batch.map((row) => row.room_id))) {
+      if (readable.has(roomId)) continue;
+      let allowed = false;
+      try { allowed = await deps.canReadRoom(query.accountId, roomId); }
+      catch (error) { console.warn(`[my work] room access check failed room=${roomId}`, error); }
+      readable.set(roomId, allowed);
+    }
+    const visible = batch.filter((row) => readable.get(row.room_id));
+    const cards = new Map((await buildCards(visible, roomNames, query.login, cache))
+      .map((card) => [pageKey(card.room_id, Number(card.task_id.slice("task_".length))), card]));
     let lastTaken: CandidateRow | null = null;
-    for (const [index, card] of cards.entries()) {
-      if (query.needsMe && !card.needs_me) { lastTaken = batch[index]!; continue; }
+    for (const row of batch) {
+      const card = cards.get(pageKey(row.room_id, row.number));
+      if (!card || (query.needsMe && !card.needs_me)) { lastTaken = row; continue; }
       if (page.cards.length >= limit) break;
       page.cards.push(card);
-      lastTaken = batch[index]!;
+      lastTaken = row;
     }
     const filled = page.cards.length >= limit;
     const consumedBatch = lastTaken === batch[batch.length - 1];
     if (lastTaken) cursor = { updated_at: lastTaken.cursor_at, room_id: lastTaken.room_id, number: lastTaken.number };
     if (!more && consumedBatch) return page;
-    if (filled || !query.needsMe || scanned >= MY_WORK_NEEDS_ME_SCAN) {
+    if (filled || scanned >= MY_WORK_NEEDS_ME_SCAN) {
       page.next_cursor = cursor ? encodeMyWorkCursor(cursor) : null;
       return page;
     }

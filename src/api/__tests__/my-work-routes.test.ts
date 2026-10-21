@@ -11,6 +11,7 @@ const {
   MyWorkInputError,
   needsMeReasons,
   openReviewRequests,
+  pullRequestUrl,
 } = await import("../connectors/my-work.js");
 import type { MyWorkQuery } from "../connectors/my-work.js";
 import type { MyWorkPage } from "../../../shared/ticket-connectors.mjs";
@@ -134,4 +135,21 @@ test("needs me: the ticket is done while a pull request is still open", () => {
   assert.deepEqual(needsMeReasons(card({ ticket_state: "done", pull_requests: [{ url: PR, state: "draft", merged: null }] }), none), ["ticket_done_pr_open"]);
   assert.deepEqual(needsMeReasons(card({ ticket_state: "done", pull_requests: [{ url: PR, state: "closed", merged: false }] }), none), []);
   assert.deepEqual(needsMeReasons(card({ ticket_state: "in_review" }), none), []);
+});
+
+test("pull request URLs compare in one spelling", () => {
+  assert.equal(pullRequestUrl("https://github.com/Acme/App/pull/88/files"), PR);
+  assert.equal(pullRequestUrl("https://github.com/acme/app/pull/88/"), PR);
+  assert.equal(pullRequestUrl(`${PR}#pullrequestreview-1`), PR);
+  const requested = openReviewRequests([
+    { room_id: "room-1", event_type: "pull_request", action: "review_requested", github_object_url: "https://github.com/Acme/App/pull/88", event_order_at: "2026-10-21T10:00:00Z" },
+  ]);
+  assert.deepEqual(needsMeReasons(card({ pull_requests: [{ url: `${PR}/files`, state: "open", merged: false }] }), { ...none, reviewRequests: requested }), ["review_requested"]);
+});
+
+test("an open request names the card in any case", () => {
+  const request = { room_id: "room-1", title: "is ht-1234 ready?", body: "", source_message_number: null };
+  assert.deepEqual(needsMeReasons(card(), { ...none, openRequests: [request] }), ["human_request"]);
+  // Keys with characters a regular expression treats specially match only themselves.
+  assert.deepEqual(needsMeReasons(card({ key: "A.B-1" }), { ...none, openRequests: [{ ...request, title: "AxB-1" }] }), []);
 });

@@ -31,7 +31,9 @@
     </p>
 
     <p v-if="!loading && page && !cards.length" class="my-work-empty" data-testid="my-work-empty">
-      {{ filters.needsMe ? "Nothing needs you right now." : "No work is assigned to you." }}
+      {{ nextCursor
+        ? "Nothing in the cards read so far. Load more to look further."
+        : filters.needsMe ? "Nothing needs you right now." : "No work is assigned to you." }}
     </p>
 
     <table v-if="cards.length" class="my-work-table" data-testid="my-work-table">
@@ -158,7 +160,13 @@ const filters = reactive<MyWorkFilters>({ tracker: "", roomId: "", needsMe: fals
 
 const columns = computed(() => myWorkColumns(page.value));
 const trackerOptions = computed(() => myWorkTrackerOptions(page.value));
-const roomOptions = computed(() => myWorkRoomOptions(cards.value, filters.roomId));
+// Rooms seen in any read stay in the list, so a room filter can switch to another room directly.
+const knownRooms = reactive(new Map<string, string>());
+watch(cards, (list) => { for (const card of list) knownRooms.set(card.room_id, card.room_name); });
+const roomOptions = computed(() => myWorkRoomOptions(
+  [...knownRooms].map(([room_id, room_name]) => ({ room_id, room_name })),
+  filters.roomId,
+));
 
 let generation = 0;
 let lastReadAt = 0;
