@@ -1431,13 +1431,6 @@ export const READ_ONLY_LAUNCH = {
   launchPolicy: CODEX_READ_ONLY_POLICY,
 };
 
-// ---- The permission profile of a Read-only runtime ----
-//
-// Codex's read-only sandbox refuses no read, so a Read-only runtime names a permission profile in place
-// of it: the launch defines the profile with the owner's sign-in file denied to every command. Codex takes
-// a profile or a sandbox, never both, and a request that named the sandbox would take the profile's name
-// off the conversation.
-
 /** A request that gives a conversation or a turn its access. A subscription to a loaded conversation gives none. */
 export const givesAccess = (call: RecordedRequest) => call.method === "thread/start" || call.method === "turn/start"
   || (call.method === "thread/resume" && Object.hasOwn(call.params as object, "approvalPolicy"));

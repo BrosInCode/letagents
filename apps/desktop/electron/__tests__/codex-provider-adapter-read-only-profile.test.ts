@@ -420,6 +420,13 @@ test("a turn that is running when a Read-only Codex is stopped at reattach ends 
   }
 });
 
+// ---- The permission profile of a Read-only runtime ----
+//
+// Codex's read-only sandbox refuses no read, so a Read-only runtime names a permission profile in place
+// of it: the launch defines the profile with the owner's sign-in file denied to every command. Codex takes
+// a profile or a sandbox, never both, and a request that named the sandbox would take the profile's name
+// off the conversation.
+
 test("no request of a Read-only runtime names a sandbox, and every one that gives a conversation or a turn its access names the permission profile", { timeout: 60_000 }, async () => {
   const harness = createHarness({ exitOnSignal: true });
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

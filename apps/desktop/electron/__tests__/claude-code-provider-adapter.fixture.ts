@@ -884,8 +884,6 @@ export const STORED_CLAUDE_OPTIONS: Array<[string, unknown, string]> = [
   ["dangerously-skip-permissions", true, "skips approvals under the option's other spelling"],
 ];
 
-// A room turn stays open for background work that it started.
-
 /** The lines of a real capture up to the turn's own result and the lifecycle line after it, and the lines the CLI wrote after those. */
 export function splitAtOwnResult(stream: Array<Record<string, unknown>>, turnId: string) {
   const result = stream.findIndex((event) => event.type === "result" && event.user_message_uuid === turnId);

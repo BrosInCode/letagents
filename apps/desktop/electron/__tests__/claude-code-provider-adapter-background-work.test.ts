@@ -159,6 +159,8 @@ test("one of the owner's MCP tools asks for approval through the same flow as th
   }
 });
 
+// A room turn stays open for background work that it started.
+
 test("a Claude turn that started background work stays open: the owner reads what it waits for, the next message waits behind it, and the room gets one reply", async () => {
   const agent = await claudeDaemonFixture();
   try {
