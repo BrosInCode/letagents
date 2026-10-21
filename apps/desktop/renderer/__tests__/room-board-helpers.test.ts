@@ -122,6 +122,46 @@ describe("board card hierarchy", () => {
     assert.doesNotMatch(nativeHtml, /HT-1234/);
   });
 
+  it("shows the ticket state pill next to the work state only on cards with a tracker state", async () => {
+    const render = (overrides: Partial<DesktopTaskSummary>) => renderToString(createSSRApp({
+      render: () => h(TaskCard, { task: task(overrides), actions: [], busyAction: null, draggableTask: false, selected: false }),
+    }));
+    const synced = await render({ externalRef: "jira:HT-7", ticketState: "in_review", createdBy: "tracker:jira" });
+    assert.match(synced, /class="desktop-task-ticket-state"[^>]*data-ticket-state="in_review"[^>]*>In review</);
+    assert.doesNotMatch(await render({ externalRef: "jira:HT-7" }), /desktop-task-ticket-state/);
+    const native = await render({});
+    assert.doesNotMatch(native, /desktop-task-ticket-state|desktop-task-provider-chip/);
+  });
+
+  it("offers the tracker / native filter only when the room has imported cards", async () => {
+    const scope = effectScope();
+    const props = reactive({ roomIdentifier: "room", tasks: [task({ id: "task_1" }), task({ id: "task_2", externalRef: "jira:HT-1" })], workers: [] as WorkerSnapshot[] });
+    const presentation = scope.run(() => useRoomBoardPresentation(props, () => undefined))!;
+    assert.equal(presentation.showSourceFilter.value, false, "a linked native card alone adds no filter");
+    presentation.setSourceFilter("tracker");
+    assert.equal(presentation.visibleTaskCount.value, 2, "a hidden filter filters nothing");
+    props.tasks = [...props.tasks, task({ id: "task_3", externalRef: "jira:HT-2", createdBy: "tracker:jira", ticketState: "todo" })];
+    await nextTick();
+    assert.equal(presentation.showSourceFilter.value, true);
+    assert.deepEqual(presentation.visibleGroups.value.flatMap((group) => group.tasks.map((entry) => entry.id)).sort(), ["task_2", "task_3"]);
+    presentation.setSourceFilter("native");
+    assert.deepEqual(presentation.visibleGroups.value.flatMap((group) => group.tasks.map((entry) => entry.id)), ["task_1"]);
+    presentation.clearFilters();
+    assert.equal(presentation.sourceFilter.value, "all");
+    scope.stop();
+
+    const toolbar = (showSourceFilter: boolean) => renderToString(createSSRApp({
+      render: () => h(Toolbar, {
+        searchQuery: "", activeFilter: "open", filterOptions: [], busy: false,
+        managerMode: "off", managerTitle: "Off", pendingIntentCount: 0, governanceOpen: false,
+        ownerFilter: "all", ownerOptions: boardOwnerOptions([]), statusFilter: "all", statusOptions: boardStatusOptions(),
+        sort: "recent", showSourceFilter, sourceFilter: "all",
+      }),
+    }));
+    assert.doesNotMatch(await toolbar(false), /Filter by source/);
+    assert.match(await toolbar(true), /aria-label="Filter by source"/);
+  });
+
   it("reads typed ticket keys and splits stored ones for display", () => {
     assert.equal(normalizedExternalRef(""), null);
     assert.equal(normalizedExternalRef("ht-12"), "jira:HT-12");

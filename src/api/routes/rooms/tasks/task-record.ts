@@ -15,7 +15,9 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
+import { ImportedCardBusyError } from "../../../connectors/card-merge.js";
 import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
+import { getTaskTicketDetails } from "../../../connectors/ticket-details.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import {
@@ -74,6 +76,21 @@ export function registerTaskRecordRoutes(
 
     const mentions = await getTaskMentions(project.id, task.id);
     res.json({ room_id: project.id, task_id: task.id, mentions });
+  });
+
+  /** The tracker record behind a card that names a ticket in a room that imports it. */
+  app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)\/ticket$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const ticket = await getTaskTicketDetails(project.id, taskId);
+    res.json({ room_id: project.id, task_id: taskId, ticket });
   });
 
   app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
@@ -292,16 +309,32 @@ export function registerTaskRecordRoutes(
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;
 
-      const updated = await deps.updateTask(
-        project.id,
-        taskId,
-        updates,
-        {
-          boardIntentApproval,
-          workLeaseCreation: coordination.workLeaseCreation ?? null,
-          leaseFence: coordination.leaseFence ?? null,
-        }
-      );
+      const updateOptions = {
+        boardIntentApproval,
+        workLeaseCreation: coordination.workLeaseCreation ?? null,
+        leaseFence: coordination.leaseFence ?? null,
+      };
+      const linkedRef = updates.external_ref && updates.external_ref !== task.external_ref ? updates.external_ref : null;
+      let mergedTaskId: string | null = null;
+      let updated: Awaited<ReturnType<typeof deps.updateTask>>;
+      if (linkedRef && deps.updateTaskLinkingTicket) {
+        // A card sync imported for this ticket folds into this card, which
+        // keeps the key, in one transaction with the rest of this update.
+        const link = await deps.updateTaskLinkingTicket(
+          { room_id: project.id, task_id: taskId, external_ref: linkedRef, updates },
+          (patch, tx) => deps.updateTask(project.id, taskId, patch, updateOptions, tx),
+        );
+        updated = link.task;
+        mergedTaskId = link.merged_task_id;
+      } else {
+        updated = await deps.updateTask(project.id, taskId, updates, updateOptions);
+      }
+      if (updated && linkedRef && !mergedTaskId && deps.refreshLinkedTicket) {
+        // Reads the tracker; the card shows its ticket state once that lands.
+        void deps.refreshLinkedTicket(project.id, linkedRef).catch(() => {
+          console.warn("Linked ticket refresh failed", { roomId: project.id, taskId });
+        });
+      }
       if (updated && updates.status && updates.status !== task.status) {
         try {
           await deps.emitTaskLifecycleStatusMessage(project.id, updated, {
@@ -323,7 +356,7 @@ export function registerTaskRecordRoutes(
         }
         // A pull request that merged before it was linked moves the task now.
         let settled = updated;
-        if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined || updates.status !== undefined) {
+        if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined || updates.status !== undefined || mergedTaskId) {
           try {
             settled = (await deps.replayStoredPullRequestMerge?.({ project, task: updated, actorLabel })) ?? updated;
           } catch (error) {
@@ -347,13 +380,25 @@ export function registerTaskRecordRoutes(
         } catch {
           console.warn("Task event delivery failed after committed update", { roomId: project.id, taskId });
         }
-        res.json({ ...taskWithDetails, room_id: project.id });
+        if (mergedTaskId) {
+          try {
+            deps.taskEvents.emit("task:removed", { projectId: project.id, taskId: mergedTaskId });
+          } catch {
+            console.warn("Task removal event failed after a ticket merge", { roomId: project.id, taskId: mergedTaskId });
+          }
+        }
+        // merged_task_id names the imported card this link removed from the board.
+        res.json({ ...taskWithDetails, room_id: project.id, ...(mergedTaskId ? { merged_task_id: mergedTaskId } : {}) });
       } else {
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
       if (error instanceof TaskExternalRefConflictError) {
         res.status(409).json({ error: error.message, code: error.code, task_id: error.existingTaskId });
+        return;
+      }
+      if (error instanceof ImportedCardBusyError) {
+        res.status(409).json({ error: error.message, code: error.code, task_id: error.importedTaskId });
         return;
       }
       if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {

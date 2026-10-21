@@ -32,6 +32,13 @@
           <i aria-hidden="true"><UserRound v-if="!task.assignee" :size="12" /><template v-else>{{ ownerInitial }}</template></i>
           <strong :title="`Owner: ${ownerName}`">{{ ownerName }}</strong>
         </span>
+        <span
+          v-if="ticket && ticketState"
+          class="desktop-task-ticket-state"
+          :data-ticket-state="task.ticketState"
+          :title="`${ticket.providerLabel} state: ${ticketState}. The column is the work state.`"
+          data-testid="room-board-ticket-state"
+        >{{ ticketState }}</span>
       </span>
     </button>
 
@@ -93,7 +100,7 @@ import { CircleCheck, GitPullRequest, Link, LockKeyhole, ScanEye, UserRound } fr
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
 import { useNow } from "../../../../composables/useNow";
-import { ticketRefParts } from "./ticket-ref";
+import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
 
 // Labels such as "2m ago" move on with the shared clock even when the data is unchanged.
 const now = useNow(30_000);
@@ -122,6 +129,7 @@ const emit = defineEmits<{
 }>();
 
 const ticket = computed(() => ticketRefParts(props.task.externalRef));
+const ticketState = computed(() => ticketStateLabel(props.task.ticketState));
 const taskWorkLease = computed(() => workLease(props.task));
 const authority = computed(() => executionAuthorityState(props.task));
 const taskSecondaryLeases = computed(() => secondaryLeases(props.task));
@@ -159,4 +167,16 @@ function onCardClick(event: MouseEvent): void {
   font-size: 11px;
   line-height: 16px;
 }
+.desktop-task-ticket-state {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.desktop-task-ticket-state[data-ticket-state="done"] { color: var(--success, #3fb950); }
+.desktop-task-ticket-state[data-ticket-state="in_review"] { color: var(--accent, #58a6ff); }
 </style>

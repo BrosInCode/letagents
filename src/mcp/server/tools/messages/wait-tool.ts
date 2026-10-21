@@ -11,7 +11,7 @@ import {
   buildAgentDeliveryHeaders,
   bindSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
-  currentRoom,
+  getCurrentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
   getLatestLocalChatMessages,
@@ -54,6 +54,7 @@ import { normalizeRoutingSender } from "../../../../../shared/routing-aliases.mj
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { fetchRecentRemoteMessages } from "./read-tool.js";
 import { jsonToolResponse } from "./response.js";
+import { scopedMap } from "../../runtime/session-scope.js";
 
 const DEFAULT_POLL_TIMEOUT_MS = 30000;
 
@@ -472,7 +473,7 @@ const THREAD_CONTEXT_CACHE_MAX = 500;
 export const THREAD_CONTEXT_LOOKUP_MAX = 16;
 export const THREAD_CONTEXT_BYTES_MAX = 256 * 1024;
 const THREAD_CONTEXT_DEADLINE_MS = 1_000;
-const threadContextCache = new Map<string, MessageRecord>();
+const threadContextCache = scopedMap<string, MessageRecord>("thread-context-cache");
 
 function threadContextCacheKey(scopeId: string, targetMessageId: string): string {
   return `${scopeId}:${targetMessageId}`;
@@ -484,18 +485,18 @@ export function rememberThreadContextMessages(scopeId: string, records: readonly
     const id = messageId(record);
     if (!id) continue;
     const key = threadContextCacheKey(scopeId, id);
-    threadContextCache.delete(key);
-    threadContextCache.set(key, record);
+    threadContextCache().delete(key);
+    threadContextCache().set(key, record);
   }
-  while (threadContextCache.size > THREAD_CONTEXT_CACHE_MAX) {
-    const oldest = threadContextCache.keys().next().value;
+  while (threadContextCache().size > THREAD_CONTEXT_CACHE_MAX) {
+    const oldest = threadContextCache().keys().next().value;
     if (oldest === undefined) break;
-    threadContextCache.delete(oldest);
+    threadContextCache().delete(oldest);
   }
 }
 
 export function resetThreadContextCacheForTests(): void {
-  threadContextCache.clear();
+  threadContextCache().clear();
 }
 
 export async function collectThreadContextMessages(input: {
@@ -538,7 +539,7 @@ export async function collectThreadContextMessages(input: {
     const nextId = pendingIds.shift();
     if (!nextId || seenIds.has(nextId)) continue;
     seenIds.add(nextId);
-    const cached = threadContextCache.get(threadContextCacheKey(scopeId, nextId));
+    const cached = threadContextCache().get(threadContextCacheKey(scopeId, nextId));
     if (!cached) lookups += 1;
     const message = cached
       ?? (useLocalStorage && input.localRoomId
@@ -599,8 +600,8 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       }
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
-      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
-      const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? localRoomId ?? null;
+      const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
+      const sessionRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? localRoomId ?? null;
       const custodial = isCustodialPolling();
       const routingStateSnapshot = custodial ? { complete: true } : getStoredAgentRoutingStateSnapshot(sessionRoomId ?? "");
       const localStorageEnabled = Boolean(
@@ -695,9 +696,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       }
 
       await syncRoomPresence(
-        targetRoomId ?? currentRoom?.room_id ?? null,
+        targetRoomId ?? getCurrentRoom()?.room_id ?? null,
         identity,
-        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
+        getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
         agentSession
       );
       const clientTimeout =
@@ -842,9 +843,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         // send-tool marks "replied" when the agent actually publishes a reply.
       }
       await syncRoomPresence(
-        targetRoomId ?? currentRoom?.room_id ?? null,
+        targetRoomId ?? getCurrentRoom()?.room_id ?? null,
         identity,
-        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
+        getRememberedRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
         agentSession
       );
       return jsonToolResponse(output);

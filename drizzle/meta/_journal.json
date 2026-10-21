@@ -834,6 +834,20 @@
       "when": 1792600000000,
       "tag": "0118_tracker_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1792700000000,
+      "tag": "0119_remote_mcp_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1792800000000,
+      "tag": "0120_room_tracker_filters",
+      "breakpoints": true
     }
   ]
 }

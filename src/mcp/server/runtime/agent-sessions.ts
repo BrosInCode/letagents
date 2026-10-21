@@ -15,7 +15,7 @@ import {
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
 } from "../../../shared/request-headers.js";
 import {
-  AGENT_INSTANCE_UUID,
+  agentInstanceUuid,
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
@@ -198,7 +198,7 @@ export async function resolveWorkerToolIdentity(input: {
         tool_bridge_id: null,
         actor_label: identity.actor_label,
         agent_key: identity.canonical_key ?? identity.runtime_key ?? identity.actor_label,
-        agent_instance_id: AGENT_INSTANCE_UUID,
+        agent_instance_id: agentInstanceUuid(),
         display_name: identity.display_name,
         owner_label: identity.owner_label,
         ide_label: identity.ide_label ?? detectAgentIdeLabel(),
@@ -247,7 +247,7 @@ export async function ensureLocalWorkerAgentSession(
     tool_bridge_id: null,
     actor_label: identity.actor_label,
     agent_key: identity.canonical_key || identity.runtime_key || identity.actor_label,
-    agent_instance_id: AGENT_INSTANCE_UUID,
+    agent_instance_id: agentInstanceUuid(),
     display_name: displayName,
     owner_label: identity.owner_label,
     ide_label: identity.ide_label ?? detectAgentIdeLabel(),

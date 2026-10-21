@@ -1,4 +1,5 @@
 import { execSync } from "child_process";
+import { currentSessionScope, requireScopeWhenHosted } from "../session-scope.js";
 
 import {
   inferAgentIdeLabel,
@@ -25,6 +26,9 @@ export const AGENT_OWNER_LABEL = (
 export const EXPLICIT_AGENT_IDENTITY_KEY = getExplicitAgentIdentityStorageKey();
 
 export function readCommandOutput(command: string, cwd = process.cwd()): string | null {
+  // A remote session never runs programs on the API server.
+  if (currentSessionScope()) return null;
+  requireScopeWhenHosted("A local program");
   try {
     const output = execSync(command, {
       cwd,
@@ -85,6 +89,9 @@ export function ideLabelFromMcpClientName(name: string | null | undefined): stri
 }
 
 export function detectAgentIdeLabel(): string {
+  // A remote session is described by its own client, never the API's env.
+  const scope = currentSessionScope();
+  if (scope) return ideLabelFromMcpClientName(scope.clientName) ?? "Agent";
   if (AGENT_IDE_LABEL) {
     return toTitleCaseCodename(AGENT_IDE_LABEL);
   }
@@ -106,7 +113,7 @@ export function detectAgentIdeLabel(): string {
 }
 
 export function detectAgentRuntimeLabel(): string {
-  if (isCodexRuntime()) {
+  if (!currentSessionScope() && isCodexRuntime()) {
     return "codex";
   }
 

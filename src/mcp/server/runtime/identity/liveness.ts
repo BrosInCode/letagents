@@ -9,7 +9,8 @@ import {
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
 } from "./config.js";
-import { AGENT_INSTANCE_UUID } from "./state.js";
+import { agentInstanceUuid } from "./state.js";
+import { currentSessionScope } from "../session-scope.js";
 
 function getOrCreateLocalHostId(): string {
   const state = readLocalState();
@@ -34,6 +35,10 @@ function getOrCreateLocalHostId(): string {
  * says of itself, so two machines never report the same value.
  */
 export function getProcessHostId(): string {
+  // A remote session is its own host; the API server's names stay private.
+  if (currentSessionScope()) {
+    return `phost_${createHash("sha256").update(`remote_mcp\n${getOrCreateLocalHostId()}`).digest("hex").slice(0, 32)}`;
+  }
   let user = "";
   try {
     user = userInfo().username;
@@ -50,11 +55,11 @@ export function getSessionLivenessRegistration(runtime = detectAgentRuntimeLabel
   const normalizedRuntime = runtime.trim().toLowerCase() || ideLabel.toLowerCase();
   return {
     host_id: hostId,
-    host_kind: process.platform === "darwin" ? "macos" : process.platform,
+    host_kind: currentSessionScope() ? "remote_mcp" : process.platform === "darwin" ? "macos" : process.platform,
     host_label: null,
     liveness_capability: normalizedRuntime === "codex"
       ? "codex_app_server_runtime_stream"
       : "session_activity",
-    tool_bridge_id: `${hostId}:${normalizedRuntime}:${AGENT_INSTANCE_UUID}`,
+    tool_bridge_id: `${hostId}:${normalizedRuntime}:${agentInstanceUuid()}`,
   };
 }

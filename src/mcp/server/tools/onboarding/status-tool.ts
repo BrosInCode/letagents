@@ -11,9 +11,9 @@ import {
 import { resolveGitRoot } from "../../repo-context.js";
 import {
   API_URL,
-  currentAgentIdentity,
-  currentAgentIdentityKey,
-  currentRoom,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
+  getCurrentRoom,
   getLocalStatePath,
   getPendingDeviceAuth,
   getStoredAgentIdentity,
@@ -135,7 +135,7 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
       let nextStep = "join_room";
       if (!storedAuth && pendingAuth) {
         nextStep = "poll_device_auth";
-      } else if (savedCurrentRoom && !currentRoom) {
+      } else if (savedCurrentRoom && !getCurrentRoom()) {
         nextStep = "resume_room_session";
       }
 
@@ -155,9 +155,9 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
         token_expires_at: storedAuth?.expires_at ?? null,
         pending_device_auth: pendingAuth,
         agent_identity: toPublicAgentIdentity(
-          currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey),
+          getCurrentAgentIdentity() ?? getStoredAgentIdentity(getCurrentAgentIdentityKey()),
         ),
-        current_room: toPublicRoomState(currentRoom),
+        current_room: toPublicRoomState(getCurrentRoom()),
         saved_current_room: toPublicStoredRoomSession(savedCurrentRoom),
         detected_room_from_context: detectedRoom,
         configured_room_from_file: configRoom,

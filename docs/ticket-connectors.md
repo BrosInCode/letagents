@@ -30,7 +30,8 @@ Local-only rooms do not support ticket keys.
 
 `ticket_state` is the tracker's state for the ticket (todo, in_progress,
 in_review, done). The tracker owns it, and LetAgents never sets it from a room
-action. Until tracker connections exist, it stays empty. The card's work status
+action. Only sync sets it, in a room that imports from a tracker connection
+(see [Sync and room filters](#sync-and-room-filters)); elsewhere it stays empty. The card's work status
 (`status`) stays owned by LetAgents and does not change with the ticket.
 
 ## What attaches to the card
@@ -77,8 +78,8 @@ that has a ticket, search the board for the key first.
 - Common technical names with the same shape, such as `UTF-8`, `SHA-256` and
   `ISO-8859`, are not keys.
 - Linear keys look like Jira keys, so a Linear key matches only a team key
-  LetAgents knows. Today those are the team keys of the room's own Linear
-  cards. Tracker connections will add the connected teams.
+  LetAgents knows: the team keys of the room's own Linear cards, and the
+  `team:<KEY>` terms of the room's Linear ticket filters.
 
 ## Rooms without ticket keys
 
@@ -87,6 +88,178 @@ extra request from the desktop app, and runs no key detector on its messages
 or GitHub events. The server remembers for 30 seconds that the room has no
 ticket cards, so most messages cost no extra query. Setting a key clears that
 memory at once on the server that wrote it.
+
+## Sync and room filters
+
+A room imports tickets through **ticket filters**. A filter names one tracker
+connection and which tickets to import. Sync then keeps a card for each
+matching ticket and keeps its ticket state current. A room without a filter
+runs no sync and looks as before.
+
+### Add a filter
+
+1. Open the room's settings. The **Ticket filters** section shows when the
+   room has a filter or when you have a tracker connection.
+2. Choose the connection.
+3. Type the filter:
+   - Jira: JQL without `ORDER BY`, for example `project = HT AND statusCategory != Done`.
+   - Linear: `team:<KEY>` and `project:<id>` terms, for example `team:ENG`.
+   - Empty: every ticket the connection can read.
+4. Choose **Test**. The app shows how many tickets match (up to 200).
+5. Choose **Save**. The first sync starts within one poll interval.
+
+Only a room admin can add or change a filter, and only with a connection they
+own, because sync reads the tickets with that person's credentials. Any room
+admin can remove a filter. A room reads each tracker through one connection:
+a second Jira (or Linear) filter on another connection is refused with
+`tracker_filter_provider_taken`. A filter that is off or removed stops the sync;
+the cards it imported stay on the board with their last ticket state.
+
+### What sync does
+
+- **New ticket**: sync creates a card with the ticket's title, its key as the
+  external ref, its ticket state, and the work state `proposed`. The card's
+  creator is `tracker:jira` or `tracker:linear`.
+- **Changed ticket**: sync updates the card's ticket state. An imported card
+  also takes the ticket's new title, until someone renames the card: a title
+  that no longer equals the last synced title is kept. A card a person made
+  keeps its own title.
+  Sync never changes a card's work state, owner or anything else.
+- **Two states, two owners.** The board column is the work state, owned by
+  LetAgents. The ticket state is the tracker's. For example, a ticket moved
+  to Done in Jira shows **Done** on the card while the card stays in
+  **In progress** until the room finishes its work.
+- A ticket reaches a room only through that room's filter. A card is bound to
+  a ticket (it gets its state and the **Ticket** section) when the room's
+  filter matched the ticket. A key typed on a card never pulls in a ticket the
+  filter excludes, and a card in a room without a filter gets no ticket state.
+- A deleted ticket leaves its card alone.
+
+Sync polls each enabled filter every 2 minutes (`LETAGENTS_TRACKER_POLL_MS`,
+15 seconds to 1 hour). A poll asks for tickets changed since the previous poll
+began, less 5 minutes for clock skew. Trackers answer newest first, 200 tickets
+a page; a full page makes the poll read the next page below the oldest ticket
+it saw, up to 1,000 tickets. Past that the oldest changes are skipped and the
+filter shows a warning: narrow the filter. Two API processes never poll the
+same filter at once: each poll claims its filter row first, and a running poll
+keeps its claim until it finishes (or for 10 minutes if its process died).
+A failed poll waits before the next try: one interval after the first
+failure, doubling after each further failure, at most 30 minutes. A
+tracker's `Retry-After` wins when it is longer, up to 1 hour. A success clears the wait. One filter's
+failure never stops the others.
+
+### One path for polls and webhooks
+
+A poll, a webhook and an auto import all apply a ticket through one function.
+It takes a Postgres advisory lock on the connection and ticket key, compares
+the ticket with the cached copy in `external_items`, and writes only when
+something changed. So a webhook and a poll that see the same change write
+once, and an older copy (a slow poll) never undoes a newer one.
+
+### Webhooks (optional)
+
+Webhooks make ticket changes show at once instead of at the next poll.
+
+1. Open **Settings → Ticket trackers** and choose **Webhook** on the connection.
+2. Copy the URL and the secret.
+3. In Jira (**System → WebHooks**), add a webhook with that URL and secret for
+   issue created, updated and deleted events. In Linear
+   (**Settings → API → Webhooks**), add a webhook with that URL for Issue
+   events, and paste the secret as the signing secret.
+
+The URL is `/webhooks/trackers/<provider>/<connection id>`. The secret is
+derived from the server's connector key and the connection id, so nothing
+extra is stored. A webhook needs `LETAGENTS_BASE_URL` set to an https URL.
+
+- Jira deliveries must carry `X-Hub-Signature: sha256=<HMAC of the body>`, and
+  the body's `timestamp` must be within 10 minutes.
+- Linear deliveries must carry `Linear-Signature` (HMAC of the body), and the
+  body's `webhookTimestamp` must be within 5 minutes.
+- The server answers `202` at once. The payload only names tickets. Sync reads
+  only tickets LetAgents already holds (a cached ticket, or a card naming the
+  key in a room that imports from the connection) and updates the cards bound
+  to them. A ticket new to LetAgents makes the connection's filters ask for an
+  early poll, which runs at least half a poll interval (1 minute by default)
+after the previous poll began.
+
+### Auto import
+
+When a pull request's branch, title or closing keyword names a ticket key and
+no card in the room holds it, and the ticket matches the room's filter for
+that tracker, LetAgents creates its card. For Jira the server asks with the
+filter's JQL plus `key = "<KEY>"`; for Linear it compares the ticket's team and
+project with the filter's terms. A key outside the filter imports nothing, so
+a pull request cannot pull an unrelated ticket into the room. The pull
+request then attaches to that card. At most three keys are tried per event; a
+key the tracker does not know is not asked for again for 10 minutes, and a
+key whose read failed waits a minute (or the tracker's `Retry-After`). Room
+messages do not import tickets.
+
+### Linking your own card
+
+When you set a ticket key on your own card and the room's filter matches the
+ticket, sync binds your card to it right away; it gets the ticket state
+without waiting for the ticket to change.
+
+When sync already imported a card for that ticket, the two become one, in the
+same transaction as your edit:
+
+- your card keeps its title, description, owner and work state;
+- it takes the imported card's ticket state, pull requests and links, shared
+  artifacts, room events and linked threads;
+- the imported card is deleted.
+
+Only an untouched imported card is merged: status proposed, accepted or
+cancelled, no owner, and no lease ever. Otherwise the link is refused with
+`imported_card_busy`; use that card, or cancel it first. If any part of your
+edit fails, nothing is merged. The response names the removed card in
+`merged_task_id`, and the room stream sends `task_remove` so open boards drop it. A card that a person
+or an agent created is never merged away (`created_by` values that start with
+`tracker:` are reserved for sync).
+
+### Room events
+
+Each import and each ticket state change adds a quiet event in the room's
+**Events** tab, never a chat message. These events have
+`event_type = "tracker_ticket"` and `metadata.source = "tracker_sync"`. They
+are left out of a card's pull request and CI status, and they are not sent
+on the GitHub event bus, so wake rules and the rules engine
+(a later part of this feature) never act on them: a ticket transition cannot
+trigger itself.
+
+### On the board
+
+- A card that names a ticket shows the provider chip and its key. When the
+  ticket has a state, the card also shows a ticket state pill (To do,
+  In progress, In review, Done). The column is the work state.
+- When the room has imported cards, the toolbar offers **All cards**,
+  **Tracker cards** (cards that name a ticket) and **Native cards**.
+- The card details show a **Ticket** section: the tracker status, the ticket
+  state, the assignee, when it last synced, and a link to the ticket.
+- A room with no ticket cards shows none of this.
+
+`get_board` returns `ticket_state` for these cards (see [Agents](#agents)).
+Agents get no new tools.
+
+### HTTP routes
+
+| Route | Purpose |
+|---|---|
+| `GET /rooms/:room/tracker-filters` | List the room's filters (any participant). |
+| `PUT /rooms/:room/tracker-filters` | Add or replace the filter for a connection (`connection_id`, `filter`, `enabled`). Room admin, own connection, app session. |
+| `PATCH /rooms/:room/tracker-filters/:id` | Change `filter` or `enabled`. Room admin who owns the connection. |
+| `DELETE /rooms/:room/tracker-filters/:id` | Remove a filter. Room admin. |
+| `POST /rooms/:room/tracker-filters/test` | Count matching tickets without saving. |
+| `GET /rooms/:room/tasks/:task/ticket` | The cached ticket behind a card. |
+| `GET /account/connectors/:id/webhook` | The connection's webhook URL and secret. |
+| `POST /webhooks/trackers/:provider/:connection` | Tracker webhooks (signed). |
+
+### Tests
+
+```bash
+node --import tsx --test src/api/__tests__/tracker-webhooks.test.ts src/api/__tests__/room-task-routes.test.ts
+TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-sync-db.test.ts
+```
 
 ## Connections and providers
 
@@ -247,3 +420,60 @@ TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurren
 
 Provider tests answer from fixtures in `src/api/__tests__/fixtures/connectors`
 and fail on any request they do not expect, so CI makes no live tracker call.
+
+## Remote MCP endpoint
+
+LetAgents serves its MCP tools over streamable HTTP at `https://letagents.chat/mcp`. A Claude app chat can then
+join a room as a worker with no local `npx` process. This matters on managed devices that allow only remote
+connectors.
+
+**Authentication.** Send a LetAgents owner token (the `LETAGENTS_TOKEN` minted by GitHub device flow) as
+`Authorization: Bearer <token>`. Other credentials (browser cookies, desktop app sessions, worker bearers, host
+grants) get `401`, and a browser `Origin` outside the API's allow list gets `403`. Nothing is stored before auth passes.
+
+**How it runs.** The API builds an MCP server object from the same registry the npm package uses
+(`registerLetAgentsTools` in `src/mcp/server/letagents-server.ts`) for each request, with the remote allow list
+applied. Tool calls reach the API's own routes in process: an in-memory HTTP connection into the same Express app,
+bound to the session's account, with no network hop and no token (`src/api/remote-mcp/in-process-dispatch.ts`).
+The runtime state the npm package keeps in module variables and `~/.letagents/mcp-state.json` (joined room, agent
+identity, worker handles, read cursors) is kept per session and saved in the `remote_mcp_sessions` table (migration
+0119) before each tool result is returned. Any API replica can serve the next request, and a session survives a
+restart. Saves write only over the version they started from; when two replicas save one session at once, the states
+are merged. The saved state holds agent session tokens, so it is sealed (AES-256-GCM) with a key derived from the
+owner token; the table keeps only the token's SHA-256. Inside a session the runtime refuses files, git and programs
+on the API server, and once the API hosts sessions, runtime code that runs without a session scope throws instead of
+falling back to process-wide state. A client that disconnects ends its in-flight calls.
+
+**Sessions.** The session id is bound to the account and the exact token that opened it; any other token gets `404`
+and must initialize its own session. `DELETE` removes the session. There is no server-initiated stream (`GET` gets
+`405`); every reply travels on its `POST`.
+
+**Tools.** The remote tool list is an explicit allow list (`REMOTE_ALLOWED_TOOLS` in
+`src/mcp/server/remote-tool-surface.ts`). Excluded, with reasons in the same file: workspace capture, `check_repo`,
+`check_repo_visibility`, `initialize_repo`, the local Codex session tools, the device-auth and onboarding tools,
+`resume_room_session` and the rental provider tools. `cwd` inputs are removed, and `join_room` refuses
+`session_mode: "live"`. A remote agent registers its worker with `register_agent_session` before it writes, as an
+npm-package agent does.
+
+**Limits.** All values are server environment variables.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT` | 16 | At the cap, the account's least recently used session is deleted. |
+| `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min | A session with no request for this long is deleted. |
+| `LETAGENTS_POLL_MAX_MS` | 180000 | Cap for `wait_for_messages`, the same value the poll route uses. |
+| `LETAGENTS_REMOTE_MCP_MAX_BODY_BYTES` | 262144 | Larger request bodies get `413` before the MCP SDK validates them. |
+| `LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT` | 8 | Requests one account may have open at once (long-polls included); more get `429`. |
+| `LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT` | 256 | Requests open at once on one API process; more get `503`. |
+| `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES` | 262144 | Largest saved session state; a call that would exceed it fails. |
+
+Each account may open 10 sessions and send 600 requests per minute. A tool call may hold at most 10 000 array
+elements and object keys. Once a minute, sessions that are idle or whose owner token was revoked are deleted. A
+client whose session is gone gets `404` and initializes a new one; the agent then joins its room and registers its
+worker again. Limits are per account, so people who share one token share them.
+
+**Proxy note.** `wait_for_messages` holds one streamed HTTP response open for up to `LETAGENTS_POLL_MAX_MS`. The
+reverse proxy in front of the API must forward `/mcp` with response buffering off, no gzip on `text/event-stream`, and
+a read timeout at or above `LETAGENTS_POLL_MAX_MS`.
+
+Setup steps for the Claude app are in `AGENTS.md`, section "Remote connector (Claude app)".
