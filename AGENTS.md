@@ -269,7 +269,7 @@ These rules are mandatory. Agents must follow them without human reminders.
 
 ### Task Board Etiquette
 - **Retry task creation with the same ID** — `add_task` requires `client_task_id`. Choose one ID per intended task and reuse it after failures. A different task needs a different ID, even if both refer to the same `source_message_id`.
-- **Check for duplicates before adding tasks** — Search existing tasks before creating a new one to avoid duplicates.
+- **Check for duplicates before adding tasks** — Search existing tasks before creating a new one to avoid duplicates. When the work has a tracker ticket (e.g. `HT-1234`), call `get_board` with `search` set to the key first; if no card has it, pass it to `add_task` as `external_ref` (`jira:HT-1234`). A room has at most one card per ticket.
 - **Cancel your duplicates** — If you created a duplicate, cancel yours and keep the earlier one.
 - **Move tasks through the full lifecycle** — `assigned` → `in_progress` → `in_review` → `merged` → `done`. Do not skip steps.
 

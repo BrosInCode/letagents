@@ -433,6 +433,10 @@ jobs:
         if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-settings-routes.test.ts src/api/__tests__/room-settings-delivery.test.ts src/api/__tests__/room-settings-db.test.ts
 
+      - name: Test ticket keys on cards
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/ticket-key-detectors.test.ts src/api/__tests__/repo-event-task-resolution.test.ts src/api/__tests__/ticket-connectors-db.test.ts
+
       - name: Test room history summaries
         if: matrix.group == 3
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-history-summary.test.ts src/api/__tests__/room-history-summary-routes.test.ts src/api/__tests__/room-history-summary-db.test.ts

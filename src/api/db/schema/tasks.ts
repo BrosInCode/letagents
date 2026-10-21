@@ -1,9 +1,10 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../../repo-workflow.js";
 
 import { room_agent_sessions } from "./agents.js";
 import { rooms } from "./core.js";
+import { messages } from "./messages.js";
 import { taskLeaseKindEnum, taskLeaseStatusEnum, taskLockReasonEnum, taskLockScopeEnum, taskStatusEnum } from "./enums.js";
 
 export const tasks = pgTable(
@@ -26,6 +27,11 @@ export const tasks = pgTable(
       .$type<TaskWorkflowArtifact[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
+    // `provider:KEY`, e.g. `jira:HT-1234`. One card per ticket in a room.
+    external_ref: text("external_ref"),
+    // Owned by the tracker; LetAgents never writes it from a room action.
+    ticket_state: text("ticket_state"),
+    external_item_id: text("external_item_id"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
@@ -43,6 +49,37 @@ export const tasks = pgTable(
     room_client_task_id_unique_idx: uniqueIndex("tasks_room_client_task_id_unique_idx")
       .on(table.room_id, table.client_task_id)
       .where(sql`${table.client_task_id} IS NOT NULL`),
+    room_external_ref_unique_idx: uniqueIndex("tasks_room_external_ref_unique_idx")
+      .on(table.room_id, table.external_ref)
+      .where(sql`${table.external_ref} IS NOT NULL`),
+  })
+);
+
+/** A room message that names a card's ticket key. */
+export const task_mentions = pgTable(
+  "task_mentions",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_number: integer("task_number").notNull(),
+    message_number: integer("message_number").notNull(),
+    key: text("key").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "task_mentions_pk", columns: [table.room_id, table.task_number, table.message_number] }),
+    task_fk: foreignKey({
+      name: "task_mentions_task_fk",
+      columns: [table.room_id, table.task_number],
+      foreignColumns: [tasks.room_id, tasks.number],
+    }).onDelete("cascade").onUpdate("cascade"),
+    message_fk: foreignKey({
+      name: "task_mentions_message_fk",
+      columns: [table.room_id, table.message_number],
+      foreignColumns: [messages.room_id, messages.number],
+    }).onDelete("cascade").onUpdate("cascade"),
+    message_idx: index("task_mentions_message_idx").on(table.room_id, table.message_number),
   })
 );
 

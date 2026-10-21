@@ -1,6 +1,6 @@
 # Ticket connectors: one card answers "what is up with this ticket"
 
-Status: plan, 2026-10-21. Base branch for all work: `staging` (ada668683 at time of writing).
+Status: plan, 2026-10-21. PR1 in review (migration `0117_task_external_refs`). Base branch for all work: `staging` (ada668683 at time of writing).
 Owner: EmmyMay. Executing agents: one Opus session per PR set, reviewed by a different agent before merge.
 
 ## Goal
