@@ -5,7 +5,7 @@ import { filterSettingsNavigation, settingsNavGroups, settingsSectionFor, settin
 test("every existing settings pane is reachable from the grouped navigation", () => {
   const all = new Set(settingsNavGroups.flatMap(group => group.items.flatMap(item =>
     (settingsSubsections[item.id] ?? [item]).map(child => child.id))));
-  assert.equal(all.size, 16);
+  assert.equal(all.size, 17);
   for (const pane of all) {
     const section = settingsSectionFor(pane);
     assert.ok(settingsNavGroups.some(group => group.items.some(item => item.id === section)));
@@ -21,5 +21,6 @@ test("settings search reaches nested recovery and publishing panes without dupli
   assert.deepEqual(ids("publish local"), ["storage:sync"]);
   assert.deepEqual(ids(" CONNECT an APP "), ["system:setup"]);
   assert.deepEqual(ids("no such preference"), []);
-  assert.equal(ids("").length, 9);
+  assert.equal(ids("").length, 10);
+  assert.deepEqual(ids("jira"), ["account:connectors"]);
 });

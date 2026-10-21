@@ -1,0 +1,24 @@
+{
+  "data": {
+    "issue": {
+      "id": "1d2c3b4a-0000-4000-8000-000000000001",
+      "identifier": "BIL-12",
+      "title": "Proration rounding",
+      "url": "https://linear.app/herotel/issue/BIL-12/proration-rounding",
+      "updatedAt": "2026-10-20T09:15:02.123Z",
+      "state": { "id": "st-started", "name": "In Progress", "type": "started" },
+      "assignee": { "id": "9a3c1d2e-4f5a-4b6c-8d7e-0f1a2b3c4d5e", "name": "Emmy May", "displayName": "emmy" },
+      "team": { "key": "BIL" },
+      "teamStates": {
+        "states": {
+          "nodes": [
+            { "id": "st-todo", "name": "Todo", "type": "unstarted" },
+            { "id": "st-started", "name": "In Progress", "type": "started" },
+            { "id": "st-review", "name": "In Review", "type": "started" },
+            { "id": "st-done", "name": "Done", "type": "completed" }
+          ]
+        }
+      }
+    }
+  }
+}

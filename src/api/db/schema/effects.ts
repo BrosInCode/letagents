@@ -12,8 +12,8 @@ export const workflow_effects = pgTable(
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     task_id: text("task_id").notNull(),
+    /** Required for GitHub review verdicts; tracker effects run without a lease. */
     lease_id: text("lease_id")
-      .notNull()
       .references(() => task_leases.id, { onDelete: "restrict", onUpdate: "cascade" }),
     kind: text("kind").notNull(),
     provider: text("provider").notNull(),
@@ -23,6 +23,8 @@ export const workflow_effects = pgTable(
     request_payload: jsonb("request_payload").$type<Record<string, unknown>>().notNull(),
     state: text("state").notNull().default("pending"),
     attempt_count: integer("attempt_count").notNull().default(0),
+    /** Reconciliation lookups that found no marker. */
+    lookup_count: integer("lookup_count").notNull().default(0),
     max_attempts: integer("max_attempts").notNull().default(3),
     processing_token: text("processing_token"),
     processing_started_at: timestamp("processing_started_at", { mode: "string", withTimezone: true }),
@@ -52,8 +54,9 @@ export const workflow_effects = pgTable(
       .where(sql`${table.state} = 'succeeded' OR (${table.state} = 'failed' AND ${table.attempt_count} >= ${table.max_attempts}) OR ${table.quarantined_at} IS NOT NULL`),
     task_idx: index("workflow_effects_room_task_idx").on(table.room_id, table.task_id),
     state_check: check("workflow_effects_state_check", sql`${table.state} IN ('pending', 'succeeded', 'failed', 'ambiguous')`),
-    kind_check: check("workflow_effects_kind_check", sql`${table.kind} IN ('github_review_verdict')`),
-    provider_check: check("workflow_effects_provider_check", sql`${table.provider} IN ('github')`),
+    kind_check: check("workflow_effects_kind_check", sql`${table.kind} IN ('github_review_verdict', 'tracker_transition', 'tracker_comment')`),
+    provider_check: check("workflow_effects_provider_check", sql`${table.provider} IN ('github', 'jira', 'linear')`),
+    kind_provider_check: check("workflow_effects_kind_provider_check", sql`(${table.kind} = 'github_review_verdict' AND ${table.provider} = 'github' AND ${table.lease_id} IS NOT NULL) OR (${table.kind} IN ('tracker_transition', 'tracker_comment') AND ${table.provider} IN ('jira', 'linear'))`),
     attempt_count_check: check("workflow_effects_attempt_count_check", sql`${table.attempt_count} >= 0 AND ${table.attempt_count} <= ${table.max_attempts}`),
     max_attempts_check: check("workflow_effects_max_attempts_check", sql`${table.max_attempts} > 0`),
     processing_coupling_check: check("workflow_effects_processing_coupling_check", sql`(${table.processing_token} IS NULL) = (${table.processing_started_at} IS NULL)`),
