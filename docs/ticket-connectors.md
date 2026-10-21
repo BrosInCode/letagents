@@ -261,6 +261,152 @@ node --import tsx --test src/api/__tests__/tracker-webhooks.test.ts src/api/__te
 TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-sync-db.test.ts
 ```
 
+## My work
+
+**My work** is one page for "what is up with my tickets". It lists, across
+your rooms, every card that is your work, newest change first, with its ticket
+state, its agent work and its pull request in one row.
+
+### Which cards are listed
+
+1. A card bound to a synced ticket is listed when the ticket's assignee is
+   your tracker user. LetAgents compares the ticket's assignee with the
+   `tracker_user_id` of your own connection to the same tracker site, so a
+   ticket imported through a teammate's connection still counts. A ticket
+   assigned to the same id on another site does not.
+2. A card bound to no ticket (a native card) is listed when it is assigned to
+   your GitHub login, or to an agent you own (an agent whose room session you
+   started).
+3. A card bound to a ticket counts only through the ticket. Assigning it to
+   yourself on the board does not add it.
+4. Finished cards leave the list: a card whose work state is done, merged or
+   cancelled is listed only while its ticket is still open in the tracker.
+
+The rooms are the rooms of your room list (`/account/rooms`, at most 100 rooms
+and their focus rooms). Archived rooms are not read. Before a room's cards are
+shown, the server checks that you may still read the room (the cached access
+decision that room notifications use); a private Git Room you lost access to is
+left out.
+
+### What each row shows
+
+| Column | Content |
+|---|---|
+| Ticket | The tracker chip and key (or the card id), the title, and the room. |
+| Ticket state | The tracker's state (To do, In progress, In review, Done). |
+| Agent work | The card's work state, the assigned agent, and its last status line. The number of room messages that name the ticket, and when the newest was sent. |
+| PR | The card's pull request: number and state, review summary, check summary. |
+
+Select a row to open the **ticket detail** under it, in three columns:
+**Ticket** (tracker status, assignee, a link to the ticket), **Agent work**
+(work state, owner, last seen, the agent's status line, **Open card**, and the
+card's linked threads, the same list as the board's card details) and **PR**
+(every pull request on the card, with links to GitHub). Selecting a thread
+opens it in its room.
+
+### Needs me
+
+A row with a dot needs you. In this part the flag uses only signals that
+already exist:
+
+1. **Your review is requested**: the newest GitHub event about you on one of
+   the card's open pull requests is a review request. A review you submitted
+   later, or a removed request, clears it. A new request sets it again.
+2. **A request waits for you**: an open room request (a Needs-you record that
+   nobody answered, closed or archived) names the card's key or card id, in
+   any case, or was asked from a message that names the card's ticket. A
+   request is not addressed to one person, so in a room with several people
+   it shows for each of them.
+3. **Ticket is done, PR still open**: the tracker says the ticket is done
+   while one of the card's pull requests is open or a draft.
+
+The **Needs me** filter lists only such rows. Jev-based "needs me" is a later
+part of this feature.
+
+### Filters
+
+- **Tracker**: Jira, Linear, or **Not from a tracker** (cards that sync did
+  not bind to a ticket, including cards with a typed key). Shown only when you
+  have a tracker connection.
+- **Room**: one room.
+- **Needs me**: rows that need you.
+
+### Without a tracker connection
+
+With no tracker connection, the page lists the native cards assigned to you
+or your agents. The **Ticket state** column and the tracker filter are hidden,
+and the page says where to connect a tracker. The server never reads tracker
+data for such an account.
+
+### Room search
+
+Type a ticket key in a room's search (`HT-1234`, `jira:HT-1234` or
+`linear:ENG-12`, in any case). When a card in the room holds that key, the
+search bar shows **Open HT-1234**, and Enter opens the card on the board. A
+bare key matches a card of either tracker.
+
+### How the page stays current
+
+The page re-reads its cards when a card changes or is removed in one of your
+rooms, or when a pull request or review event, or a finished check run,
+arrives there. The
+server's account activity stream (`/account/activity/stream`, the stream the
+sidebar already uses) now carries `tasks_changed_at` per room: on
+`task:updated`, `task:removed` or such a GitHub event the server stamps the
+room with no database read and sends the room's frame. The page then reads
+again: 3 seconds after its previous read when the changed room holds a card on
+the page, else 30 seconds after it. It reads only while it is open (it reads
+everything when it opens), and once after a dropped stream reopens. The
+desktop app keeps these stamps apart from the sidebar's room activity, so a
+card change does not redraw the sidebar. The page does
+not poll. A new or answered room request does not stamp the room, so its
+**Needs me** flag shows on the next read or **Refresh**.
+
+### HTTP route
+
+`GET /account/my-work` needs the desktop app's session or an owner token.
+
+| Query | Meaning |
+|---|---|
+| `limit` | Cards per page, 1 to 100 (default 50). |
+| `cursor` | The `next_cursor` of the previous page. |
+| `tracker` | `jira`, `linear` or `native`. |
+| `room` | One room id. |
+| `needs_me` | `true` lists only rows that need you. |
+
+A request reads at most 500 candidate cards. With `needs_me` a page can come
+back short, or empty, with a `next_cursor`: the next page continues after the
+last card read.
+
+The answer is `{ cards, next_cursor, has_connections, providers }`. Each card
+has `task_id`, `room_id`, `room_name`, `title`, `external_ref`, `key`,
+`provider`, `ticket_state`, `ticket_status`, `ticket_url`,
+`ticket_assignee_label`, `work_state`, `assigned_via` (`tracker` or `native`),
+`agent` (label, display name, presence status, `status_text`, last heartbeat),
+`threads` (`count`, `last_activity_at`), `pull_requests` (URL, number, title,
+state, draft, merged, `review_summary`, `check_summary`), `needs_me`,
+`needs_me_reasons` and `updated_at`. Pages are ordered by the card's
+`updated_at`, newest first; the cursor keeps the database's full precision.
+
+Each page costs a bounded set of queries: one for the cards (through the
+partial indexes of migration `0124_my_work_task_indexes`, which hold a room's
+unfinished cards and its finished cards whose ticket is still open, so the
+done cards of a busy board are never read), then, for the page's
+cards and rooms only, agent presence, linked-thread counts, the board's PR
+status (`getTasksGitHubArtifactStatus`, narrowed to the page's cards, a few
+rooms at a time), the newest 500
+review events about you, and the newest 500 open room requests. Each card's PR
+status and each room's review events and requests are read once per request,
+however many batches it reads.
+
+### Tests
+
+```bash
+node --import tsx --test src/api/__tests__/my-work-routes.test.ts src/api/__tests__/account-activity-hub.test.ts
+TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/my-work-db.test.ts
+cd apps/desktop && HOME=<scratch folder> node --import tsx --test renderer/__tests__/my-work.test.ts
+```
+
 ## Connections and providers
 
 An account connects Jira or Linear once, in the desktop app under

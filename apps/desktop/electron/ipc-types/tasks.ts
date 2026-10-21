@@ -69,6 +69,17 @@ export interface DesktopTaskTicket {
   syncedAt: string;
 }
 
+/** A My work read: one page, optionally narrowed by tracker, room, or "needs me". */
+export interface DesktopMyWorkQuery {
+  cursor?: string | null;
+  limit?: number;
+  /** `native` lists cards that name no ticket. */
+  tracker?: "jira" | "linear" | "native" | null;
+  /** The server's room id. */
+  roomId?: string | null;
+  needsMe?: boolean;
+}
+
 /** A room ticket filter to save or test. */
 export interface DesktopTrackerFilterInput {
   connectionId: string;

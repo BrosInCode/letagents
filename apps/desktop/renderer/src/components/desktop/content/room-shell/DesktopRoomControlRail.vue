@@ -48,12 +48,13 @@
               type="search"
               placeholder="Search messages"
               data-testid="desktop-room-search-input"
-              @keydown.enter.prevent="emit('moveSearch', 1)"
+              @keydown.enter.prevent="ticketMatch ? emit('openTicketCard', ticketMatch.taskId) : emit('moveSearch', 1)"
               @keydown.escape.prevent="emit('closeSearch')"
             >
           </label>
           <span>{{ searchSummary }}</span>
           <div>
+            <button v-if="ticketMatch" type="button" data-testid="desktop-room-search-open-ticket" @click="emit('openTicketCard', ticketMatch.taskId)">Open {{ ticketMatch.key }}</button>
             <button type="button" :disabled="!searchResultsCount" @click="emit('moveSearch', -1)">Previous</button>
             <button type="button" :disabled="!searchResultsCount" @click="emit('moveSearch', 1)">Next</button>
             <button type="button" @click="emit('closeSearch')">Close</button>
@@ -113,6 +114,8 @@ const props = defineProps<{
   storageFeedback?: { message: string; error: boolean } | null;
   searchSummary: string;
   searchResultsCount: number;
+  /** The card the search names by its ticket key; Enter opens it. */
+  ticketMatch?: { taskId: string; key: string } | null;
 }>();
 
 const emit = defineEmits<{
@@ -132,6 +135,7 @@ const emit = defineEmits<{
   /** A match from the room's history was chosen: bring it into view. */
   showSearchResult: [messageId: string];
   closeSearch: [];
+  openTicketCard: [taskId: string];
   closeActionPanel: [];
 }>();
 

@@ -448,6 +448,10 @@ jobs:
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/tracker-sync-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts src/api/__tests__/tracker-rules-db.test.ts
 
+      - name: Test My work
+        if: matrix.group == 2
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/my-work-routes.test.ts src/api/__tests__/my-work-db.test.ts
+
       - name: Test agent wake rules and room resource invalidation
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
