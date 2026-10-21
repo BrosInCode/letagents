@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
 import { db } from "../client.js";
-import { board_intents, board_manager_assignments, room_agent_sessions } from "../schema.js";
+import { board_intents, board_manager_assignments, room_agent_sessions, tracker_rule_runs, workflow_effects } from "../schema.js";
 import { toBoardIntent, toBoardManagerAssignment, toCoordinationEvent } from "../mappers.js";
 import type {
   BoardGovernanceAuditEntry,
@@ -29,6 +29,17 @@ import {
   shouldRequireBoardIntent,
 } from "./board-intents.js";
 import { coordination_events } from "../schema.js";
+
+/** Fixed audit text for a rule run's reason code. Provider error text stays in the journal. */
+const TRACKER_RULE_RUN_DETAIL_TEXT: Record<string, string> = {
+  untrusted_actor: "Skipped: the pull request's author or the reviewer has no write access to the repository.",
+  debounced: "Skipped: this rule already ran for this ticket and event in the last 10 minutes.",
+  owner_not_admin: "Skipped: the connection's owner is no longer an admin of this room.",
+  reservation_failed: "Not written: the connection was removed or changed.",
+  connection_unavailable: "Not written: the room no longer imports with this connection.",
+  journal_row_missing: "Not written: the journal row for this write is gone.",
+  stalled: "Stopped: the tracker could not confirm a write within 7 days. Check the ticket.",
+};
 
 const BOARD_GOVERNANCE_AUDIT_EVENT_TYPES = [
   "board_manager_assigned",
@@ -68,7 +79,7 @@ export async function listBoardGovernanceAudit(
   roomId: string,
   limit = 50
 ): Promise<BoardGovernanceAuditEntry[]> {
-  const [coordinationRows, assignmentRows, intentRows] = await Promise.all([
+  const [coordinationRows, assignmentRows, intentRows, ruleRunRows] = await Promise.all([
     db
       .select()
       .from(coordination_events)
@@ -97,6 +108,13 @@ export async function listBoardGovernanceAudit(
       )
       .orderBy(desc(board_intents.decided_at))
       .limit(limit) as Promise<BoardIntentRow[]>,
+    // Ticket connectors PR5: what each tracker rule did in this room.
+    db
+      .select()
+      .from(tracker_rule_runs)
+      .where(eq(tracker_rule_runs.room_id, roomId))
+      .orderBy(desc(tracker_rule_runs.created_at))
+      .limit(limit),
   ]);
 
   const entries: BoardGovernanceAuditEntry[] = [];
@@ -172,6 +190,49 @@ export async function listBoardGovernanceAudit(
         action_type: intent.action_type,
         task_id: intent.task_id,
         proposer_actor_label: intent.proposer_actor_label,
+      },
+    });
+  }
+
+  // A run's outcome follows its journal rows, which the sweep keeps settling
+  // after the run was recorded.
+  const effectIds = [...new Set(ruleRunRows.flatMap((run) => Array.isArray(run.effect_ids) ? run.effect_ids : []))];
+  const effectStates = new Map(
+    (effectIds.length === 0 ? [] : await db
+      .select({ id: workflow_effects.id, state: workflow_effects.state, quarantined_at: workflow_effects.quarantined_at })
+      .from(workflow_effects)
+      .where(inArray(workflow_effects.id, effectIds)))
+      .map((effect) => [effect.id, effect]),
+  );
+  // A pending run shows its current journal row: a write the sweep is still
+  // retrying reads "failed" until it succeeds or runs out of attempts.
+  const ruleRunOutcome = (run: (typeof ruleRunRows)[number]): string => {
+    const ids = Array.isArray(run.effect_ids) ? run.effect_ids : [];
+    const last = ids.length ? effectStates.get(ids[ids.length - 1]!) : undefined;
+    if (run.outcome !== "pending" || !last) return run.outcome;
+    return last.quarantined_at ? "quarantined" : last.state === "failed" ? "failed" : "pending";
+  };
+
+  for (const run of ruleRunRows) {
+    const outcome = ruleRunOutcome(run);
+    entries.push({
+      id: run.id,
+      kind: "tracker_rule_run",
+      event_type: "tracker_rule_run",
+      actor_label: `Rule: ${run.rule_name}`,
+      reason: TRACKER_RULE_RUN_DETAIL_TEXT[run.detail ?? ""] ?? null,
+      created_at: run.created_at,
+      metadata: {
+        rule_id: run.rule_id,
+        rule_name: run.rule_name,
+        rule_version: run.rule_version,
+        task_id: run.task_id,
+        external_ref: run.external_ref,
+        event_type: run.event_type,
+        event_action: run.event_action,
+        event_url: run.event_url,
+        outcome,
+        effect_ids: run.effect_ids,
       },
     });
   }

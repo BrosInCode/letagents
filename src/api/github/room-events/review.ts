@@ -59,6 +59,7 @@ export function materializePullRequestReviewEvent(
       body: payload.review.body ?? null,
       dismissed_by_login: action === "dismissed" ? actorLogin : null,
       pull_request_author_login: pullRequest.authorLogin ?? null,
+      ...(payload.review.author_association ? { reviewer_association: payload.review.author_association } : {}),
       head_ref: headRef,
       head_sha: headSha,
     },
@@ -71,6 +72,7 @@ export function materializePullRequestReviewEvent(
         state: reviewState,
         url: payload.review.html_url,
         body: payload.review.body,
+        ...(payload.review.author_association ? { authorAssociation: payload.review.author_association } : {}),
       },
     },
   };
