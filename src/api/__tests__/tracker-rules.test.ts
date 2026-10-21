@@ -11,7 +11,14 @@ import type { RepoRoomEvent } from "../repo-workflow.js";
 
 // The engine module holds the default database wiring; nothing here connects.
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { createTrackerRuleEngine, trackerRuleEffectKey, trackerRuleFacts } = await import("../connectors/rules/engine.js");
+const {
+  createTrackerRuleEngine,
+  repoEventIsTrusted,
+  repositoryPullRequestUrl,
+  trackerRuleEffectKey,
+  trackerRuleFacts,
+  trackerRuleTemplateValues,
+} = await import("../connectors/rules/engine.js");
 
 const opened: TrackerRuleEventFacts = { event: "pull_request", action: "opened", merged: false, draft: false, baseBranch: "main" };
 const merged: TrackerRuleEventFacts = { event: "pull_request", action: "closed", merged: true, draft: false, baseBranch: "main" };
@@ -134,7 +141,9 @@ test("template values are inserted as plain text", () => {
   const linear = renderTrackerRuleTemplate(template, values, "linear");
   assert.ok(linear.includes("Fix \\[the link\\]\\(https\\:"), linear);
   assert.ok(linear.includes("\\*\\*now\\*\\*"));
-  assert.ok(linear.includes("@​channel"), "no Linear mention from a PR title");
+  assert.ok(linear.includes("@\u200bchannel"), "no Linear mention from a PR title");
+  assert.equal(renderTrackerRuleTemplate("{{author}}", { author: "a\u202eb\u0085c" }, "jira"), "a b c", "bidi overrides and C1 controls go");
+  assert.equal(renderTrackerRuleTemplate("{{author}}", { author: "\u{1F600}".repeat(400) }, "jira"), `${"\u{1F600}".repeat(299)}…`);
   assert.ok(linear.includes("(https://github.com/acme/app/pull/7)"), "the template's own text and the URL stay as written");
   assert.equal(renderTrackerRuleTemplate("{{pr_url}}", { pr_url: "javascript:alert(1)" }, "linear"), "");
   assert.equal(renderTrackerRuleTemplate("{{pr_url}}", { pr_url: "http://github.com/x" }, "jira"), "");
@@ -149,7 +158,9 @@ const pullRequestOpened = {
   action: "opened",
   repositoryFullName: "acme/app",
   senderLogin: "kai",
-  pullRequest: { number: 91, title: "Fix", url: "https://github.com/acme/app/pull/91", headRef: "HT-1234-x", authorLogin: "kai" },
+  pullRequest: {
+    number: 91, title: "Fix", url: "https://github.com/acme/app/pull/91", headRef: "HT-1234-x", authorLogin: "kai", authorAssociation: "MEMBER",
+  },
 } as RepoRoomEvent;
 
 test("facts come from the event and the stored row", () => {
@@ -159,8 +170,9 @@ test("facts come from the event and the stored row", () => {
   assert.equal(trackerRuleFacts({ ...pullRequestOpened, kind: "push" } as unknown as RepoRoomEvent, { event_type: "push" }, null), null);
 });
 
-function engineHarness(rules: LoadedTrackerRule[]) {
+function engineHarness(rules: LoadedTrackerRule[], bound = true) {
   const submitted: string[] = [];
+  const driven: string[] = [];
   const deps: TrackerRuleEngineDeps = {
     store: {
       forRoom: async () => rules,
@@ -169,17 +181,24 @@ function engineHarness(rules: LoadedTrackerRule[]) {
     },
     roomScope: async () => ({ sources: [{ filter_id: "f", connection_id: "tcon_1", provider: "jira", filter: "project = HT" }], linearTeamKeys: [] }),
     roomConnection: async () => ({ connection_id: "tcon_1", account_id: "acct_1", provider: "jira" }),
+    ticketBound: async () => bound,
     countApprovals: async () => 0,
-    submit: async (input) => {
+    reserve: async (input) => {
       submitted.push(input.idempotency_key);
-      return { id: `effect_${submitted.length}`, state: "succeeded", quarantined_at: null } as WorkflowEffectLike;
+      const effect = { id: `effect_${submitted.length}`, state: "pending", quarantined_at: null } as WorkflowEffectLike;
+      return { effect, claimed: true, processing_token: "t" };
     },
+    drive: async (reserved) => {
+      driven.push(reserved.effect.id);
+      return { ...reserved.effect, state: "succeeded" };
+    },
+    getEffect: async (id) => ({ id, state: "succeeded", quarantined_at: null }) as WorkflowEffectLike,
     schedule: (work) => { pending.push(work()); },
   };
   const pending: Array<Promise<void>> = [];
-  return { engine: createTrackerRuleEngine(deps), submitted, settle: () => Promise.all(pending) };
+  return { engine: createTrackerRuleEngine(deps), submitted, driven, settle: () => Promise.all(pending) };
 }
-type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["submit"]>>;
+type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["drive"]>>;
 
 const loadedRule: LoadedTrackerRule = {
   id: "trule_1", connection_id: "tcon_1", room_id: null, name: "Opened", enabled: true, version: 1,
@@ -199,6 +218,7 @@ test("the engine reserves one effect per action with the rule, delivery and acti
   await harness.settle();
   assert.deepEqual(result.runs, ["run_1"]);
   assert.deepEqual(harness.submitted, [trackerRuleEffectKey("trule_1", "d-1", 0), trackerRuleEffectKey("trule_1", "d-1", 1)]);
+  assert.deepEqual(harness.driven, ["effect_1", "effect_2"]);
   assert.equal(trackerRuleEffectKey("trule_1", "d-1", 1), "trule_1:d-1:1");
 });
 
@@ -216,5 +236,51 @@ test("the engine skips cards without a tracker ref and tracker sync events", asy
     ...input, task: { ...input.task, external_ref: "jira:HT-1" }, storedEvent: { event_type: "tracker_ticket" },
   })).runs, []);
   await harness.settle();
+  assert.deepEqual(harness.submitted, []);
+});
+
+test("only people with access to the repository fire rules", () => {
+  const stored = { event_type: "pull_request" };
+  const base = (pullRequestOpened as { pullRequest: Record<string, unknown> }).pullRequest;
+  const outsider = { ...pullRequestOpened, pullRequest: { ...base, authorAssociation: "NONE" } } as RepoRoomEvent;
+  assert.equal(repoEventIsTrusted(pullRequestOpened, stored), true);
+  assert.equal(repoEventIsTrusted(outsider, stored), false);
+  const mergedOutsider = { ...outsider, action: "closed", pullRequest: { ...base, authorAssociation: "NONE", merged: true } } as RepoRoomEvent;
+  assert.equal(repoEventIsTrusted(mergedOutsider, stored), true, "a merge needs write access");
+  const review = (association: string) => ({
+    provider: "github", kind: "pull_request_review", action: "submitted", repositoryFullName: "acme/app",
+    pullRequest: base,
+    review: { id: "1", state: "approved", url: "u", authorAssociation: association },
+  }) as unknown as RepoRoomEvent;
+  assert.equal(repoEventIsTrusted(review("COLLABORATOR"), stored), true);
+  assert.equal(repoEventIsTrusted(review("CONTRIBUTOR"), stored), false);
+  const check = { provider: "github", kind: "check_run", action: "completed", repositoryFullName: "acme/app",
+    checkRun: { id: "1", name: "ci", status: "completed", conclusion: "failure", url: "u" } } as RepoRoomEvent;
+  assert.equal(repoEventIsTrusted(check, { event_type: "check_run", metadata: { same_repo_pull_request_count: 1 } }), true);
+  assert.equal(repoEventIsTrusted(check, { event_type: "check_run", metadata: { same_repo_pull_request_count: 0 } }), false, "a fork's branch");
+});
+
+test("pr_url is only ever the event repository's pull request URL", () => {
+  assert.equal(repositoryPullRequestUrl("https://github.com/acme/app/pull/7", "acme/app"), "https://github.com/acme/app/pull/7");
+  assert.equal(repositoryPullRequestUrl("https://github.com/other/app/pull/7", "acme/app"), null);
+  assert.equal(repositoryPullRequestUrl("https://x/a)![t](https://evil/p.png", "acme/app"), null);
+  assert.equal(repositoryPullRequestUrl("https://github.com/acme/app/pull/7)", "acme/app"), null);
+  const check = { provider: "github", kind: "check_run", action: "completed", repositoryFullName: "acme/app",
+    checkRun: { id: "1", name: "ci", status: "completed", conclusion: "failure", url: "u" } } as RepoRoomEvent;
+  const values = trackerRuleTemplateValues(check, { event_type: "check_run" },
+    { id: "t", room_id: "r", external_ref: null, pr_url: "https://x/a)![t](https://evil/p.png" });
+  assert.equal(values.pr_url, null);
+});
+
+test("a card that sync never bound to the ticket runs no rule", async () => {
+  const harness = engineHarness([loadedRule], false);
+  const result = await harness.engine.runForRepoEvent({
+    deliveryId: "d-3",
+    storedEvent: { event_type: "pull_request", base_ref: "main" },
+    eventRoomId: "room",
+    roomEvent: pullRequestOpened,
+    task: { id: "task_1", room_id: "room", external_ref: "jira:HR-17", pr_url: null },
+  });
+  assert.deepEqual(result.runs, []);
   assert.deepEqual(harness.submitted, []);
 });

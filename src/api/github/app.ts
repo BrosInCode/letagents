@@ -68,6 +68,8 @@ export interface GitHubWebhookPullRequest {
     login: string;
     id?: number;
   };
+  /** OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE, ... */
+  author_association?: string | null;
   merged_by?: {
     login: string;
   } | null;
@@ -174,6 +176,7 @@ export interface GitHubWebhookPayload {
     submitted_at?: string | null;
     updated_at?: string | null;
     user?: { login: string; id?: number };
+    author_association?: string | null;
   };
   requested_reviewer?: { login: string; id?: number };
   requested_team?: { slug: string; name?: string };
@@ -188,6 +191,8 @@ export interface GitHubWebhookPayload {
     started_at?: string | null;
     completed_at?: string | null;
     app?: { name: string };
+    /** Pull requests whose head is in this repository; empty for a fork's branch. */
+    pull_requests?: Array<{ number?: number }> | null;
     check_suite?: {
       id?: number | string;
       head_branch?: string | null;

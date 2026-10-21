@@ -32,7 +32,7 @@ export interface WorkflowEffectExecutor {
   lookup(effect: WorkflowEffect): Promise<WorkflowEffectLookupResult>;
 }
 
-interface ReserveResult {
+export interface ReserveResult {
   effect: WorkflowEffect;
   claimed: boolean;
   processing_token: string | null;
@@ -312,6 +312,15 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
      * or Linear write goes through here (ticket connectors invariant 3).
      */
     async submitTrackerEffect(input: SubmitTrackerEffectInput): Promise<WorkflowEffect> {
+      return drive(await this.reserveTrackerEffect(input));
+    },
+
+    /**
+     * Reserve only: the journal row exists before the caller answers its own
+     * request, and `driveTrackerEffect` runs it later. A crash in between
+     * leaves a pending row that the sweep reconciles, not a lost write.
+     */
+    async reserveTrackerEffect(input: SubmitTrackerEffectInput): Promise<ReserveResult> {
       if (!store.reserveTracker) throw new Error("This workflow effect store cannot reserve tracker effects.");
       const key = input.key.trim().toUpperCase();
       const requestPayload: Record<string, unknown> = input.action.kind === "tracker_transition"
@@ -335,7 +344,16 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
         quarantine_reason: quarantine,
         now: nowFn(),
       });
+      return reserved;
+    },
+
+    /** Runs a reservation from `reserveTrackerEffect` once; an earlier claim makes this a read. */
+    driveTrackerEffect(reserved: ReserveResult): Promise<WorkflowEffect> {
       return drive(reserved);
+    },
+
+    getEffect(id: string): Promise<WorkflowEffect | null> {
+      return store.get(id);
     },
 
     async reconcile(effect: WorkflowEffect): Promise<WorkflowEffect> {

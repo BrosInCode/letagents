@@ -16,8 +16,18 @@ const MARKDOWN_SPECIAL = /[\\`*_{}[\]()#+\-.!|<>~=:]/g;
  * become spaces, and it is cut to a bounded length.
  */
 function plainValue(value: string, max: number): string {
-  const flat = value.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  // C0 and C1 controls, line and paragraph separators, and bidi overrides.
+  const flat = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cut(flat, max);
+}
+
+/** Cut by code points, so a surrogate pair is never split. */
+function cut(text: string, max: number): string {
+  const points = Array.from(text);
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
 }
 
 /** Only an https URL is inserted as a URL; anything else becomes empty. */
@@ -55,5 +65,7 @@ export function renderTrackerRuleTemplate(
     if (URL_VARIABLES.has(name)) return urlValue(text);
     return escapeForProvider(provider, plainValue(text, VALUE_MAX_LENGTH));
   });
-  return rendered.length > TRACKER_COMMENT_MAX_LENGTH ? rendered.slice(0, TRACKER_COMMENT_MAX_LENGTH) : rendered;
+  if (rendered.length <= TRACKER_COMMENT_MAX_LENGTH) return rendered;
+  // Never end on half an escape ("\\") or half a surrogate pair.
+  return Array.from(rendered.slice(0, TRACKER_COMMENT_MAX_LENGTH - 1)).join("").replace(/(?<!\\)\\$/, "").replace(/[\ud800-\udbff]$/, "");
 }

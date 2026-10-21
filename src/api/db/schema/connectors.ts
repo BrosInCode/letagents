@@ -228,6 +228,7 @@ export const tracker_rule_runs = pgTable(
   (table) => ({
     rule_delivery_unique: uniqueIndex("tracker_rule_runs_rule_delivery_uq").on(table.rule_id, table.delivery_id),
     room_created_idx: index("tracker_rule_runs_room_created_idx").on(table.room_id, table.created_at),
+    debounce_idx: index("tracker_rule_runs_debounce_idx").on(table.rule_id, table.external_ref, table.created_at),
     outcome_check: check(
       "tracker_rule_runs_outcome_check",
       sql`${table.outcome} IN ('pending', 'succeeded', 'failed', 'quarantined', 'error')`,

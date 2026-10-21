@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import type {
   TrackerRuleAction,
@@ -28,6 +28,9 @@ export interface LoadedTrackerRule {
   trigger: TrackerRuleTrigger;
   actions: TrackerRuleAction[];
 }
+
+/** A rule runs at most once per ticket and event type and action in this window. */
+export const TRACKER_RULE_RUN_DEBOUNCE_MS = 10 * 60_000;
 
 export function newTrackerRuleId(): string {
   return `trule_${randomUUID()}`;
@@ -215,10 +218,28 @@ export const trackerRuleStore = {
    * Records that a rule matched one delivery. Unique per rule and delivery:
    * the first room to record it owns the run; `claimed` is false when another
    * room did. A retry of the same delivery in the same room gets its earlier
-   * row back, with the actions it planned then.
+   * row back, with the actions it planned then. A rule runs at most once per
+   * ticket and event (type and action) in `TRACKER_RULE_RUN_DEBOUNCE_MS`, so a
+   * burst of check runs or a close-and-reopen loop writes once.
    */
-  async claimRun(input: Omit<TrackerRuleRunRow, "id" | "effect_ids" | "outcome" | "detail" | "created_at" | "updated_at">): Promise<{ run: TrackerRuleRunRow; claimed: boolean }> {
-    const at = new Date().toISOString();
+  async claimRun(
+    input: Omit<TrackerRuleRunRow, "id" | "effect_ids" | "outcome" | "detail" | "created_at" | "updated_at">,
+    now = new Date(),
+  ): Promise<{ run: TrackerRuleRunRow | null; claimed: boolean }> {
+    const sameDelivery = and(eq(tracker_rule_runs.rule_id, input.rule_id!), eq(tracker_rule_runs.delivery_id, input.delivery_id));
+    const [earlier] = await db.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
+    if (earlier) return { run: earlier, claimed: earlier.room_id === input.room_id && earlier.task_id === input.task_id };
+    const [recent] = await db.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
+      .where(and(
+        eq(tracker_rule_runs.rule_id, input.rule_id!),
+        eq(tracker_rule_runs.external_ref, input.external_ref),
+        eq(tracker_rule_runs.event_type, input.event_type),
+        eq(tracker_rule_runs.event_action, input.event_action),
+        gt(tracker_rule_runs.created_at, new Date(now.getTime() - TRACKER_RULE_RUN_DEBOUNCE_MS).toISOString()),
+      ))
+      .limit(1);
+    if (recent) return { run: null, claimed: false };
+    const at = now.toISOString();
     const [inserted] = await db.insert(tracker_rule_runs).values({
       ...input,
       id: `trun_${randomUUID()}`,
@@ -229,9 +250,8 @@ export const trackerRuleStore = {
       updated_at: at,
     }).onConflictDoNothing({ target: [tracker_rule_runs.rule_id, tracker_rule_runs.delivery_id] }).returning();
     if (inserted) return { run: inserted, claimed: true };
-    const [existing] = await db.select().from(tracker_rule_runs)
-      .where(and(eq(tracker_rule_runs.rule_id, input.rule_id!), eq(tracker_rule_runs.delivery_id, input.delivery_id)))
-      .limit(1);
+    // A concurrent claim of the same delivery won.
+    const [existing] = await db.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
     if (!existing) throw new Error("The rule run conflict row could not be loaded.");
     return { run: existing, claimed: existing.room_id === input.room_id && existing.task_id === input.task_id };
   },

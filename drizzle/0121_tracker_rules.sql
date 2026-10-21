@@ -59,3 +59,5 @@ CREATE TABLE IF NOT EXISTS "tracker_rule_runs" (
 CREATE UNIQUE INDEX IF NOT EXISTS "tracker_rule_runs_rule_delivery_uq" ON "tracker_rule_runs" USING btree ("rule_id", "delivery_id");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "tracker_rule_runs_room_created_idx" ON "tracker_rule_runs" USING btree ("room_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "tracker_rule_runs_debounce_idx" ON "tracker_rule_runs" USING btree ("rule_id", "external_ref", "created_at");

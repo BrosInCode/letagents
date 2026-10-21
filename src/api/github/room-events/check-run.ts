@@ -49,6 +49,11 @@ export function materializeCheckRunEvent(
       suite_id: payload.check_run.check_suite?.id ?? null,
       head_branch: headRef,
       head_sha: headSha,
+      // GitHub lists only pull requests whose head is in this repository: a
+      // fork's branch has none.
+      ...(Array.isArray(payload.check_run.pull_requests)
+        ? { same_repo_pull_request_count: payload.check_run.pull_requests.length }
+        : {}),
     },
     roomEvent: {
       ...base,
