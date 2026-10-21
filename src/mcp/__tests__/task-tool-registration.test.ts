@@ -6,6 +6,7 @@ import {
   compactTaskForBoard,
   MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK,
   MAX_BOARD_WORKFLOW_REFS_PER_TASK,
+  taskMatchesBoardSearch,
 } from "../server/tools/tasks/board-tools.js";
 
 type ToolRegistration = {
@@ -147,4 +148,25 @@ test("task creation requires an explicit retry ID before mutation", async () => 
   const handler = tool.handler as (input: Record<string, unknown>) => Promise<any>;
   const result = await handler({ title: "Due dates", room_id: "room_1" });
   assert.match(result.content[0].text, /client_task_id is required/);
+});
+
+test("board search matches a card by its ticket key", () => {
+  const card = { id: "task_7", title: "Round proration", description: null, external_ref: "jira:HT-1234" };
+  assert.equal(taskMatchesBoardSearch(card, "HT-1234"), true);
+  assert.equal(taskMatchesBoardSearch(card, "ht-1234"), true);
+  assert.equal(taskMatchesBoardSearch(card, "jira:HT-1234"), true);
+  assert.equal(taskMatchesBoardSearch(card, "proration"), true);
+  assert.equal(taskMatchesBoardSearch(card, "HT-99"), false);
+  assert.equal(taskMatchesBoardSearch({ id: "task_8", title: "Native" }, "HT-1234"), false);
+});
+
+test("add_task, update_task and get_board accept the ticket fields", () => {
+  const tools = collectTaskToolRegistrations();
+  const schema = (name: string, field: string) =>
+    tools.find((registration) => registration.name === name)!.schema[field] as { safeParse(value: unknown): { success: boolean } };
+  assert.equal(schema("add_task", "external_ref").safeParse("jira:HT-1234").success, true);
+  assert.equal(schema("add_task", "external_ref").safeParse(undefined).success, true);
+  assert.equal(schema("update_task", "external_ref").safeParse(null).success, true);
+  assert.equal(schema("update_task", "external_ref").safeParse("x".repeat(65)).success, false);
+  assert.equal(schema("get_board", "search").safeParse("HT-1234").success, true);
 });

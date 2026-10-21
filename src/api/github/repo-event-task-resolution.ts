@@ -13,6 +13,15 @@ export interface RepoRoomEventTaskResolution {
   task: Task | undefined;
   matchedByTaskReference: boolean;
   matchedByWorkflowArtifact: boolean;
+  /** The card's `external_ref` names a ticket key found in the branch, PR title or PR body. */
+  matchedByTicketKey?: boolean;
+}
+
+/** The texts a ticket key may appear in. */
+export interface RepoEventTicketKeyInputs {
+  branchRef?: string | null;
+  title?: string | null;
+  body?: string | null;
 }
 
 export interface RepoRoomEventTaskResolverDeps {
@@ -26,6 +35,15 @@ export interface RepoRoomEventTaskResolverDeps {
     workflow: { prUrl?: string | null; branchRef?: string | null }
   ): Promise<Task | undefined>;
   getTaskById(projectId: string, taskId: string): Promise<Task | undefined>;
+  /**
+   * Finds the card whose `external_ref` names a key in the inputs. It must
+   * return undefined without running a detector when the room has no card
+   * with an external ref.
+   */
+  findTaskByTicketKeys?(
+    projectId: string,
+    inputs: RepoEventTicketKeyInputs
+  ): Promise<Task | undefined>;
 }
 
 export function emptyRepoRoomEventTaskResolution(): RepoRoomEventTaskResolution {
@@ -71,6 +89,29 @@ function taskIdsMatch(left: string | null | undefined, right: string): boolean {
 }
 
 export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverDeps) {
+  async function resolveTaskByTicketKeys(
+    project: { id: string },
+    inputs: RepoEventTicketKeyInputs,
+    referencedTaskId: string | null
+  ): Promise<RepoRoomEventTaskResolution | null> {
+    if (!deps.findTaskByTicketKeys) {
+      return null;
+    }
+
+    const task = await deps.findTaskByTicketKeys(project.id, inputs);
+    if (!task) {
+      return null;
+    }
+
+    // A key is an explicit link, like a PR URL on the card.
+    return {
+      task,
+      matchedByTaskReference: taskIdsMatch(referencedTaskId, task.id),
+      matchedByWorkflowArtifact: true,
+      matchedByTicketKey: true,
+    };
+  }
+
   async function resolveTaskByActiveWorkflowLease(
     project: { id: string },
     pullRequest: RepoPullRequestRef,
@@ -159,6 +200,11 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
         }
       }
 
+      const keyTask = await resolveTaskByTicketKeys(project, { branchRef }, referencedTaskId);
+      if (keyTask) {
+        return keyTask;
+      }
+
       if (!referencedTaskId) {
         return emptyRepoRoomEventTaskResolution();
       }
@@ -191,6 +237,15 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
       );
       if (leaseTask) {
         return leaseTask;
+      }
+
+      const keyTask = await resolveTaskByTicketKeys(project, {
+        branchRef: event.pullRequest.headRef,
+        title: event.pullRequest.title,
+        body: event.pullRequest.body,
+      }, referencedTaskId);
+      if (keyTask) {
+        return keyTask;
       }
 
       // PR/review prose can quote examples or tasks belonging to other rooms.
@@ -227,6 +282,15 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
       );
       if (leaseTask) {
         return leaseTask;
+      }
+
+      const keyTask = await resolveTaskByTicketKeys(project, {
+        branchRef: event.pullRequest.headRef,
+        title: event.pullRequest.title,
+        body: event.pullRequest.body,
+      }, referencedTaskId);
+      if (keyTask) {
+        return keyTask;
       }
 
       // PR/review prose can quote examples or tasks belonging to other rooms.

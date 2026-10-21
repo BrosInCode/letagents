@@ -10,8 +10,10 @@ import {
   findTaskBySourceMessageId,
   getOpenTasks,
   getTasks,
+  TaskExternalRefConflictError,
   updateTask,
 } from "../../../db.js";
+import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
 import { parseLimit, type AuthenticatedRequest } from "../../../http/helpers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
@@ -79,7 +81,7 @@ export function registerTaskListAndCreateRoutes(
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
 
-    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id, client_task_id } = requestBody as {
+    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id, client_task_id, external_ref } = requestBody as {
       title?: string;
       description?: string;
       created_by?: string;
@@ -88,6 +90,7 @@ export function registerTaskListAndCreateRoutes(
       actor_key?: string;
       actor_instance_id?: string;
       client_task_id?: string;
+      external_ref?: unknown;
     };
 
     const createdBy = workerIdentity?.actor_label ?? created_by ?? null;
@@ -103,9 +106,17 @@ export function registerTaskListAndCreateRoutes(
     const clientTaskId = requestedClientTaskId ? createHash("sha256")
       .update(JSON.stringify([effectiveActorKey ?? createdBy, requestedClientTaskId])).digest("hex") : null;
     const sourceMessageId = deps.normalizeOptionalString(source_message_id);
+    let externalRef: string | null = null;
+    if (external_ref !== undefined && external_ref !== null && external_ref !== "") {
+      externalRef = typeof external_ref === "string" ? normalizeExternalRef(external_ref) : null;
+      if (!externalRef) {
+        res.status(400).json({ error: "external_ref must be a ticket key such as jira:HT-1234 or linear:ENG-12." });
+        return;
+      }
+    }
     const replyToRetry = async (existingTask: Awaited<ReturnType<typeof createTask>>) => {
       if (existingTask.title !== title || existingTask.description !== (description ?? null)
-        || existingTask.source_message_id !== sourceMessageId) {
+        || existingTask.source_message_id !== sourceMessageId || existingTask.external_ref !== externalRef) {
         res.status(409).json({ error: "The creation ID was already used for a different task.", code: "task_creation_id_conflict" });
         return;
       }
@@ -153,9 +164,20 @@ export function registerTaskListAndCreateRoutes(
         createdBy,
         description,
         sourceMessageId ?? undefined,
-        { boardIntentApproval, clientTaskId }
+        { boardIntentApproval, clientTaskId, externalRef }
       );
     } catch (error) {
+      if (error instanceof TaskExternalRefConflictError) {
+        if (clientTaskId) {
+          const existingTask = await findTaskByClientId(project.id, clientTaskId);
+          if (existingTask) {
+            await replyToRetry(existingTask);
+            return;
+          }
+        }
+        res.status(409).json({ error: error.message, code: error.code, task_id: error.existingTaskId });
+        return;
+      }
       if (error instanceof BoardIntentApprovalConsumptionError) {
         await recordBoardIntentConsumptionFailure({
           roomId: project.id,

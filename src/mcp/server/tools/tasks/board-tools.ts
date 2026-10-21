@@ -14,7 +14,7 @@ import {
   taskActorPayload,
 } from "./context.js";
 import { jsonToolResponse, taskToolError } from "./response.js";
-import { boardIntentApprovalSchema, TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
+import { boardIntentApprovalSchema, externalRefSchema, TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
 
 export const MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK = 4;
 export const MAX_BOARD_WORKFLOW_REFS_PER_TASK = 4;
@@ -46,13 +46,31 @@ export function compactTaskForBoard(value: unknown): unknown {
   };
 }
 
+/**
+ * Case-insensitive match on the task ID, title, description, and ticket key.
+ * `HT-1234` matches a card with `external_ref` `jira:HT-1234`.
+ */
+export function taskMatchesBoardSearch(value: unknown, search: string): boolean {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const task = value as Record<string, unknown>;
+  const externalRef = typeof task.external_ref === "string" ? task.external_ref.toLowerCase() : "";
+  if (externalRef && (externalRef === query || externalRef.slice(externalRef.indexOf(":") + 1) === query)) {
+    return true;
+  }
+  return [task.id, task.title, task.description, task.external_ref]
+    .some((field) => typeof field === "string" && field.toLowerCase().includes(query));
+}
+
 export function registerTaskBoardTools(server: McpServer): void {
   server.tool(
     "add_task",
     "Add a new task to the room board. Tasks normally start as 'proposed' and must be " +
       "accepted before an agent can claim them. Agent-created tasks require coordinator " +
       "acceptance before they become claimable. Use this when a human or agent identifies " +
-      "work that needs to be done.",
+      "work that needs to be done. When the work has a tracker ticket, first call get_board with " +
+      "search set to the key: a room has at most one card per ticket.",
     {
       title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
       description: z.string().optional().describe("Longer description of what needs to be done"),
@@ -62,10 +80,13 @@ export function registerTaskBoardTools(server: McpServer): void {
         .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
       client_task_id: z.string().trim().min(1).describe("Unique ID for this intended task. Reuse it on every retry; use a different ID for a separate task with identical contents."),
       source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
+      external_ref: externalRefSchema
+        .optional()
+        .describe("Optional ticket the card names, e.g. 'jira:HT-1234' or 'linear:ENG-12'. A bare key means Jira."),
       ...workerTaskIdentitySchema,
       ...boardIntentApprovalSchema,
     },
-    async ({ title, description, created_by: _createdBy, source_message_id, client_task_id, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
+    async ({ title, description, created_by: _createdBy, source_message_id, client_task_id, external_ref, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
       const target = resolveTaskToolTarget(room_id);
       if (!target) return taskToolError("Not in a room. Join one first.");
 
@@ -78,6 +99,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         ...taskActorPayload(identity, agentSession),
         source_message_id,
         client_task_id,
+        ...(external_ref ? { external_ref } : {}),
         board_intent_id,
         board_approval_token,
       });
@@ -104,9 +126,14 @@ export function registerTaskBoardTools(server: McpServer): void {
     {
       status: z.enum(TASK_STATUSES).optional().describe("Filter by specific status"),
       open_only: z.boolean().optional().describe("If true (default), only show actionable tasks, including merged closeout work but not done/cancelled"),
+      search: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Only tasks whose ID, title, description or ticket key contains this text. 'HT-1234' finds the card with external_ref 'jira:HT-1234'."),
       room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     },
-    async ({ status, open_only, room_id }) => {
+    async ({ status, open_only, search, room_id }) => {
       const target = resolveTaskToolTarget(room_id);
       if (!target) return taskToolError("Not in a room. Join one first.");
 
@@ -125,7 +152,9 @@ export function registerTaskBoardTools(server: McpServer): void {
         const result = await listTasks(target, qs);
 
         const tasks = result.tasks ?? [];
-        allTasks.push(...tasks.map(compactTaskForBoard));
+        allTasks.push(...tasks
+          .filter((task) => !search || taskMatchesBoardSearch(task, search))
+          .map(compactTaskForBoard));
 
         if (!result.has_more || tasks.length === 0) break;
         const lastTask = tasks[tasks.length - 1];

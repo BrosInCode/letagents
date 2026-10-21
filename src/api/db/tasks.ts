@@ -6,6 +6,7 @@ import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { room_agent_sessions, task_leases, tasks } from "./schema.js";
 import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
+import { findTaskIdByExternalRef, isTaskExternalRefUniqueViolation, TaskExternalRefConflictError } from "./task-external-refs.js";
 import {
   approveBoardIntent,
   assertConsumeBoardIntentApproval,
@@ -96,7 +97,7 @@ async function insertTaskRow(
   description?: string,
   sourceMessageId?: string,
   executor: RoomSequenceExecutor = db,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
@@ -112,6 +113,7 @@ async function insertTaskRow(
     client_task_id: options?.clientTaskId ?? (options?.boardIntentApproval?.intent_id ? `board-intent:${options.boardIntentApproval.intent_id}` : null),
     pr_url: null,
     workflow_artifacts: [],
+    external_ref: options?.externalRef ?? null,
     created_at: now,
     updated_at: now,
   };
@@ -121,7 +123,7 @@ async function insertTaskRow(
   }
 
   task.number = await nextRoomScopedNumber("tasks", roomId, executor);
-  await executor.insert(tasks).values(task);
+  await withExternalRefConflict(roomId, task.external_ref, () => executor.insert(tasks).values(task));
 
   if (
     options?.boardIntentApproval?.action_type === "task_create"
@@ -171,7 +173,7 @@ export async function createTask(
   createdBy: string,
   description?: string,
   sourceMessageId?: string,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
   if (options?.boardIntentApproval) {
     return db.transaction((tx) =>
@@ -435,6 +437,18 @@ export async function findTaskByWorkflowArtifactMatches(
   return undefined;
 }
 
+/** Turns a unique-index violation on `(room_id, external_ref)` into a named conflict. */
+async function withExternalRefConflict<T>(roomId: string, externalRef: string | null | undefined, write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (externalRef && isTaskExternalRefUniqueViolation(error)) {
+      throw new TaskExternalRefConflictError(externalRef, await findTaskIdByExternalRef(roomId, externalRef).catch(() => null));
+    }
+    throw error;
+  }
+}
+
 export class TaskContentConflictError extends Error {
   readonly code = "task_content_conflict";
 
@@ -456,6 +470,7 @@ export async function updateTask(
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+    external_ref?: string | null;
   },
   options?: {
     boardIntentApproval?: BoardIntentConsumptionInput | null;
@@ -536,7 +551,7 @@ export async function updateTask(
 
   const writeTaskUpdate = async (executor: Pick<typeof db, "update">) => {
     // Omitted fields must not replay the earlier read over a concurrent write.
-    [writtenTask] = await executor
+    [writtenTask] = await withExternalRefConflict(roomId, updates.external_ref ?? null, () => executor
       .update(tasks)
       .set({
         title: updates.title,
@@ -547,6 +562,10 @@ export async function updateTask(
           ? assignment.assignee_agent_key : updates.assignee_agent_key,
         pr_url: updates.pr_url,
         workflow_artifacts: writesWorkflow ? newWorkflowArtifacts : undefined,
+        external_ref: updates.external_ref,
+        // A new ticket's state comes from its tracker, never from the old one.
+        ticket_state: updates.external_ref !== undefined && updates.external_ref !== task.external_ref ? null : undefined,
+        external_item_id: updates.external_ref !== undefined && updates.external_ref !== task.external_ref ? null : undefined,
         updated_at: now,
       })
       .where(and(
@@ -555,7 +574,7 @@ export async function updateTask(
         expectedContent?.description === undefined ? undefined
           : sql`coalesce(${tasks.description}, '') = ${expectedContent.description}`,
       ))
-      .returning();
+      .returning());
     if (!writtenTask && expectedContent) throw new TaskContentConflictError();
   };
 

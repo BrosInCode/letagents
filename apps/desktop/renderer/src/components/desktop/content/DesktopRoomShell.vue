@@ -163,6 +163,7 @@
         @update:selected-task-id="boardSelectedTaskId = $event"
         @view-events="openEventsForTask"
         @view-artifacts="openArtifactsForTask"
+        @open-thread="openThreadFromBoard"
       />
 
       <RoomEventsView
@@ -316,7 +317,7 @@
 
 <script setup lang="ts">
 import { GitBranch } from "@lucide/vue";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import AddAgentModal from "./AddAgentModal.vue";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
@@ -436,6 +437,12 @@ Object.assign(app, useRoomShellRoomWatchers(app));
 Object.assign(app, useRoomShellAttention(app));
 
 Object.assign(app, useRoomShellLifecycle(app));
+
+// A card's "Linked threads" entry opens that thread in chat.
+function openThreadFromBoard(threadRootId: string): void {
+  activeTab.value = "chat";
+  void nextTick(() => roomChatView.value?.openThread(threadRootId));
+}
 
 const {
   tabs,

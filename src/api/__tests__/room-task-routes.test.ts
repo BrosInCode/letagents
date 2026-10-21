@@ -104,6 +104,7 @@ test("registerRoomTaskRoutes preserves canonical task route order", () => {
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/review-verdict$/" },
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/tasks\\/github-status$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/mentions$/" },
     { method: "patch", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
   ]);
 });

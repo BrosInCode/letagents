@@ -31,19 +31,21 @@
       :review-assignment-candidates="reviewAssignmentCandidates"
       :selected-reviewer="selectedReviewer"
       :can-edit="canEdit"
+      :room-identifier="roomIdentifier"
       @edit="editing = true"
       @assign-review="emit('assign-review')"
       @run-action="emit('run-action', $event)"
       @update:selected-reviewer="emit('update:selected-reviewer', $event)"
       @view-events="emit('view-events', $event)"
       @view-artifacts="emit('view-artifacts', $event)"
+      @open-thread="emit('open-thread', $event)"
     />
   </DesktopDialogShell>
 </template>
 
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue';
-import type { TaskContentPatch } from '../../../../../../../../shared/task-markdown-editing.mjs';
+import type { TaskEditPatch } from './ticket-ref';
 import type {
   DesktopAgentPresence,
   DesktopTaskSummary,
@@ -61,6 +63,7 @@ const props = defineProps<{
   reviewAssignmentCandidates: DesktopAgentPresence[];
   selectedReviewer: string;
   canEdit?: boolean;
+  roomIdentifier?: string;
 }>();
 const editing = ref(false);
 const dirty = ref(false);
@@ -87,12 +90,13 @@ function requestClose() {
 
 const emit = defineEmits<{
   close: [];
-  save: [input: TaskContentPatch, onSettled: (saved: boolean) => void];
+  save: [input: TaskEditPatch, onSettled: (saved: boolean) => void];
   "assign-review": [];
   "run-action": [action: TaskAction];
   "update:selected-reviewer": [value: string];
   "view-events": [taskId: string];
   "view-artifacts": [taskId: string];
+  "open-thread": [threadRootId: string];
 }>();
 </script>
 

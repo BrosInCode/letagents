@@ -7,11 +7,13 @@ import { isPromptOnlyAgentMessage, type AgentPromptKind } from "../../../../shar
 import { messages } from "../../schema.js";
 import type { MessageRow } from "../../types.js";
 import { enqueueDesktopPushNotifications } from "../../../notifications/enqueue.js";
+import { recordTaskMentionsForMessage } from "../../task-external-refs.js";
 import type { MessageCreateTransaction, AddMessageOptions } from "./types.js";
 
 /**
  * Removes the sender's older blank auto prompts, enqueues desktop push
- * notifications, and runs the caller's in-transaction hook.
+ * notifications, links ticket-key mentions to cards, and runs the caller's
+ * in-transaction hook.
  */
 export async function finishCreatedMessage(
   tx: MessageCreateTransaction,
@@ -45,6 +47,10 @@ export async function finishCreatedMessage(
       recents_account_ids: options?.recents_account_ids,
     });
     notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
+  }
+
+  if (!createdMessageIsPromptOnly) {
+    await recordTaskMentionsForMessage(tx, roomId, createdMessage);
   }
 
   if (options?.with_created_message_in_transaction) {

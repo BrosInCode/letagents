@@ -82,6 +82,19 @@ function followUpPullRequestArtifacts(
   });
 }
 
+/** The card's artifacts with this event's pull request added, or null when it is already there. */
+function ticketKeyPullRequestArtifacts(task: Task, event: RepoRoomEvent): TaskWorkflowArtifact[] | null {
+  if (event.kind !== "pull_request") return null;
+  return upsertTaskPullRequestArtifact(task.workflow_artifacts, {
+    provider: event.provider,
+    kind: "pull_request",
+    number: event.pullRequest.number,
+    title: event.pullRequest.title,
+    url: event.pullRequest.url,
+    state: pullRequestState(event),
+  });
+}
+
 export async function getProjectForResolvedTask(
   fallbackProject: Project,
   linkedTask: Pick<Task, "room_id"> | undefined
@@ -141,6 +154,7 @@ export async function applyRepoRoomEventToTask(
     installationId: string | null;
     githubRoutingContext: FocusGitHubRoutingContext;
     messageIdBase?: string | null;
+    matchedByTicketKey?: boolean;
   }
 ): Promise<RepoRoomEventTaskProjection> {
   if (!linkedTask) {
@@ -186,6 +200,14 @@ export async function applyRepoRoomEventToTask(
       decision,
       installationId: input.installationId,
     });
+
+    if (decision.kind === "deny" && decision.code === "missing_lease" && input.matchedByTicketKey) {
+      // The card names this ticket, but nobody holds its work lease: link the
+      // pull request to the card and leave the work state alone.
+      const linked = ticketKeyPullRequestArtifacts(linkedTask, event);
+      const refreshed = linked ? await updateTask(project.id, linkedTask.id, { workflow_artifacts: linked }) : null;
+      return { task: refreshed ?? linkedTask, authoritative: true };
+    }
 
     if (decision.kind === "deny") {
       await emitTaskAnchoredMessage(

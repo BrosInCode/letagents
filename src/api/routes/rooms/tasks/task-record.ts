@@ -3,8 +3,10 @@ import type { Express } from "express";
 import {
   BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
+  getTaskMentions,
   LeaseFenceStaleError,
   TaskContentConflictError,
+  TaskExternalRefConflictError,
   type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
@@ -13,6 +15,7 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
+import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import {
@@ -52,6 +55,27 @@ export function registerTaskRecordRoutes(
     res.json({ ...taskWithDetails, room_id: project.id });
   });
 
+  /** Room messages that mention the card's ticket key, newest first. */
+  app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)\/mentions$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const task = await deps.getTaskById(project.id, taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+
+    const mentions = await getTaskMentions(project.id, task.id);
+    res.json({ room_id: project.id, task_id: task.id, mentions });
+  });
+
   app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -79,8 +103,11 @@ export function registerTaskRecordRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    // The ticket a card names is content too: a human room admin sets it.
+    const editsExternalRef = Object.prototype.hasOwnProperty.call(requestBody, "external_ref");
     const editsContent = Object.prototype.hasOwnProperty.call(requestBody, "title")
-      || Object.prototype.hasOwnProperty.call(requestBody, "description");
+      || Object.prototype.hasOwnProperty.call(requestBody, "description")
+      || editsExternalRef;
     if (editsContent && !(await deps.requireAdmin(req, res, project))) return;
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
@@ -105,6 +132,19 @@ export function registerTaskRecordRoutes(
       return;
     }
     const { updates } = patch;
+    if (editsExternalRef) {
+      const raw = requestBody.external_ref;
+      if (raw === null || raw === "") {
+        updates.external_ref = null;
+      } else {
+        const externalRef = typeof raw === "string" ? normalizeExternalRef(raw) : null;
+        if (!externalRef) {
+          res.status(400).json({ error: "external_ref must be a ticket key such as jira:HT-1234 or linear:ENG-12, or null." });
+          return;
+        }
+        updates.external_ref = externalRef;
+      }
+    }
     const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
     const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
     const actorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id);
@@ -148,7 +188,8 @@ export function registerTaskRecordRoutes(
         updates.assignee === undefined &&
         updates.assignee_agent_key === undefined &&
         updates.pr_url === undefined &&
-        updates.workflow_artifacts === undefined;
+        updates.workflow_artifacts === undefined &&
+        updates.external_ref === undefined;
 
       if (isReviewChangeRequest && !reviewDecisionOnly) {
         res.status(409).json({
@@ -311,6 +352,10 @@ export function registerTaskRecordRoutes(
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
+      if (error instanceof TaskExternalRefConflictError) {
+        res.status(409).json({ error: error.message, code: error.code, task_id: error.existingTaskId });
+        return;
+      }
       if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {
         res.status(409).json({ error: error.message, code: error.code });
         return;

@@ -48,6 +48,7 @@ import {
   workflowRefs,
 } from "../src/components/desktop/content/room-board/task-state";
 import { TASK_STATUS_ORDER, sortTasks } from "../src/domain/tasks";
+import { normalizedExternalRef, ticketRefParts } from "../src/components/desktop/content/room-board/ticket-ref";
 
 let vite: ViteDevServer;
 let TaskCard: object;
@@ -107,6 +108,28 @@ describe("board card hierarchy", () => {
     assert.match(html, />Accept<\/button>/);
     assert.doesNotMatch(html, /Cancel task/);
     assert.match(await render([cancel]), /aria-label="Open Test task"/);
+  });
+
+  it("labels a card with its ticket key and shows the provider chip only when the card names a ticket", async () => {
+    const render = (overrides: Partial<DesktopTaskSummary>) => renderToString(createSSRApp({
+      render: () => h(TaskCard, { task: task(overrides), actions: [], busyAction: null, draggableTask: false, selected: false }),
+    }));
+    const ticketHtml = await render({ externalRef: "jira:HT-1234" });
+    assert.match(ticketHtml, /class="desktop-task-provider-chip"[^>]*data-provider="jira"[^>]*>Jira</);
+    assert.match(ticketHtml, /class="desktop-task-id"[^>]*>HT-1234</);
+    const nativeHtml = await render({});
+    assert.doesNotMatch(nativeHtml, /desktop-task-provider-chip/);
+    assert.doesNotMatch(nativeHtml, /HT-1234/);
+  });
+
+  it("reads typed ticket keys and splits stored ones for display", () => {
+    assert.equal(normalizedExternalRef(""), null);
+    assert.equal(normalizedExternalRef("ht-12"), "jira:HT-12");
+    assert.equal(normalizedExternalRef("Linear:eng-4"), "linear:ENG-4");
+    assert.equal(normalizedExternalRef("not a key"), undefined);
+    assert.deepEqual(ticketRefParts("linear:ENG-4"), { provider: "linear", providerLabel: "Linear", key: "ENG-4" });
+    assert.equal(ticketRefParts(null), null);
+    assert.equal(ticketRefParts("broken"), null);
   });
 
   it("preserves reviewers, lock detail, and access to overflow links", async () => {

@@ -1,6 +1,7 @@
 import type {
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -114,6 +115,7 @@ export async function updateDesktopRoomTask(
     status?: string;
     assignee?: string | null;
     pr_url?: string | null;
+    external_ref?: string | null;
   },
 ): Promise<DesktopTaskMutationResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
@@ -122,6 +124,9 @@ export async function updateDesktopRoomTask(
   if (!taskId.trim()) throw new Error("Task id is required.");
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
   if (storage.effectiveMode === "local") {
+    if (updates.external_ref !== undefined) {
+      throw new Error("Ticket keys need a cloud room.");
+    }
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
@@ -153,6 +158,45 @@ export async function updateDesktopRoomTask(
     },
   );
   return mapDesktopTaskMutationResult(data);
+}
+
+/** Room messages that name the card's ticket key. Local rooms have none. */
+export async function getDesktopRoomTaskMentions(
+  roomIdentifier: string,
+  taskId: string,
+): Promise<DesktopTaskMention[]> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier || !taskId.trim()) return [];
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") return [];
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+  const data = await apiFetch<{
+    mentions?: Array<{
+      message_id?: unknown;
+      thread_root_id?: unknown;
+      key?: unknown;
+      sender?: unknown;
+      text?: unknown;
+      timestamp?: unknown;
+    }>;
+  }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/mentions`,
+  );
+  return (data.mentions ?? []).flatMap((mention) =>
+    typeof mention.message_id === "string"
+      ? [{
+          messageId: mention.message_id,
+          threadRootId: typeof mention.thread_root_id === "string" ? mention.thread_root_id : mention.message_id,
+          key: typeof mention.key === "string" ? mention.key : "",
+          sender: typeof mention.sender === "string" ? mention.sender : "",
+          text: typeof mention.text === "string" ? mention.text : "",
+          timestamp: typeof mention.timestamp === "string" ? mention.timestamp : "",
+        }]
+      : []
+  );
 }
 
 export async function updateDesktopRoomTaskLease(
