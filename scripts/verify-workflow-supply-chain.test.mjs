@@ -442,6 +442,21 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   );
 });
 
+test("the retry wrapper only wraps the pinned npm ci installs", () => {
+  // scripts/retry-command.mjs runs any command, so a step could use it to hide
+  // an install the npm ci checks above would not see.
+  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs npm ci --ignore-scripts --no-audit(?: --prefix apps\/desktop)?$/;
+  for (const path of workflowPaths) {
+    const commands = workflowRunScripts(workflowJobs(path))
+      .flatMap((script) => script.split("\n"))
+      .filter((command) => command.includes("retry-command"));
+    assert.ok(commands.length > 0, `${path} should install through the retry wrapper`);
+    for (const command of commands) {
+      assert.match(command, wrapperLine, `${path} uses the retry wrapper for something other than npm ci`);
+    }
+  }
+});
+
 test("the OpenCode runtime contract steps are exactly the reviewed ones", () => {
   const build = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "build-checks");
   assert.ok(build, "ci.yml must define the build-checks job");

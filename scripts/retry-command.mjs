@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
 
 // CI runs `npm ci` through this script so one dropped registry connection does
@@ -28,14 +29,16 @@ export function runWithRetries(
     if (result.error) {
       throw result.error;
     }
-    status = result.status ?? 1;
+    // A child killed by a signal has no status; report it the way a shell does.
+    status = result.status ?? 128 + (constants.signals[result.signal] ?? 0);
     if (status === 0) {
       return 0;
     }
+    const outcome = result.signal ? `was killed by ${result.signal}` : `exited with ${status}`;
     if (attempt < attempts) {
       const delayMs = baseDelayMs * attempt;
       log(
-        `\`${[command, ...args].join(" ")}\` exited with ${status} (attempt ${attempt} of ${attempts}); retrying in ${delayMs / 1000}s.`,
+        `\`${[command, ...args].join(" ")}\` ${outcome} (attempt ${attempt} of ${attempts}); retrying in ${delayMs / 1000}s.`,
       );
       sleep(delayMs);
     }

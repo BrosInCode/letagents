@@ -60,3 +60,14 @@ test("a command that keeps failing stops after the last attempt with its own exi
     assert.equal(runCount(counter), 3);
   });
 });
+
+test("a command killed by a signal reports 128 plus the signal number", () => {
+  const messages = [];
+  const status = runWithRetries(process.execPath, ["-e", "process.kill(process.pid, 'SIGTERM')"], {
+    attempts: 2,
+    baseDelayMs: 0,
+    log: (m) => messages.push(m),
+  });
+  assert.equal(status, 143);
+  assert.match(messages[0], /was killed by SIGTERM \(attempt 1 of 2\)/);
+});
