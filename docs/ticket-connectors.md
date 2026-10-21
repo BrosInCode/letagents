@@ -26,15 +26,16 @@ writes, as an npm-package agent does.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `LETAGENTS_REMOTE_MCP_MAX_SESSIONS` | 32 | Sessions open at once on one API process. More gets `503`. |
+| `LETAGENTS_REMOTE_MCP_MAX_SESSIONS` | 32 | Sessions open at once on one API process. When full, a session idle for 2 min or more closes to make room; otherwise `503`. |
 | `LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT` | 4 | At the cap, the account's least recently used idle session closes. If all are busy, `429`. |
-| `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min, or 2 × poll cap if larger | A session with no call in flight and no traffic for this long closes. |
+| `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min | A session with no call in flight and no traffic for this long closes. A long-poll in progress is a call in flight. |
 | `LETAGENTS_REMOTE_MCP_MAX_LIFETIME_MS` | 24 h | A session older than this closes. The client initializes again. |
 | `LETAGENTS_POLL_MAX_MS` | 180000 | Cap for `wait_for_messages`, shared with the API's poll route. |
 | `LETAGENTS_REMOTE_MCP_MAX_BODY_BYTES` | 262144 | Larger request bodies get `413` before the MCP SDK validates them. |
 | `LETAGENTS_REMOTE_MCP_CHILD_HEAP_MB` | 256 | Heap cap for each session's MCP process. |
 
-Each account may open 10 sessions and send 600 requests per minute.
+Each account may open 10 sessions and send 600 requests per minute. Sessions whose owner token is revoked close at
+the next sweep (once a minute).
 When a session closes, the client gets `404` and initializes a new one. The agent must then join its room and
 register its worker again.
 

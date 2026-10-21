@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -101,6 +102,9 @@ test("the remote endpoint refuses requests without an owner bearer before starti
     const oversized = await post(url, { Authorization: "Bearer owner-a" },
       { ...initializeBody, params: { ...initializeBody.params, padding: "x".repeat(300 * 1024) } });
     assert.equal(oversized.status, 413, "bodies over the MCP cap never reach SDK validation");
+    const wrongAccept = await fetch(url, { method: "POST", body: JSON.stringify(initializeBody),
+      headers: { Authorization: "Bearer owner-a", "Content-Type": "application/json", Accept: "application/json" } });
+    assert.equal(wrongAccept.status, 406, "a request the transport would refuse never starts a child");
     const getWithoutSession = await fetch(url, { headers: { Authorization: "Bearer owner-a" } });
     assert.equal(getWithoutSession.status, 400);
     assert.equal(sessions.size, 0, "no session was created by a rejected request");
@@ -199,6 +203,62 @@ test("the global cap refuses new sessions with 503", { timeout: 60_000 }, async 
     assert.equal(refused.status, 503);
     assert.equal(sessions.size, 1);
     await first.client.close();
+  } finally {
+    await sessions.closeAll();
+    server.close();
+  }
+});
+
+test("concurrent initializes from one account respect the account cap", { timeout: 60_000 }, async () => {
+  const sessions = new RemoteMcpSessionManager({ limits: { maxSessionsPerAccount: 2, maxSessions: 10 } });
+  const { server, url } = await startApp(sessions);
+  try {
+    const responses = await Promise.all(Array.from({ length: 6 }, () => post(url, { Authorization: "Bearer owner-a" })));
+    const statuses = responses.map((response) => response.status).sort();
+    for (const response of responses) await response.body?.cancel();
+    assert.equal(statuses.filter((status) => status === 200).length, 2, `two creates proceed: ${statuses}`);
+    assert.equal(statuses.filter((status) => status === 429).length, 4, `the rest are refused: ${statuses}`);
+    assert.ok(sessions.size <= 2);
+  } finally {
+    await sessions.closeAll();
+    server.close();
+  }
+});
+
+test("the sweep closes sessions whose owner token was revoked", { timeout: 60_000 }, async () => {
+  const revoked = new Set<string>();
+  const sessions = new RemoteMcpSessionManager({
+    isTokenValid: async (hashHex) => !revoked.has(hashHex),
+  });
+  const { server, url } = await startApp(sessions);
+  try {
+    const a = await connect(url, "owner-a");
+    const b = await connect(url, "owner-b");
+    assert.equal(sessions.size, 2);
+    revoked.add(createHash("sha256").update("owner-a").digest("hex"));
+    sessions.sweep();
+    for (let i = 0; i < 100 && sessions.size !== 1; i += 1) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sessions.size, 1, "only the revoked token's session closed");
+    await Promise.all([a.client.close().catch(() => undefined), b.client.close()]);
+  } finally {
+    await sessions.closeAll();
+    server.close();
+  }
+});
+
+test("global pressure closes another account's session only after it has idled a while", { timeout: 60_000 }, async () => {
+  let now = 5_000_000;
+  const sessions = new RemoteMcpSessionManager({ now: () => now, limits: { maxSessions: 1, maxSessionsPerAccount: 4 } });
+  const { server, url } = await startApp(sessions);
+  try {
+    const a = await connect(url, "owner-a");
+    const early = await post(url, { Authorization: "Bearer owner-b" });
+    assert.equal(early.status, 503, "a session that was just used is not taken from its owner");
+    now += 3 * 60_000;
+    const b = await connect(url, "owner-b");
+    for (let i = 0; i < 100 && sessions.size !== 1; i += 1) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sessions.size, 1, "the long-idle session made room");
+    await Promise.all([a.client.close().catch(() => undefined), b.client.close()]);
   } finally {
     await sessions.closeAll();
     server.close();

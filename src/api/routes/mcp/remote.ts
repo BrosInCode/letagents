@@ -103,6 +103,12 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
       jsonRpcError(res, 400, "Send an initialize request first, without an Mcp-Session-Id header.");
       return;
     }
+    // The transport would refuse these with 406; refuse them before a child starts.
+    const accept = String(req.headers.accept ?? "");
+    if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
+      jsonRpcError(res, 406, "Accept must include application/json and text/event-stream.");
+      return;
+    }
     if (!allowSessionCreate(accountId)) {
       jsonRpcError(res, 429, "Too many new remote MCP sessions. Slow down.");
       return;

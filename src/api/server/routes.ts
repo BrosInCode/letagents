@@ -163,6 +163,7 @@ import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
 import { RemoteMcpSessionManager } from "../remote-mcp/sessions.js";
+import { ownerTokenHashExists } from "../db/auth/owner-tokens.js";
 import {
   createListing,
   updateListing,
@@ -514,7 +515,7 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
   registerHealthRoutes(app);
-  sharedRemoteMcpSessions ??= new RemoteMcpSessionManager();
+  sharedRemoteMcpSessions ??= new RemoteMcpSessionManager({ isTokenValid: ownerTokenHashExists });
   registerRemoteMcpRoutes(app, { sessions: sharedRemoteMcpSessions });
 
   registerGitHubAppCallbackRoute(app);

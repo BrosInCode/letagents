@@ -57,6 +57,16 @@ export async function getOwnerTokenAccountByToken(token: string): Promise<OwnerT
   return ownerToken ?? null;
 }
 
+/** Whether an owner token with this SHA-256 hex digest still exists. */
+export async function ownerTokenHashExists(tokenHash: string): Promise<boolean> {
+  const [row] = await db
+    .select({ token_id: owner_tokens.token_id })
+    .from(owner_tokens)
+    .where(eq(owner_tokens.token_hash, tokenHash))
+    .limit(1);
+  return Boolean(row);
+}
+
 export async function deleteOwnerTokenById(tokenId: string): Promise<void> {
   await db.delete(owner_tokens).where(eq(owner_tokens.token_id, tokenId));
 }

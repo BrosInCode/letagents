@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,9 +43,9 @@ export function remoteMcpLimitsFromEnv(): RemoteMcpLimits {
   return {
     maxSessions: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS", 32),
     maxSessionsPerAccount: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT", 4),
-    // At least two long-poll windows, so a waiting agent is never "idle".
-    idleTimeoutMs: positiveIntEnv("LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS",
-      Math.max(30 * 60_000, 2 * getPollTimeoutCapMs())),
+    // A call in flight (a long-poll included) keeps a session from going idle,
+    // so this does not need to follow LETAGENTS_POLL_MAX_MS.
+    idleTimeoutMs: positiveIntEnv("LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS", 30 * 60_000),
     maxLifetimeMs: positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_LIFETIME_MS", 24 * 60 * 60_000),
   };
 }
@@ -78,7 +78,43 @@ interface RemoteMcpSession {
   createdAt: number;
   lastActivityAt: number;
   openRequests: number;
+  /** Holds a capacity slot from create until the session registers or closes. */
+  reserved: boolean;
   closed: boolean;
+}
+
+/** Another account's session must be idle this long before global pressure may close it. */
+const CROSS_ACCOUNT_EVICTION_IDLE_MS = 2 * 60_000;
+
+/**
+ * Session folders live under one private root per API process, named after
+ * its pid, so a restart can remove folders a crashed process left behind.
+ */
+function createProcessRoot(): string {
+  const shared = join(tmpdir(), "letagents-remote-mcp");
+  try {
+    mkdirSync(shared, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(shared);
+    const ours = stat.isDirectory() && !stat.isSymbolicLink()
+      && (typeof process.getuid !== "function" || stat.uid === process.getuid());
+    if (!ours) return mkdtempSync(join(tmpdir(), "letagents-remote-mcp-"));
+    for (const entry of readdirSync(shared)) {
+      const pid = Number.parseInt(/^p(\d+)-/.exec(entry)?.[1] ?? "", 10);
+      if (pid && !processIsAlive(pid)) rmSync(join(shared, entry), { recursive: true, force: true });
+    }
+    return mkdtempSync(join(shared, `p${process.pid}-`));
+  } catch {
+    return mkdtempSync(join(tmpdir(), "letagents-remote-mcp-"));
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 export class RemoteMcpCapacityError extends Error {
@@ -93,6 +129,12 @@ export interface RemoteMcpSessionManagerOptions {
   childCommand?: RemoteMcpChildCommand;
   now?: () => number;
   sweepIntervalMs?: number;
+  /**
+   * Whether the owner token (by its SHA-256 hex) still exists. The sweep
+   * closes sessions whose token was revoked, so a child does not keep a
+   * long-poll running on a dead credential.
+   */
+  isTokenValid?: (tokenHashHex: string) => Promise<boolean>;
 }
 
 export class RemoteMcpSessionManager {
@@ -101,12 +143,16 @@ export class RemoteMcpSessionManager {
   private readonly childCommand: RemoteMcpChildCommand;
   private readonly now: () => number;
   private readonly sweepTimer: NodeJS.Timeout;
+  private readonly isTokenValid: ((tokenHashHex: string) => Promise<boolean>) | null;
+  private readonly pendingByAccount = new Map<string, number>();
   private pendingCreates = 0;
+  private root: string | null = null;
 
   constructor(options: RemoteMcpSessionManagerOptions = {}) {
     this.limits = { ...remoteMcpLimitsFromEnv(), ...options.limits };
     this.childCommand = options.childCommand ?? defaultRemoteMcpChildCommand();
     this.now = options.now ?? Date.now;
+    this.isTokenValid = options.isTokenValid ?? null;
     this.sweepTimer = setInterval(() => this.sweep(), options.sweepIntervalMs ?? 60_000);
     this.sweepTimer.unref();
   }
@@ -128,12 +174,14 @@ export class RemoteMcpSessionManager {
 
   /** Spawn an isolated MCP child for an authenticated initialize request. */
   async create(input: { accountId: string; token: string; apiUrl: string }): Promise<RemoteMcpSession> {
+    // Reserve before any await, so concurrent initializes count against the caps.
     this.makeRoomFor(input.accountId);
-    this.pendingCreates += 1;
+    this.reserve(input.accountId, 1);
     let dir: string | null = null;
     let child: StdioClientTransport | null = null;
     try {
-      dir = mkdtempSync(join(tmpdir(), "letagents-remote-mcp-"));
+      this.root ??= createProcessRoot();
+      dir = mkdtempSync(join(this.root, "s-"));
       const workspace = join(dir, "workspace");
       const home = join(dir, "home");
       for (const folder of [workspace, home]) mkdirSync(folder, { mode: 0o700 });
@@ -149,6 +197,8 @@ export class RemoteMcpSessionManager {
         env: {
           HOME: home,
           TMPDIR: dir,
+          // git lookups from the empty workspace stop at the session folder.
+          GIT_CEILING_DIRECTORIES: dir,
           NODE_ENV: process.env.NODE_ENV ?? "production",
           LETAGENTS_API_URL: input.apiUrl,
           LETAGENTS_TOKEN: input.token,
@@ -173,20 +223,23 @@ export class RemoteMcpSessionManager {
         createdAt: this.now(),
         lastActivityAt: this.now(),
         openRequests: 0,
+        reserved: true,
         closed: false,
       };
       session.http = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => session.id,
-        onsessioninitialized: (id) => { this.sessions.set(id, session); },
+        onsessioninitialized: (id) => {
+          this.release(session);
+          this.sessions.set(id, session);
+        },
       });
       this.bridge(session);
       return session;
     } catch (error) {
+      this.reserve(input.accountId, -1);
       await child?.close().catch(() => undefined);
       if (dir) rmSync(dir, { recursive: true, force: true });
       throw error;
-    } finally {
-      this.pendingCreates -= 1;
     }
   }
 
@@ -218,6 +271,7 @@ export class RemoteMcpSessionManager {
   async close(session: RemoteMcpSession): Promise<void> {
     if (session.closed) return;
     session.closed = true;
+    this.release(session);
     if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
     await Promise.allSettled([session.http.close(), session.child.close()]);
     rmSync(session.dir, { recursive: true, force: true });
@@ -226,30 +280,72 @@ export class RemoteMcpSessionManager {
   async closeAll(): Promise<void> {
     clearInterval(this.sweepTimer);
     await Promise.allSettled([...this.sessions.values()].map((session) => this.close(session)));
+    if (this.root) rmSync(this.root, { recursive: true, force: true });
+    this.root = null;
   }
 
-  /** Close sessions past their idle timeout or lifetime. */
+  /** Close sessions past their idle timeout or lifetime, or whose token was revoked. */
   sweep(): void {
     const now = this.now();
     for (const session of this.sessions.values()) {
       const idle = session.openRequests === 0 && now - session.lastActivityAt >= this.limits.idleTimeoutMs;
       if (idle || now - session.createdAt >= this.limits.maxLifetimeMs) void this.close(session);
     }
+    if (this.isTokenValid) void this.closeRevoked(this.isTokenValid);
   }
 
+  private async closeRevoked(isTokenValid: (tokenHashHex: string) => Promise<boolean>): Promise<void> {
+    const byToken = new Map<string, RemoteMcpSession[]>();
+    for (const session of this.sessions.values()) {
+      const key = session.tokenHash.toString("hex");
+      byToken.set(key, [...(byToken.get(key) ?? []), session]);
+    }
+    for (const [tokenHashHex, sessions] of byToken) {
+      const valid = await isTokenValid(tokenHashHex).catch(() => true);
+      if (!valid) await Promise.allSettled(sessions.map((session) => this.close(session)));
+    }
+  }
+
+  private reserve(accountId: string, delta: 1 | -1): void {
+    this.pendingCreates += delta;
+    const next = (this.pendingByAccount.get(accountId) ?? 0) + delta;
+    if (next > 0) this.pendingByAccount.set(accountId, next);
+    else this.pendingByAccount.delete(accountId);
+  }
+
+  private release(session: RemoteMcpSession): void {
+    if (!session.reserved) return;
+    session.reserved = false;
+    this.reserve(session.accountId, -1);
+  }
+
+  /**
+   * Check both caps (counting creates still starting) and pick what to close
+   * only once the create will go ahead: the account's least recently used
+   * idle session at the account cap, then under global pressure the least
+   * recently used session that has been idle a while.
+   */
   private makeRoomFor(accountId: string): void {
-    const own = [...this.sessions.values()].filter((session) => session.accountId === accountId);
-    if (own.length >= this.limits.maxSessionsPerAccount) {
-      const idle = own.filter((session) => session.openRequests === 0)
-        .sort((a, b) => a.lastActivityAt - b.lastActivityAt)[0];
-      if (!idle) {
+    const now = this.now();
+    const live = [...this.sessions.values()];
+    const leastRecent = (candidates: RemoteMcpSession[]) => candidates
+      .filter((session) => session.openRequests === 0)
+      .sort((a, b) => a.lastActivityAt - b.lastActivityAt)[0] ?? null;
+    const own = live.filter((session) => session.accountId === accountId);
+    let ownVictim: RemoteMcpSession | null = null;
+    if (own.length + (this.pendingByAccount.get(accountId) ?? 0) >= this.limits.maxSessionsPerAccount) {
+      ownVictim = leastRecent(own);
+      if (!ownVictim) {
         throw new RemoteMcpCapacityError(429, "Too many open remote MCP sessions for this account. Close one and retry.");
       }
-      void this.close(idle);
     }
-    if (this.sessions.size + this.pendingCreates >= this.limits.maxSessions) {
-      throw new RemoteMcpCapacityError(503, "The remote MCP endpoint is at capacity. Retry later.");
+    let globalVictim: RemoteMcpSession | null = null;
+    if (this.sessions.size + this.pendingCreates - (ownVictim ? 1 : 0) >= this.limits.maxSessions) {
+      globalVictim = leastRecent(live.filter((session) => session !== ownVictim
+        && now - session.lastActivityAt >= CROSS_ACCOUNT_EVICTION_IDLE_MS));
+      if (!globalVictim) throw new RemoteMcpCapacityError(503, "The remote MCP endpoint is at capacity. Retry later.");
     }
+    for (const victim of [ownVictim, globalVictim]) if (victim) void this.close(victim);
   }
 
   private bridge(session: RemoteMcpSession): void {
