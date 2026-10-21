@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
 import { db } from "../client.js";
-import { board_intents, board_manager_assignments, room_agent_sessions } from "../schema.js";
+import { board_intents, board_manager_assignments, room_agent_sessions, tracker_rule_runs } from "../schema.js";
 import { toBoardIntent, toBoardManagerAssignment, toCoordinationEvent } from "../mappers.js";
 import type {
   BoardGovernanceAuditEntry,
@@ -68,7 +68,7 @@ export async function listBoardGovernanceAudit(
   roomId: string,
   limit = 50
 ): Promise<BoardGovernanceAuditEntry[]> {
-  const [coordinationRows, assignmentRows, intentRows] = await Promise.all([
+  const [coordinationRows, assignmentRows, intentRows, ruleRunRows] = await Promise.all([
     db
       .select()
       .from(coordination_events)
@@ -97,6 +97,13 @@ export async function listBoardGovernanceAudit(
       )
       .orderBy(desc(board_intents.decided_at))
       .limit(limit) as Promise<BoardIntentRow[]>,
+    // Ticket connectors PR5: what each tracker rule did in this room.
+    db
+      .select()
+      .from(tracker_rule_runs)
+      .where(eq(tracker_rule_runs.room_id, roomId))
+      .orderBy(desc(tracker_rule_runs.created_at))
+      .limit(limit),
   ]);
 
   const entries: BoardGovernanceAuditEntry[] = [];
@@ -172,6 +179,29 @@ export async function listBoardGovernanceAudit(
         action_type: intent.action_type,
         task_id: intent.task_id,
         proposer_actor_label: intent.proposer_actor_label,
+      },
+    });
+  }
+
+  for (const run of ruleRunRows) {
+    entries.push({
+      id: run.id,
+      kind: "tracker_rule_run",
+      event_type: "tracker_rule_run",
+      actor_label: `Rule: ${run.rule_name}`,
+      reason: run.detail,
+      created_at: run.created_at,
+      metadata: {
+        rule_id: run.rule_id,
+        rule_name: run.rule_name,
+        rule_version: run.rule_version,
+        task_id: run.task_id,
+        external_ref: run.external_ref,
+        event_type: run.event_type,
+        event_action: run.event_action,
+        event_url: run.event_url,
+        outcome: run.outcome,
+        effect_ids: run.effect_ids,
       },
     });
   }

@@ -1,0 +1,220 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { TrackerRuleTrigger } from "../../../shared/ticket-connectors.mjs";
+import { matchTrackerRules, rulesNeedApprovalCount, triggerMatches, type TrackerRuleEventFacts } from "../connectors/rules/matcher.js";
+import { renderTrackerRuleTemplate } from "../connectors/rules/template.js";
+import { parseTrackerRuleInput, parseTrackerRuleTrigger } from "../connectors/rules/validate.js";
+import type { TrackerRuleEngineDeps } from "../connectors/rules/engine.js";
+import type { LoadedTrackerRule } from "../connectors/rules/store.js";
+import type { RepoRoomEvent } from "../repo-workflow.js";
+
+// The engine module holds the default database wiring; nothing here connects.
+process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+const { createTrackerRuleEngine, trackerRuleEffectKey, trackerRuleFacts } = await import("../connectors/rules/engine.js");
+
+const opened: TrackerRuleEventFacts = { event: "pull_request", action: "opened", merged: false, draft: false, baseBranch: "main" };
+const merged: TrackerRuleEventFacts = { event: "pull_request", action: "closed", merged: true, draft: false, baseBranch: "main" };
+const approved: TrackerRuleEventFacts = { event: "pull_request_review", action: "submitted", baseBranch: "main", reviewState: "APPROVED", approvals: 2 };
+const checkFailed: TrackerRuleEventFacts = { event: "check_run", action: "completed", conclusion: "failure" };
+
+const cases: Array<{ name: string; trigger: TrackerRuleTrigger; facts: TrackerRuleEventFacts; matches: boolean }> = [
+  { name: "event and action", trigger: { event: "pull_request", action: "opened" }, facts: opened, matches: true },
+  { name: "another action", trigger: { event: "pull_request", action: "closed" }, facts: opened, matches: false },
+  { name: "another event", trigger: { event: "pull_request_review", action: "opened" }, facts: opened, matches: false },
+  { name: "merged true", trigger: { event: "pull_request", action: "closed", merged: true }, facts: merged, matches: true },
+  { name: "merged false on a merge", trigger: { event: "pull_request", action: "closed", merged: false }, facts: merged, matches: false },
+  { name: "merged unknown", trigger: { event: "pull_request", action: "closed", merged: true }, facts: { ...merged, merged: null }, matches: false },
+  { name: "draft false", trigger: { event: "pull_request", action: "opened", draft: false }, facts: opened, matches: true },
+  { name: "draft true on a ready PR", trigger: { event: "pull_request", action: "opened", draft: true }, facts: opened, matches: false },
+  { name: "draft true on a draft", trigger: { event: "pull_request", action: "opened", draft: true }, facts: { ...opened, draft: true }, matches: true },
+  { name: "base branch", trigger: { event: "pull_request", action: "opened", baseBranch: "main" }, facts: opened, matches: true },
+  { name: "other base branch", trigger: { event: "pull_request", action: "opened", baseBranch: "release" }, facts: opened, matches: false },
+  { name: "base branch is case sensitive", trigger: { event: "pull_request", action: "opened", baseBranch: "Main" }, facts: opened, matches: false },
+  { name: "base branch unknown", trigger: { event: "pull_request", action: "opened", baseBranch: "main" }, facts: { ...opened, baseBranch: null }, matches: false },
+  { name: "review state, any case", trigger: { event: "pull_request_review", action: "submitted", reviewState: "approved" }, facts: approved, matches: true },
+  { name: "other review state", trigger: { event: "pull_request_review", action: "submitted", reviewState: "changes_requested" }, facts: approved, matches: false },
+  { name: "approvals reached", trigger: { event: "pull_request_review", action: "submitted", approvalsAtLeast: 2 }, facts: approved, matches: true },
+  { name: "approvals short", trigger: { event: "pull_request_review", action: "submitted", approvalsAtLeast: 3 }, facts: approved, matches: false },
+  { name: "approvals not counted", trigger: { event: "pull_request_review", action: "submitted", approvalsAtLeast: 1 }, facts: { ...approved, approvals: null }, matches: false },
+  { name: "check conclusion", trigger: { event: "check_run", action: "completed", conclusion: "failure" }, facts: checkFailed, matches: true },
+  { name: "other check conclusion", trigger: { event: "check_run", action: "completed", conclusion: "success" }, facts: checkFailed, matches: false },
+  { name: "every field", trigger: { event: "pull_request", action: "closed", merged: true, draft: false, baseBranch: "main" }, facts: merged, matches: true },
+];
+
+for (const entry of cases) {
+  test(`trigger: ${entry.name}`, () => {
+    assert.equal(triggerMatches(entry.trigger, entry.facts), entry.matches);
+  });
+}
+
+test("the matcher returns every enabled matching rule, in order", () => {
+  const rules = [
+    { id: "a", enabled: true, trigger: { event: "pull_request", action: "opened" } as TrackerRuleTrigger },
+    { id: "b", enabled: false, trigger: { event: "pull_request", action: "opened" } as TrackerRuleTrigger },
+    { id: "c", enabled: true, trigger: { event: "pull_request", action: "closed" } as TrackerRuleTrigger },
+    { id: "d", enabled: true, trigger: { event: "pull_request", action: "opened", draft: false } as TrackerRuleTrigger },
+  ];
+  assert.deepEqual(matchTrackerRules(rules, opened).map((rule) => rule.id), ["a", "d"]);
+  assert.deepEqual(matchTrackerRules([], opened), []);
+  assert.equal(rulesNeedApprovalCount(rules), false);
+  assert.equal(rulesNeedApprovalCount([{ id: "e", enabled: true, trigger: { event: "pull_request_review", action: "submitted", approvalsAtLeast: 1 } }]), true);
+});
+
+test("triggers are validated strictly", () => {
+  const refused: Array<[unknown, RegExp]> = [
+    [null, /object/],
+    [{ event: "push", action: "opened" }, /event must be/],
+    [{ event: "pull_request", action: "submitted" }, /action for pull_request/],
+    [{ event: "pull_request", action: "opened", extra: 1 }, /unknown field "extra"/],
+    [{ event: "pull_request", action: "opened", merged: true }, /only to the closed action/],
+    [{ event: "pull_request", action: "closed", merged: "yes" }, /true or false/],
+    [{ event: "pull_request", action: "opened", reviewState: "approved" }, /only to pull_request_review/],
+    [{ event: "pull_request_review", action: "submitted", draft: true }, /only to pull_request triggers/],
+    [{ event: "pull_request_review", action: "submitted", approvalsAtLeast: 0 }, /whole number/],
+    [{ event: "pull_request_review", action: "submitted", approvalsAtLeast: 1.5 }, /whole number/],
+    [{ event: "pull_request_review", action: "submitted", reviewState: "lgtm" }, /reviewState/],
+    [{ event: "check_run", action: "completed", baseBranch: "main" }, /does not apply/],
+    [{ event: "check_run", action: "completed", conclusion: "green" }, /conclusion/],
+    [{ event: "pull_request", action: "opened", baseBranch: "has space" }, /branch name/],
+    [{ event: "pull_request", action: "opened", baseBranch: "a..b" }, /branch name/],
+  ];
+  for (const [input, error] of refused) {
+    const result = parseTrackerRuleTrigger(input);
+    assert.equal(result.ok, false, JSON.stringify(input));
+    assert.match((result as { error: string }).error, error);
+  }
+  assert.deepEqual(parseTrackerRuleTrigger({ event: "pull_request", action: "closed", merged: true, baseBranch: "release/2026" }), {
+    ok: true, value: { event: "pull_request", action: "closed", merged: true, baseBranch: "release/2026" },
+  });
+});
+
+test("rules are validated strictly", () => {
+  const trigger = { event: "pull_request", action: "opened" };
+  const base = { name: "Rule", room_id: null, trigger, actions: [{ kind: "transition", toStatus: "In Review" }] };
+  assert.equal(parseTrackerRuleInput(base).ok, true);
+  const refused: Array<[unknown, RegExp]> = [
+    [{ ...base, name: "" }, /name/],
+    [{ ...base, owner: "x" }, /unknown field "owner"/],
+    [{ ...base, actions: [] }, /1 to 5 actions/],
+    [{ ...base, actions: Array.from({ length: 6 }, () => ({ kind: "comment", template: "hi" })) }, /1 to 5 actions/],
+    [{ ...base, actions: [{ kind: "transition", toStatus: "" }] }, /tracker status/],
+    [{ ...base, actions: [{ kind: "transition", toStatus: "A" }, { kind: "transition", toStatus: "B" }] }, /one status/],
+    [{ ...base, actions: [{ kind: "comment", template: "{{secret}}" }] }, /not a template variable/],
+    [{ ...base, actions: [{ kind: "comment", template: "{{ pr_url.constructor }}" }] }, /not a template variable/],
+    [{ ...base, actions: [{ kind: "comment", template: "hi", connection_id: "x" }] }, /unknown field/],
+    [{ ...base, actions: [{ kind: "delete" }] }, /transition or a comment/],
+    [{ ...base, room_id: 12 }, /room/],
+    [{ ...base, enabled: "yes" }, /enabled/],
+  ];
+  for (const [input, error] of refused) {
+    const result = parseTrackerRuleInput(input);
+    assert.equal(result.ok, false, JSON.stringify(input));
+    assert.match((result as { error: string }).error, error);
+  }
+});
+
+test("template values are inserted as plain text", () => {
+  const values = {
+    pr_url: "https://github.com/acme/app/pull/7",
+    pr_number: 7,
+    pr_title: "Fix [the link](https://evil.example) **now**\n\n@channel please",
+    author: "kai",
+    branch: "HT-1-x",
+    base_branch: "main",
+    repo: "acme/app",
+    reviewer: null,
+  };
+  const template = "{{pr_title}} ({{pr_url}}) by {{author}}; reviewer: {{reviewer}}";
+  assert.equal(
+    renderTrackerRuleTemplate(template, values, "jira"),
+    "Fix [the link](https://evil.example) **now** @channel please (https://github.com/acme/app/pull/7) by kai; reviewer: ",
+    "Jira gets plain ADF text: one line, no new paragraphs",
+  );
+  const linear = renderTrackerRuleTemplate(template, values, "linear");
+  assert.ok(linear.includes("Fix \\[the link\\]\\(https\\:"), linear);
+  assert.ok(linear.includes("\\*\\*now\\*\\*"));
+  assert.ok(linear.includes("@​channel"), "no Linear mention from a PR title");
+  assert.ok(linear.includes("(https://github.com/acme/app/pull/7)"), "the template's own text and the URL stay as written");
+  assert.equal(renderTrackerRuleTemplate("{{pr_url}}", { pr_url: "javascript:alert(1)" }, "linear"), "");
+  assert.equal(renderTrackerRuleTemplate("{{pr_url}}", { pr_url: "http://github.com/x" }, "jira"), "");
+  assert.equal(renderTrackerRuleTemplate("{{author}}", { author: "x".repeat(1_000) }, "jira").length, 300);
+  // A value cannot add a placeholder that is filled later.
+  assert.equal(renderTrackerRuleTemplate("{{pr_title}}", { pr_title: "{{author}}", author: "kai" }, "jira"), "{{author}}");
+});
+
+const pullRequestOpened = {
+  provider: "github",
+  kind: "pull_request",
+  action: "opened",
+  repositoryFullName: "acme/app",
+  senderLogin: "kai",
+  pullRequest: { number: 91, title: "Fix", url: "https://github.com/acme/app/pull/91", headRef: "HT-1234-x", authorLogin: "kai" },
+} as RepoRoomEvent;
+
+test("facts come from the event and the stored row", () => {
+  assert.deepEqual(trackerRuleFacts(pullRequestOpened, { event_type: "pull_request", base_ref: "main" }, null), {
+    event: "pull_request", action: "opened", merged: false, draft: false, baseBranch: "main",
+  });
+  assert.equal(trackerRuleFacts({ ...pullRequestOpened, kind: "push" } as unknown as RepoRoomEvent, { event_type: "push" }, null), null);
+});
+
+function engineHarness(rules: LoadedTrackerRule[]) {
+  const submitted: string[] = [];
+  const deps: TrackerRuleEngineDeps = {
+    store: {
+      forRoom: async () => rules,
+      claimRun: async (input) => ({ run: { ...input, id: "run_1", effect_ids: [], outcome: "pending", detail: null, created_at: "", updated_at: "" } as never, claimed: true }),
+      finishRun: async () => undefined,
+    },
+    roomScope: async () => ({ sources: [{ filter_id: "f", connection_id: "tcon_1", provider: "jira", filter: "project = HT" }], linearTeamKeys: [] }),
+    roomConnection: async () => ({ connection_id: "tcon_1", account_id: "acct_1", provider: "jira" }),
+    countApprovals: async () => 0,
+    submit: async (input) => {
+      submitted.push(input.idempotency_key);
+      return { id: `effect_${submitted.length}`, state: "succeeded", quarantined_at: null } as WorkflowEffectLike;
+    },
+    schedule: (work) => { pending.push(work()); },
+  };
+  const pending: Array<Promise<void>> = [];
+  return { engine: createTrackerRuleEngine(deps), submitted, settle: () => Promise.all(pending) };
+}
+type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["submit"]>>;
+
+const loadedRule: LoadedTrackerRule = {
+  id: "trule_1", connection_id: "tcon_1", room_id: null, name: "Opened", enabled: true, version: 1,
+  trigger: { event: "pull_request", action: "opened", draft: false },
+  actions: [{ kind: "transition", toStatus: "In Review" }, { kind: "comment", template: "{{pr_url}}" }],
+};
+
+test("the engine reserves one effect per action with the rule, delivery and action index", async () => {
+  const harness = engineHarness([loadedRule]);
+  const result = await harness.engine.runForRepoEvent({
+    deliveryId: "d-1",
+    storedEvent: { event_type: "pull_request", base_ref: "main" },
+    eventRoomId: "room",
+    roomEvent: pullRequestOpened,
+    task: { id: "task_1", room_id: "room", external_ref: "jira:HT-1234", pr_url: null },
+  });
+  await harness.settle();
+  assert.deepEqual(result.runs, ["run_1"]);
+  assert.deepEqual(harness.submitted, [trackerRuleEffectKey("trule_1", "d-1", 0), trackerRuleEffectKey("trule_1", "d-1", 1)]);
+  assert.equal(trackerRuleEffectKey("trule_1", "d-1", 1), "trule_1:d-1:1");
+});
+
+test("the engine skips cards without a tracker ref and tracker sync events", async () => {
+  const harness = engineHarness([loadedRule]);
+  const input = {
+    deliveryId: "d-2",
+    storedEvent: { event_type: "pull_request" },
+    eventRoomId: "room",
+    roomEvent: pullRequestOpened,
+    task: { id: "task_1", room_id: "room", external_ref: null, pr_url: null },
+  };
+  assert.deepEqual((await harness.engine.runForRepoEvent(input)).runs, []);
+  assert.deepEqual((await harness.engine.runForRepoEvent({
+    ...input, task: { ...input.task, external_ref: "jira:HT-1" }, storedEvent: { event_type: "tracker_ticket" },
+  })).runs, []);
+  await harness.settle();
+  assert.deepEqual(harness.submitted, []);
+});

@@ -848,6 +848,13 @@
       "when": 1792800000000,
       "tag": "0120_room_tracker_filters",
       "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1792900000000,
+      "tag": "0121_tracker_rules",
+      "breakpoints": true
     }
   ]
 }

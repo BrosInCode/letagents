@@ -421,6 +421,147 @@ TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurren
 Provider tests answer from fixtures in `src/api/__tests__/fixtures/connectors`
 and fail on any request they do not expect, so CI makes no live tracker call.
 
+## Rules (PR event moves the ticket)
+
+A rule belongs to one connection. It names a repo event (the trigger) and one to five tracker actions. When a
+pull request, review or check matches, LetAgents moves the ticket, comments on it, or both. A rule is an approval
+the connection's owner gives in advance: nobody touches the tracker by hand, and every write still goes through the
+workflow effect journal.
+
+### Write a rule
+
+Open Settings, Ticket trackers, then the connection's **Rules** section, and press **Add rule**.
+
+1. Give the rule a name.
+2. Choose the rooms: every room that imports with this connection, or one of them.
+3. Under **When**, choose the event and the action, then any of the optional fields below.
+4. Under **Then**, add a status change, a comment, or both.
+5. Press **Save rule**.
+
+| Trigger field | Events | Matches when |
+|---|---|---|
+| `event` | all | `pull_request`, `pull_request_review` or `check_run`. |
+| `action` | all | The webhook action: `opened`, `reopened`, `ready_for_review`, `converted_to_draft`, `synchronize`, `closed`; `submitted`, `dismissed`; `completed`. |
+| `merged` | `pull_request` `closed` | The pull request merged (`true`) or closed without a merge (`false`). |
+| `draft` | `pull_request` | The pull request is a draft (`true`) or not (`false`). |
+| `baseBranch` | `pull_request`, `pull_request_review` | The base branch is exactly this name. |
+| `reviewState` | `pull_request_review` | `approved`, `changes_requested`, `commented` or `dismissed`. |
+| `approvalsAtLeast` | `pull_request_review` | At least this many reviewers' latest review approves (comment-only reviews do not count). |
+| `conclusion` | `check_run` | `success`, `failure`, `neutral`, `cancelled`, `skipped`, `timed_out`, `action_required` or `stale`. |
+
+A field that is not set matches anything. A field that the event cannot know (for example a base branch on a check
+run) is refused when you save. The server validates the whole rule strictly: unknown fields, wrong types, more than
+one status change, and unknown template variables are refused with a message.
+
+Example: "PR opened, not draft: In Review and a comment".
+
+```json
+{
+  "name": "Opened: In Review",
+  "room_id": null,
+  "trigger": { "event": "pull_request", "action": "opened", "draft": false },
+  "actions": [
+    { "kind": "transition", "toStatus": "In Review" },
+    { "kind": "comment", "template": "PR {{pr_number}} by {{author}}: {{pr_url}}" }
+  ]
+}
+```
+
+A `transition` names the tracker's status by name (`In Review`), not the board column. The provider resolves the
+name to a transition at run time, as for any tracker write. A `comment` template may use `{{pr_url}}`,
+`{{pr_number}}`, `{{pr_title}}`, `{{author}}`, `{{branch}}`, `{{base_branch}}`, `{{repo}}` and `{{reviewer}}`.
+
+### When a rule runs
+
+1. A webhook for a pull request, review or check reaches the room-event projection.
+2. The projection resolves the event to a card. The rule engine runs only when the card has an `external_ref` and
+   the projection accepted the link: a ticket key in the branch, title or body, or a confirmed link (lease or pull
+   request URL). A card that a lock or another branch's lease protects runs no rule.
+3. The engine finds the room's enabled filter for the card's tracker. The filter's author must own the connection,
+   and the connection must be active. A room without such a filter runs nothing more (invariant 1).
+4. The engine loads the connection's enabled rules for the room (rules for every room, and rules for this room),
+   oldest first, and the pure matcher (`src/api/connectors/rules/matcher.ts`) returns every rule that matches.
+5. For each match it records a `tracker_rule_runs` row, unique per rule and webhook delivery. When the same delivery
+   reaches a second room, that room finds the row and writes nothing: one write per event.
+6. After the webhook answers, the engine reserves one `tracker_transition` or `tracker_comment` effect per action
+   through the broker, with the idempotency key `${rule.id}:${deliveryId}:${action.index}`. The run row then holds
+   the effect ids and the outcome: `succeeded`, `pending` (the journal still reconciles), `failed`, `quarantined`
+   or `error` (for example the connection was removed).
+
+A redelivered webhook is a duplicate to the projection and reaches no rule. A delivery the route retries after a
+failure reaches the rules again: the run row and the journal give back the earlier rows, so nothing new is reserved
+and the tracker is not called again for an effect that succeeded. A retry submits the actions the first attempt
+planned, so a rule edited in between does not change them.
+
+**No loops (invariant 4).** Rules fire on repo events only. Tracker sync writes `tracker_ticket` events tagged
+`metadata.source = "tracker_sync"`; the engine refuses any event that `isTrackerSyncEvent` flags before the
+matcher runs, and those events never go through the repo-event projection. So a transition that a rule made, and
+that sync later reads back, cannot start a rule.
+
+Stored merge replays and the unapplied-merge repair do not run rules: only a live webhook does.
+
+### Comment text
+
+The template is the owner's text and is kept as written. Every variable comes from GitHub, so each value is added as
+plain text: line breaks and control characters become spaces, and a value is cut at 300 characters. For Linear,
+which renders Markdown, the value's Markdown characters are escaped and an `@` cannot mention anyone. For Jira, the
+comment is sent as plain text nodes. `{{pr_url}}` is added only when it is an `https` URL. A value cannot add a
+placeholder: the template is filled in one pass.
+
+### History and rollback
+
+Each save is a new version; the earlier ones stay in `tracker_rule_versions`. **History** lists them, and **Roll back
+to this** saves an old version's content as the newest version, after the same validation as any save. Turning a
+rule on or off is not a new version. Deleting a rule keeps its runs in the audit (the run keeps the rule's name).
+
+### Audit
+
+Each run shows in the board's governance panel, Audit section, as `Rule "<name>" ran` with the event, the card and
+its ticket, and the outcome. The journal row behind each write is in `workflow_effects` (`effect_ids` on the run).
+
+### Who may write rules
+
+Rules write to the tracker with the connection's credentials, so only the connection's owner, signed in to the
+desktop app, may list, create, change, switch, roll back or delete them. The routes use the same gate as the
+connection routes: owner tokens (what agents carry) are refused. Another account's connection or rule answers
+`404`. A rule limited to one room must name a room that already imports with the connection.
+
+### Rule drafting (PR6 extension point)
+
+PR6 adds `POST /account/connectors/:id/rules/draft`, which turns a sentence into rule JSON. The editor in
+`SettingsConnectorRules.vue` has a `draft` slot and an exposed `applyDraft(rule)`, which fill the form from a
+`TrackerRuleInput`; the person still presses Save, and the draft goes through the same validation.
+
+### HTTP routes
+
+All under the desktop app's session bearer, for a connection the account owns.
+
+| Route | Purpose |
+|---|---|
+| `GET /account/connectors/:id/rules` | The rules and the rooms that import with the connection. |
+| `POST /account/connectors/:id/rules` | Create a rule (at most 50 per connection). |
+| `PUT /account/connectors/:id/rules/:ruleId` | Save a new version. |
+| `POST /account/connectors/:id/rules/:ruleId/enabled` | `{ "enabled": true }` or `false`. |
+| `GET /account/connectors/:id/rules/:ruleId/versions` | Version history, newest first. |
+| `POST /account/connectors/:id/rules/:ruleId/rollback` | `{ "version": 2 }`: that content becomes the newest version. |
+| `DELETE /account/connectors/:id/rules/:ruleId` | Delete the rule. |
+
+### Tables
+
+Migration `0121_tracker_rules`: `tracker_rules`, `tracker_rule_versions` (unique per rule and version), and
+`tracker_rule_runs` (unique per rule and delivery, indexed by room and time).
+
+### Tests
+
+- `src/api/__tests__/tracker-rules.test.ts`: matcher table tests for every trigger field, strict validation,
+  template escaping, and the engine's idempotency keys.
+- `src/api/__tests__/tracker-rules-db.test.ts` (needs `TEST_DB_URL`): a PR opened from `HT-1234-x` with the rule
+  above reserves two effects and calls the tracker once for each; a redelivery and a retried delivery reserve
+  nothing; a disabled or non-matching rule never fires; a `tracker_ticket` event never triggers a rule; two rooms
+  write once; a filter its owner did not set writes nothing; versions and rollback.
+- `src/api/__tests__/tracker-rule-routes.test.ts`: owner-only access, versions, rollback, strict validation.
+- `apps/desktop/renderer/__tests__/settings-connector-rules.test.ts`: the editor and the audit text.
+
 ## Remote MCP endpoint
 
 LetAgents serves its MCP tools over streamable HTTP at `https://letagents.chat/mcp`. A Claude app chat can then

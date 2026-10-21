@@ -25,6 +25,11 @@ import {
 } from "./room-event-projection/task-projection.js";
 import { resolveLinkedTaskForRepoRoomEvent } from "./room-event-projection/task-resolver.js";
 import { artifactEvents, githubRoomEvents } from "../server/events.js";
+import {
+  getDefaultTrackerRuleEngine,
+  type TrackerRuleRepoEventInput,
+  type TrackerRuleRepoEventResult,
+} from "../connectors/rules/engine.js";
 
 export { persistMaterializedGitHubRoomEvent } from "./room-event-projection/persistence.js";
 
@@ -41,6 +46,7 @@ export interface GitHubRoomEventProjectionDeps {
   emitGitHubRoomEventUpdate: typeof emitGitHubRoomEventUpdate;
   emitRepoRoomEventProjectionMessage: typeof emitRepoRoomEventProjectionMessage;
   applyGitHubRefRoomLifecycle: typeof applyGitHubRefRoomLifecycle;
+  runTrackerRulesForRepoEvent: (input: TrackerRuleRepoEventInput) => Promise<TrackerRuleRepoEventResult>;
 }
 
 export function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
@@ -88,6 +94,7 @@ const defaultGitHubRoomEventProjectionDeps: GitHubRoomEventProjectionDeps = {
   emitGitHubRoomEventUpdate,
   emitRepoRoomEventProjectionMessage,
   applyGitHubRefRoomLifecycle,
+  runTrackerRulesForRepoEvent: async (input) => (await getDefaultTrackerRuleEngine()).runForRepoEvent(input),
 };
 
 export async function handleMaterializedGitHubRoomEvent(
@@ -178,6 +185,19 @@ export async function handleMaterializedGitHubRoomEvent(
     await deps.updateGitHubRoomEventLinkedTaskId(persisted.event.idempotency_key, null);
   }
   linkedTask = taskProjection.task;
+
+  // Ticket connectors PR5: a card with a ticket, linked by a key match or a
+  // confirmed link, runs its connection's rules. A card the projection did
+  // not accept (a lock, or a lease on another branch) runs none.
+  if (taskProjection.authoritative && linkedTask?.external_ref) {
+    await deps.runTrackerRulesForRepoEvent({
+      deliveryId: input.deliveryId,
+      storedEvent: persisted.event,
+      eventRoomId: eventProject.id,
+      roomEvent,
+      task: linkedTask,
+    });
+  }
 
   const syncedArtifacts = await deps.syncRoomSharedArtifactsForGitHubRoomEvent({
     room_id: eventProject.id,

@@ -142,3 +142,95 @@ export const room_tracker_filters = pgTable(
     enabled_idx: index("room_tracker_filters_enabled_idx").on(table.sync_claimed_at).where(sql`${table.enabled}`),
   }),
 );
+
+/**
+ * Per connection: a repo event trigger and the tracker actions it causes
+ * (ticket connectors PR5). `room_id` null applies to every room that imports
+ * tickets with the connection. A rule is an approval given in advance by the
+ * connection's owner; every write still goes through `workflow_effects`.
+ */
+export const tracker_rules = pgTable(
+  "tracker_rules",
+  {
+    id: text("id").primaryKey(),
+    connection_id: text("connection_id")
+      .notNull()
+      .references(() => tracker_connections.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    room_id: text("room_id")
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    trigger: jsonb("trigger").$type<Record<string, unknown>>().notNull(),
+    actions: jsonb("actions").$type<Array<Record<string, unknown>>>().notNull(),
+    version: integer("version").notNull().default(1),
+    /** The account that wrote the rule: always the connection's owner. */
+    created_by: text("created_by").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    connection_idx: index("tracker_rules_connection_idx").on(table.connection_id, table.created_at),
+    version_check: check("tracker_rules_version_check", sql`${table.version} >= 1`),
+  }),
+);
+
+/** Every saved version of a rule, for history and rollback. */
+export const tracker_rule_versions = pgTable(
+  "tracker_rule_versions",
+  {
+    id: text("id").primaryKey(),
+    rule_id: text("rule_id")
+      .notNull()
+      .references(() => tracker_rules.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    version: integer("version").notNull(),
+    name: text("name").notNull(),
+    room_id: text("room_id"),
+    trigger: jsonb("trigger").$type<Record<string, unknown>>().notNull(),
+    actions: jsonb("actions").$type<Array<Record<string, unknown>>>().notNull(),
+    created_by: text("created_by").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    rule_version_unique: uniqueIndex("tracker_rule_versions_rule_version_uq").on(table.rule_id, table.version),
+  }),
+);
+
+/**
+ * One row per rule that matched one repo event: the audit shown in the board
+ * governance section. Unique per rule and delivery, so a rule that applies to
+ * several rooms writes once per event, and a redelivery reserves nothing new.
+ */
+export const tracker_rule_runs = pgTable(
+  "tracker_rule_runs",
+  {
+    id: text("id").primaryKey(),
+    rule_id: text("rule_id").references(() => tracker_rules.id, { onDelete: "set null", onUpdate: "cascade" }),
+    rule_version: integer("rule_version").notNull(),
+    rule_name: text("rule_name").notNull(),
+    connection_id: text("connection_id").notNull(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_id: text("task_id").notNull(),
+    external_ref: text("external_ref").notNull(),
+    delivery_id: text("delivery_id").notNull(),
+    event_type: text("event_type").notNull(),
+    event_action: text("event_action").notNull(),
+    event_url: text("event_url"),
+    /** The rendered tracker writes, so a retry of the same delivery submits the same requests. */
+    planned_actions: jsonb("planned_actions").$type<Array<Record<string, unknown>>>().notNull(),
+    effect_ids: jsonb("effect_ids").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    outcome: text("outcome").notNull().default("pending"),
+    detail: text("detail"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    rule_delivery_unique: uniqueIndex("tracker_rule_runs_rule_delivery_uq").on(table.rule_id, table.delivery_id),
+    room_created_idx: index("tracker_rule_runs_room_created_idx").on(table.room_id, table.created_at),
+    outcome_check: check(
+      "tracker_rule_runs_outcome_check",
+      sql`${table.outcome} IN ('pending', 'succeeded', 'failed', 'quarantined', 'error')`,
+    ),
+  }),
+);
