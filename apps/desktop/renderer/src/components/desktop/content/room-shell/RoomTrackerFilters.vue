@@ -88,7 +88,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   RoomTrackerFilterView,
   TrackerConnectionView,
@@ -140,8 +140,8 @@ async function load(): Promise<void> {
   error.value = null;
   testResult.value = null;
   const [filterList, connectionList] = await Promise.allSettled([
-    desktopIpc.room.listTrackerFilters(props.roomIdentifier),
-    desktopIpc.connectors.list(),
+    Promise.resolve().then(() => desktopIpc.room.listTrackerFilters(props.roomIdentifier)),
+    Promise.resolve().then(() => desktopIpc.connectors.list()),
   ]);
   if (version !== generation) return;
   if (filterList.status === "fulfilled") {
@@ -213,7 +213,9 @@ function remove(filter: RoomTrackerFilterView): Promise<void> {
   }, "The filter could not be removed.");
 }
 
-watch(() => props.roomIdentifier, () => { void load(); }, { immediate: true });
+// Loaded on mount (never during a server render) and again when the room changes.
+onMounted(() => { void load(); });
+watch(() => props.roomIdentifier, () => { void load(); });
 onBeforeUnmount(() => { generation++; });
 </script>
 
