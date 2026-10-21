@@ -62,6 +62,8 @@ type Gift = {
   windowId: string | null; lastUsedPercent: number | null; consumedPercent: number;
   /** Paused because the app quit; the next app start resumes it (D40: offline, then back). */
   pausedForQuit?: boolean;
+  /** A substitute stays paused until the asker accepts it. */
+  waitingForAsker?: boolean;
 };
 type Journal = { version: 1; gifts: Record<string, Gift> };
 
@@ -189,9 +191,12 @@ export class AskGiveCoordinator {
         throw new AskGiveError(`You have ${Math.max(0, Math.round(left))}% of your ${window.label.toLowerCase()} limit left${promised ? " after your other gifts" : ""}. Give less or try later.`);
       }
       const joined = await this.api.joined(input.token, ready.agentSessionId!);
+      // A different model than asked for joins on hold: it does nothing until the asker accepts it.
+      const waitingForAsker = joined.state === "on_hold"
+        && Boolean(await this.daemon.compareAndSetDesiredState(ready.id, "running", "paused").catch(() => false));
       await updateJournal(journal => {
         const gift = journal.gifts[input.token];
-        if (gift) journal.gifts[input.token] = { ...gift, entryId: ready.id, windowId: window?.id ?? null, lastUsedPercent: window?.usedPercent ?? null };
+        if (gift) journal.gifts[input.token] = { ...gift, entryId: ready.id, windowId: window?.id ?? null, lastUsedPercent: window?.usedPercent ?? null, waitingForAsker };
       });
       this.startWatching();
       return joined;
@@ -243,6 +248,12 @@ export class AskGiveCoordinator {
     const preview = await this.api.preview(gift.token).catch(() => null);
     // Finished, or no longer this giver's: a declined substitute's link can reopen and be given by someone else.
     if (preview && (FINISHED.has(preview.ask.state) || preview.ask.is_giver === false)) return this.finish(gift);
+    if (gift.waitingForAsker && preview?.ask.state === "active") {
+      if (await this.daemon.compareAndSetDesiredState(gift.entryId, "paused", "running").catch(() => false)) {
+        await updateJournal(journal => { const current = journal.gifts[gift.token]; if (current) current.waitingForAsker = false; });
+      }
+      return;
+    }
     const usage = await this.readUsage(gift.entryId, gift.roomId);
     if (usage?.account.windows.some(window => window.usedPercent >= 100)) {
       await this.api.end(gift.token, "provider_limit").catch(() => undefined);

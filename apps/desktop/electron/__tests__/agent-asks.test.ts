@@ -49,13 +49,13 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
+function fakes(overrides: { joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
   const calls: string[] = [];
   const api = {
     claim: async () => { calls.push("claim"); if (overrides.claimFails) throw new Error("Someone is adding this agent right now."); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
     release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return overrides.release ?? { ok: true }; },
     launchAuthority: async () => { calls.push("authority"); return { room_id: "room", grant: { supervisor_grant: "t", grant_id: "g", expires_at: "2099-01-01T00:00:00Z" } }; },
-    joined: async () => { calls.push("joined"); return { id: "ask_1", state: "active" }; },
+    joined: async () => { calls.push("joined"); return { id: "ask_1", state: overrides.joinedState ?? "active" }; },
     models: async () => [{ providerId: "cursor", model: null, label: "Cursor" }, { providerId: "claude-code", model: "claude-opus-5-5", label: "Claude Opus 5.5" }],
     preview: async () => ({ ask: { state: "active", is_giver: true, ...overrides.preview }, unavailable: null }), end: async () => ({}),
   };
@@ -215,4 +215,20 @@ test("a dev run leaves the letagents:// scheme alone, and quitting waits for gif
   let heldAgain = false;
   appEvents.get("before-quit")!({ preventDefault: () => { heldAgain = true; } });
   assert.equal(heldAgain, false, "the second quit goes straight through");
+});
+
+test("a substitute stays paused until the asker accepts it, then starts", async () => {
+  const preview: Record<string, unknown> = { state: "on_hold", is_giver: true };
+  const { coordinator, states } = fakes({ joinedState: "on_hold", preview });
+  const joined = await coordinator.give(give);
+  coordinator.stopWatching();
+  assert.equal(joined.state, "on_hold");
+  assert.deepEqual(states, ["paused->running", "running->paused"], "started to join, then paused");
+  await coordinator.watchOnce();
+  assert.deepEqual(states.slice(2), [], "still waiting: nothing changes");
+  preview.state = "active";
+  await coordinator.watchOnce();
+  assert.deepEqual(states.slice(2), ["paused->running"], "accepted: the agent starts");
+  await coordinator.watchOnce();
+  assert.deepEqual(states.slice(3), [], "started once");
 });

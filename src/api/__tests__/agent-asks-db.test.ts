@@ -198,3 +198,11 @@ test("cancelling from a stale view leaves a running agent and its grant alone", 
   assert.equal((await fresh(row.id)).state, "active");
   assert.equal(await grantRevoked(grant.grant_id), false);
 });
+
+test("a substitute's grant waits for the asker until accepted", options, async () => {
+  const s = await seed(); const { row } = await ask(s);
+  const { joined, grant } = await launch(s, row, { providerId: "claude-code", model: "claude-sonnet-5-5", modelLabel: "Claude Sonnet 5.5" });
+  assert.equal(await asks!.isGrantWaitingForAsker(grant.grant_id), true);
+  await asks!.acceptSubstitute(joined);
+  assert.equal(await asks!.isGrantWaitingForAsker(grant.grant_id), false);
+});

@@ -277,6 +277,13 @@ export async function askForWorker(agentSessionId: string): Promise<AgentAsk | n
   return row?.ask ?? null;
 }
 
+/** A substitute agent waits on hold until the asker accepts it, and may do nothing meanwhile. */
+export async function isGrantWaitingForAsker(grantId: string): Promise<boolean> {
+  const [ask] = await db.select({ id: agent_asks.id }).from(agent_asks)
+    .where(and(eq(agent_asks.grant_id, grantId), eq(agent_asks.state, "on_hold"))).limit(1);
+  return Boolean(ask);
+}
+
 /** Grants scoped to an ask work only while that ask still has, or is starting, an agent. */
 export async function isAskGrantActive(input: { askId: string; ownerAccountId: string; grantId: string }): Promise<boolean> {
   const [ask] = await db.select({ id: agent_asks.id }).from(agent_asks).where(and(
