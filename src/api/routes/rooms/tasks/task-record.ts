@@ -15,7 +15,7 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
-import { ImportedCardBusyError, mergeImportedCardIntoNative } from "../../../connectors/card-merge.js";
+import { ImportedCardBusyError } from "../../../connectors/card-merge.js";
 import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
 import { getTaskTicketDetails } from "../../../connectors/ticket-details.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
@@ -309,10 +309,10 @@ export function registerTaskRecordRoutes(
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;
 
-      if (updates.external_ref && updates.external_ref !== task.external_ref) {
+      if (deps.mergeImportedCardIntoNative && updates.external_ref && updates.external_ref !== task.external_ref) {
         // A card sync imported for this ticket folds into this card, which
         // keeps the key (ticket connectors PR3, native card link).
-        const merge = await mergeImportedCardIntoNative({
+        const merge = await deps.mergeImportedCardIntoNative({
           room_id: project.id,
           native_task_id: taskId,
           external_ref: updates.external_ref,

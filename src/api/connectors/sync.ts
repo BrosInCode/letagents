@@ -274,7 +274,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
   }
 
   async function syncFilter(filter: RoomTrackerFilterRow) {
-    const claimedAt = filter.sync_claimed_at ?? now().toISOString();
+    const claimedAt = filter.sync_claimed_at;
     const startedAt = now().toISOString();
     const connection = await deps.store.get(filter.connection_id);
     if (!connection || connection.status !== "active") {

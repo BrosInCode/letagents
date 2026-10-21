@@ -42,6 +42,8 @@ export interface RoomTaskRouteDeps {
   getTaskById: typeof import("../../../db.js").getTaskById;
   getTaskOwnershipState: typeof import("../../../db.js").getTaskOwnershipState;
   updateTask: typeof import("../../../db.js").updateTask;
+  /** Folds an imported tracker card into a card a person links to the same ticket (ticket connectors PR3). */
+  mergeImportedCardIntoNative?: typeof import("../../../connectors/card-merge.js").mergeImportedCardIntoNative;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,

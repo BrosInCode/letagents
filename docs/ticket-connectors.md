@@ -30,7 +30,8 @@ Local-only rooms do not support ticket keys.
 
 `ticket_state` is the tracker's state for the ticket (todo, in_progress,
 in_review, done). The tracker owns it, and LetAgents never sets it from a room
-action. Until tracker connections exist, it stays empty. The card's work status
+action. Only sync sets it, in a room that imports from a tracker connection
+(see [Sync and room filters](#sync-and-room-filters)); elsewhere it stays empty. The card's work status
 (`status`) stays owned by LetAgents and does not change with the ticket.
 
 ## What attaches to the card
@@ -77,8 +78,8 @@ that has a ticket, search the board for the key first.
 - Common technical names with the same shape, such as `UTF-8`, `SHA-256` and
   `ISO-8859`, are not keys.
 - Linear keys look like Jira keys, so a Linear key matches only a team key
-  LetAgents knows. Today those are the team keys of the room's own Linear
-  cards. Tracker connections will add the connected teams.
+  LetAgents knows: the team keys of the room's own Linear cards, and the
+  `team:<KEY>` terms of the room's Linear ticket filters.
 
 ## Rooms without ticket keys
 
@@ -87,6 +88,150 @@ extra request from the desktop app, and runs no key detector on its messages
 or GitHub events. The server remembers for 30 seconds that the room has no
 ticket cards, so most messages cost no extra query. Setting a key clears that
 memory at once on the server that wrote it.
+
+## Sync and room filters
+
+A room imports tickets through **ticket filters**. A filter names one tracker
+connection and which tickets to import. Sync then keeps a card for each
+matching ticket and keeps its ticket state current. A room without a filter
+runs no sync and looks as before.
+
+### Add a filter
+
+1. Open the room's settings. The **Ticket filters** section shows when the
+   room has a filter or when you have a tracker connection.
+2. Choose the connection.
+3. Type the filter:
+   - Jira: JQL without `ORDER BY`, for example `project = HT AND statusCategory != Done`.
+   - Linear: `team:<KEY>` and `project:<id>` terms, for example `team:ENG`.
+   - Empty: every ticket the connection can read.
+4. Choose **Test**. The app shows how many tickets match (up to 200).
+5. Choose **Save**. The first sync starts within one poll interval.
+
+Only a room admin can add or change a filter, and only with a connection they
+own, because sync reads the tickets with that person's credentials. Any room
+admin can remove a filter. A filter that is off or removed stops the sync;
+the cards it imported stay on the board with their last ticket state.
+
+### What sync does
+
+- **New ticket**: sync creates a card with the ticket's title, its key as the
+  external ref, its ticket state, and the work state `proposed`. The card's
+  creator is `tracker:jira` or `tracker:linear`.
+- **Changed ticket**: sync updates the card's ticket state. An imported card
+  also takes the ticket's new title. A card a person made keeps its own title.
+  Sync never changes a card's work state, owner or anything else.
+- **Two states, two owners.** The board column is the work state, owned by
+  LetAgents. The ticket state is the tracker's. For example, a ticket moved
+  to Done in Jira shows **Done** on the card while the card stays in
+  **In progress** until the room finishes its work.
+- Ticket states belong only in rooms that import from the connection. A card
+  that names a ticket in a room without a filter gets no ticket state.
+- A deleted ticket leaves its card alone.
+
+Sync polls each enabled filter every 2 minutes (`LETAGENTS_TRACKER_POLL_MS`,
+15 seconds to 1 hour). A poll asks for tickets changed since the previous poll
+began, less 5 minutes for clock skew. A poll reads at most 200 tickets, most
+recently updated first; narrow a larger filter. Two API processes never poll
+the same filter at once: each poll claims its filter row first.
+
+### One path for polls and webhooks
+
+A poll, a webhook and an auto import all apply a ticket through one function.
+It takes a Postgres advisory lock on the connection and ticket key, compares
+the ticket with the cached copy in `external_items`, and writes only when
+something changed. So a webhook and a poll that see the same change write
+once, and an older copy (a slow poll) never undoes a newer one.
+
+### Webhooks (optional)
+
+Webhooks make ticket changes show at once instead of at the next poll.
+
+1. Open **Settings → Ticket trackers** and choose **Webhook** on the connection.
+2. Copy the URL and the secret.
+3. In Jira (**System → WebHooks**), add a webhook with that URL and secret for
+   issue created, updated and deleted events. In Linear
+   (**Settings → API → Webhooks**), add a webhook with that URL for Issue
+   events, and paste the secret as the signing secret.
+
+The URL is `/webhooks/trackers/<provider>/<connection id>`. The secret is
+derived from the server's connector key and the connection id, so nothing
+extra is stored. A webhook needs `LETAGENTS_BASE_URL` set to an https URL.
+
+- Jira deliveries must carry `X-Hub-Signature: sha256=<HMAC of the body>`.
+- Linear deliveries must carry `Linear-Signature` (HMAC of the body), and the
+  body's `webhookTimestamp` must be within 5 minutes.
+- The server answers `202` at once. The payload only names tickets: sync reads
+  each ticket from the tracker and applies it as a poll would. It then makes
+  the connection's filters due, so a new ticket that matches a filter is
+  imported at the next tick.
+
+### Auto import
+
+When a pull request's branch, title or closing keyword names a ticket key and
+no card in the room holds it, and the room has a filter on a connection for
+that tracker, LetAgents reads the ticket and creates its card. The pull
+request then attaches to that card. At most three keys are tried per event; a
+key the tracker does not know is not asked for again for 10 minutes. Room
+messages do not import tickets.
+
+### Linking your own card
+
+When you set a ticket key on your own card and sync already imported a card
+for that ticket, the two become one, in one transaction:
+
+- your card keeps its title, description, owner and work state;
+- it takes the imported card's ticket state, pull requests and links, shared
+  artifacts, room events and linked threads;
+- the imported card is deleted.
+
+If an agent holds a work lease on the imported card, the link is refused with
+`imported_card_busy`; finish or release that card first. A card that a person
+or an agent created is never merged away (`created_by` values that start with
+`tracker:` are reserved for sync).
+
+### Room events
+
+Each import and each ticket state change adds a quiet event in the room's
+**Events** tab, never a chat message. These events have
+`event_type = "tracker_ticket"` and `metadata.source = "tracker_sync"`. They
+are not sent on the GitHub event bus, so wake rules and the rules engine
+(a later part of this feature) never act on them: a ticket transition cannot
+trigger itself.
+
+### On the board
+
+- A card that names a ticket shows the provider chip and its key. When the
+  ticket has a state, the card also shows a ticket state pill (To do,
+  In progress, In review, Done). The column is the work state.
+- When the room has imported cards, the toolbar offers **All cards**,
+  **Tracker cards** (cards that name a ticket) and **Native cards**.
+- The card details show a **Ticket** section: the tracker status, the ticket
+  state, the assignee, when it last synced, and a link to the ticket.
+- A room with no ticket cards shows none of this.
+
+`get_board` returns `ticket_state` for these cards (see [Agents](#agents)).
+Agents get no new tools.
+
+### HTTP routes
+
+| Route | Purpose |
+|---|---|
+| `GET /rooms/:room/tracker-filters` | List the room's filters (any participant). |
+| `PUT /rooms/:room/tracker-filters` | Add or replace the filter for a connection (`connection_id`, `filter`, `enabled`). Room admin, own connection, app session. |
+| `PATCH /rooms/:room/tracker-filters/:id` | Change `filter` or `enabled`. Room admin who owns the connection. |
+| `DELETE /rooms/:room/tracker-filters/:id` | Remove a filter. Room admin. |
+| `POST /rooms/:room/tracker-filters/test` | Count matching tickets without saving. |
+| `GET /rooms/:room/tasks/:task/ticket` | The cached ticket behind a card. |
+| `GET /account/connectors/:id/webhook` | The connection's webhook URL and secret. |
+| `POST /webhooks/trackers/:provider/:connection` | Tracker webhooks (signed). |
+
+### Tests
+
+```bash
+node --import tsx --test src/api/__tests__/tracker-webhooks.test.ts src/api/__tests__/room-task-routes.test.ts
+TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-sync-db.test.ts
+```
 
 ## Connections and providers
 

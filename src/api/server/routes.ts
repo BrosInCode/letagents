@@ -1,5 +1,6 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
 import { registerRoomTrackerFilterRoutes } from "../routes/rooms/tracker-filters.js";
+import { mergeImportedCardIntoNative } from "../connectors/card-merge.js";
 import { registerTrackerWebhookRoutes } from "../routes/connectors/tracker-webhooks.js";
 import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
 import { registerRoomHistorySummaryRoutes } from "../routes/rooms/history-summary.js";
@@ -404,6 +405,7 @@ export function registerApiRoutes(app: Express): void {
     getTaskById,
     getTaskOwnershipState,
     updateTask,
+    mergeImportedCardIntoNative,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,

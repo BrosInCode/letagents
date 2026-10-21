@@ -160,14 +160,18 @@ function toIso(value: unknown): string | null {
 /** Records a finished poll. A filter changed meanwhile (claim cleared) keeps its fresh state. */
 export async function finishRoomTrackerFilterSync(input: {
   id: string;
-  claimed_at: string;
+  /** The claim the poll ran under; null for a poll run without one. */
+  claimed_at: string | null;
   started_at: string;
   error: string | null;
 }): Promise<void> {
   await db.update(room_tracker_filters).set(input.error
     ? { last_error: input.error }
     : { last_synced_at: input.started_at, last_error: null })
-    .where(and(eq(room_tracker_filters.id, input.id), eq(room_tracker_filters.sync_claimed_at, input.claimed_at)));
+    .where(and(
+      eq(room_tracker_filters.id, input.id),
+      sql`${room_tracker_filters.sync_claimed_at} IS NOT DISTINCT FROM ${input.claimed_at}::timestamptz`,
+    ));
 }
 
 /** Makes a connection's filters due now, unless a poll claimed them in the last few seconds. */
