@@ -13,6 +13,12 @@ The broker uses four states:
 
 `request_changes` submissions with an empty or obvious junk explanation are persisted as quarantined pending rows. They do not call GitHub and require human handling.
 
+## Tracker effects
+
+Ticket connectors add two kinds: `tracker_transition` and `tracker_comment`, for the providers `jira` and `linear`. They are reserved through `submitTrackerEffect` under a live tracker connection instead of a review lease, so `lease_id` is null for them; a database check still requires a lease for `github_review_verdict`. The request payload names the connection, the ticket key, and the target status or the comment body; the fingerprint binds them to the idempotency key.
+
+A Jira comment carries the correlation key as the hidden comment property `letagents.effect`; a Linear comment is created with an id derived from the correlation key. A transition has no marker: reconciliation looks for a change to the target status in the Jira changelog or the Linear issue history that is no older than the effect (less one minute of clock skew). An effect whose ticket already has the target status succeeds without a write. A removed connection, or credentials that cannot be decrypted, fail the effect definitely before any tracker call; a removed connection found during reconciliation fails the effect with no attempts left. `lookup_count` counts lookups that found nothing: after three, an ambiguous `tracker_transition` moves to `failed` so the bounded create retry runs (the transition re-reads the ticket's status first). An ambiguous `tracker_comment` stays ambiguous. Empty or oversized comments are quarantined. See [ticket-connectors.md](ticket-connectors.md).
+
 ## Boundary and resume rule
 
 Only writes made through a brokered server tool are covered by the effect journal. In P3a, that is `submit_review_verdict`. Direct `git`, `gh`, provider CLI, shell, desktop, and ordinary API writes are still at-least-once operations. After a worker restart or an uncertain command result, the worker must inspect provider reality (for example the current PR reviews, comments, branches, or checks) before repeating an unbrokered write. A local timeout or missing acknowledgement is not proof that the external write failed.

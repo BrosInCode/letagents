@@ -13,6 +13,7 @@ export * from "./schema/tasks.js";
 export * from "./schema/coordination.js";
 export * from "./schema/board.js";
 export * from "./schema/effects.js";
+export * from "./schema/connectors.js";
 export * from "./schema/desktop-push.js";
 export * from "./schema/agent-work.js";
 export * from "./schema/execution-approvals.js";

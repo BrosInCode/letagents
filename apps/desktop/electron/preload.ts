@@ -320,6 +320,15 @@ const api: DesktopApi = {
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
   },
+  connectors: {
+    list: () => ipcRenderer.invoke("desktop:connectors:list"),
+    connectOAuth: (provider) => ipcRenderer.invoke("desktop:connectors:connect-oauth", provider),
+    cancelOAuth: () => ipcRenderer.invoke("desktop:connectors:cancel-oauth"),
+    saveApiToken: (input) => ipcRenderer.invoke("desktop:connectors:save-api-token", input),
+    test: (id) => ipcRenderer.invoke("desktop:connectors:test", id),
+    update: (id, patch) => ipcRenderer.invoke("desktop:connectors:update", id, patch),
+    remove: (id) => ipcRenderer.invoke("desktop:connectors:remove", id),
+  },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
     getStorageStatus: () => ipcRenderer.invoke("desktop:supervisor-grant:get-storage-status"),

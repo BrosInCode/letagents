@@ -1,0 +1,8 @@
+{
+  "expand": "transitions",
+  "transitions": [
+    { "id": "11", "name": "Stop progress", "to": { "name": "To Do", "id": "1" }, "hasScreen": false },
+    { "id": "31", "name": "Send to review", "to": { "name": "In Review", "id": "10003" }, "hasScreen": false },
+    { "id": "41", "name": "Resolve", "to": { "name": "Done", "id": "10002" }, "hasScreen": false }
+  ]
+}
