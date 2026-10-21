@@ -137,6 +137,11 @@ test("HTTP exposes exactly the remote allow list, and stdio has nothing unclassi
     for (const tool of tools) {
       assert.equal(Object.hasOwn(tool.inputSchema.properties ?? {}, "cwd"), false, `${tool.name} takes no local path remotely`);
     }
+    const flood = await remote.client.callTool({ name: "send_message",
+      arguments: { text: "x", reply_to: Object.fromEntries(Array.from({ length: 12_000 }, (_, i) => [`k${i}`, i])) } });
+    assert.equal(flood.isError, true);
+    assert.match(JSON.stringify(flood.content), /more than the maximum of 10000 elements/,
+      "the SDK's element limit refuses the call before tool validation");
     await remote.client.close();
   } finally {
     await sessions.closeAll();

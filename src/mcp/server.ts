@@ -9,7 +9,7 @@ import { announceProcessExit } from "./server/runtime/process-connection.js";
 import { executionProfile } from "./server/runtime/execution-profile.js";
 import { setMcpClientNameSource } from "./server/runtime/identity/config.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from "./server/tools/workspace.js";
-import { isRemoteToolSurface } from "./server/remote-tool-surface.js";
+import { isRemoteToolSurface, REMOTE_MAX_TOOL_INPUT_ELEMENTS } from "./server/remote-tool-surface.js";
 import { ROOM_EXPRESSION_GUIDANCE } from "../../shared/room-expressions.mjs";
 import {
   LETAGENTS_RUNTIME_CONTRACT_ARG,
@@ -31,9 +31,14 @@ async function main() {
   const server = new McpServer({
     name: "letagents",
     version: "0.2.0",
-  }, { instructions: remote ? ROOM_EXPRESSION_GUIDANCE
-    : profile === "autonomous_mcp_worker" || profile === "interactive_desktop"
-      ? `${WORKSPACE_CAPTURE_INSTRUCTIONS}\n\n${ROOM_EXPRESSION_GUIDANCE}` : undefined });
+  }, {
+    instructions: remote ? ROOM_EXPRESSION_GUIDANCE
+      : profile === "autonomous_mcp_worker" || profile === "interactive_desktop"
+        ? `${WORKSPACE_CAPTURE_INSTRUCTIONS}\n\n${ROOM_EXPRESSION_GUIDANCE}` : undefined,
+    // Remote callers reach SDK validation over HTTP; bound its work per call
+    // (GHSA-46jr-4wx8-v453). stdio servers are not exposed to it.
+    ...(remote ? { maxToolInputElements: REMOTE_MAX_TOOL_INPUT_ELEMENTS } : {}),
+  });
   attachMcpServer(server);
   registerRoomResources(server);
   registerTools(server, profile, supervisedProvider, { remote });
