@@ -80,7 +80,7 @@ async function runningDaemon() {
     daemon, watch, ran,
     /**
      * The servers still listening on the daemon's socket: one keeps the process alive.
-     * A closed server stays in Node's handle list until the next tick, so only a server that still listens counts.
+     * A closed server can stay in Node's handle list for a while after its close callback, so only a server that still listens counts.
      */
     listening: () => (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
       .filter((handle) => handle instanceof Server && handle.listening && handle.address() === paths.socketPath).length,
