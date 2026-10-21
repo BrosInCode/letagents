@@ -80,9 +80,14 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
     // endpoint. Browser cookies, app sessions, worker bearers and host grants
     // do not. Invalid bearers were already refused by the auth middleware.
     const authorization = parseBearerAuthorization(req.headers.authorization);
-    if (authorization.kind !== "token" || req.authKind !== "owner_token" || !req.sessionAccount) {
-      jsonRpcError(res, 401, authorization.kind === "token" ? INVALID_BEARER_MESSAGE
-        : "A LetAgents owner token is required as 'Authorization: Bearer <LETAGENTS_TOKEN>'.",
+    if (authorization.kind === "token" && (req.authKind !== "owner_token" || !req.sessionAccount)) {
+      // Same status, headers and body as the middleware's invalid-bearer reply,
+      // so a valid credential of another kind cannot be told from a bad one.
+      res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+      return;
+    }
+    if (authorization.kind !== "token" || !req.sessionAccount) {
+      jsonRpcError(res, 401, "A LetAgents owner token is required as 'Authorization: Bearer <LETAGENTS_TOKEN>'.",
         { "WWW-Authenticate": 'Bearer realm="letagents"' });
       return;
     }

@@ -98,9 +98,12 @@ test("the remote endpoint refuses requests without an owner bearer before starti
     assert.equal((await post(url, { Authorization: "Bearer not-a-token" })).status, 401, "unknown bearer");
     assert.equal((await post(url, { Authorization: "Bearer" })).status, 401, "malformed bearer");
     const appSession = await post(url, { Authorization: "Bearer app-session" });
+    const unknownBearer = await post(url, { Authorization: "Bearer not-a-token-either" });
     assert.equal(appSession.status, 401, "app sessions are not owner tokens");
-    assert.match((await appSession.json()).error.message, /bearer credential is invalid or expired/,
-      "a valid bearer of the wrong kind gets the middleware's message");
+    assert.deepEqual(
+      { status: appSession.status, auth: appSession.headers.get("www-authenticate"), body: await appSession.json() },
+      { status: unknownBearer.status, auth: unknownBearer.headers.get("www-authenticate"), body: await unknownBearer.json() },
+      "a valid bearer of the wrong kind looks exactly like an invalid bearer");
     const cookieOnly = await post(url, { Cookie: "letagents_session=whatever" });
     assert.equal(cookieOnly.status, 401, "a browser cookie never opens the MCP endpoint");
     const notInitialize = await post(url, { Authorization: "Bearer owner-a" },

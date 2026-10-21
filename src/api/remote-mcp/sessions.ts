@@ -364,6 +364,9 @@ export class RemoteMcpSessionManager {
     for (const victim of [ownVictim, globalVictim]) {
       if (!victim) continue;
       this.counters.evicted += 1;
+      // Counts only: no account id or token in server logs.
+      console.info(`Remote MCP session evicted (${victim === ownVictim ? "account" : "global"} cap):`,
+        JSON.stringify(this.stats()));
       void this.close(victim);
     }
   }

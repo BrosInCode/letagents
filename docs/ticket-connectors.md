@@ -40,7 +40,7 @@ When a session closes, the client gets `404` and initializes a new one. The agen
 register its worker again.
 
 Limits are per account, so people who share one token share them. Each person should use their own owner token.
-Refusals are logged at warn level with counts only (sessions in use, starting, created, refused at the account cap,
+Refusals are logged at warn level and capacity evictions at info level, with counts only (sessions in use, starting, created, refused at the account cap,
 refused at the global cap, evicted); `RemoteMcpSessionManager.stats()` returns the same counts.
 
 **Proxy note.** `wait_for_messages` holds one streamed HTTP response open for up to `LETAGENTS_POLL_MAX_MS`. The
@@ -54,7 +54,7 @@ where one missed global leaks one caller's room or worker to another. A child pe
 the operating system and runs the exact code the npm package runs. The cost is memory: one idle child measured about
 107 MB resident (compiled build, Node 22, macOS), with its heap capped at 256 MB. The default cap of 16 sessions is
 therefore about 1.7 GB when all are idle; raise `LETAGENTS_REMOTE_MCP_MAX_SESSIONS` only with container memory to
-match. Moving the runtime to per-connection state in-process, which would cut this to a few MB per session, is a
+match (it is read at API start). Moving the runtime to per-connection state in-process, which would cut this to a few MB per session, is a
 possible later change.
 
 **Follow-up: separate user.** The children run as the API's operating-system user. The env allowlist keeps database
