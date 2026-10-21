@@ -449,3 +449,84 @@ test('recent completed tasks include new work beyond the first 200 and recently 
     assert.deepEqual(original.tasks.map(task => task.id), ['task_1', 'task_2'], 'existing board order stays stable');
   } finally { await pool.query('DELETE FROM rooms WHERE id = $1', [room.id]); await pool.end(); }
 });
+
+function createExternalRefPatchHarness(input: { admin: boolean; updateTask?: (...args: unknown[]) => Promise<unknown> }) {
+  const { app, handlers } = createRouteApp();
+  const updates: unknown[] = [];
+  const task = { id: "task_5", status: "accepted", assignee: null, assignee_agent_key: null, external_ref: null };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async () => ({ id: "github.com/brosincode/letagents" }),
+    requireParticipant: async () => true,
+    requireAdmin: async (_req: unknown, res: { status(code: number): { json(body: unknown): void } }) => {
+      if (!input.admin) res.status(403).json({ error: "Admin required" });
+      return input.admin;
+    },
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" as const }),
+    getTaskById: async () => task,
+    getTaskOwnershipState: async () => ({ status: task.status, assignee: null, assignee_agent_key: null }),
+    enforceTaskCoordinationMutation: async () => ({ kind: "allow" as const }),
+    updateTask: input.updateTask ?? (async (_room: string, _id: string, patch: unknown) => {
+      updates.push(patch);
+      return { ...task, ...(patch as object) };
+    }),
+  };
+  registerRoomTaskRoutes(app as never, deps as never);
+  const handler = handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/")!;
+  const patch = async (body: Record<string, unknown>) => {
+    const res = createResponseRecorder();
+    await handler({ params: { 0: "github.com/brosincode/letagents", 1: "task_5" }, body, query: {} }, res);
+    return res;
+  };
+  return { patch, updates };
+}
+
+test("a room admin sets, normalizes and clears a card's ticket key", async () => {
+  const { patch, updates } = createExternalRefPatchHarness({ admin: true });
+  assert.equal((await patch({ external_ref: "ht-1234" })).statusCode, 200);
+  assert.equal((await patch({ external_ref: null })).statusCode, 200);
+  assert.deepEqual(updates, [{ external_ref: "jira:HT-1234" }, { external_ref: null }]);
+  const invalid = await patch({ external_ref: "github:HT-1" });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(updates.length, 2);
+});
+
+test("only a room admin may change a card's ticket key", async () => {
+  const { patch, updates } = createExternalRefPatchHarness({ admin: false });
+  assert.equal((await patch({ external_ref: "jira:HT-1" })).statusCode, 403);
+  assert.equal(updates.length, 0);
+});
+
+test("a ticket key already on another card is a conflict that names that card", async () => {
+  const { TaskExternalRefConflictError } = await import("../db.js");
+  const { patch } = createExternalRefPatchHarness({
+    admin: true,
+    updateTask: async () => { throw new TaskExternalRefConflictError("jira:HT-1", "task_2"); },
+  });
+  const res = await patch({ external_ref: "jira:HT-1" });
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, {
+    error: "jira:HT-1 is already on task_2 in this room.",
+    code: "task_external_ref_conflict",
+    task_id: "task_2",
+  });
+});
+
+test("room task creation rejects a malformed ticket key before any write", async () => {
+  const { app, handlers } = createRouteApp();
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async () => ({ id: "github.com/brosincode/letagents" }),
+    requireParticipant: async () => true,
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" as const }),
+  };
+  registerRoomTaskRoutes(app as never, deps as never);
+  const res = createResponseRecorder();
+  await handlers.post.get("/^\\/rooms\\/(.+)\\/tasks$/")!(
+    { params: { 0: "github.com/brosincode/letagents" }, body: { title: "Ticket", created_by: "human", external_ref: "nope" } },
+    res,
+  );
+  assert.equal(res.statusCode, 400);
+});

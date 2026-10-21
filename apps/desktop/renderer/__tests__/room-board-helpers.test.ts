@@ -127,6 +127,8 @@ describe("board card hierarchy", () => {
     assert.equal(normalizedExternalRef("ht-12"), "jira:HT-12");
     assert.equal(normalizedExternalRef("Linear:eng-4"), "linear:ENG-4");
     assert.equal(normalizedExternalRef("not a key"), undefined);
+    assert.equal(normalizedExternalRef("E-1"), undefined);
+    assert.equal(normalizedExternalRef("linear:E-1"), "linear:E-1");
     assert.deepEqual(ticketRefParts("linear:ENG-4"), { provider: "linear", providerLabel: "Linear", key: "ENG-4" });
     assert.equal(ticketRefParts(null), null);
     assert.equal(ticketRefParts("broken"), null);

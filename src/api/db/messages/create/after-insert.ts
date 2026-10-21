@@ -50,7 +50,12 @@ export async function finishCreatedMessage(
   }
 
   if (!createdMessageIsPromptOnly) {
-    await recordTaskMentionsForMessage(tx, roomId, createdMessage);
+    // Best effort inside a savepoint: a failed mention link never blocks chat.
+    await tx.transaction((savepoint) => recordTaskMentionsForMessage(savepoint, roomId, createdMessage))
+      .catch((error: unknown) => {
+        console.warn(`[task mentions] could not link message ${createdMessage.number} in ${roomId}`,
+          error instanceof Error ? error.message : error);
+      });
   }
 
   if (options?.with_created_message_in_transaction) {

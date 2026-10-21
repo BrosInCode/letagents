@@ -38,5 +38,8 @@ export function normalizedExternalRef(value: string): string | null | undefined 
   if (!trimmed) return null;
   const match = /^(?:(jira|linear):)?\s*([A-Za-z][A-Za-z0-9]*-\d+)$/i.exec(trimmed);
   if (!match) return undefined;
-  return `${(match[1] || "jira").toLowerCase()}:${match[2]!.toUpperCase()}`;
+  const provider = (match[1] || "jira").toLowerCase();
+  // Jira project keys have two or more characters; Linear team keys may have one.
+  if (provider === "jira" && !/^[A-Za-z][A-Za-z0-9]+-/.test(match[2]!)) return undefined;
+  return `${provider}:${match[2]!.toUpperCase()}`;
 }

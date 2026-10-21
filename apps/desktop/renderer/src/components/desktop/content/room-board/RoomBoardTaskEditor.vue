@@ -3,7 +3,7 @@
     <header><span class="desktop-task-id">{{ shortTaskId(task.id) }}</span><h3>Edit task</h3></header>
     <label class="desktop-task-create-field"><span>Title</span><input ref="titleInput" v-model="title" type="text" required :disabled="busy" /></label>
     <TaskMarkdownEditor v-model="description" :disabled="busy" />
-    <label class="desktop-task-create-field">
+    <label v-if="ticketKeys" class="desktop-task-create-field">
       <span>Ticket key (optional)</span>
       <input v-model="externalRef" type="text" placeholder="jira:HT-1234" spellcheck="false" autocomplete="off" :disabled="busy" :aria-invalid="externalRefInvalid" />
       <small v-if="externalRefInvalid" class="desktop-task-dialog-error">Use a key such as HT-1234, jira:HT-1234 or linear:ENG-12.</small>
@@ -23,7 +23,7 @@ import { shortTaskId } from './formatters';
 import TaskMarkdownEditor from './TaskMarkdownEditor.vue';
 import { taskContentPatch } from '../../../../../../../../shared/task-markdown-editing.mjs';
 import { normalizedExternalRef, type TaskEditPatch } from './ticket-ref';
-const props = defineProps<{ task: DesktopTaskSummary; busy: boolean; error: string | null }>();
+const props = defineProps<{ task: DesktopTaskSummary; busy: boolean; error: string | null; ticketKeys?: boolean }>();
 const emit = defineEmits<{ save: [input: TaskEditPatch]; cancel: []; dirty: [value: boolean] }>();
 const title = ref(props.task.title);
 const description = ref(props.task.description || '');

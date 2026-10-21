@@ -69,6 +69,7 @@
       :selected-reviewer="modalSelectedReviewer"
       :can-edit="canEditTasks"
       :room-identifier="roomIdentifier"
+      :ticket-keys="ticketKeys"
       @save="saveModalTask"
       @close="clearTaskSelection"
       @assign-review="assignModalReview"
@@ -137,6 +138,8 @@ import { useRoomBoardController } from "./room-board/useRoomBoardController";
 import { useRoomBoardPresentation } from "./room-board/useRoomBoardPresentation";
 
 const props = defineProps<{
+  /** Cloud rooms only: local rooms cannot store ticket keys. */
+  ticketKeys?: boolean;
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
   boardSettings?: DesktopBoardSettingsSummary | null;

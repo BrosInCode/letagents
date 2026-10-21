@@ -17,7 +17,7 @@
       </div>
     </section>
     <RoomBoardTaskEditor
-      v-if="task && editing" :key="task.id" :task="task" :busy="busyAction !== null" :error="error"
+      v-if="task && editing" :key="task.id" :task="task" :busy="busyAction !== null" :error="error" :ticket-keys="ticketKeys"
       @dirty="dirty = $event" @cancel="finishEditing"
       @save="input => emit('save', input, saved => { if (saved) void finishEditing(); })"
     />
@@ -64,6 +64,7 @@ const props = defineProps<{
   selectedReviewer: string;
   canEdit?: boolean;
   roomIdentifier?: string;
+  ticketKeys?: boolean;
 }>();
 const editing = ref(false);
 const dirty = ref(false);

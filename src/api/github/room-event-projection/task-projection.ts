@@ -201,12 +201,17 @@ export async function applyRepoRoomEventToTask(
       installationId: input.installationId,
     });
 
-    if (decision.kind === "deny" && decision.code === "missing_lease" && input.matchedByTicketKey) {
-      // The card names this ticket, but nobody holds its work lease: link the
-      // pull request to the card and leave the work state alone.
-      const linked = ticketKeyPullRequestArtifacts(linkedTask, event);
-      const refreshed = linked ? await updateTask(project.id, linkedTask.id, { workflow_artifacts: linked }) : null;
-      return { task: refreshed ?? linkedTask, authoritative: true };
+    if (decision.kind === "deny" && input.matchedByTicketKey) {
+      if (decision.code === "missing_lease") {
+        // The card names this ticket, but nobody holds its work lease: link
+        // the pull request to the card and leave the work state alone.
+        const linked = ticketKeyPullRequestArtifacts(linkedTask, event);
+        const refreshed = linked ? await updateTask(project.id, linkedTask.id, { workflow_artifacts: linked }) : null;
+        return { task: refreshed ?? linkedTask, authoritative: true };
+      }
+      // A lock, or a lease on another branch: a key alone is too weak to
+      // override it, and too weak to post an "ignored" notice for every event.
+      return { task: linkedTask, authoritative: false };
     }
 
     if (decision.kind === "deny") {

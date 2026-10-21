@@ -88,12 +88,3 @@ test("a room with no external refs runs no detector on messages", async () => {
   assert.equal(detectorRuns, 0);
   assert.equal(queries, 0);
 });
-
-test("rental-visibility messages are never linked to cards", async () => {
-  let scopeProbes = 0;
-  const recorded = await recordTaskMentionsForMessage({} as never, "room", { number: 1, text: "HT-1", visibility: "renter_only" }, {
-    getScope: async () => { scopeProbes += 1; return { hasExternalRefs: true, detectorOptions: {} }; },
-  });
-  assert.equal(recorded, 0);
-  assert.equal(scopeProbes, 0);
-});

@@ -153,6 +153,7 @@
         :tasks="tasks"
         :board-settings="boardSettings"
         :can-edit-tasks="canManageRoomBoard(room.role)"
+        :ticket-keys="storage.effectiveMode !== 'local'"
         :presence="presence"
         :workers="workers"
         :supervisor-entries="supervisorEntries"

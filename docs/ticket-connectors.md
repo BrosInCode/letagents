@@ -44,6 +44,8 @@ from branch `HT-1234-proration` attaches to the card `jira:HT-1234`.
   review and merge as a linked PR always does.
 - If nobody holds the lease, the PR is shown on the card and the card's work
   status does not change.
+- If the card is locked, or its lease is for another branch, a key match
+  changes nothing.
 
 **Room messages.** A room message that names a card's key is listed under
 **Linked threads** in the card's details. Select an entry to open its thread.

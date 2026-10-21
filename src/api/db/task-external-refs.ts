@@ -3,7 +3,7 @@
  * messages that mention them (`task_mentions`). A room with no external ref
  * pays one indexed probe here and runs no detector.
  */
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import {
   detectKeysInMessage,
@@ -12,6 +12,7 @@ import {
 } from "../connectors/key-detectors.js";
 import { db } from "./client.js";
 import { toTask } from "./mappers.js";
+import { visibleMessageCondition } from "./messages/visibility.js";
 import { messages, task_mentions, tasks } from "./schema.js";
 import { formatMessageId, formatTaskId, parseScopedId } from "./utils.js";
 import type { MessageRow, Task, TaskRow } from "./types.js";
@@ -123,11 +124,10 @@ export interface TaskMentionDeps {
 export async function recordTaskMentionsForMessage(
   executor: WriteExecutor,
   roomId: string,
-  message: Pick<MessageRow, "number" | "text"> & { visibility?: string | null },
+  message: Pick<MessageRow, "number" | "text">,
   deps: TaskMentionDeps = {},
 ): Promise<number> {
-  // Rental messages have restricted readers; a card must not surface them.
-  if (message.visibility || !message.text.trim()) return 0;
+  if (!message.text.trim()) return 0;
   const scope = await (deps.getScope ?? getRoomExternalRefScope)(roomId, executor);
   if (!scope.hasExternalRefs) return 0;
   const detected = (deps.detect ?? detectKeysInMessage)(message.text, scope.detectorOptions);
@@ -160,7 +160,11 @@ export interface TaskMention {
 
 const MENTION_TEXT_PREVIEW_CHARS = 280;
 
-/** Newest first. Each entry names its thread root so the UI can open the thread. */
+/**
+ * Newest first. Each entry names its thread root so the UI can open the thread.
+ * Rental tags are set after a message is written, so restricted messages are
+ * filtered here, at read time, as room search filters hidden prompts.
+ */
 export async function getTaskMentions(
   roomId: string,
   taskId: string,
@@ -185,7 +189,12 @@ export async function getTaskMentions(
       eq(messages.room_id, task_mentions.room_id),
       eq(messages.number, task_mentions.message_number),
     ))
-    .where(and(eq(task_mentions.room_id, roomId), eq(task_mentions.task_number, taskNumber)))
+    .where(and(
+      eq(task_mentions.room_id, roomId),
+      eq(task_mentions.task_number, taskNumber),
+      visibleMessageCondition(),
+      or(isNull(messages.visibility), eq(messages.visibility, "rental_visible")),
+    ))
     .orderBy(desc(task_mentions.message_number), asc(task_mentions.key))
     .limit(limit);
   return rows.map((row) => {

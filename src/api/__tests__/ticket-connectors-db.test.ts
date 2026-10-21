@@ -66,6 +66,13 @@ test("a message naming the card's key is listed as a linked thread", options, as
   assert.ok(mentions.every((mention) => mention.key === "HT-1234" && mention.thread_root_id === root.id));
   assert.deepEqual((await db!.getTaskMentions(room.id, other.id)).map((mention) => mention.message_id), [root.id]);
   assert.equal(await mentionCount(room.id), 3);
+
+  // Rental tags are set after the write, so the read hides restricted messages.
+  const restricted = await db!.addMessage(room.id, "provider", "HT-1234 internal notes");
+  await client!.pool.query("UPDATE messages SET visibility = 'provider_only' WHERE room_id = $1 AND number = $2",
+    [room.id, Number(restricted.id.replace("msg_", ""))]);
+  assert.equal(await mentionCount(room.id), 4);
+  assert.deepEqual((await db!.getTaskMentions(room.id, card.id)).map((mention) => mention.message_id), [reply.id, root.id]);
 });
 
 test("a room has one card per ticket", options, async () => {
