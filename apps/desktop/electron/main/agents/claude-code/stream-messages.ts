@@ -78,6 +78,12 @@ export function claudeTerminalDiscriminator(message: ClaudeStreamMessage): strin
   return `${subtype}:${errorState}`;
 }
 
+/** A guest's tools, as Claude itself reports them: only the room's LetAgents tools. */
+export function guestHasOnlyRoomTools(message: ClaudeStreamMessage): boolean {
+  return Array.isArray(message.tools)
+    && (message.tools as unknown[]).every(tool => typeof tool === "string" && tool.startsWith("mcp__letagents__"));
+}
+
 export function hasReadyRoomWorkplace(message: ClaudeStreamMessage): boolean {
   if (!Array.isArray(message.mcp_servers) || !Array.isArray(message.tools)) return false;
   const connected = message.mcp_servers.some(row => row && typeof row === "object"

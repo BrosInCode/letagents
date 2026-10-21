@@ -68,6 +68,10 @@ export function registerWebRoutes(app: Express): void {
   app.get("/messages", (_req, res) => {
     sendVueApp(res);
   });
+  // "Ask for an agent" links open the desktop app from this page.
+  app.get(/^\/ask\/[A-Za-z0-9_-]{20,64}$/, (_req, res) => {
+    sendVueApp(res);
+  });
 
   app.get("/app", (_req, res) => {
     res.redirect(301, "/");

@@ -5,7 +5,7 @@ import type {
   ResolvedRequestAuth,
 } from "./helpers.js";
 import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../../shared/request-headers.js";
-import { requiredAgentSessionRouteCapability } from "../request/agent-session-route-capabilities.js";
+import { isAllowedWhileWaitingForAsker, isGrantRouteAllowedWhileWaitingForAsker, requiredAgentSessionRouteCapability } from "../request/agent-session-route-capabilities.js";
 import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route-registry.js";
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
@@ -15,7 +15,12 @@ export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expir
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
+  isGrantWaitingForAsker?(grantId: string): Promise<boolean>;
 }
+
+// Loaded on use: the ask store pulls in room messaging, which this module must not load eagerly.
+const defaultIsGrantWaitingForAsker = (grantId: string) =>
+  import("../agent-asks/store.js").then((asks) => asks.isGrantWaitingForAsker(grantId));
 
 export function buildAllowedOrigins(): Set<string> {
   return new Set([
@@ -77,11 +82,21 @@ export function registerHttpMiddleware(
           _res.status(403).json({ error: "This supervisor grant is not authorized for the requested route." });
           return;
         }
+        const grant = req.supervisorGrant;
+        if (grant?.scope_key?.startsWith("ask:") && !isGrantRouteAllowedWhileWaitingForAsker(req.method, req.path)
+          && await (deps.isGrantWaitingForAsker ?? defaultIsGrantWaitingForAsker)(grant.grant_id)) {
+          _res.status(403).json({ code: "waiting_for_asker", error: "This agent is waiting for the person who asked for it to accept it." });
+          return;
+        }
       }
       if (req.authKind === "agent_session" && req.agentSession) {
         const capability = requiredAgentSessionRouteCapability(req.method, req.path);
         if (!capability || !req.agentSession.capabilities.includes(capability)) {
           _res.status(403).json({ error: "This worker bearer is not authorized for the requested route." });
+          return;
+        }
+        if (req.agentSession.waiting_for_asker && !isAllowedWhileWaitingForAsker(req.method, req.path)) {
+          _res.status(403).json({ code: "waiting_for_asker", error: "This agent is waiting for the person who asked for it to accept it." });
           return;
         }
       }

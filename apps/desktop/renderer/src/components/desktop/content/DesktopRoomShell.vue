@@ -132,6 +132,7 @@
       @open-agent-detail="openAgentDetailFromParticipant"
       @open-agent-correction="openAgentCorrectionFromComposer"
       @open-add-agent="openAddAgentModal"
+      @open-ask-agent="emit('open-ask-agent')"
       @restore-conversation="restoreAgentConversation"
       @skip-delivery="skipRoomDelivery"
       @retry-delivery="retryRoomAgentDelivery"

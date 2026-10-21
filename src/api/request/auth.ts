@@ -72,6 +72,10 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
     const workerBearer = await getRoomAgentSessionBearerByToken(providerToken);
     if (workerBearer) {
       const { bearer, session } = workerBearer;
+      // Loaded here, not at the top: the ask store pulls in room messaging, which imports this module.
+      const waitingForAsker = session.supervisor_grant_id
+        ? await import("../agent-asks/store.js").then(asks => asks.isGrantWaitingForAsker(session.supervisor_grant_id!))
+        : false;
       return {
         account: null,
         authKind: "agent_session",
@@ -92,6 +96,7 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
           ide_label: session.ide_label,
           repo_branch: session.repo_branch ?? null,
           expires_at: bearer.expires_at,
+          waiting_for_asker: waitingForAsker,
         },
       };
     }

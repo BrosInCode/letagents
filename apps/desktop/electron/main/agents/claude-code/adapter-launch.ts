@@ -13,7 +13,7 @@ import { claudeChildEnvironment, claudeTranscriptsRoot } from "./child-process.j
 import { ClaudeBootstrapError } from "./errors.js";
 import { claudeCliLaunchArgs, claudeLaunchPolicyArgs, claudeOwnerSetupReadsProjectInstructionsOnly, claudeOwnerSetupStartEnvironment, ownerMcpServerNotices, ownerMcpStartupTimeoutMs } from "./launch-args.js";
 import { ClaudeProviderHandle } from "./provider-handle.js";
-import { CLAUDE_DAEMON_BOOTSTRAP_PROMPT, hasReadyRoomWorkplace, parseStreamLine, roomServerIsThisLaunchs, sessionIdOf, streamMethod, userStreamJsonLine } from "./stream-messages.js";
+import { CLAUDE_DAEMON_BOOTSTRAP_PROMPT, guestHasOnlyRoomTools, hasReadyRoomWorkplace, parseStreamLine, roomServerIsThisLaunchs, sessionIdOf, streamMethod, userStreamJsonLine } from "./stream-messages.js";
 import type { ClaudeCliChild, ClaudeStreamMessage } from "./types.js";
 
 /** CLI launch, the bootstrap turn, and the attach-path fence. */
@@ -201,6 +201,10 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
       // there would either prompt for everything or decide nothing.
       if (req.permissionProfileId === "auto_review" && observedInit.permissionMode !== "auto") {
         throw new Error("Claude Code did not start in Auto mode. This account or Claude Code version may not support it. Choose another access level, then try again.");
+      }
+      // A guest must have no tool of its own on this Mac: fail closed on anything but LetAgents' tools.
+      if (req.supervisorEntryId?.startsWith("supervised_rental_") && !guestHasOnlyRoomTools(observedInit)) {
+        throw new Error("Claude Code started with tools that can reach this Mac, so the given agent was not started. Update Claude Code, then try again.");
       }
       // A named but failed server is not a usable room connection.
       if (!hasReadyRoomWorkplace(observedInit)) {

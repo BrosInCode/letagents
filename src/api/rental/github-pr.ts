@@ -29,6 +29,8 @@ export interface RentalPatchPullRequestInput {
   commitMessage?: string | null;
   title: string;
   body?: string | null;
+  /** Add each approved change on top of the last one and reuse the open PR. */
+  stackOnWorkBranch?: boolean;
 }
 
 export interface RentalPatchPullRequestFile {
@@ -300,6 +302,8 @@ async function createPatchCommitBranch(input: {
   workBranch: string;
   patchFiles: RentalPatchPullRequestFile[];
   commitMessage: string;
+  /** Build on the work branch's current head, so earlier approved changes are kept. */
+  stack?: boolean;
 }): Promise<string> {
   if (input.patchFiles.length === 0) {
     throw new RentalGitHubPrError("patch_files_required", 409);
@@ -315,10 +319,20 @@ async function createPatchCommitBranch(input: {
     method: "GET",
     token: input.token,
   });
-  const baseCommitSha = parseRefObjectSha(
+  let baseCommitSha = parseRefObjectSha(
     baseRefResult,
     "github_base_ref_response_invalid",
   );
+  if (input.stack) {
+    const workHead = await githubApiRequest({
+      fetchImpl: input.fetchImpl,
+      url: `${repoUrl}/git/ref/${workRef}`,
+      method: "GET",
+      token: input.token,
+      allowNotFound: true,
+    });
+    if (workHead) baseCommitSha = parseRefObjectSha(workHead, "github_work_ref_response_invalid");
+  }
 
   const baseCommit = await githubApiRequest({
     fetchImpl: input.fetchImpl,
@@ -367,7 +381,8 @@ async function createPatchCommitBranch(input: {
       url: `${repoUrl}/git/refs/${workRef}`,
       method: "PATCH",
       token: input.token,
-      body: { sha: commitSha, force: true },
+      // Stacked changes only ever fast-forward: a branch that moved underneath fails instead of losing a change.
+      body: { sha: commitSha, force: !input.stack },
     });
   } else {
     await githubApiRequest({
@@ -411,8 +426,20 @@ export async function openRentalPatchPullRequest(
         workBranch,
         patchFiles: input.patchFiles,
         commitMessage: input.commitMessage?.trim() || input.title,
+        stack: input.stackOnWorkBranch,
       })
     : null;
+
+  if (input.stackOnWorkBranch) {
+    const [owner] = fullName.split("/");
+    const open = await githubApiRequest({
+      fetchImpl,
+      url: `https://api.github.com/repos/${encodeURI(fullName)}/pulls?state=open&head=${encodeURIComponent(`${owner}:${workBranch}`)}`,
+      method: "GET",
+      token,
+    });
+    if (Array.isArray(open) && open.length) return { ...parsePullRequestResult(open[0]), commitSha };
+  }
 
   const result = await githubApiRequest({
     fetchImpl,

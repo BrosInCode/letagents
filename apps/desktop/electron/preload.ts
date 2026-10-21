@@ -285,6 +285,25 @@ const api: DesktopApi = {
     syncLocalRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
   },
+  asks: {
+    listModels: () => ipcRenderer.invoke("desktop:asks:list-models"),
+    create: (input) => ipcRenderer.invoke("desktop:asks:create", input),
+    listRoom: (roomId) => ipcRenderer.invoke("desktop:asks:list-room", roomId),
+    listMine: () => ipcRenderer.invoke("desktop:asks:list-mine"),
+    act: (askId, action) => ipcRenderer.invoke("desktop:asks:act", askId, action),
+    preview: (token) => ipcRenderer.invoke("desktop:asks:preview", token),
+    workspace: (askId) => ipcRenderer.invoke("desktop:asks:workspace", askId),
+    decide: (askId, proposalId, approve) => ipcRenderer.invoke("desktop:asks:decide", askId, proposalId, approve),
+    canGive: (providerId) => ipcRenderer.invoke("desktop:asks:can-give", providerId),
+    give: (input) => ipcRenderer.invoke("desktop:asks:give", input),
+    cantHelp: (token) => ipcRenderer.invoke("desktop:asks:cant-help", token),
+    takePendingLink: () => ipcRenderer.invoke("desktop:asks:take-pending-link"),
+    onOpenLink: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, token: string) => callback(token);
+      ipcRenderer.on("desktop:asks:open-link", listener);
+      return () => ipcRenderer.off("desktop:asks:open-link", listener);
+    },
+  },
   rental: {
     getMarketplace: () => ipcRenderer.invoke("desktop:rental:get-marketplace"),
     getProviderSettings: () => ipcRenderer.invoke("desktop:rental:get-provider-settings"),

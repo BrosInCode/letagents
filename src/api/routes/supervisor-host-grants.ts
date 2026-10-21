@@ -34,6 +34,7 @@ import { resolveSupervisedWorkerDisplayName } from "../rooms/agent-display-name-
 import { isActiveWorkerActorLabelConflict } from "./rooms/presence/helpers.js";
 import { getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { isRentalSupervisorGrantActive } from "../rental/session-launch.js";
+import { askIdFromGrantScope, isAskGrantActive } from "../agent-asks/store.js";
 import { accountKnowledgeActor, closeRequestsOfRetiredAgent } from "../rooms/attention-answers.js";
 import {
   resolveProjectRepoAccessTarget,
@@ -161,7 +162,9 @@ export async function requireSupervisorGrantRoomAccess(
   deps: RoomResolverDeps,
   policy: SupervisorGrantAccessPolicy,
 ): Promise<boolean> {
-  if (grant.rental_session_id || policy.kind === "none") return true;
+  // Rental and ask grants are authorized by their own session, not by the
+  // owner's own room access: a giver need not be a member of the room.
+  if (grant.rental_session_id || askIdFromGrantScope(grant.scope_key) || policy.kind === "none") return true;
   const loadOwner = deps.getSupervisorGrantOwnerAccount ?? getSupervisorGrantOwnerAccount;
   const revokeAuthority = deps.revokeSupervisorGrantAuthority ?? revokeSupervisorGrantAuthority;
   const findProject = deps.getProjectById ?? getProjectById;
@@ -289,6 +292,11 @@ export async function requireCurrentSupervisorGrant(
     hostId: current.host_id,
   }))) {
     res.status(409).json({ error: "Rental supervisor authority is no longer active." });
+    return null;
+  }
+  const askId = askIdFromGrantScope(current.scope_key);
+  if (askId && !(await isAskGrantActive({ askId, ownerAccountId: current.owner_account_id, grantId: current.grant_id }))) {
+    res.status(409).json({ error: "This agent's ask has ended." });
     return null;
   }
   if (!(await requireSupervisorGrantRoomAccess(current, res, deps, accessPolicy))) return null;

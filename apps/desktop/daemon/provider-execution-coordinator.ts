@@ -1229,6 +1229,7 @@ export class ProviderExecutionCoordinator {
         assertSupervisedRentalPermissionProfileAvailable(
           rentalConfiguration.provider,
           rentalConfiguration.permission_profile_id,
+          entry.id,
         );
       } catch (error) {
         await this.options.delivery.stop(entry.id).catch(() => undefined);
@@ -1731,6 +1732,7 @@ export class ProviderExecutionCoordinator {
       ? assertSupervisedRentalPermissionProfileAvailable(
           launchConfiguration.provider,
           launchConfiguration.permission_profile_id,
+          entry.id,
         )
       : assertSupervisedPermissionProfileAvailable(
           launchConfiguration.provider,

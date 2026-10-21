@@ -64,6 +64,7 @@ export interface DesktopRoomShellProps {
 /** DesktopRoomShell.vue's events, as passed to defineEmits. */
 export type DesktopRoomShellEmits = {
   "attention-opened": [];
+  "open-ask-agent": [];
   "cycle-sidebar": [];
   "message-sent": [message: DesktopRoomMessage];
   "room-renamed": [room: DesktopRoomInfo];

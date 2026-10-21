@@ -6,6 +6,7 @@ import { registerTrackerWebhookRoutes } from "../routes/connectors/tracker-webho
 import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
 import { registerRoomHistorySummaryRoutes } from "../routes/rooms/history-summary.js";
 import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notification-preferences.js";
+import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import type { Express } from "express";
@@ -582,6 +583,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomSettingsRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomHistorySummaryRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomNotificationPreferenceRoutes(app, roomMessageRouteDeps);
+  registerAgentAskRoutes(app, roomMessageRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,

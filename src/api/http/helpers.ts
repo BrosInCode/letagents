@@ -23,6 +23,8 @@ export interface AgentSessionRequestPrincipal {
   owner_label: string;
   ide_label: string;
   repo_branch: string | null;
+  /** A given agent the asker hasn't accepted yet: it may only stay connected. */
+  waiting_for_asker?: boolean;
   expires_at: string;
 }
 

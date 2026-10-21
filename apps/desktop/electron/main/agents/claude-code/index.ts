@@ -10,7 +10,7 @@ export {
   ownerMcpServerNotices,
   ownerMcpStartupTimeoutMs,
 } from "./launch-args.js";
-export { boundedClaudeRoomTurnPrompt } from "./stream-messages.js";
+export { boundedClaudeRoomTurnPrompt, guestHasOnlyRoomTools } from "./stream-messages.js";
 export {
   CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS,
   CLAUDE_BACKGROUND_NOTICE_START_LIMIT_MS,

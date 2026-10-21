@@ -1,6 +1,7 @@
 import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
+import { registerAskLinks } from "./main/ask-links.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
@@ -26,6 +27,7 @@ import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-pol
 
 configureDesktopSmokeEnvironment();
 prepareDesktopNotifications();
+registerAskLinks();
 
 protocol.registerSchemesAsPrivileged([
   {
