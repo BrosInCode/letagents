@@ -16,6 +16,7 @@ import { jsonToolResponse, taskToolError } from "./response.js";
 import {
   deprecatedAssigneeSchema,
   boardIntentApprovalSchema,
+  externalRefSchema,
   TASK_STATUSES,
   workerTaskIdentitySchema,
   workflowArtifactSchema,
@@ -67,7 +68,7 @@ export function registerTaskMutationTools(server: McpServer): void {
     "update_task",
     "Update a task's status or assignee. Status transitions are validated — " +
       "only valid transitions are allowed (e.g. in_progress → in_review, " +
-      "but NOT proposed → in_progress).",
+      "but NOT proposed → in_progress). external_ref links the card to its tracker ticket.",
     {
       task_id: z.string().describe("The task ID to update"),
       status: z.enum(TASK_STATUSES).optional().describe("New status for the task"),
@@ -81,10 +82,14 @@ export function registerTaskMutationTools(server: McpServer): void {
         .max(32)
         .optional()
         .describe("Persisted provider-neutral task workflow artifacts to attach to the task"),
+      external_ref: externalRefSchema
+        .nullable()
+        .optional()
+        .describe("Ticket the card names, e.g. 'jira:HT-1234' or 'linear:ENG-12'. A bare key means Jira. Null clears it."),
       ...workerTaskIdentitySchema,
       ...boardIntentApprovalSchema,
     },
-    async ({ task_id, status, assignee, pr_url, workflow_artifacts, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
+    async ({ task_id, status, assignee, pr_url, workflow_artifacts, external_ref, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
       const target = resolveTaskToolTarget(room_id);
       if (!target) return taskToolError("Not in a room.");
 
@@ -100,6 +105,7 @@ export function registerTaskMutationTools(server: McpServer): void {
           assignee_agent_key: nextAssigneeAgentKey,
           pr_url,
           workflow_artifacts,
+          ...(external_ref !== undefined ? { external_ref } : {}),
           board_intent_id,
           board_approval_token,
           ...taskActorPayload(identity, agentSession),

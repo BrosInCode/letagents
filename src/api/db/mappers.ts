@@ -304,6 +304,8 @@ export function toTask(row: TaskRow): Task {
       prUrl: row.pr_url,
       status: row.status,
     }),
+    external_ref: row.external_ref ?? null,
+    ticket_state: row.ticket_state ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
