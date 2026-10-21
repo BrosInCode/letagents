@@ -78,9 +78,12 @@ async function runningDaemon() {
   };
   return {
     daemon, watch, ran,
-    /** The servers still listening on the daemon's socket: one keeps the process alive. */
+    /**
+     * The servers still listening on the daemon's socket: one keeps the process alive.
+     * A closed server stays in Node's handle list until the next tick, so only a server that still listens counts.
+     */
     listening: () => (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
-      .filter((handle) => handle instanceof Server && handle.address() === paths.socketPath).length,
+      .filter((handle) => handle instanceof Server && handle.listening && handle.address() === paths.socketPath).length,
     answers: () => new Promise<boolean>((resolve) => {
       const socket = createConnection(paths.socketPath);
       socket.once("connect", () => { socket.destroy(); resolve(true); });
