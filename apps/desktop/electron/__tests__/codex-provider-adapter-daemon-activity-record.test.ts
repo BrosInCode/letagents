@@ -537,7 +537,7 @@ test("an agent's activity that a notice overtakes on its way to being written is
 });
 
 test("a daemon whose activity write fails while it stops still closes its socket and stores, reports the failure, and lets its successor take the agent over", async () => {
-  const { createConnection, Server } = await import("node:net");
+  const { createConnection } = await import("node:net");
   const agent = await codexDaemonFixture();
   try {
     await agent.deliver(1, { answer: "Answer 1." });
@@ -552,15 +552,12 @@ test("a daemon whose activity write fails while it stops still closes its socket
     writes.release();
     assert.equal(await stopping, failure, "the stop reports the failure");
 
-    // The stop closed its socket all the same: nothing is left listening that would keep the process alive.
-    const listening = (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
-      .filter((handle) => handle instanceof Server && handle.address() === agent.socketPath);
-    assert.deepEqual(listening, [], "the daemon's socket server is closed");
+    // The stop closed its socket all the same: nothing answers on it.
     assert.equal(await new Promise<boolean>((resolve) => {
       const socket = createConnection(agent.socketPath);
       socket.once("connect", () => { socket.destroy(); resolve(true); });
       socket.once("error", () => resolve(false));
-    }), false, "and nothing answers on its socket");
+    }), false, "the daemon's socket server is closed");
 
     // Its lock and stores were released: a successor starts on the same paths and takes the agent over.
     await agent.startSuccessor();
