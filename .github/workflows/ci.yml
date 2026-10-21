@@ -78,7 +78,7 @@ jobs:
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
-        run: npm audit signatures
+        run: node scripts/retry-command.mjs npm audit signatures
 
       - name: Install pinned dependency audit client
         run: |
@@ -110,7 +110,7 @@ jobs:
         run: cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify Vue dependency signatures
-        run: cd src/web && npm audit signatures
+        run: cd src/web && node ../../scripts/retry-command.mjs npm audit signatures
 
       - name: Audit Vue dependency advisories
         run: node scripts/verify-dependency-advisories.mjs src/web
@@ -149,7 +149,7 @@ jobs:
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify desktop dependency signatures
-        run: npm audit signatures --prefix apps/desktop
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
 
       - name: Audit desktop dependency advisories
         run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
@@ -282,8 +282,8 @@ jobs:
 
       - name: Verify dependency signatures
         run: |
-          npm audit signatures
-          npm audit signatures --prefix apps/desktop
+          node scripts/retry-command.mjs npm audit signatures
+          node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
 
       - name: Install pinned dependency audit client
         run: |
@@ -399,7 +399,7 @@ jobs:
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
-        run: npm audit signatures
+        run: node scripts/retry-command.mjs npm audit signatures
 
       - name: Install pinned dependency audit client
         run: |
@@ -746,7 +746,7 @@ jobs:
 
       - name: Verify dependency signatures
         if: steps.version.outputs.publish == 'true'
-        run: npm audit signatures
+        run: node scripts/retry-command.mjs npm audit signatures
 
       - name: Audit dependency advisories
         if: steps.version.outputs.publish == 'true'
@@ -929,7 +929,7 @@ jobs:
       - name: Install dependencies without lifecycle scripts
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
       - name: Verify dependency signatures
-        run: npm audit signatures
+        run: node scripts/retry-command.mjs npm audit signatures
       - name: Install pinned dependency audit client
         run: |
           npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
