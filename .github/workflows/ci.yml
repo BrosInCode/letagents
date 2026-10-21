@@ -75,7 +75,7 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
@@ -107,7 +107,7 @@ jobs:
         run: npm run test:package-runtime
 
       - name: Install Vue dependencies without lifecycle scripts
-        run: cd src/web && npm ci --ignore-scripts --no-audit
+        run: cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify Vue dependency signatures
         run: cd src/web && npm audit signatures
@@ -130,6 +130,9 @@ jobs:
       - name: Test room artifact routes
         run: node --import tsx --test src/api/__tests__/room-artifact-routes.test.ts
 
+      - name: Test the remote MCP endpoint routes
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/remote-mcp-routes.test.ts
+
       - name: Test automatic command review
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts src/api/__tests__/jev-acknowledgment.test.ts src/api/__tests__/jev-acknowledgment-eval.test.ts
 
@@ -143,7 +146,7 @@ jobs:
         run: npm run build:web
 
       - name: Install desktop dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit --prefix apps/desktop
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify desktop dependency signatures
         run: npm audit signatures --prefix apps/desktop
@@ -274,8 +277,8 @@ jobs:
 
       - name: Install dependencies without lifecycle scripts
         run: |
-          npm ci --ignore-scripts --no-audit
-          npm ci --ignore-scripts --no-audit --prefix apps/desktop
+          node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+          node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify dependency signatures
         run: |
@@ -393,7 +396,7 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
@@ -464,6 +467,10 @@ jobs:
       - name: Test message reactions and optional GIFs
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/giphy-client.test.ts src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
+
+      - name: Test the remote MCP endpoint against the API
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/remote-mcp-db.test.ts
 
       - name: Test room message search
         if: matrix.group == 3
@@ -724,7 +731,7 @@ jobs:
 
       - name: Install dependencies without lifecycle scripts
         if: steps.version.outputs.publish == 'true'
-        run: npm ci --ignore-scripts --no-audit
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         if: steps.version.outputs.publish == 'true'
@@ -909,7 +916,7 @@ jobs:
       - name: Enforce dependency cooldown
         run: npm run verify:dependency-age
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --no-audit
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
       - name: Verify dependency signatures
         run: npm audit signatures
       - name: Install pinned dependency audit client

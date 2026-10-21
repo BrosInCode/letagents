@@ -21,13 +21,16 @@ import { toolSurfaceForExecutionProfile } from "./runtime/tool-surface-policy.js
 import { profileAwareToolServer } from "./supervised-tool-facade.js";
 import { workerAwareToolServer } from "./worker-tool-facade.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
+import { remoteToolServer } from "./remote-tool-surface.js";
 
 export function registerTools(
   server: McpServer,
   profile: LetAgentsExecutionProfile = "autonomous_mcp_worker",
   supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
-  options: { executionOwner?: "provider" | "daemon"; apiUrl?: string } = {},
+  options: { executionOwner?: "provider" | "daemon"; apiUrl?: string; remote?: boolean } = {},
 ): void {
+  // The remote HTTP endpoint shares this registry; it only drops local-machine tools.
+  if (options.remote) server = remoteToolServer(server);
   const localRoom = profile === "supervised_room_turn" && isLocalRoomApi(options.apiUrl ?? process.env.LETAGENTS_API_URL);
   const routedServer = localRoom ? new Proxy(server, {
     get(target, property, receiver) {

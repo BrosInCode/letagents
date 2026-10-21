@@ -9,11 +9,11 @@ import {
 } from "../../managed-agent-providers.js";
 import { encodeRoomIdPath, looksLikeInviteCode, normalizeInviteCode, type JoinedVia } from "../../room-id.js";
 import {
-  AGENT_INSTANCE_UUID,
+  agentInstanceUuid,
   RepoRoomAuthRequiredError,
   apiCall,
   agentSessionCredentials,
-  currentRoom,
+  getCurrentRoom,
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
   endStoredAgentSession,
@@ -253,7 +253,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         ? priorRoomSessions.find((session) =>
             !session.ended_at
             && session.session_kind === "worker"
-            && session.agent_instance_id === AGENT_INSTANCE_UUID
+            && session.agent_instance_id === agentInstanceUuid()
             && Boolean(session.session_token)
           ) ?? null
         : null;
@@ -265,7 +265,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             actor_key: identity.canonical_key,
             actor_label: identity.actor_label,
             ide_label: identity.ide_label ?? detectAgentIdeLabel(),
-            agent_instance_id: AGENT_INSTANCE_UUID,
+            agent_instance_id: agentInstanceUuid(),
             display_name: display_name?.trim() || identity.display_name,
             requested_base_display_name: requestedBaseDisplayName,
             session_kind: session_kind ?? "worker",
@@ -305,7 +305,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         tool_bridge_id: typeof created.tool_bridge_id === "string" ? created.tool_bridge_id : null,
         actor_label: typeof created.actor_label === "string" ? created.actor_label : identity.actor_label,
         agent_key: typeof created.agent_key === "string" ? created.agent_key : identity.canonical_key,
-        agent_instance_id: typeof created.agent_instance_id === "string" ? created.agent_instance_id : AGENT_INSTANCE_UUID,
+        agent_instance_id: typeof created.agent_instance_id === "string" ? created.agent_instance_id : agentInstanceUuid(),
         display_name: typeof created.display_name === "string" ? created.display_name : identity.display_name,
         // Prefer the server-recorded allocation base; fall back to the base we
         // declared so a later resume still replays a stable signal.
@@ -606,7 +606,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
       const provider = getManagedAgentProvider("codex");
-      const status = await provider.inspectLocalSession(session_id, currentRoom?.room_id);
+      const status = await provider.inspectLocalSession(session_id, getCurrentRoom()?.room_id);
       if (!status) {
         return {
           content: [
@@ -663,7 +663,7 @@ export function registerAgentSessionTools(server: McpServer): void {
       const provider = getManagedAgentProvider("codex");
       const stopped = await provider.stopLocalSession({
         session_id,
-        room_id: currentRoom?.room_id,
+        room_id: getCurrentRoom()?.room_id,
         shutdown_server,
       });
 

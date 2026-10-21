@@ -12,17 +12,18 @@ import {
 } from "../../room-id.js";
 import { getApiUrl, getLetagentsToken } from "./api.js";
 import {
-  AGENT_INSTANCE_UUID,
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  agentInstanceUuid,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
 } from "./identity.js";
 import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
+import { currentSessionScope, requireScopeWhenHosted, scopedValue } from "./session-scope.js";
 import {
   getCurrentSupervisedRoomAuthority,
   runWithSupervisedRoomAuthority,
 } from "./supervised-room-authority.js";
 
-let mcpServer: McpServer | null = null;
+const mcpServer = scopedValue<McpServer | null>("mcp-server", () => null);
 let sseClient: SseClient | null = null;
 
 export interface RoomState {
@@ -36,10 +37,28 @@ export interface RoomState {
   is_local?: boolean;
 }
 
-export let currentRoom: RoomState | null = null;
+let processCurrentRoom: RoomState | null = null;
+
+/** The room this runtime joined: per session in a remote scope, per process otherwise. */
+export function getCurrentRoom(): RoomState | null {
+  const scope = currentSessionScope();
+  if (!scope) requireScopeWhenHosted("The MCP current room");
+  return scope ? scope.state.currentRoom as RoomState | null : processCurrentRoom;
+}
+
+function setCurrentRoom(state: RoomState | null): void {
+  const scope = currentSessionScope();
+  if (!scope) {
+    requireScopeWhenHosted("The MCP current room");
+    processCurrentRoom = state;
+    return;
+  }
+  scope.state.currentRoom = state;
+  scope.dirty = true;
+}
 
 export function attachMcpServer(server: McpServer): void {
-  mcpServer = server;
+  mcpServer.set(server);
 }
 
 export function shutdownRuntime(): void {
@@ -58,7 +77,7 @@ function getCurrentStreamAgentIdentity():
     actorInstanceId: string;
   }
   | null {
-  const identity = currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey);
+  const identity = getCurrentAgentIdentity() ?? getStoredAgentIdentity(getCurrentAgentIdentityKey());
   if (!identity?.actor_label || !identity.canonical_key) {
     return null;
   }
@@ -66,7 +85,7 @@ function getCurrentStreamAgentIdentity():
   return {
     actorLabel: identity.actor_label,
     actorKey: identity.canonical_key,
-    actorInstanceId: AGENT_INSTANCE_UUID,
+    actorInstanceId: agentInstanceUuid(),
   };
 }
 
@@ -94,9 +113,8 @@ export function toRoomState(input: {
 
 export function currentRoomMatchesLocator(locator: string | null): boolean {
   const value = locator?.trim();
-  return Boolean(value && currentRoom && (
-    currentRoom.room_id === value || currentRoom.navigation_locator === value
-  ));
+  const room = getCurrentRoom();
+  return Boolean(value && room && (room.room_id === value || room.navigation_locator === value));
 }
 
 function getCanonicalRoomWebUrl(roomId: string): string {
@@ -166,7 +184,7 @@ export function toPublicRoomResponse(
 }
 
 export function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
-  currentRoom = state;
+  setCurrentRoom(state);
   if (hasSupervisedWorkerAuthority()) return state;
   saveRoomSession({
     room_id: state.room_id,
@@ -177,6 +195,8 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
     joined_via: state.joined_via,
     last_message_id: lastMessageId,
   });
+  // A remote session has no event stream to hold open; its client pulls.
+  if (currentSessionScope()) return state;
   getSseClient().unsubscribeAll();
   if (state.is_local) {
     return state;
@@ -189,13 +209,13 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
     },
     (_message: Message) => {
       touchRoomSession(state.room_id);
-      mcpServer?.server.sendResourceListChanged();
+      mcpServer.get()?.server.sendResourceListChanged();
     },
     () => {
       // The SSE cursor crossed a broker/bridge loss boundary. MCP resources
       // are pull-based, so invalidating the list is the full-state repair.
       touchRoomSession(state.room_id);
-      mcpServer?.server.sendResourceListChanged();
+      mcpServer.get()?.server.sendResourceListChanged();
     },
   );
   return state;
@@ -203,11 +223,12 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
 
 export function touchCurrentRoom(lastMessageId?: string): void {
   if (hasSupervisedWorkerAuthority()) return;
-  if (!currentRoom) {
+  const room = getCurrentRoom();
+  if (!room) {
     return;
   }
 
-  touchRoomSession(currentRoom.room_id, lastMessageId);
+  touchRoomSession(room.room_id, lastMessageId);
 }
 
 export function getTargetRoomId(roomId?: string): string | null {
@@ -221,7 +242,7 @@ export function getTargetRoomId(roomId?: string): string | null {
     }
     return exactRoomAuthority;
   }
-  return roomId || currentRoom?.room_id || null;
+  return roomId || getCurrentRoom()?.room_id || null;
 }
 
 /** The last room authority returned by this process's exact daemon effect. */
@@ -230,7 +251,7 @@ export { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.j
 /** Public room metadata without inventing join provenance or locality. */
 export function toPublicCurrentRoomState(): Record<string, unknown> | null {
   const exactRoomAuthority = getCurrentSupervisedRoomAuthority();
-  if (!exactRoomAuthority) return toPublicRoomState(currentRoom);
+  if (!exactRoomAuthority) return toPublicRoomState(getCurrentRoom());
   return {
     ...toPublicRoomState(toRoomState({ room_id: exactRoomAuthority, joined_via: "join_room" })),
     joined_via: null,
@@ -256,5 +277,5 @@ export function runWithCurrentSupervisedRoom<T>(roomId: string, callback: () => 
 
 export function getFallbackProjectId(): string | null {
   if (hasSupervisedWorkerAuthority()) return null;
-  return currentRoom?.project_id ?? null;
+  return getCurrentRoom()?.project_id ?? null;
 }

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { StoredAgentSessionState } from "./local-state/types.js";
 import { readLocalStateSnapshot, withLocalStateReadLock, type LocalStateSnapshot } from "./local-state/storage.js";
 import { isMcpWorkerId } from "../shared/mcp-worker.js";
+import { currentSessionScope } from "./server/runtime/session-scope.js";
 
 const calls = new AsyncLocalStorage<StoredAgentSessionState>();
 const connections = new Map<string, StoredAgentSessionState>();
@@ -37,15 +38,24 @@ export function withWorkerStateFence<T>(callback: () => T): T {
 }
 
 export function pinWorkerConnection(statePath: string, session: StoredAgentSessionState): void {
+  const scope = currentSessionScope();
+  if (scope) {
+    // A remote session is the holder; it keeps its connections in saved state.
+    scope.state.pinnedConnections[session.session_id] = structuredClone(session);
+    scope.dirty = true;
+    return;
+  }
   connections.set(`${statePath}\n${session.session_id}`, structuredClone(session));
 }
 
-/** The connection this process registered for a session, if it did. */
+/** The connection this process (or remote session) registered for a session, if it did. */
 export function heldWorkerConnection(statePath: string, sessionId: string): StoredAgentSessionState | null {
+  const scope = currentSessionScope();
+  if (scope) return scope.state.pinnedConnections[sessionId] ?? null;
   return connections.get(`${statePath}\n${sessionId}`) ?? null;
 }
 
 export function pinnedWorkerConnection(statePath: string, sessionId: string): StoredAgentSessionState | null {
   const call = currentWorkerCall();
-  return call?.session_id === sessionId ? call : connections.get(`${statePath}\n${sessionId}`) ?? null;
+  return call?.session_id === sessionId ? call : heldWorkerConnection(statePath, sessionId);
 }
