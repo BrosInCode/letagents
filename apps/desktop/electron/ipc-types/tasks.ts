@@ -47,8 +47,22 @@ export interface DesktopTaskSummary {
     mutedBy: string | null;
     mutedAt: string | null;
   } | null;
+  /** The ticket the card names, e.g. `jira:HT-1234`. Absent on local rooms. */
+  externalRef?: string | null;
+  /** The tracker's state for that ticket. Owned by the tracker. */
+  ticketState?: string | null;
   createdAt: string | null;
   updatedAt: string;
+}
+
+/** A room message that names a card's ticket key. */
+export interface DesktopTaskMention {
+  messageId: string;
+  threadRootId: string;
+  key: string;
+  sender: string;
+  text: string;
+  timestamp: string;
 }
 
 export interface DesktopTaskMutationResult {

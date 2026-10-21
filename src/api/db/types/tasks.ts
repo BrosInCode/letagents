@@ -35,6 +35,8 @@ export interface Task {
   pr_url: string | null;
   workflow_artifacts: TaskWorkflowArtifact[];
   workflow_refs: TaskWorkflowRef[];
+  external_ref: string | null;
+  ticket_state: string | null;
   created_at: string;
   updated_at: string;
   stale_prompt_state?: TaskStalePromptState | null;
@@ -144,6 +146,9 @@ export interface TaskRow {
   source_message_id: string | null;
   pr_url: string | null;
   workflow_artifacts: TaskWorkflowArtifact[];
+  external_ref?: string | null;
+  ticket_state?: string | null;
+  external_item_id?: string | null;
   created_at: string;
   updated_at: string;
 }

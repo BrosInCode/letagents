@@ -39,6 +39,8 @@ const TASK_WORKFLOW_ARTIFACT_KEYS = new Set([
   "ref",
   "state",
   "detail",
+  // Accepted so a client can echo an artifact it read; dropped, never stored.
+  "linked_by",
 ]);
 
 export const MAX_TASK_WORKFLOW_ARTIFACTS = 32;
