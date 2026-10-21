@@ -108,6 +108,7 @@ const expectedDirectChannels = [
   "desktop:room:get-reasoning-session",
   "desktop:room:get-reply-order",
   "desktop:room:get-snapshot",
+  "desktop:room:get-task-mentions",
   "desktop:room:get-thread",
   "desktop:room:get-threads",
   "desktop:room:get-wake-rules",
