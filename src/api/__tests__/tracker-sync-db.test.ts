@@ -257,6 +257,7 @@ test("a pull request naming an unknown key imports the ticket into a room with a
   assert.equal(task?.external_ref, "jira:HT-5");
   assert.equal(task?.ticket_state, "in_progress");
   assert.equal(ctx.jira.calls.listItems.at(-1)?.filter, '(project = HT) AND key = "HT-5"', "the import asks with the room's filter");
+  assert.deepEqual(ctx.jira.calls.getItem, ["HT-5"]);
 
   // A ticket outside the room's filter is never read into the room.
   ctx.tickets.set("SEC-42", item("SEC-42", "todo", "2026-10-21T10:00:00.000Z"));
@@ -271,7 +272,8 @@ test("a pull request naming an unknown key imports the ticket into a room with a
       importTicket: (roomId, matches) => ctx.service.importTicketForRoom(roomId, matches),
     }), undefined);
   }
-  assert.equal(ctx.jira.calls.listItems.filter((call) => call.filter?.includes('"HT-404"')).length, 1);
+  assert.equal(ctx.jira.calls.getItem.filter((key) => key === "HT-404").length, 1);
+  assert.equal(ctx.jira.calls.listItems.filter((call) => call.filter?.includes('"HT-404"')).length, 0, "a missing key never reaches JQL");
 });
 
 test("a room without a filter runs no sync and gets no ticket state", options, async () => {

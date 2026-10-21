@@ -168,6 +168,14 @@ export async function acceptProposedTaskTx(
   return rows.length > 0;
 }
 
+export class ReservedTaskCreatorError extends Error {
+  readonly code = "task_creator_reserved";
+  constructor() {
+    super(`created_by may not start with "${TRACKER_IMPORT_CREATOR_PREFIX}".`);
+    this.name = "ReservedTaskCreatorError";
+  }
+}
+
 export async function createTask(
   roomId: string,
   title: string,
@@ -177,9 +185,7 @@ export async function createTask(
   options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
   // Reserved for cards tracker sync imports: only those may be merged away.
-  if (createdBy.startsWith(TRACKER_IMPORT_CREATOR_PREFIX)) {
-    throw new Error(`created_by may not start with "${TRACKER_IMPORT_CREATOR_PREFIX}".`);
-  }
+  if (createdBy.startsWith(TRACKER_IMPORT_CREATOR_PREFIX)) throw new ReservedTaskCreatorError();
   const task = options?.boardIntentApproval
     ? await db.transaction((tx) =>
       insertTaskRow(roomId, title, createdBy, description, sourceMessageId, tx, options)

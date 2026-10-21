@@ -137,12 +137,15 @@ function rowToItem(row: ExternalItemRow): ExternalItem {
 export function linearFilterAllows(filter: string, item: ExternalItem): boolean {
   const teamKey = (typeof item.payload.team_key === "string" ? item.payload.team_key : item.key.split("-")[0] ?? "").toUpperCase();
   const projectId = typeof item.payload.project_id === "string" ? item.payload.project_id : null;
+  // As parseLinearFilter reads it: the last `team:` and the last `project:` term count.
+  let team: string | null = null;
+  let project: string | null = null;
   for (const term of filter.trim().split(/\s+/).filter(Boolean)) {
     const [kind, value] = [term.slice(0, term.indexOf(":")), term.slice(term.indexOf(":") + 1)];
-    if (kind === "team" && value.toUpperCase() !== teamKey) return false;
-    if (kind === "project" && value !== projectId) return false;
+    if (kind === "team") team = value.toUpperCase();
+    if (kind === "project") project = value;
   }
-  return true;
+  return (!team || team === teamKey) && (!project || project === projectId);
 }
 
 /** Local failures stay in the server log; the room sees a fixed text. */
@@ -420,14 +423,21 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
    */
   async function fetchMatchingItem(source: RoomTrackerSource, connection: TrackerConnectionRow, key: string): Promise<ExternalItem | null> {
     const open = deps.connections.open(connection);
-    if (source.provider === "jira") {
-      const base = jiraFilterClause(source.filter.trim() || null);
-      const jql = base ? `(${base}) AND key = "${key}"` : `key = "${key}"`;
-      const [match] = await deps.providers.jira.listItems(open, jql, { limit: 1 });
-      return match && match.key === key ? match : null;
+    // Read the ticket first: a key that does not exist is a 404 (null), while
+    // JQL naming a missing key is an error.
+    const item = await deps.providers[source.provider].getItem(open, key);
+    if (!item) return null;
+    if (source.provider === "linear") return linearFilterAllows(source.filter, item) ? item : null;
+    const base = jiraFilterClause(source.filter.trim() || null);
+    if (!base) return item;
+    try {
+      const [match] = await deps.providers.jira.listItems(open, `(${base}) AND key = "${item.key}"`, { limit: 1 });
+      return match && match.key === item.key ? match : null;
+    } catch (error) {
+      // Jira refuses JQL that names a key it cannot see: not a match.
+      if (error instanceof TrackerProviderError && error.outcome === "definite") return null;
+      throw error;
     }
-    const item = await deps.providers.linear.getItem(open, key);
-    return item && linearFilterAllows(source.filter, item) ? item : null;
   }
 
   /** Each enabled filter on an active connection for the key's provider, until one matches. */
