@@ -137,3 +137,79 @@ export interface TrackerWebhookSetup {
   url: string;
   secret: string;
 }
+
+export type TrackerRuleEvent = "pull_request" | "pull_request_review" | "check_run";
+export declare const TRACKER_RULE_EVENTS: readonly TrackerRuleEvent[];
+export declare const TRACKER_RULE_EVENT_ACTIONS: Readonly<Record<TrackerRuleEvent, readonly string[]>>;
+export declare const TRACKER_RULE_REVIEW_STATES: readonly string[];
+export declare const TRACKER_RULE_CHECK_CONCLUSIONS: readonly string[];
+export type TrackerRuleTemplateVariable =
+  | "pr_url" | "pr_number" | "pr_title" | "author" | "branch" | "base_branch" | "repo" | "reviewer";
+export declare const TRACKER_RULE_TEMPLATE_VARIABLES: readonly TrackerRuleTemplateVariable[];
+export declare const TRACKER_RULE_NAME_MAX_LENGTH: number;
+export declare const TRACKER_RULE_MAX_ACTIONS: number;
+export declare const TRACKER_RULE_TEMPLATE_MAX_LENGTH: number;
+export declare const TRACKER_RULE_BRANCH_MAX_LENGTH: number;
+export declare const TRACKER_RULE_MAX_APPROVALS: number;
+export declare const TRACKER_RULES_PER_CONNECTION_MAX: number;
+
+/** When a rule fires. Every field that is set must match; unset fields match anything. */
+export interface TrackerRuleTrigger {
+  event: TrackerRuleEvent;
+  /** The webhook action, e.g. `opened`, `closed`, `submitted`, `completed`. */
+  action: string;
+  /** pull_request only. */
+  merged?: boolean;
+  /** pull_request only. */
+  draft?: boolean;
+  /** The pull request's base branch, exact match. Not for check_run. */
+  baseBranch?: string;
+  /** pull_request_review only. */
+  reviewState?: string;
+  /** pull_request_review only: reviewers whose latest review approves, counted with this event. */
+  approvalsAtLeast?: number;
+  /** check_run only. */
+  conclusion?: string;
+}
+
+export type TrackerRuleAction =
+  | { kind: "transition"; toStatus: string }
+  | { kind: "comment"; template: string };
+
+/** What the editor sends to create or change a rule. */
+export interface TrackerRuleInput {
+  name: string;
+  /** Null: every room that imports tickets with this connection. */
+  room_id: string | null;
+  enabled?: boolean;
+  trigger: TrackerRuleTrigger;
+  actions: TrackerRuleAction[];
+}
+
+export interface TrackerRuleView {
+  id: string;
+  connection_id: string;
+  room_id: string | null;
+  name: string;
+  enabled: boolean;
+  trigger: TrackerRuleTrigger;
+  actions: TrackerRuleAction[];
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TrackerRuleVersionView {
+  version: number;
+  name: string;
+  room_id: string | null;
+  trigger: TrackerRuleTrigger;
+  actions: TrackerRuleAction[];
+  created_at: string;
+}
+
+export interface TrackerRuleList {
+  rules: TrackerRuleView[];
+  /** Rooms that import tickets with this connection: the rooms a rule can be limited to. */
+  rooms: string[];
+}

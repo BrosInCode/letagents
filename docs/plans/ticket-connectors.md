@@ -1,6 +1,6 @@
 # Ticket connectors: one card answers "what is up with this ticket"
 
-Status: plan, 2026-10-21. PR1 merged (#1711, migration `0117_task_external_refs`). PR2 merged (#1712, migration `0118_tracker_connections`). PR3 in review (migration `0120_room_tracker_filters`). Base branch for all work: `staging` (ada668683 at time of writing).
+Status: plan, 2026-10-21. PR1 merged (#1711, migration `0117_task_external_refs`). PR2 merged (#1712, migration `0118_tracker_connections`). PR3 merged (#1716, migration `0120_room_tracker_filters`). PR7 merged (#1714, migration `0119_remote_mcp_sessions`). PR5 in review (migration `0123_tracker_rules`). Base branch for all work: `staging` (ada668683 at time of writing).
 Owner: EmmyMay. Executing agents: one Opus session per PR set, reviewed by a different agent before merge.
 
 ## Goal

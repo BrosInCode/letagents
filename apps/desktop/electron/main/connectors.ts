@@ -6,6 +6,10 @@ import type {
   TrackerConnectionView,
   TrackerOAuthStart,
   TrackerProvider,
+  TrackerRuleInput,
+  TrackerRuleList,
+  TrackerRuleVersionView,
+  TrackerRuleView,
   TrackerWebhookSetup,
 } from "../../../../shared/ticket-connectors.mjs";
 import { createServer, type Server } from "node:http";
@@ -162,4 +166,53 @@ export async function removeTrackerConnection(id: unknown): Promise<void> {
 
 export function getTrackerWebhookSetup(id: unknown): Promise<TrackerWebhookSetup> {
   return apiFetch<TrackerWebhookSetup>(`${connectionPath(id)}/webhook`);
+}
+
+const RULE_ID = /^trule_[0-9a-f-]{36}$/;
+
+function rulePath(connectionId: unknown, ruleId?: unknown): string {
+  const base = `${connectionPath(connectionId)}/rules`;
+  if (ruleId === undefined) return base;
+  if (typeof ruleId !== "string" || !RULE_ID.test(ruleId)) throw new Error("Choose a rule.");
+  return `${base}/${ruleId}`;
+}
+
+/** The rule as the editor built it. The server validates it strictly. */
+function ruleBody(input: TrackerRuleInput): TrackerRuleInput {
+  return {
+    name: String(input?.name ?? ""),
+    room_id: typeof input?.room_id === "string" && input.room_id ? input.room_id : null,
+    ...(typeof input?.enabled === "boolean" ? { enabled: input.enabled } : {}),
+    trigger: input?.trigger,
+    actions: Array.isArray(input?.actions) ? input.actions : [],
+  };
+}
+
+export function listTrackerRules(connectionId: unknown): Promise<TrackerRuleList> {
+  return apiFetch<TrackerRuleList>(rulePath(connectionId));
+}
+
+export async function createTrackerRule(connectionId: unknown, input: TrackerRuleInput): Promise<TrackerRuleView> {
+  return (await apiFetch<{ rule: TrackerRuleView }>(rulePath(connectionId), json("POST", ruleBody(input)))).rule;
+}
+
+export async function updateTrackerRule(connectionId: unknown, ruleId: unknown, input: TrackerRuleInput): Promise<TrackerRuleView> {
+  return (await apiFetch<{ rule: TrackerRuleView }>(rulePath(connectionId, ruleId), json("PUT", ruleBody(input)))).rule;
+}
+
+export async function setTrackerRuleEnabled(connectionId: unknown, ruleId: unknown, enabled: unknown): Promise<TrackerRuleView> {
+  return (await apiFetch<{ rule: TrackerRuleView }>(`${rulePath(connectionId, ruleId)}/enabled`, json("POST", { enabled: enabled === true }))).rule;
+}
+
+export async function listTrackerRuleVersions(connectionId: unknown, ruleId: unknown): Promise<TrackerRuleVersionView[]> {
+  return (await apiFetch<{ versions: TrackerRuleVersionView[] }>(`${rulePath(connectionId, ruleId)}/versions`)).versions;
+}
+
+export async function rollbackTrackerRule(connectionId: unknown, ruleId: unknown, version: unknown): Promise<TrackerRuleView> {
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1) throw new Error("Choose a version.");
+  return (await apiFetch<{ rule: TrackerRuleView }>(`${rulePath(connectionId, ruleId)}/rollback`, json("POST", { version }))).rule;
+}
+
+export async function removeTrackerRule(connectionId: unknown, ruleId: unknown): Promise<void> {
+  await apiFetch<{ deleted: boolean }>(rulePath(connectionId, ruleId), { method: "DELETE" });
 }

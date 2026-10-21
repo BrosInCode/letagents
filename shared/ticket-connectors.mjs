@@ -81,3 +81,35 @@ export function isTrackerSyncEvent(event) {
 }
 
 export const ROOM_TRACKER_FILTER_MAX_LENGTH = 2_000;
+
+/**
+ * Rules (PR5): a repo event that matches a rule's trigger reserves one tracker
+ * write per action through the workflow effect journal. Tracker sync events
+ * never reach the matcher (invariant 4).
+ */
+export const TRACKER_RULE_EVENTS = ["pull_request", "pull_request_review", "check_run"];
+
+/** The webhook actions a trigger may name for each event: the ones the server records. */
+export const TRACKER_RULE_EVENT_ACTIONS = {
+  pull_request: ["opened", "reopened", "ready_for_review", "converted_to_draft", "synchronize", "closed"],
+  pull_request_review: ["submitted", "dismissed"],
+  check_run: ["completed"],
+};
+
+export const TRACKER_RULE_REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
+
+export const TRACKER_RULE_CHECK_CONCLUSIONS = [
+  "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale",
+];
+
+/** `{{name}}` placeholders a comment template may use. Values are inserted as plain text. */
+export const TRACKER_RULE_TEMPLATE_VARIABLES = [
+  "pr_url", "pr_number", "pr_title", "author", "branch", "base_branch", "repo", "reviewer",
+];
+
+export const TRACKER_RULE_NAME_MAX_LENGTH = 120;
+export const TRACKER_RULE_MAX_ACTIONS = 5;
+export const TRACKER_RULE_TEMPLATE_MAX_LENGTH = 4_000;
+export const TRACKER_RULE_BRANCH_MAX_LENGTH = 255;
+export const TRACKER_RULE_MAX_APPROVALS = 20;
+export const TRACKER_RULES_PER_CONNECTION_MAX = 50;

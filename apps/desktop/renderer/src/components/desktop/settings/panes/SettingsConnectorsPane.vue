@@ -99,6 +99,8 @@
             />
           </template>
         </SettingsRow>
+
+        <SettingsConnectorRules :connection="connection" />
       </article>
 
       <SettingsRow
@@ -159,6 +161,7 @@ import type {
 } from "../../../../../../../../shared/ticket-connectors.mjs";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import SettingsRow from "../SettingsRow.vue";
+import SettingsConnectorRules from "./SettingsConnectorRules.vue";
 import {
   connectionStateLabel,
   statusMapFromRows,

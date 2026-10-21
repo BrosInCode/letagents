@@ -26,6 +26,8 @@ export interface RepoPullRequestRef {
   merged?: boolean;
   draft?: boolean;
   authorLogin?: string | null;
+  /** GitHub's `author_association` for the pull request's author. */
+  authorAssociation?: string | null;
   mergedByLogin?: string | null;
 }
 
@@ -46,6 +48,8 @@ export interface RepoReviewRef {
   state: string;
   url: string;
   body?: string | null;
+  /** GitHub's `author_association` for the reviewer. */
+  authorAssociation?: string | null;
 }
 
 export interface RepoCheckRunRef {

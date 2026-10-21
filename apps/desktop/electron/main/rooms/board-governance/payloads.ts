@@ -58,7 +58,7 @@ export interface BoardGovernanceApiResponse {
   pending_intent_count: number;
   audit: Array<{
     id: string;
-    kind: "coordination_event" | "manager_assignment" | "board_intent_decision";
+    kind: "coordination_event" | "manager_assignment" | "board_intent_decision" | "tracker_rule_run";
     event_type: string;
     actor_label: string | null;
     reason: string | null;

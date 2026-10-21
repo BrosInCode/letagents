@@ -1,3 +1,4 @@
+import { getDefaultTrackerRuleEngine } from "../connectors/rules/engine.js";
 import {
   acceptProposedTaskTx,
   approveTaskCreateBoardIntent,
@@ -345,6 +346,12 @@ export function startLivenessSweep(): void {
       await workflowEffectBroker.sweepOnce();
       } catch (error) {
       console.error("Workflow effect reconciliation sweep failed:", error);
+      }
+      try {
+      // Tracker rule runs continue once the sweep settled their last write.
+      await (await getDefaultTrackerRuleEngine()).advancePendingRuns();
+      } catch (error) {
+      console.error("Tracker rule run sweep failed:", error);
       }
       try {
       await sweepAgentAsks();

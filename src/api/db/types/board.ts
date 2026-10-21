@@ -180,7 +180,8 @@ export interface BoardGovernanceCapabilities {
 export type BoardGovernanceAuditKind =
   | "coordination_event"
   | "manager_assignment"
-  | "board_intent_decision";
+  | "board_intent_decision"
+  | "tracker_rule_run";
 
 export interface BoardGovernanceAuditEntry {
   id: string;
