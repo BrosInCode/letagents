@@ -405,14 +405,15 @@ test("a webhook reads only tickets LetAgents holds, and asks for a poll only for
 test("an early poll waits a minimum gap after the last claim", options, async () => {
   const ctx = await setup("early-gap");
   const start = new Date(Date.now() + 60 * 60_000);
-  const claim = (at: Date) => filters!.claimDueRoomTrackerFilters({ now: at, intervalMs: 120_000, limit: 500, earlyGapMs: 15_000 })
+  // Default gap: half the interval, longer than the worker's quarter-interval tick.
+  const claim = (at: Date) => filters!.claimDueRoomTrackerFilters({ now: at, intervalMs: 120_000, limit: 500 })
     .then((rows) => rows.find((row) => row.id === ctx.filter.id));
   const first = await claim(start);
   assert.ok(first);
   await client!.pool.query("UPDATE room_tracker_filters SET sync_finished_at = $2, sync_requested_at = $3 WHERE id = $1",
     [ctx.filter.id, new Date(start.getTime() + 1_000).toISOString(), new Date(start.getTime() + 2_000).toISOString()]);
-  assert.equal(await claim(new Date(start.getTime() + 5_000)), undefined, "not within the gap");
-  assert.ok(await claim(new Date(start.getTime() + 16_000)), "due once the gap passed");
+  assert.equal(await claim(new Date(start.getTime() + 30_000)), undefined, "not at the next worker tick");
+  assert.ok(await claim(new Date(start.getTime() + 61_000)), "due once half an interval passed");
 });
 
 test("a failed poll backs off, doubling, and does not stop the other filters", options, async () => {
@@ -493,4 +494,24 @@ test("busy tickets do not push pull request status out of the artifact status re
   await client!.pool.query(`INSERT INTO github_room_events (id, room_id, event_type, action, idempotency_key, linked_task_id, event_order_at, created_at) VALUES ${values.join(",")}`);
   const status = (await db!.getTasksGitHubArtifactStatus(ctx.room.id)).get(card!.id);
   assert.equal(status?.pr_state, "open");
+});
+
+test("a sync that throws is counted, backs off, and gives up its claim", options, async () => {
+  const ctx = await setup("throws");
+  const throwing = sync!.createTrackerSync({
+    providers: { jira: ctx.jira.provider, linear: ctx.jira.provider },
+    connections: { open: () => ({}) as ProviderConnection, recordFailure: async () => "x" },
+    // A local failure outside syncFilter's own handling.
+    store: { get: async () => { throw new Error("database went away"); }, addUnmapped: async () => undefined },
+  });
+  // Each tick claims up to ten due filters; other tests' filters may come first.
+  let claimedHere = await filterRow(ctx.filter.id);
+  for (let attempt = 0; attempt < 20 && claimedHere.failure_count === 0; attempt += 1) {
+    await throwing.tick(60_000);
+    claimedHere = await filterRow(ctx.filter.id);
+  }
+  assert.equal(claimedHere.failure_count, 1);
+  assert.ok(claimedHere.backoff_until, "it backs off");
+  assert.ok(Date.parse(claimedHere.sync_finished_at!) >= Date.parse(claimedHere.sync_claimed_at!), "the claim is finished");
+  assert.equal(claimedHere.last_error, "Sync failed on the server. It retries at the next poll.");
 });

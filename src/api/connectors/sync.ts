@@ -529,13 +529,30 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
   }
 
   async function tick(intervalMs = trackerPollIntervalMs()) {
-    const due = await claimDueRoomTrackerFilters({ now: now(), intervalMs, limit: FILTERS_PER_TICK, earlyGapMs: MIN_TRACKER_POLL_MS });
+    // An early poll (a webhook named a new ticket) waits half an interval:
+    // the worker ticks every quarter interval, so a stream of webhooks polls
+    // at most twice an interval.
+    const due = await claimDueRoomTrackerFilters({
+      now: now(),
+      intervalMs,
+      limit: FILTERS_PER_TICK,
+      earlyGapMs: Math.max(MIN_TRACKER_POLL_MS, Math.round(intervalMs / 2)),
+    });
     for (const filter of due) {
       try {
         await syncFilter(filter, intervalMs);
       } catch (error) {
-        // One filter's failure never stops the others; its claim expires.
+        // One filter's failure never stops the others. It is counted and
+        // backs off like a tracker failure, and its claim is finished.
         console.error("Tracker filter sync failed:", connectorErrorText(error));
+        await finishRoomTrackerFilterSync({
+          id: filter.id,
+          claimed_at: filter.sync_claimed_at,
+          started_at: now().toISOString(),
+          advance: false,
+          error: LOCAL_SYNC_ERROR,
+          failed: { intervalMs },
+        }).catch(() => undefined);
       }
     }
     return due.length;

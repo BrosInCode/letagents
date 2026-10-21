@@ -157,12 +157,12 @@ export async function claimDueRoomTrackerFilters(input: {
   intervalMs: number;
   limit: number;
   staleMs?: number;
-  /** A webhook's early poll waits at least this long after the last claim. */
+  /** A webhook's early poll waits at least this long after the last claim. Default: half the interval. */
   earlyGapMs?: number;
 }): Promise<RoomTrackerFilterRow[]> {
   const claimedAt = input.now.toISOString();
   const dueCutoff = new Date(input.now.getTime() - input.intervalMs).toISOString();
-  const earlyCutoff = new Date(input.now.getTime() - Math.min(input.earlyGapMs ?? 15_000, input.intervalMs)).toISOString();
+  const earlyCutoff = new Date(input.now.getTime() - Math.min(input.earlyGapMs ?? Math.round(input.intervalMs / 2), input.intervalMs)).toISOString();
   const staleCutoff = new Date(input.now.getTime() - Math.max(input.staleMs ?? 10 * 60_000, input.intervalMs)).toISOString();
   const f = room_tracker_filters;
   const result = await db.execute(sql`

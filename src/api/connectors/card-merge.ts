@@ -137,6 +137,10 @@ export interface TicketLinkResult<T> {
 }
 
 /**
+ * Callers emit `task:removed` for `merged_task_id` after this returns (the
+ * room route does), so open boards and MCP streams drop the duplicate: the
+ * event bus lives in the server layer, not here.
+ *
  * A card update that sets `external_ref`. When an imported card holds the
  * ticket, one transaction applies the rest of the update first (with its
  * lease fence and transition checks), then folds the imported card in. When

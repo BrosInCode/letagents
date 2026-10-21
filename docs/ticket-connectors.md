@@ -144,8 +144,8 @@ filter shows a warning: narrow the filter. Two API processes never poll the
 same filter at once: each poll claims its filter row first, and a running poll
 keeps its claim until it finishes (or for 10 minutes if its process died).
 A failed poll waits before the next try: one interval after the first
-failure, doubling after each further failure, at most 30 minutes, and never
-less than the tracker's `Retry-After`. A success clears the wait. One filter's
+failure, doubling after each further failure, at most 30 minutes. A
+tracker's `Retry-After` wins when it is longer, up to 1 hour. A success clears the wait. One filter's
 failure never stops the others.
 
 ### One path for polls and webhooks
@@ -179,7 +179,8 @@ extra is stored. A webhook needs `LETAGENTS_BASE_URL` set to an https URL.
   only tickets LetAgents already holds (a cached ticket, or a card naming the
   key in a room that imports from the connection) and updates the cards bound
   to them. A ticket new to LetAgents makes the connection's filters ask for an
-  early poll, which runs at least 15 seconds after the previous poll began.
+  early poll, which runs at least half a poll interval (1 minute by default)
+after the previous poll began.
 
 ### Auto import
 
