@@ -2,6 +2,7 @@ import { mapTicketState } from "../status-map.js";
 import { isAtlassianCloudId, normalizeJiraSiteUrl } from "../site-url.js";
 import { asRecord, asString, trackerRequest } from "./http.js";
 import { freshCredentials, type TokenRefresher } from "./oauth-refresh.js";
+import { parseJiraWebhook, verifyJiraWebhook } from "./webhooks.js";
 import {
   type ExternalItem,
   type JiraCredentials,
@@ -203,6 +204,13 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         const minutes = Math.max(1, Math.ceil((now().getTime() - since) / 60_000) + 1);
         clauses.push(`updated >= -${minutes}m`);
       }
+      if (opts.updatedBefore) {
+        const before = Date.parse(opts.updatedBefore);
+        if (!Number.isFinite(before)) throw new TrackerProviderError("definite", "updatedBefore is not a valid time.");
+        // Rounded toward now, so the bound never drops a ticket at the edge.
+        const minutes = Math.max(0, Math.floor((now().getTime() - before) / 60_000));
+        clauses.push(`updated <= -${minutes}m`);
+      }
       const jql = `${clauses.join(" AND ")} ORDER BY updated DESC`.trim();
       const items: ExternalItem[] = [];
       let nextPageToken: string | null = null;
@@ -313,5 +321,8 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       }
       return null;
     },
+
+    verifyWebhook: verifyJiraWebhook,
+    parseWebhook: parseJiraWebhook,
   };
 }

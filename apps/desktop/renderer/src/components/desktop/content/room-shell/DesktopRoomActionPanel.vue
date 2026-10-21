@@ -122,6 +122,8 @@
         </div>
       </section>
 
+      <RoomTrackerFilters v-if="cloudRoom" :room-identifier="room.identifier" />
+
       <section class="room-settings-section" data-section="guidelines" aria-labelledby="room-settings-heading-guidelines">
         <h3 id="room-settings-heading-guidelines">Guidelines</h3>
         <div class="room-settings-list">
@@ -366,6 +368,7 @@ import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSqua
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
+import RoomTrackerFilters from "./RoomTrackerFilters.vue";
 import RoomExpressions from "./RoomExpressions.vue";
 import RoomReplyOrder from "./RoomReplyOrder.vue";
 import RoomHistorySummary from "./RoomHistorySummary.vue";

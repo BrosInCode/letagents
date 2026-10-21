@@ -1,5 +1,6 @@
 import { isHumanAppWrite } from "../../../request/app-session.js";
 import { createHash } from "node:crypto";
+import { TRACKER_IMPORT_CREATOR_PREFIX } from "../../../../../shared/ticket-connectors.mjs";
 import type { Express } from "express";
 
 import {
@@ -126,6 +127,11 @@ export function registerTaskListAndCreateRoutes(
 
     if (!title || !createdBy) {
       res.status(400).json({ error: "title and created_by are required" });
+      return;
+    }
+    if (createdBy.startsWith(TRACKER_IMPORT_CREATOR_PREFIX)) {
+      // Reserved for cards that tracker sync imports; those may be merged away.
+      res.status(400).json({ error: `created_by may not start with "${TRACKER_IMPORT_CREATOR_PREFIX}".` });
       return;
     }
 

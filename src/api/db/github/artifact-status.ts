@@ -1,4 +1,6 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, ne, or, sql } from "drizzle-orm";
+
+import { TRACKER_SYNC_EVENT_TYPE } from "../../../../shared/ticket-connectors.mjs";
 
 import { PARTICIPANT_PULL_REQUEST_ACTION_LIST } from "../../github/room-events/pull-request.js";
 import { db } from "../client.js";
@@ -35,7 +37,9 @@ export async function getTasksGitHubArtifactStatus(
         )
       )
     )
-    .where(eq(github_room_events.room_id, roomId))
+    // Tracker events carry no PR, check or review state; left in, a busy
+    // ticket would push those out of the newest 500.
+    .where(and(eq(github_room_events.room_id, roomId), ne(github_room_events.event_type, TRACKER_SYNC_EVENT_TYPE)))
     .orderBy(desc(github_room_events.event_order_at))
     .limit(500);
 

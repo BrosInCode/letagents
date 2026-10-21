@@ -17,6 +17,7 @@ import {
   type BoardSort,
 } from "./board-presentation";
 import { findLocalRoomWorker } from "./board-workers";
+import { isBoardSourceFilter, isImportedTask } from "./ticket-ref";
 
 interface RoomBoardPresentationProps {
   roomIdentifier: string;
@@ -38,6 +39,7 @@ export function useRoomBoardPresentation(
   const activeFilter = ref<BoardFilter>("open");
   const ownerFilter = ref("all");
   const statusFilter = ref("all");
+  const sourceFilter = ref("all");
   const sort = ref<BoardSort>("recent");
   const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
   const collapsedGroups = ref(new Set<string>());
@@ -45,6 +47,8 @@ export function useRoomBoardPresentation(
   const localWorker = computed(() =>
     findLocalRoomWorker(props.workers, props.roomIdentifier)
   );
+  // Rooms without imported cards look as before: no source filter (invariant 1).
+  const showSourceFilter = computed(() => props.tasks.some(isImportedTask));
   const visibleGroups = computed(() => visibleBoardGroups({
     tasks: props.tasks,
     filter: activeFilter.value,
@@ -52,6 +56,7 @@ export function useRoomBoardPresentation(
     localWorker: localWorker.value,
     ownerFilter: ownerFilter.value,
     statusFilter: statusFilter.value,
+    sourceFilter: showSourceFilter.value ? sourceFilter.value : "all",
     sort: sort.value,
     dropTargets: options.dropTargets,
   }));
@@ -70,7 +75,8 @@ export function useRoomBoardPresentation(
     hasSearchQuery: Boolean(searchQuery.value.trim()),
     filter: activeFilter.value,
     closeoutTaskCount: boardFilterCount(props.tasks, "closeout", localWorker.value),
-    hasFilters: activeFilter.value !== "open" || ownerFilter.value !== "all" || statusFilter.value !== "all" || Boolean(searchQuery.value.trim()),
+    hasFilters: activeFilter.value !== "open" || ownerFilter.value !== "all" || statusFilter.value !== "all"
+      || (showSourceFilter.value && sourceFilter.value !== "all") || Boolean(searchQuery.value.trim()),
   }));
   const modalTask = computed(() =>
     visibleTasks.value.find((task) => task.id === localSelectedTaskId.value)
@@ -87,6 +93,7 @@ export function useRoomBoardPresentation(
     activeFilter.value = "open";
     ownerFilter.value = "all";
     statusFilter.value = "all";
+    sourceFilter.value = "all";
     sort.value = "recent";
   });
 
@@ -114,6 +121,10 @@ export function useRoomBoardPresentation(
     }
   }
 
+  function setSourceFilter(value: string): void {
+    if (isBoardSourceFilter(value)) sourceFilter.value = value;
+  }
+
   function setSort(value: string): void {
     if (value === "recent" || value === "oldest" || value === "title") sort.value = value;
   }
@@ -129,6 +140,7 @@ export function useRoomBoardPresentation(
     searchQuery.value = "";
     ownerFilter.value = "all";
     statusFilter.value = "all";
+    sourceFilter.value = "all";
     activeFilter.value = props.tasks.length > 0 && boardFilterCount(props.tasks, "open", localWorker.value) === 0
       ? "closeout" : "open";
   }
@@ -169,6 +181,9 @@ export function useRoomBoardPresentation(
     selectTask,
     setActiveFilter,
     setSort,
+    setSourceFilter,
+    showSourceFilter,
+    sourceFilter,
     setStatusFilter,
     sort,
     statusFilter,

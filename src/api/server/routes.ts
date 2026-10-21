@@ -1,4 +1,8 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
+import { registerRoomTrackerFilterRoutes } from "../routes/rooms/tracker-filters.js";
+import { updateTaskLinkingTicket } from "../connectors/card-merge.js";
+import { getDefaultTrackerSync } from "../connectors/sync.js";
+import { registerTrackerWebhookRoutes } from "../routes/connectors/tracker-webhooks.js";
 import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
 import { registerRoomHistorySummaryRoutes } from "../routes/rooms/history-summary.js";
 import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notification-preferences.js";
@@ -413,6 +417,10 @@ export function registerApiRoutes(app: Express): void {
     getTaskById,
     getTaskOwnershipState,
     updateTask,
+    updateTaskLinkingTicket,
+    refreshLinkedTicket: async (roomId: string, externalRef: string) => {
+      await getDefaultTrackerSync()?.refreshLinkedCard(roomId, externalRef);
+    },
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -528,6 +536,7 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubAppCallbackRoute(app);
 
   registerGitHubWebhookRoutes(app, githubWebhookRouteDeps);
+  registerTrackerWebhookRoutes(app);
 
   registerAuthRoutes(app);
   registerAppLoginRoutes(app);
@@ -567,6 +576,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerConversationRoutingRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomTrackerFilterRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomSettingsRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomHistorySummaryRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomNotificationPreferenceRoutes(app, roomMessageRouteDeps);

@@ -79,3 +79,61 @@ export interface TrackerConnectionPatch {
   status_map?: Record<string, TicketState>;
   jev_linking_enabled?: boolean;
 }
+
+export declare const TRACKER_IMPORT_CREATOR_PREFIX: string;
+export declare function trackerImportCreator(provider: TrackerProvider): string;
+export declare function isTrackerImportCreator(createdBy: unknown): boolean;
+export declare const TRACKER_SYNC_EVENT_TYPE: "tracker_ticket";
+export declare const TRACKER_SYNC_EVENT_SOURCE: "tracker_sync";
+export declare function isTrackerSyncEvent(event: unknown): boolean;
+export declare const ROOM_TRACKER_FILTER_MAX_LENGTH: number;
+
+/** One room's import filter for one connection. */
+export interface RoomTrackerFilterView {
+  id: string;
+  room_id: string;
+  connection_id: string;
+  provider: TrackerProvider;
+  connection_label: string;
+  filter: string;
+  enabled: boolean;
+  /** Whether the signed-in person owns the connection and may change the filter. */
+  can_manage: boolean;
+  last_synced_at: string | null;
+  last_error: string | null;
+}
+
+export interface RoomTrackerFilterList {
+  filters: RoomTrackerFilterView[];
+  /** Whether the signed-in person may add or change filters in this room (room admin). */
+  can_manage: boolean;
+}
+
+export interface RoomTrackerFilterTestResult {
+  ok: boolean;
+  /** Tickets the filter matches, counted up to `limit`. */
+  count: number;
+  limit: number;
+  sample: TrackerItemSummary[];
+  error: string | null;
+}
+
+/** The cached tracker record behind an imported or linked card. */
+export interface TaskTicketDetails {
+  external_ref: string;
+  provider: TrackerProvider;
+  key: string;
+  title: string;
+  ticket_state: TicketState;
+  raw_status: string;
+  assignee_label: string | null;
+  url: string | null;
+  tracker_updated_at: string | null;
+  synced_at: string;
+}
+
+/** Where a tracker sends its webhooks for one connection. */
+export interface TrackerWebhookSetup {
+  url: string;
+  secret: string;
+}
