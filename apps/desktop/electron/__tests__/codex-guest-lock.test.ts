@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { codexGuestToolsLocked, isGuestCodexToolSet, probeCodexGuestTools } from "../main/agents/codex-guest-lock.js";
@@ -24,6 +27,30 @@ test("the lock fails closed when the probe sees a local tool or sees nothing", a
   assert.equal(await codexGuestToolsLocked("/fake/codex-g", {}, null, seen(["functions.exec"], "### `mcp__letagents__send_message`\n### `brand_new_tool`")), false);
   assert.equal(await codexGuestToolsLocked("/fake/codex-h", {}, null, seen(["functions.exec"], "Run JavaScript with tools.")), false);
   assert.equal(await codexGuestToolsLocked("/fake/codex-i", {}, null, seen([])), false);
+});
+
+test("the probe leaves no Codex process behind when an npm wrapper exits first", { skip: process.platform === "win32" && "no process groups" }, async () => {
+  const folder = mkdtempSync(join(tmpdir(), "codex-shim-"));
+  const pids = join(folder, "pids");
+  const shim = join(folder, "codex");
+  // Like npm's wrapper: start the "native" process, then exit without waiting for it.
+  writeFileSync(shim, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+if (process.argv[2] === "exec") {
+  const native = spawn("sleep", ["300"], { stdio: "ignore" });
+  require("node:fs").appendFileSync(${JSON.stringify(pids)}, native.pid + "\\n");
+  native.unref();
+}
+if (process.argv[2] === "mcp") process.stdout.write("[]");
+process.exit(0);
+`);
+  chmodSync(shim, 0o755);
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  assert.equal(await probeCodexGuestTools(shim, { ...process.env, CODEX_HOME: folder }, null), null);
+  const started = readFileSync(pids, "utf8").trim().split("\n").map(Number);
+  assert.equal(started.length, 1);
+  for (let i = 0; i < 50 && alive(started[0]!); i += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(alive(started[0]!), false, "the native process was stopped with its wrapper");
 });
 
 let codexBin: string | null = null;

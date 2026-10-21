@@ -124,9 +124,12 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
         ...(model ? ["-c", `model=${JSON.stringify(model)}`] : []),
         ...[...isolation, ...CODEX_GUEST_TOOL_OVERRIDES].flatMap(override => ["-c", override]),
         "probe",
-      ], { env: { ...env, LETAGENTS_PROBE_KEY: "probe" }, stdio: ["ignore", "ignore", "ignore"] });
-      const timer = setTimeout(() => child.kill("SIGKILL"), PROBE_TIMEOUT_MS);
-      child.on("exit", () => { clearTimeout(timer); resolve(); });
+      ], { env: { ...env, LETAGENTS_PROBE_KEY: "probe" }, stdio: ["ignore", "ignore", "ignore"], detached: process.platform !== "win32" });
+      // An npm-installed `codex` is a Node wrapper around the native binary: stop the whole group, not just the wrapper.
+      const stopGroup = () => { try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ } };
+      const timer = setTimeout(() => { stopGroup(); child.kill("SIGKILL"); }, PROBE_TIMEOUT_MS);
+      // The wrapper can exit while the native binary keeps running: end what is left of its group.
+      child.on("exit", () => { clearTimeout(timer); stopGroup(); resolve(); });
       child.on("error", () => { clearTimeout(timer); resolve(); });
     });
     return seen;

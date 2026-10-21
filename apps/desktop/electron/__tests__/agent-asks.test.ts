@@ -8,12 +8,13 @@ process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH = join(mkdtempSync(join(tmpdir(), 
 const appEvents = new Map<string, (...args: any[]) => void>();
 const appCalls: string[] = [];
 const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClient() { appCalls.push("scheme"); },
-  on(name: string, handler: (...args: any[]) => void) { appEvents.set(name, handler); }, quit() { appCalls.push("quit"); } };
+  on(name: string, handler: (...args: any[]) => void) { appEvents.set(name, handler); }, quit() { appCalls.push("quit"); },
+  requestSingleInstanceLock: () => true };
 const autoUpdater = { on() {} };
 mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
 const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
-const { parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
+const { askLinkFromArgv, parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
 const { readFileSync } = await import("node:fs");
 
 const TOKEN = "abcdefghijklmnopqrstuvwxyz012345";
@@ -24,6 +25,11 @@ test("links parse from the app scheme and the web, and nothing else", () => {
   for (const url of [`http://letagents.chat/ask/${TOKEN}`, `letagents://room/${TOKEN}`, "letagents://ask/short", `https://x/ask/${TOKEN}/more`, "nope"]) {
     assert.equal(parseAskLink(url), null, url);
   }
+});
+
+test("on Windows and Linux the link is found among the launch arguments", () => {
+  assert.equal(askLinkFromArgv(["C:\\LetAgents\\LetAgents.exe", "--flag", `letagents://ask/${TOKEN}`]), TOKEN);
+  assert.equal(askLinkFromArgv(["/opt/LetAgents/letagents", "--no-sandbox"]), null);
 });
 
 test("a given agent is always a guest entry, so every rental safeguard applies", () => {
@@ -49,7 +55,7 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
+function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
   const calls: string[] = [];
   const api = {
     claim: async () => { calls.push("claim"); if (overrides.claimFails) throw new Error("Someone is adding this agent right now."); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
@@ -66,7 +72,8 @@ function fakes(overrides: { joinedState?: string; readyFails?: boolean; usedPerc
     ensureRunning: async () => ({ generation: 1 }),
     compareAndSetDesiredState: async (_id: string, from: string, to: string) => { states.push(`${from}->${to}`); return true; },
     list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed" } : entry],
-    getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 }] } } }),
+    getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 },
+      ...(overrides.shortUsedPercent === undefined ? [] : [{ id: "five_hour", label: "5-hour", usedPercent: overrides.shortUsedPercent }])] } } }),
     setDesiredState: async () => { stopped = true; calls.push("stop"); }, purgeAgent: async () => { calls.push("purge"); return { outcome: "purged" }; },
   };
   const grants = { createRentalPausedAndInstall: async () => { calls.push("install"); return { entry, agentKey: "john/helper" }; } };
@@ -103,6 +110,13 @@ test("the pre-check counts what other gifts from the same app may still use", as
   await second.coordinator.pauseForQuit();
   const { writeFileSync } = await import("node:fs");
   writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+});
+
+test("a used-up short limit refuses the gift, even with weekly room left", async () => {
+  const { coordinator, calls } = fakes({ usedPercent: 20, shortUsedPercent: 100 });
+  await assert.rejects(coordinator.give(give), /Your 5-hour limit is used up/);
+  assert.ok(calls.includes("purge"), "the started agent is stopped");
+  assert.equal(calls.at(-1), "release:false", "and the link is given back");
 });
 
 test("only a model on the current list can be given", async () => {

@@ -18,7 +18,8 @@ import { askApi, AskGiveError, type AskApi } from "./api.js";
 
 const READY_TIMEOUT_MS = 90_000;
 const READY_POLL_MS = 500;
-const WATCH_MS = 60_000;
+// Often enough that a busy turn can't run far past the amount between checks.
+const WATCH_MS = 15_000;
 const FINISHED = new Set(["ended", "expired", "cancelled", "open"]);
 
 /**
@@ -181,6 +182,9 @@ export class AskGiveCoordinator {
       }
       const ready = await this.waitUntilReady(entry.id);
       const usage = await this.readUsage(ready.id, roomId);
+      // Any limit already used up (a 5-hour one, say) means the agent couldn't do anything.
+      const usedUp = usage?.account.state === "unavailable" ? null : usage?.account.windows.find(limit => limit.usedPercent >= 100);
+      if (usedUp) throw new AskGiveError(`Your ${usedUp.label.toLowerCase()} limit is used up. Try again after it resets.`);
       const window = mainWindow(usage, null);
       // What this app's other gifts may still use is already promised, so it isn't left to give.
       const promised = Object.values((await readJournal()).gifts)

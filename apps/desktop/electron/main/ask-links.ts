@@ -15,6 +15,12 @@ export function parseAskLink(url: string): string | null {
   } catch { return null; }
 }
 
+/** Windows and Linux pass the link as a launch argument instead of an open-url event. */
+export function askLinkFromArgv(argv: readonly string[]): string | null {
+  for (const arg of argv) { const token = parseAskLink(arg); if (token) return token; }
+  return null;
+}
+
 function deliver(token: string): void {
   holdAskLink(token);
   if (!app.isReady()) return;
@@ -54,4 +60,14 @@ export function registerAskLinks(): void {
     const token = parseAskLink(url);
     if (token) deliver(token);
   });
+  // macOS keeps one instance and sends open-url. Elsewhere a link starts a second instance, which hands it over and quits.
+  if (process.platform === "darwin") return;
+  if (!app.requestSingleInstanceLock()) { app.quit(); return; }
+  app.on("second-instance", (_event, argv) => {
+    const token = askLinkFromArgv(argv);
+    if (token) deliver(token);
+    else if (app.isReady()) { if (!hasOpenWindows()) createWindow(); focusMainWindow(); }
+  });
+  const launched = askLinkFromArgv(process.argv);
+  if (launched) deliver(launched);
 }
