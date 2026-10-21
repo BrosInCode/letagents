@@ -482,7 +482,7 @@ function createExternalRefPatchHarness(input: { admin: boolean; updateTask?: (..
   return { patch, updates };
 }
 
-test("a room admin sets, normalizes and clears a card's ticket key", async () => {
+test("a participant sets, normalizes and clears a card's ticket key", async () => {
   const { patch, updates } = createExternalRefPatchHarness({ admin: true });
   assert.equal((await patch({ external_ref: "ht-1234" })).statusCode, 200);
   assert.equal((await patch({ external_ref: null })).statusCode, 200);
@@ -492,10 +492,12 @@ test("a room admin sets, normalizes and clears a card's ticket key", async () =>
   assert.equal(updates.length, 2);
 });
 
-test("only a room admin may change a card's ticket key", async () => {
+test("any participant may link a card to its ticket, but title edits stay admin-only", async () => {
   const { patch, updates } = createExternalRefPatchHarness({ admin: false });
-  assert.equal((await patch({ external_ref: "jira:HT-1" })).statusCode, 403);
-  assert.equal(updates.length, 0);
+  assert.equal((await patch({ external_ref: "jira:HT-1" })).statusCode, 200);
+  assert.deepEqual(updates, [{ external_ref: "jira:HT-1" }]);
+  assert.equal((await patch({ title: "Renamed", expected_content: { title: "Old" } })).statusCode, 403);
+  assert.equal(updates.length, 1);
 });
 
 test("a ticket key already on another card is a conflict that names that card", async () => {

@@ -6,7 +6,7 @@ import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { room_agent_sessions, task_leases, tasks } from "./schema.js";
 import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
-import { findTaskIdByExternalRef, isTaskExternalRefUniqueViolation, TaskExternalRefConflictError } from "./task-external-refs.js";
+import { findTaskIdByExternalRef, invalidateRoomExternalRefScope, isTaskExternalRefUniqueViolation, TaskExternalRefConflictError } from "./task-external-refs.js";
 import {
   approveBoardIntent,
   assertConsumeBoardIntentApproval,
@@ -175,13 +175,14 @@ export async function createTask(
   sourceMessageId?: string,
   options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
-  if (options?.boardIntentApproval) {
-    return db.transaction((tx) =>
+  const task = options?.boardIntentApproval
+    ? await db.transaction((tx) =>
       insertTaskRow(roomId, title, createdBy, description, sourceMessageId, tx, options)
-    );
-  }
-
-  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId, db, options);
+    )
+    : await insertTaskRow(roomId, title, createdBy, description, sourceMessageId, db, options);
+  // After commit, so no concurrent read caches the room as having no ticket cards.
+  if (task.external_ref) invalidateRoomExternalRefScope(roomId);
+  return task;
 }
 
 export async function approveTaskCreateBoardIntent(input: {
@@ -740,6 +741,7 @@ export async function updateTask(
     await writeArtifactSideEffects(executor ?? db);
   }
 
+  if (updates.external_ref !== undefined) invalidateRoomExternalRefScope(roomId);
   if (progressRetryResult) return progressRetryResult;
   return writtenTask ? toTask(writtenTask) : null;
 }

@@ -7,7 +7,7 @@ import { isPromptOnlyAgentMessage, type AgentPromptKind } from "../../../../shar
 import { messages } from "../../schema.js";
 import type { MessageRow } from "../../types.js";
 import { enqueueDesktopPushNotifications } from "../../../notifications/enqueue.js";
-import { recordTaskMentionsForMessage } from "../../task-external-refs.js";
+import { mayLinkTaskMentions, recordTaskMentionsForMessage } from "../../task-external-refs.js";
 import type { MessageCreateTransaction, AddMessageOptions } from "./types.js";
 
 /**
@@ -49,8 +49,9 @@ export async function finishCreatedMessage(
     notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
   }
 
-  if (!createdMessageIsPromptOnly) {
+  if (!createdMessageIsPromptOnly && mayLinkTaskMentions(roomId)) {
     // Best effort inside a savepoint: a failed mention link never blocks chat.
+    // A room cached as having no ticket cards skips this, savepoint included.
     await tx.transaction((savepoint) => recordTaskMentionsForMessage(savepoint, roomId, createdMessage))
       .catch((error: unknown) => {
         console.warn(`[task mentions] could not link message ${createdMessage.number} in ${roomId}`,

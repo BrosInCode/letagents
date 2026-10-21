@@ -80,6 +80,46 @@ export async function getRoomExternalRefScope(
   };
 }
 
+// In-process memo of each room's scope, so a room with no ticket cards pays no
+// query per message. Writes to external_ref in this process clear the room's
+// entry; another API process sees a change within the TTL.
+export const ROOM_EXTERNAL_REF_SCOPE_TTL_MS = 30_000;
+const MAX_CACHED_ROOM_SCOPES = 5_000;
+const scopeCache = new Map<string, { scope: RoomExternalRefScope; expiresAt: number }>();
+
+/** The cached scope while it is fresh, else undefined. Never queries. */
+export function peekRoomExternalRefScope(roomId: string, now = Date.now()): RoomExternalRefScope | undefined {
+  const entry = scopeCache.get(roomId);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= now) {
+    scopeCache.delete(roomId);
+    return undefined;
+  }
+  return entry.scope;
+}
+
+export async function getCachedRoomExternalRefScope(
+  roomId: string,
+  executor: ReadExecutor = db,
+): Promise<RoomExternalRefScope> {
+  const cached = peekRoomExternalRefScope(roomId);
+  if (cached) return cached;
+  const scope = await getRoomExternalRefScope(roomId, executor);
+  scopeCache.delete(roomId);
+  if (scopeCache.size >= MAX_CACHED_ROOM_SCOPES) {
+    // Map order is insertion order: drop the oldest entry.
+    const oldest = scopeCache.keys().next().value;
+    if (oldest !== undefined) scopeCache.delete(oldest);
+  }
+  scopeCache.set(roomId, { scope, expiresAt: Date.now() + ROOM_EXTERNAL_REF_SCOPE_TTL_MS });
+  return scope;
+}
+
+/** Call after a write that sets or clears a card's external_ref in the room. */
+export function invalidateRoomExternalRefScope(roomId: string): void {
+  scopeCache.delete(roomId);
+}
+
 /** The first card, in the order of `refs`, whose external ref is one of them. */
 export async function findTaskByExternalRefs(
   roomId: string,
@@ -111,6 +151,20 @@ export async function findTaskIdByExternalRef(
   return row ? formatTaskId(row.number) : null;
 }
 
+/** GitHub projections and LetAgents status notices quote PR titles; they are not threads about a ticket. */
+function isSystemStatusMessage(message: Partial<Pick<MessageRow, "sender" | "source">>): boolean {
+  return message.source === "github" || message.sender === "letagents";
+}
+
+/**
+ * Whether the message path must open a savepoint for mention linking. False
+ * only while the room is cached as having no ticket cards: then the message
+ * costs no query at all.
+ */
+export function mayLinkTaskMentions(roomId: string): boolean {
+  return peekRoomExternalRefScope(roomId)?.hasExternalRefs !== false;
+}
+
 export interface TaskMentionDeps {
   getScope?: typeof getRoomExternalRefScope;
   detect?: (text: string, options: KeyDetectorOptions) => TicketKeyMatch[];
@@ -124,11 +178,11 @@ export interface TaskMentionDeps {
 export async function recordTaskMentionsForMessage(
   executor: WriteExecutor,
   roomId: string,
-  message: Pick<MessageRow, "number" | "text">,
+  message: Pick<MessageRow, "number" | "text"> & Partial<Pick<MessageRow, "sender" | "source">>,
   deps: TaskMentionDeps = {},
 ): Promise<number> {
-  if (!message.text.trim()) return 0;
-  const scope = await (deps.getScope ?? getRoomExternalRefScope)(roomId, executor);
+  if (!message.text.trim() || isSystemStatusMessage(message)) return 0;
+  const scope = await (deps.getScope ?? getCachedRoomExternalRefScope)(roomId, executor);
   if (!scope.hasExternalRefs) return 0;
   const detected = (deps.detect ?? detectKeysInMessage)(message.text, scope.detectorOptions);
   if (detected.length === 0) return 0;

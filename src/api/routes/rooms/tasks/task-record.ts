@@ -103,11 +103,11 @@ export function registerTaskRecordRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
-    // The ticket a card names is content too: a human room admin sets it.
+    // Any participant or worker may link a card to its ticket, as on create:
+    // agents must be able to do it. Title and description stay admin-only.
     const editsExternalRef = Object.prototype.hasOwnProperty.call(requestBody, "external_ref");
     const editsContent = Object.prototype.hasOwnProperty.call(requestBody, "title")
-      || Object.prototype.hasOwnProperty.call(requestBody, "description")
-      || editsExternalRef;
+      || Object.prototype.hasOwnProperty.call(requestBody, "description");
     if (editsContent && !(await deps.requireAdmin(req, res, project))) return;
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,

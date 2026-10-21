@@ -29,12 +29,15 @@ function compactBoardWorkflowArtifact(value: unknown): unknown {
 
 export function compactTaskForBoard(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const task = value as Record<string, unknown>;
+  const { external_ref, ticket_state, ...task } = value as Record<string, unknown>;
   const artifacts = Array.isArray(task.workflow_artifacts) ? task.workflow_artifacts : [];
   const refs = Array.isArray(task.workflow_refs) ? task.workflow_refs : [];
 
   return {
     ...task,
+    // Cards without a ticket omit the ticket fields to keep the board small.
+    ...(external_ref != null ? { external_ref } : {}),
+    ...(ticket_state != null ? { ticket_state } : {}),
     workflow_artifacts: artifacts
       .slice(-MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK)
       .map(compactBoardWorkflowArtifact),

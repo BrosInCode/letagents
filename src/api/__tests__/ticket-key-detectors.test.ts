@@ -10,6 +10,7 @@ import {
   linearTeamKeyOf,
   normalizeExternalRef,
 } from "../connectors/key-detectors.js";
+import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
 
 // The mention writer's module opens a pool lazily; these tests never query it.
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
@@ -48,7 +49,7 @@ test("Linear matches only known team keys, and nothing without them", () => {
 
 test("pull request detection reads branch, title and body as refs", () => {
   assert.deepEqual(
-    detectKeysInPullRequest({ headRef: "refs/heads/HT-1234-proration", title: "Proration (AB-5)", body: "Also UTF-8." })
+    detectKeysInPullRequest({ headRef: "refs/heads/HT-1234-proration", title: "Proration (AB-5)", body: "Also UTF-8 and HT-77." })
       .map((match) => match.ref),
     ["jira:HT-1234", "jira:AB-5"],
   );
@@ -57,6 +58,16 @@ test("pull request detection reads branch, title and body as refs", () => {
     detectKeysInMessage("ENG-7 is blocked", { linearTeamKeys: ["ENG"] }).map((match) => match.ref),
     ["jira:ENG-7", "linear:ENG-7"],
   );
+});
+
+test("a PR body links only in closing-keyword form", () => {
+  const refs = (body: string) => detectKeysInPullRequest({ body }).map((match) => match.ref);
+  assert.deepEqual(refs("Follow-up to HT-5, see also AB-1."), []);
+  assert.deepEqual(refs("Fixes HT-6\n- closes: AB-7.\n(Resolves CD-9)"), ["jira:HT-6", "jira:AB-7", "jira:CD-9"]);
+  assert.deepEqual(refs("FIXES HT-6 and HT-7"), ["jira:HT-6"], "one key per line, right after the keyword");
+  assert.deepEqual(refs("resolves ht-8"), [], "the key itself stays upper case");
+  assert.deepEqual(detectKeysInPullRequest({ title: "follow-up to HT-5" }).map((match) => match.ref), ["jira:HT-5"],
+    "the title counts in any form");
 });
 
 test("typed external refs are normalized or rejected", () => {
@@ -87,4 +98,11 @@ test("a room with no external refs runs no detector on messages", async () => {
   assert.equal(recorded, 0);
   assert.equal(detectorRuns, 0);
   assert.equal(queries, 0);
+});
+
+test("a client cannot mark an artifact as key-linked, but may echo one it read", () => {
+  const [artifact] = validateTaskWorkflowArtifactsInput([
+    { provider: "github", kind: "pull_request", url: "https://github.com/o/r/pull/1", linked_by: "ticket_key" },
+  ])!;
+  assert.equal("linked_by" in artifact!, false);
 });

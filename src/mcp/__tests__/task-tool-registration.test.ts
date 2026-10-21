@@ -170,3 +170,12 @@ test("add_task, update_task and get_board accept the ticket fields", () => {
   assert.equal(schema("update_task", "external_ref").safeParse("x".repeat(65)).success, false);
   assert.equal(schema("get_board", "search").safeParse("HT-1234").success, true);
 });
+
+test("the board leaves out empty ticket fields", () => {
+  const native = compactTaskForBoard({ id: "task_1", external_ref: null, ticket_state: null }) as Record<string, unknown>;
+  assert.equal("external_ref" in native, false);
+  assert.equal("ticket_state" in native, false);
+  const ticket = compactTaskForBoard({ id: "task_2", external_ref: "jira:HT-1", ticket_state: null }) as Record<string, unknown>;
+  assert.equal(ticket.external_ref, "jira:HT-1");
+  assert.equal("ticket_state" in ticket, false);
+});

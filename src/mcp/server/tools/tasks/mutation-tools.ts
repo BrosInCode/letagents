@@ -68,7 +68,7 @@ export function registerTaskMutationTools(server: McpServer): void {
     "update_task",
     "Update a task's status or assignee. Status transitions are validated — " +
       "only valid transitions are allowed (e.g. in_progress → in_review, " +
-      "but NOT proposed → in_progress). Setting external_ref needs a room admin that is not a registered worker.",
+      "but NOT proposed → in_progress). external_ref links the card to its tracker ticket.",
     {
       task_id: z.string().describe("The task ID to update"),
       status: z.enum(TASK_STATUSES).optional().describe("New status for the task"),

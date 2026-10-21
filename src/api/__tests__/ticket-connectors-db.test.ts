@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { generateKeyPairSync } from "node:crypto";
 import { resolve } from "node:path";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
@@ -92,29 +93,121 @@ test("a room has one card per ticket", options, async () => {
   assert.equal((await db!.updateTask(room.id, second.id, { external_ref: "jira:HT-1" }))?.external_ref, "jira:HT-1");
 });
 
+/** Runs work with the given enforcement mode and returns the GitHub calls a lease check made. */
+async function enforcementAttempts(mode: string, work: () => Promise<void>): Promise<string[]> {
+  const saved = {
+    mode: process.env.LETAGENTS_GITHUB_ENFORCEMENT_MODE,
+    appId: process.env.GITHUB_APP_ID,
+    key: process.env.GITHUB_APP_PRIVATE_KEY,
+  };
+  const previousFetch = globalThis.fetch;
+  const previousWarn = console.warn;
+  const calls: string[] = [];
+  process.env.LETAGENTS_GITHUB_ENFORCEMENT_MODE = mode;
+  // A throwaway app key, so a lease check gets as far as asking GitHub for a token.
+  process.env.GITHUB_APP_ID = "1";
+  process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    calls.push(String(url instanceof Request ? url.url : url));
+    return new Response("{}", { status: 503 });
+  }) as typeof fetch;
+  console.warn = (...args: unknown[]) => {
+    if (!String(args[0]).includes("letagents-lease enforcement")) previousWarn(...args);
+  };
+  try {
+    await work();
+  } finally {
+    globalThis.fetch = previousFetch;
+    console.warn = previousWarn;
+    for (const [name, value] of [["LETAGENTS_GITHUB_ENFORCEMENT_MODE", saved.mode], ["GITHUB_APP_ID", saved.appId], ["GITHUB_APP_PRIVATE_KEY", saved.key]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+  return calls;
+}
+
+async function project(room: { id: string }, event: RepoRoomEvent) {
+  const resolution = await resolver!.resolveLinkedTaskForRepoRoomEvent(room as never, event);
+  const result = resolution.task
+    ? await projection!.applyRepoRoomEventToTask(room as never, resolution.task, event, {
+      installationId: "1",
+      githubRoutingContext: { matched_task_reference: false, matched_workflow_artifact: true },
+      matchedByTicketKey: resolution.matchedByTicketKey === true,
+    })
+    : null;
+  return { resolution, result };
+}
+
+async function ignoredNotices(roomId: string): Promise<number> {
+  const result = await client!.pool.query(
+    "SELECT count(*)::int AS n FROM messages WHERE room_id = $1 AND text LIKE '%Ignored unleased GitHub%'", [roomId]);
+  return result.rows[0].n;
+}
+
 test("a PR opened from branch HT-1234-proration attaches to the card with external_ref=jira:HT-1234", options, async () => {
   const room = await db!.createProjectWithName(unique("tickets-projection"));
   const card = await db!.createTask(room.id, "Proration", "human", undefined, undefined, { externalRef: "jira:HT-1234" });
   await db!.updateTask(room.id, card.id, { status: "accepted" });
-  const event = pullRequestOpened("HT-1234-proration");
 
-  const resolution = await resolver!.resolveLinkedTaskForRepoRoomEvent(room, event);
-  assert.equal(resolution.task?.id, card.id);
-  assert.equal(resolution.matchedByTicketKey, true);
-
-  const result = await projection!.applyRepoRoomEventToTask(room, resolution.task, event, {
-    installationId: null,
-    githubRoutingContext: { matched_task_reference: false, matched_workflow_artifact: true },
-    matchedByTicketKey: true,
+  let opened: Awaited<ReturnType<typeof project>> | undefined;
+  const attempts = await enforcementAttempts("checks", async () => {
+    opened = await project(room, pullRequestOpened("HT-1234-proration"));
   });
-  assert.equal(result.authoritative, true);
+  assert.equal(opened?.resolution.task?.id, card.id);
+  assert.equal(opened?.resolution.matchedByTicketKey, true);
+  assert.equal(opened?.result?.authoritative, true);
+  assert.deepEqual(attempts, [], "a key-only PR gets no lease check, even in checks mode");
   const stored = await db!.getTaskById(room.id, card.id);
   assert.equal(stored?.status, "accepted", "without a work lease the key links the PR and leaves the work state alone");
   assert.deepEqual(
-    stored?.workflow_artifacts.filter((artifact) => artifact.kind === "pull_request").map((artifact) => [artifact.url, artifact.state]),
-    [["https://github.com/BrosInCode/letagents/pull/88", "open"]],
+    stored?.workflow_artifacts.filter((artifact) => artifact.kind === "pull_request")
+      .map((artifact) => [artifact.url, artifact.state, artifact.linked_by]),
+    [["https://github.com/BrosInCode/letagents/pull/88", "open", "ticket_key"]],
+  );
+
+  // The merge matches by URL now, and keeps the key's quiet handling.
+  const merged = { ...pullRequestOpened("HT-1234-proration"), action: "closed" } as RepoRoomEvent & { pullRequest: { merged: boolean } };
+  merged.pullRequest = { ...merged.pullRequest, merged: true };
+  let closed: Awaited<ReturnType<typeof project>> | undefined;
+  const mergeAttempts = await enforcementAttempts("checks", async () => { closed = await project(room, merged); });
+  assert.equal(closed?.resolution.matchedByTicketKey, true);
+  assert.deepEqual(mergeAttempts, []);
+  assert.equal(await ignoredNotices(room.id), 0);
+  const afterMerge = await db!.getTaskById(room.id, card.id);
+  assert.equal(afterMerge?.status, "accepted");
+  assert.deepEqual(
+    afterMerge?.workflow_artifacts.filter((artifact) => artifact.kind === "pull_request").map((artifact) => [artifact.state, artifact.linked_by]),
+    [["merged", "ticket_key"]],
   );
 
   const unrelated = await resolver!.resolveLinkedTaskForRepoRoomEvent(room, pullRequestOpened("HT-77-other", 89));
   assert.equal(unrelated.task, undefined);
+});
+
+test("a PR linked by URL with no lease still gets the lease check and the notice", options, async () => {
+  // Control for the test above: proves the probe sees an enforcement attempt.
+  const room = await db!.createProjectWithName(unique("tickets-control"));
+  const card = await db!.createTask(room.id, "Explicit link", "human");
+  await db!.updateTask(room.id, card.id, { status: "accepted" });
+  await db!.updateTask(room.id, card.id, { workflow_artifacts: [{
+    provider: "github", kind: "pull_request", number: 90, url: "https://github.com/BrosInCode/letagents/pull/90",
+  }] });
+  let projected: Awaited<ReturnType<typeof project>> | undefined;
+  const attempts = await enforcementAttempts("checks", async () => {
+    projected = await project(room, pullRequestOpened("some-branch", 90));
+  });
+  assert.equal(projected?.resolution.matchedByTicketKey, undefined);
+  assert.ok(attempts.length >= 1, "the lease check asked GitHub for a token");
+  assert.equal(await ignoredNotices(room.id), 1);
+});
+
+test("a ticket card created after a message still links the next mention at once", options, async () => {
+  const room = await db!.createProjectWithName(unique("tickets-cache"));
+  await db!.addMessage(room.id, "human", "HT-55 first");
+  await db!.createTask(room.id, "Late ticket", "human", undefined, undefined, { externalRef: "jira:HT-55" });
+  await db!.addMessage(room.id, "human", "HT-55 second");
+  await db!.addMessage(room.id, "letagents", "[status] HT-55 moved", { source: "github" });
+  assert.equal(await mentionCount(room.id), 1, "the cache is cleared on write; status notices are not threads");
 });

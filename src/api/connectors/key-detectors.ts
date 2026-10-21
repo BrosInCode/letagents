@@ -107,7 +107,29 @@ export function detectKeysInBranch(branch: string | null | undefined, options?: 
   return detectAll([branch?.replace(/^refs\/heads\//, "")], options);
 }
 
-/** Branch first, then title, then body: earlier inputs are stronger evidence. */
+// `Fixes HT-12`, `closes: HT-12`, `Resolves HT-12`: the keyword is case-insensitive,
+// the key that follows it keeps the key rules (upper case). One per line.
+const CLOSING_KEYWORD_LINE = /(?:^|[\s(\[])(?:fixes|closes|resolves):?[ \t]+(\S+)/i;
+
+/**
+ * The keys a PR body names in closing-keyword form only. Prose such as
+ * "follow-up to HT-5" does not link a pull request to a card.
+ */
+export function closingKeywordText(body: string | null | undefined): string {
+  if (!body) return "";
+  const input = body.length > MAX_SCANNED_CHARS ? body.slice(0, MAX_SCANNED_CHARS) : body;
+  const tokens: string[] = [];
+  for (const line of input.split("\n")) {
+    const match = CLOSING_KEYWORD_LINE.exec(line);
+    if (match) tokens.push(match[1]!);
+  }
+  return tokens.join("\n");
+}
+
+/**
+ * Branch first, then title, then the body's closing-keyword lines: earlier
+ * inputs are stronger evidence. The branch and title count in any form.
+ */
 export function detectKeysInPullRequest(
   pullRequest: { headRef?: string | null; title?: string | null; body?: string | null },
   options?: KeyDetectorOptions,
@@ -115,7 +137,7 @@ export function detectKeysInPullRequest(
   return detectAll([
     pullRequest.headRef?.replace(/^refs\/heads\//, ""),
     pullRequest.title,
-    pullRequest.body,
+    closingKeywordText(pullRequest.body),
   ], options);
 }
 

@@ -573,3 +573,25 @@ test("without a key match a pull request stays unlinked", async () => {
   const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, makePullRequestEvent());
   assert.equal(resolution.task, undefined);
 });
+
+test("a later event for a pull request a key linked keeps the key's quiet handling", async () => {
+  const url = "https://github.com/BrosInCode/letagents/pull/88";
+  const keyLinked = makeTask("task_7", {
+    external_ref: "jira:HT-1234",
+    workflow_artifacts: [{ provider: "github", kind: "pull_request", number: 88, url, state: "open", linked_by: "ticket_key" }],
+  });
+  const merged = makePullRequestEvent({
+    action: "closed",
+    pullRequest: { number: 88, title: "Round proration", url, merged: true, headRef: "HT-1234-proration" },
+  } as Partial<RepoRoomEvent>);
+  const { resolver } = createTicketKeyHarness({ artifactTask: keyLinked });
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, merged);
+  assert.equal(resolution.task?.id, "task_7");
+  assert.equal(resolution.matchedByTicketKey, true);
+
+  const explicit = makeTask("task_8", {
+    workflow_artifacts: [{ provider: "github", kind: "pull_request", number: 88, url, state: "open" }],
+  });
+  const plain = await createTicketKeyHarness({ artifactTask: explicit }).resolver.resolveLinkedTaskForRepoRoomEvent(project, merged);
+  assert.equal(plain.matchedByTicketKey, undefined);
+});

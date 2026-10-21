@@ -1,4 +1,4 @@
-import { findTaskByExternalRefs, getRoomExternalRefScope } from "../db/task-external-refs.js";
+import { findTaskByExternalRefs, getCachedRoomExternalRefScope } from "../db/task-external-refs.js";
 import type { Task } from "../db/types.js";
 import type { RepoEventTicketKeyInputs } from "../github/repo-event-task-resolution.js";
 import { detectKeysInPullRequest } from "./key-detectors.js";
@@ -12,7 +12,7 @@ export async function findTaskByTicketKeys(
   roomId: string,
   inputs: RepoEventTicketKeyInputs,
 ): Promise<Task | undefined> {
-  const scope = await getRoomExternalRefScope(roomId);
+  const scope = await getCachedRoomExternalRefScope(roomId);
   if (!scope.hasExternalRefs) return undefined;
   const matches = detectKeysInPullRequest({
     headRef: inputs.branchRef,
