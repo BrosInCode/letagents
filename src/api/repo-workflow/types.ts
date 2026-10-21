@@ -174,6 +174,11 @@ export interface TaskWorkflowArtifact {
   ref?: string | null;
   state?: string | null;
   detail?: RoomSharedArtifactDetail | null;
+  /**
+   * Set by the server when a ticket key, not a lease or an explicit link,
+   * attached this pull request to the card. Never accepted from a client.
+   */
+  linked_by?: "ticket_key" | null;
 }
 
 export interface TaskWorkflowArtifactMatch {

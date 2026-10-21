@@ -189,6 +189,23 @@ export const SECRET_PATTERNS: ReadonlyArray<{
     placeholder: "REDACTED_TWILIO_KEY",
   },
 
+  // Ticket trackers (ticket connectors)
+  {
+    name: "Atlassian API token",
+    regex: /ATATT[A-Za-z0-9_\-=]{20,}/g,
+    placeholder: "REDACTED_ATLASSIAN_TOKEN",
+  },
+  {
+    name: "Linear API key",
+    regex: /lin_api_[A-Za-z0-9]{20,}/g,
+    placeholder: "REDACTED_LINEAR_TOKEN",
+  },
+  {
+    name: "Linear OAuth token",
+    regex: /lin_oauth_[A-Za-z0-9]{20,}/g,
+    placeholder: "REDACTED_LINEAR_TOKEN",
+  },
+
   // Generic bearer/auth tokens
   {
     name: "Bearer token",

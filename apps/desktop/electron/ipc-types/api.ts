@@ -125,6 +125,7 @@ import type { DesktopUpdateStatus } from "./updates.js";
 import type {
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -252,8 +253,9 @@ export interface DesktopApi {
     updateTask: (
       roomIdentifier: string,
       taskId: string,
-      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null }
+      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null; external_ref?: string | null }
     ) => Promise<DesktopTaskMutationResult>;
+    getTaskMentions: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskMention[]>;
     updateTaskLease: (
       roomIdentifier: string,
       taskId: string,
@@ -386,6 +388,17 @@ export interface DesktopApi {
     cancelDeviceFlow: () => Promise<DesktopAuthStatus>;
     openVerification: (url: string) => Promise<void>;
     signOut: () => Promise<DesktopAuthStatus>;
+  };
+  /** Ticket connectors: this account's Jira and Linear connections. */
+  connectors: {
+    list: () => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionList>;
+    /** Opens the tracker's consent page in the browser and resolves once the app finished connecting. */
+    connectOAuth: (provider: import("../../../../shared/ticket-connectors.mjs").TrackerProvider) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    cancelOAuth: () => Promise<void>;
+    saveApiToken: (input: import("../../../../shared/ticket-connectors.mjs").TrackerApiTokenInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    test: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionTestResult>;
+    update: (id: string, patch: import("../../../../shared/ticket-connectors.mjs").TrackerConnectionPatch) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    remove: (id: string) => Promise<void>;
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;

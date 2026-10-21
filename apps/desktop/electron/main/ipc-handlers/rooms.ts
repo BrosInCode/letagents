@@ -54,6 +54,7 @@ import type {
   DesktopStagedAttachment,
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -121,6 +122,7 @@ import {
   updateDesktopAccountRoom,
   updateDesktopFocusRoomSettings,
   updateDesktopRoomTask,
+  getDesktopRoomTaskMentions,
   updateDesktopRoomTaskLease,
   updateDesktopRoomTaskReviewLease,
 } from "../rooms.js";
@@ -356,9 +358,15 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
         status?: string;
         assignee?: string | null;
         pr_url?: string | null;
+        external_ref?: string | null;
       },
     ): Promise<DesktopTaskMutationResult> =>
       updateDesktopRoomTask(roomIdentifier, taskId, updates),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-task-mentions",
+    async (_event, roomIdentifier: string, taskId: string): Promise<DesktopTaskMention[]> =>
+      getDesktopRoomTaskMentions(roomIdentifier, taskId),
   );
   targetIpcMain.handle(
     "desktop:room:update-task-lease",

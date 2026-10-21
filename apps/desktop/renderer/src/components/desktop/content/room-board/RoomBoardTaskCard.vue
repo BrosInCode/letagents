@@ -17,7 +17,11 @@
       @click="$emit('select')"
     >
       <span class="desktop-task-card-header">
-        <span class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
+        <span v-if="ticket" class="desktop-task-ticket">
+          <span class="desktop-task-provider-chip" :data-provider="ticket.provider">{{ ticket.providerLabel }}</span>
+          <span class="desktop-task-id" :title="`${ticket.key} (${task.id})`">{{ ticket.key }}</span>
+        </span>
+        <span v-else class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
         <span class="desktop-task-updated" :title="`Updated ${task.updatedAt || task.createdAt}`">
           {{ relativeTime(task.updatedAt || task.createdAt, now) }}
         </span>
@@ -89,6 +93,7 @@ import { CircleCheck, GitPullRequest, Link, LockKeyhole, ScanEye, UserRound } fr
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
 import { useNow } from "../../../../composables/useNow";
+import { ticketRefParts } from "./ticket-ref";
 
 // Labels such as "2m ago" move on with the shared clock even when the data is unchanged.
 const now = useNow(30_000);
@@ -116,6 +121,7 @@ const emit = defineEmits<{
   "select": [];
 }>();
 
+const ticket = computed(() => ticketRefParts(props.task.externalRef));
 const taskWorkLease = computed(() => workLease(props.task));
 const authority = computed(() => executionAuthorityState(props.task));
 const taskSecondaryLeases = computed(() => secondaryLeases(props.task));
@@ -142,3 +148,15 @@ function onCardClick(event: MouseEvent): void {
   emit("select");
 }
 </script>
+
+<style scoped>
+.desktop-task-ticket { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.desktop-task-provider-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+</style>
