@@ -22,6 +22,12 @@ import {
   type McpSessionScope,
 } from "../../mcp/server/runtime/session-scope.js";
 import type { InProcessDispatcher } from "./in-process-dispatch.js";
+import {
+  deriveRemoteMcpStateKey,
+  hashRemoteMcpToken,
+  openRemoteMcpState,
+  sealRemoteMcpState,
+} from "./state-crypto.js";
 
 /**
  * Remote MCP sessions served in the API process.
@@ -72,6 +78,8 @@ export interface LoadedRemoteMcpSession {
   readonly sessionId: string;
   readonly accountId: string;
   readonly tokenHash: string;
+  /** Opens and seals the saved state; derived from the token, never stored. */
+  readonly stateKey: Buffer;
   readonly agentInstanceId: string;
   readonly clientName: string | null;
   state: McpSessionPersistentState;
@@ -120,7 +128,7 @@ export class RemoteMcpSessions {
   }
 
   /** Create a session for an authenticated initialize request. */
-  async open(input: { accountId: string; tokenHash: string; clientName: string | null }): Promise<string> {
+  async open(input: { accountId: string; token: string; clientName: string | null }): Promise<string> {
     const existing = await listRemoteMcpSessionsForAccount(input.accountId);
     const excess = existing.length - this.limits.maxSessionsPerAccount + 1;
     for (const victim of existing.slice(0, Math.max(0, excess))) {
@@ -131,13 +139,14 @@ export class RemoteMcpSessions {
       console.info("Remote MCP session replaced at the account cap:", JSON.stringify(this.stats()));
     }
     const sessionId = randomUUID();
+    const key = deriveRemoteMcpStateKey(input.token, sessionId);
     await insertRemoteMcpSession({
       sessionId,
       accountId: input.accountId,
-      tokenHash: input.tokenHash,
+      tokenHash: hashRemoteMcpToken(input.token),
       agentInstanceId: randomUUID(),
       clientName: input.clientName?.slice(0, 200) ?? null,
-      state: emptyState() as unknown as Record<string, unknown>,
+      state: sealRemoteMcpState(emptyState(), key, sessionId) as unknown as Record<string, unknown>,
     });
     this.counters.opened += 1;
     return sessionId;
@@ -147,31 +156,34 @@ export class RemoteMcpSessions {
    * The session for this id, only for the token and account that opened it.
    * A wrong token and an unknown id look the same to the caller.
    */
-  async find(sessionId: string, tokenHash: string, accountId: string): Promise<LoadedRemoteMcpSession | null> {
+  async find(sessionId: string, token: string, accountId: string): Promise<LoadedRemoteMcpSession | null> {
     const row = await getRemoteMcpSession(sessionId);
     if (!row) {
       this.loaded.delete(sessionId);
       return null;
     }
-    const presented = Buffer.from(tokenHash, "hex");
+    const presented = Buffer.from(hashRemoteMcpToken(token), "hex");
     const stored = Buffer.from(row.token_hash, "hex");
     if (presented.length !== stored.length || !timingSafeEqual(presented, stored) || row.account_id !== accountId) {
       return null;
     }
-    return this.adopt(row);
+    return this.adopt(row, deriveRemoteMcpStateKey(token, sessionId));
   }
 
-  private adopt(row: RemoteMcpSessionRow): LoadedRemoteMcpSession {
+  private adopt(row: RemoteMcpSessionRow, stateKey: Buffer): LoadedRemoteMcpSession | null {
     const current = this.loaded.get(row.session_id);
     // Keep this process's copy unless another replica saved a newer state.
     if (current && current.version >= row.version) return current;
+    const opened = openRemoteMcpState(row.state, stateKey, row.session_id);
+    if (opened === null) return null;
     const loaded: LoadedRemoteMcpSession = {
       sessionId: row.session_id,
       accountId: row.account_id,
       tokenHash: row.token_hash,
+      stateKey,
       agentInstanceId: row.agent_instance_id,
       clientName: row.client_name,
-      state: readState(row.state),
+      state: readState(opened),
       version: row.version,
       memory: current?.memory ?? new Map(),
       saving: current?.saving ?? Promise.resolve(),
@@ -241,7 +253,7 @@ export class RemoteMcpSessions {
       const cursor = roomId ? state.local.room_sessions?.[roomId]?.last_message_id ?? null : null;
       const version = await saveRemoteMcpSessionState({
         sessionId: session.sessionId,
-        state: structuredClone(state) as unknown as Record<string, unknown>,
+        state: sealRemoteMcpState(state, session.stateKey, session.sessionId) as unknown as Record<string, unknown>,
         roomId,
         workerSessionId: pinned?.session_id ?? currentId ?? null,
         readCursor: cursor,

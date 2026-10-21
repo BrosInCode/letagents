@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Express, Response } from "express";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
@@ -40,11 +39,6 @@ export interface RemoteMcpRouteDeps {
 function jsonRpcError(res: Response, status: number, message: string, headers: Record<string, string> = {}): void {
   for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
   res.status(status).json({ jsonrpc: "2.0", error: { code: -32000, message }, id: null });
-}
-
-/** Sessions store the SHA-256 hex of their token, as owner_tokens does. */
-export function hashRemoteMcpToken(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 function clientNameOf(body: unknown): string | null {
@@ -99,11 +93,11 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 413, "The MCP request body is too large.");
       return;
     }
-    const tokenHash = hashRemoteMcpToken(authorization.token);
+    const token = authorization.token;
 
     const sessionId = req.headers["mcp-session-id"];
     if (typeof sessionId === "string" && sessionId) {
-      const session = await sessions.find(sessionId, tokenHash, accountId);
+      const session = await sessions.find(sessionId, token, accountId);
       if (!session) {
         // Unknown, expired, or opened with another token: the client re-initializes.
         jsonRpcError(res, 404, "Session not found.");
@@ -138,8 +132,8 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 429, "Too many new remote MCP sessions. Slow down.");
       return;
     }
-    const opened = await sessions.open({ accountId, tokenHash, clientName: clientNameOf(req.body) });
-    const session = await sessions.find(opened, tokenHash, accountId);
+    const opened = await sessions.open({ accountId, token, clientName: clientNameOf(req.body) });
+    const session = await sessions.find(opened, token, accountId);
     if (!session) {
       jsonRpcError(res, 500, "The remote MCP session could not start.");
       return;

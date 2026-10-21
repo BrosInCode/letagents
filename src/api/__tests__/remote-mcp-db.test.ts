@@ -183,6 +183,10 @@ test("a session survives a restart by reloading its state from the table", { ski
     const row = await remoteSessionsDb!.getRemoteMcpSession(transport.sessionId!);
     assert.equal(row?.room_id, "remote-mcp-reload");
     assert.equal(row?.worker_session_id, worker.agent_session_id);
+    const stored = JSON.stringify(row?.state);
+    assert.equal(stored.includes("session_token") || stored.includes("remote-mcp-reload"), false,
+      "the saved state is sealed with a key from the owner token");
+    assert.equal((row?.state as { v?: unknown }).v, 1);
 
     sessions().dropLoaded(); // what a restart, or another replica, starts from
     const room = await call(client, "get_current_room");
