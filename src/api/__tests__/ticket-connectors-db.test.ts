@@ -13,6 +13,7 @@ const client = url ? await import("../db/client.js") : null;
 const db = url ? await import("../db.js") : null;
 const resolver = url ? await import("../github/room-event-projection/task-resolver.js") : null;
 const projection = url ? await import("../github/room-event-projection/task-projection.js") : null;
+const validateTaskWorkflowArtifacts = url ? (await import("../repo-workflow.js")).validateTaskWorkflowArtifactsInput : null;
 test.before(async () => { if (client) await migrate(client.db, { migrationsFolder: resolve("drizzle") }); });
 test.after(async () => { await client?.pool.end(); });
 const options = { skip: !url ? "Set TEST_DB_URL to run PostgreSQL integration tests." : false };
@@ -166,6 +167,13 @@ test("a PR opened from branch HT-1234-proration attaches to the card with extern
       .map((artifact) => [artifact.url, artifact.state, artifact.linked_by]),
     [["https://github.com/BrosInCode/letagents/pull/88", "open", "ticket_key"]],
   );
+
+  // A client writes back the artifact list it read; validation drops linked_by,
+  // and the server keeps its mark by URL.
+  const echoed = validateTaskWorkflowArtifacts!(JSON.parse(JSON.stringify(stored?.workflow_artifacts)));
+  assert.ok(echoed?.every((artifact) => !("linked_by" in artifact)));
+  const afterEcho = await db!.updateTask(room.id, card.id, { workflow_artifacts: echoed });
+  assert.equal(afterEcho?.workflow_artifacts.find((artifact) => artifact.kind === "pull_request")?.linked_by, "ticket_key");
 
   // The merge matches by URL now, and keeps the key's quiet handling.
   const merged = { ...pullRequestOpened("HT-1234-proration"), action: "closed" } as RepoRoomEvent & { pullRequest: { merged: boolean } };

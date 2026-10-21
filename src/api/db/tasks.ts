@@ -438,6 +438,24 @@ export async function findTaskByWorkflowArtifactMatches(
   return undefined;
 }
 
+/**
+ * A client that writes back the artifact list it read cannot send
+ * `linked_by` (validation drops it). Keep the stored mark for every artifact
+ * whose URL is already on the card, so a key-linked pull request stays quiet.
+ */
+function keepServerArtifactMarks(
+  current: readonly TaskWorkflowArtifact[],
+  next: TaskWorkflowArtifact[],
+): TaskWorkflowArtifact[] {
+  const marks = new Map(current.flatMap((artifact) =>
+    artifact.url && artifact.linked_by ? [[artifact.url, artifact.linked_by] as const] : []));
+  if (marks.size === 0) return next;
+  return next.map((artifact) => {
+    const mark = artifact.url ? marks.get(artifact.url) : undefined;
+    return mark && artifact.linked_by !== mark ? { ...artifact, linked_by: mark } : artifact;
+  });
+}
+
 /** Turns a unique-index violation on `(room_id, external_ref)` into a named conflict. */
 async function withExternalRefConflict<T>(roomId: string, externalRef: string | null | undefined, write: () => Promise<T>): Promise<T> {
   try {
@@ -504,7 +522,8 @@ export async function updateTask(
     && (updates.assignee_agent_key === undefined || updates.assignee_agent_key === current.assignee_agent_key)
     && (updates.pr_url === undefined || updates.pr_url === current.pr_url)
     && (updates.workflow_artifacts === undefined
-      || isDeepStrictEqual(normalizeTaskWorkflowArtifacts({ artifacts: updates.workflow_artifacts,
+      || isDeepStrictEqual(normalizeTaskWorkflowArtifacts({
+        artifacts: keepServerArtifactMarks(current.workflow_artifacts, updates.workflow_artifacts),
         prUrl: updates.pr_url ?? current.pr_url }), current.workflow_artifacts));
   const retryingProgress = isExactProgressRetry(task);
   const retryingOwnClaim = task.status === "assigned" && updates.status === "assigned"
@@ -537,7 +556,7 @@ export async function updateTask(
   const newPrUrl = updates.pr_url ?? task.pr_url;
   const newWorkflowArtifacts = updates.workflow_artifacts
     ? normalizeTaskWorkflowArtifacts({
-        artifacts: updates.workflow_artifacts,
+        artifacts: keepServerArtifactMarks(task.workflow_artifacts, updates.workflow_artifacts),
         prUrl: newPrUrl,
       })
     : synchronizeTaskWorkflowArtifactsWithPrUrl({

@@ -86,6 +86,9 @@ export async function getRoomExternalRefScope(
 export const ROOM_EXTERNAL_REF_SCOPE_TTL_MS = 30_000;
 const MAX_CACHED_ROOM_SCOPES = 5_000;
 const scopeCache = new Map<string, { scope: RoomExternalRefScope; expiresAt: number }>();
+// Bumped on every clear. A probe that started before a clear must not cache
+// what it read: the write it raced with may have committed after its snapshot.
+const scopeVersions = new Map<string, number>();
 
 /** The cached scope while it is fresh, else undefined. Never queries. */
 export function peekRoomExternalRefScope(roomId: string, now = Date.now()): RoomExternalRefScope | undefined {
@@ -104,7 +107,9 @@ export async function getCachedRoomExternalRefScope(
 ): Promise<RoomExternalRefScope> {
   const cached = peekRoomExternalRefScope(roomId);
   if (cached) return cached;
+  const version = scopeVersions.get(roomId) ?? 0;
   const scope = await getRoomExternalRefScope(roomId, executor);
+  if ((scopeVersions.get(roomId) ?? 0) !== version) return scope;
   scopeCache.delete(roomId);
   if (scopeCache.size >= MAX_CACHED_ROOM_SCOPES) {
     // Map order is insertion order: drop the oldest entry.
@@ -118,6 +123,7 @@ export async function getCachedRoomExternalRefScope(
 /** Call after a write that sets or clears a card's external_ref in the room. */
 export function invalidateRoomExternalRefScope(roomId: string): void {
   scopeCache.delete(roomId);
+  scopeVersions.set(roomId, (scopeVersions.get(roomId) ?? 0) + 1);
 }
 
 /** The first card, in the order of `refs`, whose external ref is one of them. */

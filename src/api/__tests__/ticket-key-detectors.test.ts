@@ -14,7 +14,12 @@ import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
 
 // The mention writer's module opens a pool lazily; these tests never query it.
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { recordTaskMentionsForMessage } = await import("../db/task-external-refs.js");
+const {
+  getCachedRoomExternalRefScope,
+  invalidateRoomExternalRefScope,
+  peekRoomExternalRefScope,
+  recordTaskMentionsForMessage,
+} = await import("../db/task-external-refs.js");
 
 test("Jira keys are found in the usual branch forms", () => {
   assert.deepEqual(detectTicketKeys("jira", "feature/HT-12-x"), ["HT-12"]);
@@ -105,4 +110,21 @@ test("a client cannot mark an artifact as key-linked, but may echo one it read",
     { provider: "github", kind: "pull_request", url: "https://github.com/o/r/pull/1", linked_by: "ticket_key" },
   ])!;
   assert.equal("linked_by" in artifact!, false);
+});
+
+test("a scope read that races a ticket write is not cached", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const executor = {
+    execute: async () => { await gate; return { rows: [] }; },
+  } as unknown as Parameters<typeof getCachedRoomExternalRefScope>[1];
+  const read = getCachedRoomExternalRefScope("race-room", executor);
+  invalidateRoomExternalRefScope("race-room"); // a card got a key while the probe ran
+  release();
+  assert.equal((await read).hasExternalRefs, false);
+  assert.equal(peekRoomExternalRefScope("race-room"), undefined, "the stale read is not cached");
+
+  const fresh = await getCachedRoomExternalRefScope("race-room", { execute: async () => ({ rows: [] }) } as never);
+  assert.equal(fresh.hasExternalRefs, false);
+  assert.equal(peekRoomExternalRefScope("race-room")?.hasExternalRefs, false, "an undisturbed read is cached");
 });
