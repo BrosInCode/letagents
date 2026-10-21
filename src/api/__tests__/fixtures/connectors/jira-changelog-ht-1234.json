@@ -1,0 +1,20 @@
+{
+  "startAt": 0,
+  "maxResults": 100,
+  "total": 2,
+  "isLast": true,
+  "values": [
+    {
+      "id": "30001",
+      "author": { "accountId": "5b10ac8d82e05b22cc7d4ef5" },
+      "created": "2026-10-19T10:00:00.000+0000",
+      "items": [{ "field": "status", "fieldtype": "jira", "fromString": "To Do", "toString": "In Progress" }]
+    },
+    {
+      "id": "30002",
+      "author": { "accountId": "5b10ac8d82e05b22cc7d4ef5" },
+      "created": "2026-10-21T10:00:05.000+0000",
+      "items": [{ "field": "status", "fieldtype": "jira", "fromString": "In Progress", "toString": "In Review" }]
+    }
+  ]
+}

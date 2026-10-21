@@ -1,10 +1,11 @@
-import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, ServerCog, SlidersHorizontal, Sparkles, Trash2, Wrench } from "@lucide/vue";
+import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
 import type { SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
 
 export const settingsNavGroups: SettingsNavGroup[] = [
   { label: "You", items: [
     { id: "account:profile", title: "Account", description: "Your identity and GitHub connection", icon: CircleUser },
     { id: "account:renting", title: "Renting", description: "Availability and agent rentals", icon: Handshake },
+    { id: "account:connectors", title: "Ticket trackers", description: "Connect Jira or Linear to your boards", icon: Ticket },
   ] },
   { label: "Workspace", items: [
     { id: "rooms:defaults", title: "Rooms", description: "Manage rooms, pins, and access", icon: SlidersHorizontal },

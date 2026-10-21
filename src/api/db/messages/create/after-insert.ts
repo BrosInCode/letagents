@@ -7,11 +7,13 @@ import { isPromptOnlyAgentMessage, type AgentPromptKind } from "../../../../shar
 import { messages } from "../../schema.js";
 import type { MessageRow } from "../../types.js";
 import { enqueueDesktopPushNotifications } from "../../../notifications/enqueue.js";
+import { mayLinkTaskMentions, recordTaskMentionsForMessage } from "../../task-external-refs.js";
 import type { MessageCreateTransaction, AddMessageOptions } from "./types.js";
 
 /**
  * Removes the sender's older blank auto prompts, enqueues desktop push
- * notifications, and runs the caller's in-transaction hook.
+ * notifications, links ticket-key mentions to cards, and runs the caller's
+ * in-transaction hook.
  */
 export async function finishCreatedMessage(
   tx: MessageCreateTransaction,
@@ -45,6 +47,16 @@ export async function finishCreatedMessage(
       recents_account_ids: options?.recents_account_ids,
     });
     notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
+  }
+
+  if (!createdMessageIsPromptOnly && mayLinkTaskMentions(roomId)) {
+    // Best effort inside a savepoint: a failed mention link never blocks chat.
+    // A room cached as having no ticket cards skips this, savepoint included.
+    await tx.transaction((savepoint) => recordTaskMentionsForMessage(savepoint, roomId, createdMessage))
+      .catch((error: unknown) => {
+        console.warn(`[task mentions] could not link message ${createdMessage.number} in ${roomId}`,
+          error instanceof Error ? error.message : error);
+      });
   }
 
   if (options?.with_created_message_in_transaction) {

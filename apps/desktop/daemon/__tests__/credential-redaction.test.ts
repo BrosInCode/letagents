@@ -8,7 +8,7 @@ const FRAGMENTS = [
   "token", "ToKeN", "accessToken", "refresh_token", "LETAGENTS-TOKEN", "password", "PassWD", "dbPassword", "secret",
   "clientSecret", "apiKey", "api_key", "API-KEY", "privateKey", "private-key", "cookie", "Set-Cookie", "credentials",
   "authorization", "Proxy-Authorization", "Bearer ", "basic ", "bearer\t", "ghp_", "GHO_", "github_pat_", "sk-", "AKIA",
-  "lasb_", "lashg_", "postgres://", "redis://:", "https://user:", "@", "@host", "=", ":", " = ", ": ", "\"", "'", "\\\"",
+  "ATATT", "lin_api_", "lin_oauth_", "lasb_", "lashg_", "postgres://", "redis://:", "https://user:", "@", "@host", "=", ":", " = ", ": ", "\"", "'", "\\\"",
   "\\'", ",", "}", "]", "[", "[REDACTED]", "<redacted>", "***", " ", "\n", "\t", "-----BEGIN RSA PRIVATE KEY-----",
   "-----END RSA PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", "İ", "ſ", "K", "é",
   "abcdefghijklmnopqrstuvwxyz0123456789", "ABCDEFGHIJKLMNOPQRST", "0123456789abcdef", "a1B2c3D4e5F6g7H8i9J0k", "_", "-",
@@ -52,6 +52,8 @@ test("hints skip the patterns on text without credentials and keep every redacti
     ["{\"accessToken\":\"abcd1234\"}", "{\"accessToken\":\"[REDACTED]\"}"],
     ["push with ghp_abcdefghijklmnopqrstuvwxyz0123", "push with [REDACTED]"],
     ["key AKIAABCDEFGHIJKLMNOP here", "key [REDACTED] here"],
+    ["jira ATATT3xFfGF0abcdefghijklmnopqrstuv=AB12CD34 done", "jira [REDACTED] done"],
+    ["linear lin_api_abcdefghijklmnopqrstuvwxyz0123 done", "linear [REDACTED] done"],
     ["postgres://admin:p@ss@db.local/app", "postgres://admin:[REDACTED]@db.local/app"],
     ["a\n-----BEGIN EC PRIVATE KEY-----\nMIIB\n-----END EC PRIVATE KEY-----\nb", "a\n[REDACTED]\nb"],
   ];

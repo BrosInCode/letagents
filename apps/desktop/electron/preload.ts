@@ -162,6 +162,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>
       ipcRenderer.invoke("desktop:room:update-task", roomIdentifier, taskId, updates),
+    getTaskMentions: (roomIdentifier: string, taskId: string) =>
+      ipcRenderer.invoke("desktop:room:get-task-mentions", roomIdentifier, taskId),
     updateTaskLease: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:update-task-lease", roomIdentifier, taskId, input),
     updateTaskReviewLease: (roomIdentifier: string, taskId: string, input) =>
@@ -317,6 +319,15 @@ const api: DesktopApi = {
     cancelDeviceFlow: () => ipcRenderer.invoke("desktop:auth:cancel-device-flow"),
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
+  },
+  connectors: {
+    list: () => ipcRenderer.invoke("desktop:connectors:list"),
+    connectOAuth: (provider) => ipcRenderer.invoke("desktop:connectors:connect-oauth", provider),
+    cancelOAuth: () => ipcRenderer.invoke("desktop:connectors:cancel-oauth"),
+    saveApiToken: (input) => ipcRenderer.invoke("desktop:connectors:save-api-token", input),
+    test: (id) => ipcRenderer.invoke("desktop:connectors:test", id),
+    update: (id, patch) => ipcRenderer.invoke("desktop:connectors:update", id, patch),
+    remove: (id) => ipcRenderer.invoke("desktop:connectors:remove", id),
   },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
