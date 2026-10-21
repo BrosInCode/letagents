@@ -22,13 +22,16 @@ import { profileAwareToolServer } from "./supervised-tool-facade.js";
 import { workerAwareToolServer } from "./worker-tool-facade.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
 import { isGivenAgent, registerAskWorkspaceTools } from "./tools/ask-workspace.js";
+import { remoteToolServer } from "./remote-tool-surface.js";
 
 export function registerTools(
   server: McpServer,
   profile: LetAgentsExecutionProfile = "autonomous_mcp_worker",
   supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
-  options: { executionOwner?: "provider" | "daemon"; apiUrl?: string } = {},
+  options: { executionOwner?: "provider" | "daemon"; apiUrl?: string; remote?: boolean } = {},
 ): void {
+  // The remote HTTP endpoint shares this registry; it only drops local-machine tools.
+  if (options.remote) server = remoteToolServer(server);
   const localRoom = profile === "supervised_room_turn" && isLocalRoomApi(options.apiUrl ?? process.env.LETAGENTS_API_URL);
   const routedServer = localRoom ? new Proxy(server, {
     get(target, property, receiver) {
@@ -64,6 +67,8 @@ export function registerTools(
   if (surface.onboarding) registerOnboardingTools(tools);
   if (surface.roomResume) registerRoomResumeTool(tools);
   if (surface.rental) registerRentalTools(tools);
-  if (profile === "supervised_room_turn" && isGivenAgent()) registerAskWorkspaceTools(tools);
+  // A given agent's own server advertises the ask tools (by its entry id); the daemon, which runs every
+  // supervised tool call, always has their handlers. The server checks each call against the agent's grant.
+  if (profile === "supervised_room_turn" && (isGivenAgent() || options.executionOwner === "daemon")) registerAskWorkspaceTools(tools);
   registerRepoVisibilityTool(tools);
 }

@@ -38,6 +38,8 @@ function makeRepo() {
   mkdirSync(path.join(work, "src"));
   writeFileSync(path.join(work, "src", "auth.ts"), "export function login() {\n  return 'todo: fix auth';\n}\n");
   writeFileSync(path.join(work, ".env"), `API_KEY=${FAKE_STRIPE_LIVE}\n`);
+  // A secret committed in an ordinary file, beside a line that is safe to show.
+  writeFileSync(path.join(work, "src", "billing.ts"), `// billing setup\nexport const billingKey = "${FAKE_STRIPE_LIVE}";\n`);
   // A link committed in the repo that points at a file on the server.
   writeFileSync(SERVER_SECRET_FILE, "SERVER-SECRET-123\n");
   symlinkSync(SERVER_SECRET_FILE, path.join(work, "src", "leak.txt"));
@@ -59,12 +61,14 @@ async function activeAsk() {
 test("the agent lists, reads and searches the asker's code, never secrets, and every read is recorded", options, async () => {
   const ask = await activeAsk();
   const files = await ws!.listFiles(ask, "");
-  assert.deepEqual(files, ["src/auth.ts", "src/leak.txt"]);
+  assert.deepEqual(files, ["src/auth.ts", "src/billing.ts", "src/leak.txt"]);
   assert.match((await ws!.readRepoFile(ask, "src/auth.ts")).content, /todo: fix auth/);
   await assert.rejects(ws!.readRepoFile(ask, ".env"), /may hold secrets/);
   await assert.rejects(ws!.readRepoFile(ask, "../../etc/passwd"), /inside the repo/);
   assert.deepEqual((await ws!.searchRepo(ask, "fix auth")).map(hit => [hit.path, hit.line]), [["src/auth.ts", 2]]);
   assert.deepEqual((await ws!.searchRepo(ask, "sk_live")), []);
+  // A search never shows a line that holds a secret, even when the query matches only the safe part.
+  assert.deepEqual((await ws!.searchRepo(ask, "billing")).map(hit => [hit.path, hit.line]), [["src/billing.ts", 1]]);
   const seen = await ws!.listReads(ask.id);
   assert.ok(seen.some(row => row.kind === "file" && row.target === ".env" && row.blocked));
   assert.ok(seen.some(row => row.kind === "file" && row.target === "src/auth.ts" && !row.blocked));
@@ -139,4 +143,24 @@ test("cleanup removes copies whose gift isn't running and keeps the rest", optio
   await ws!.pruneWorkspaces(async id => id === ask.id);
   assert.equal(existsSync(stray), false);
   assert.equal(existsSync(path.join(workspaceDir(ask.id), ".git")), true);
+});
+
+test("a given agent can't change the repo's CI", options, async () => {
+  const ask = await activeAsk();
+  for (const file of [".github/workflows/ci.yml", ".gitlab-ci.yml", "Jenkinsfile", ".circleci/config.yml"]) {
+    await assert.rejects(ws!.proposeChange(ask, "CI", [{ path: file, content: "x\n" }], "john"), /controls the repo's CI/, file);
+  }
+  assert.equal(ws!.isCiPath("src/github.ts"), false);
+});
+
+test("without the GitHub App, the agent can't see the code and is told why", options, async () => {
+  const ask = await activeAsk();
+  const saved = process.env.LETAGENTS_ASK_GIT_BASE_URL;
+  delete process.env.LETAGENTS_ASK_GIT_BASE_URL;
+  try {
+    await assert.rejects(ws!.listFiles(ask, ""), /connect the LetAgents GitHub App/);
+    assert.equal(existsSync(workspaceDir(ask.id)), false, "nothing is cloned");
+  } finally {
+    process.env.LETAGENTS_ASK_GIT_BASE_URL = saved;
+  }
 });

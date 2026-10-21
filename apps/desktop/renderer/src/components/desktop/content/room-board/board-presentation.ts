@@ -1,3 +1,4 @@
+import { taskMatchesSource } from "./ticket-ref";
 import { compareText } from "../../../../domain/formatters";
 import type { DesktopTaskSummary, WorkerSnapshot } from "../../../../../../electron/ipc-types";
 import { TASK_STATUS_ORDER } from "../../../../domain/tasks";
@@ -134,6 +135,8 @@ export function visibleBoardGroups(input: {
   localWorker: WorkerSnapshot | null;
   ownerFilter?: string;
   statusFilter?: string;
+  /** all, tracker or native; offered only when the room has imported cards. */
+  sourceFilter?: string;
   sort?: BoardSort;
   /** Statuses a card can be dragged to; focused views keep those stages visible. */
   dropTargets?: (task: DesktopTaskSummary) => readonly string[];
@@ -146,6 +149,7 @@ export function visibleBoardGroups(input: {
     && taskMatchesBoardSearch(task, input.searchQuery)
     && (!input.ownerFilter || input.ownerFilter === "all" || boardOwnerValue(task) === input.ownerFilter)
     && (!input.statusFilter || input.statusFilter === "all" || task.status === input.statusFilter)
+    && taskMatchesSource(task, input.sourceFilter)
   ).sort((left, right) => {
     const delta = input.sort === "title"
       ? compareText(left.title, right.title)

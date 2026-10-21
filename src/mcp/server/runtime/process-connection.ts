@@ -11,6 +11,7 @@ import type { StoredAgentSessionState } from "../../local-state/types.js";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getApiUrl, getLetagentsToken } from "./api.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { currentSessionScope } from "./session-scope.js";
 
 /**
  * This process holds one connection open per worker session for as long as it
@@ -219,6 +220,8 @@ function holdsCredentials(session: StoredAgentSessionState | null | undefined): 
 
 /** Hold the process connection for a session this process has just registered. */
 export function holdProcessConnection(session: StoredAgentSessionState | null | undefined): void {
+  // A remote session has no process of its own to vouch for.
+  if (currentSessionScope()) return;
   if (!holdsCredentials(session)) return;
   const current = held.get(session.session_id);
   if (current?.session.session_token === session.session_token) return;

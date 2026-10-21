@@ -24,3 +24,9 @@ test("the giving screen shows why \"Can't right now\" did not go through, and st
   const give = source("asks/GiveAgentDialog.vue");
   assert.match(give, /if \(!result\?\.ok\) \{ error\.value = /);
 });
+
+test("the giving screen offers only models on the current list, never one built from the ask", () => {
+  const give = source("asks/GiveAgentDialog.vue");
+  assert.doesNotMatch(give, /label: preview\.value\.ask\.model_label/);
+  assert.match(give, /model\.model === preview\.value\.ask\.model\) \?\? null;/);
+});

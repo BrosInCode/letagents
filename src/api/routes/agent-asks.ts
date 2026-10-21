@@ -4,6 +4,8 @@ import type { AuthenticatedRequest } from "../http/helpers.js";
 import { isAppSession } from "../request/app-session.js";
 import { isProjectAdmin } from "../db/auth/project-admins.js";
 import { getProjectById } from "../db.js";
+import { getGitRoomBindingForRoom } from "../db/git-room-bindings.js";
+import { isGitHubRepoWriter } from "../github/repo-access.js";
 import { resolveParticipantRoom } from "./rooms/messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./rooms/messages/types.js";
 import {
@@ -18,11 +20,24 @@ const databaseStore = {
   listAccount: asks.listAccountAsks, cancel: asks.cancelAsk, claim: asks.claimAsk, release: asks.releaseClaim,
   authority: asks.createAskLaunchAuthority, joined: asks.acknowledgeAskJoin, accept: asks.acceptSubstitute,
   decline: asks.declineSubstitute, end: asks.endAsk, name: asks.personName, isAdmin: isProjectAdmin,
-  room: getProjectById, forWorker: asks.askForWorker,
+  room: getProjectById, forWorker: asks.askForWorker, canWrite: canWriteRoomRepo,
   files: workspace.listFiles, read: workspace.readRepoFile, search: workspace.searchRepo, propose: workspace.proposeChange,
   proposals: workspace.listProposals, reads: workspace.listReads, decide: workspace.decideProposal,
 };
 export type AgentAskStore = typeof databaseStore;
+
+/**
+ * In a room backed by a GitHub repo, bringing in an outside agent and approving
+ * its changes (which the GitHub App pushes) need write access to that repo,
+ * checked with GitHub now, or room admin. Rooms with no repo have no such gate.
+ */
+async function canWriteRoomRepo(roomId: string, account: { account_id: string; provider?: string; login?: string; provider_access_token?: string | null }): Promise<boolean> {
+  const binding = await getGitRoomBindingForRoom(roomId);
+  if (!binding) return true;
+  if (await isProjectAdmin(roomId, account.account_id)) return true;
+  if (binding.provider !== "github" || account.provider !== "github" || !account.login) return false;
+  return isGitHubRepoWriter({ roomName: `github.com/${binding.repository_full_name}`, login: account.login, accessToken: account.provider_access_token ?? "" });
+}
 
 const TOKEN = /^[A-Za-z0-9_-]{20,64}$/;
 const ASK_ID = /^ask_[0-9a-f-]{36}$/;
@@ -39,6 +54,7 @@ function fail(res: Response, error: unknown) {
     ask_not_claimed: [409, "This request is no longer reserved for you. Open the link again."],
     ask_worker_not_ready: [409, "The agent hasn't joined the room yet. Try again in a moment."],
     agent_identity_not_owned: [403, "That agent isn't yours."],
+    gift_limit: [409, "You're already giving 3 agents. Wait for one to finish, then try again."],
   };
   if (known[code]) { res.status(known[code][0]).json({ code, error: known[code][1] }); return; }
   if (error instanceof workspace.AskWorkspaceError) { res.status(error.status).json({ code: error.code, error: error.message }); return; }
@@ -87,6 +103,10 @@ export function registerAgentAskRoutes(app: Express, deps: RoomMessageRouteDeps,
     const accountId = person(req, res); if (!accountId) return;
     try {
       const room = await resolveParticipantRoom(req, res, deps); if (!room) return;
+      if (!await store.canWrite(room.id, req.sessionAccount as never)) {
+        res.status(403).json({ code: "write_required", error: "Only people who can push to this room's repo can ask for an agent here." });
+        return;
+      }
       const body = (req.body ?? {}) as Record<string, unknown>;
       const model = findAskableModel(body.provider_id, body.model);
       const amount = parseAmountPercent(body.amount_percent, { required: false });
@@ -178,10 +198,13 @@ export function registerAgentAskRoutes(app: Express, deps: RoomMessageRouteDeps,
         res.status(400).json({ code: "invalid_launch", error: "Choose a model and an amount, then try again." });
         return;
       }
+      // The label shown in the room comes from LetAgents' list, never from what the giver sends.
+      const given = findAskableModel(input.providerId, input.model);
+      if (!given) { res.status(400).json({ code: "invalid_launch", error: "Choose a model from the list, then try again." }); return; }
       const result = await store.authority(found.ask, {
         giverAccountId: found.accountId, hostId: input.hostId, installationId: input.installationId,
-        agentKey: input.agentKey, givenProviderId: input.providerId, givenModel: input.model,
-        givenModelLabel: input.label, givenAmountPercent: amount,
+        agentKey: input.agentKey, givenProviderId: given.providerId, givenModel: given.model,
+        givenModelLabel: given.label, givenAmountPercent: amount,
       });
       res.json({ ask: await summary(result.ask, found.accountId, store, true), room_id: result.ask.room_id, grant: result.grant });
     } catch (error) { fail(res, error); }
@@ -271,6 +294,10 @@ export function registerAgentAskRoutes(app: Express, deps: RoomMessageRouteDeps,
     app.post(`/agent-asks/:id/proposals/:proposalId/${decision}`, async (req: AuthenticatedRequest, res) => {
       try {
         const ask = await askerAction(req, res, false); if (!ask) return;
+        if (decision === "approve" && !await store.canWrite(ask.room_id, req.sessionAccount as never)) {
+          res.status(403).json({ code: "write_required", error: "Approving pushes to the repo, so it needs write access to it." });
+          return;
+        }
         const decided = await store.decide(ask, String(req.params.proposalId ?? ""), decision === "approve");
         if (!decided) { res.status(409).json({ code: "proposal_changed", error: "This change was already reviewed." }); return; }
         res.json({ proposal: { id: decided.id, state: decided.state, error: decided.error, pr_url: decided.pr_url } });

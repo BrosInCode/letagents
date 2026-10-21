@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 
 /**
  * Tracker credentials at rest: AES-256-GCM under a server key from
@@ -41,6 +41,11 @@ export interface EncryptedCredentials {
 export interface ConnectorCipher {
   encrypt(plaintext: Record<string, unknown>, aad: CredentialBinding): EncryptedCredentials;
   decrypt(encrypted: EncryptedCredentials, aad: CredentialBinding): Record<string, unknown>;
+  /**
+   * The webhook signing secret of one connection: HMAC-SHA256 of the
+   * connection id under the server key, so nothing extra is stored.
+   */
+  webhookSecret(connectionId: string): string;
 }
 
 export interface CredentialBinding {
@@ -94,6 +99,9 @@ export function createConnectorCipher(rawKey: string): ConnectorCipher {
       } catch {
         throw new ConnectorDecryptError();
       }
+    },
+    webhookSecret(connectionId) {
+      return createHmac("sha256", key).update(`letagents-connector-webhook:v1:${connectionId}`, "utf8").digest("hex");
     },
   };
 }

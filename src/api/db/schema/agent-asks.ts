@@ -35,6 +35,7 @@ export const agent_asks = pgTable("agent_asks", {
   room_idx: index("agent_asks_room_idx").on(table.room_id, table.created_at),
   asker_open_idx: index("agent_asks_asker_open_idx").on(table.asker_account_id).where(sql`${table.state} IN ('open', 'claimed')`),
   giver_idx: index("agent_asks_giver_idx").on(table.giver_account_id).where(sql`${table.state} IN ('claimed', 'on_hold', 'active', 'paused')`),
+  grant_idx: index("agent_asks_grant_idx").on(table.grant_id).where(sql`${table.grant_id} IS NOT NULL`),
   live_idx: index("agent_asks_live_idx").on(table.state, table.updated_at).where(sql`${table.state} IN ('open', 'claimed', 'on_hold', 'active', 'paused')`),
   state_check: check("agent_asks_state_check", sql`${table.state} IN ('open', 'claimed', 'on_hold', 'active', 'paused', 'ended', 'expired', 'cancelled')`),
   amount_check: check("agent_asks_amount_check", sql`(${table.amount_percent} IS NULL OR ${table.amount_percent} BETWEEN 1 AND 100) AND (${table.given_amount_percent} IS NULL OR ${table.given_amount_percent} BETWEEN 1 AND 100)`),

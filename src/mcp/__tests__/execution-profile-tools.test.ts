@@ -264,3 +264,15 @@ test("only an agent given to someone else's room gets the ask code tools, and it
     else process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previous;
   }
 });
+
+test("the daemon, which runs every supervised tool call, has the ask tool handlers whatever its environment", () => {
+  const previous = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+  try {
+    delete process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+    const names = new Set<string>();
+    registerTools({ tool(name: string) { names.add(name); return {}; } } as unknown as McpServer, "supervised_room_turn", "claude-code", { executionOwner: "daemon" });
+    for (const name of ["ask_list_files", "ask_read_file", "ask_search", "ask_propose_change"]) assert.equal(names.has(name), true, name);
+  } finally {
+    if (previous !== undefined) process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previous;
+  }
+});

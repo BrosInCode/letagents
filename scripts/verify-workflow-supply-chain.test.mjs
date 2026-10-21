@@ -422,24 +422,39 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   assert.deepEqual(
     ciScripts.filter(containsDirectNpmCi),
     [
-      "npm ci --ignore-scripts --no-audit",
-      "cd src/web && npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
-      "npm ci --ignore-scripts --no-audit\nnpm ci --ignore-scripts --no-audit --prefix apps/desktop",
-      "npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\nnode scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
     ],
     "CI installs must disable npm's implicit unbounded audit",
   );
   assert.deepEqual(
     releaseScripts.filter(containsDirectNpmCi),
     [
-      "npm ci --ignore-scripts --no-audit\n" +
-        "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\n" +
+        "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
     ],
     "release installs must disable npm's implicit unbounded audit",
   );
+});
+
+test("the retry wrapper only wraps the pinned npm ci installs", () => {
+  // scripts/retry-command.mjs runs any command, so a step could use it to hide
+  // an install the npm ci checks above would not see.
+  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs npm ci --ignore-scripts --no-audit(?: --prefix apps\/desktop)?$/;
+  for (const path of workflowPaths) {
+    const commands = workflowRunScripts(workflowJobs(path))
+      .flatMap((script) => script.split("\n"))
+      .filter((command) => command.includes("retry-command"));
+    assert.ok(commands.length > 0, `${path} should install through the retry wrapper`);
+    for (const command of commands) {
+      assert.match(command, wrapperLine, `${path} uses the retry wrapper for something other than npm ci`);
+    }
+  }
 });
 
 test("the OpenCode runtime contract steps are exactly the reviewed ones", () => {

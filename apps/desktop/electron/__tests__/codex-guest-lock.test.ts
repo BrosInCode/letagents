@@ -20,6 +20,10 @@ test("the lock fails closed when the probe sees a local tool or sees nothing", a
   // Code mode: exec is fine only while its nested tools reach nothing local.
   assert.equal(await codexGuestToolsLocked("/fake/codex-e", {}, null, seen(["functions.exec", "collaboration.spawn_agent"], "for example `await tools.exec_command(...)`\n### `apply_patch`\n### `clock__curr_time`")), true);
   assert.equal(await codexGuestToolsLocked("/fake/codex-f", {}, null, seen(["functions.exec"], "### `exec_command`\nRuns a shell command.")), false);
+  // Nested tools are an allowlist: a new or unknown one is refused, and so is exec with nothing parsed.
+  assert.equal(await codexGuestToolsLocked("/fake/codex-g", {}, null, seen(["functions.exec"], "### `mcp__letagents__send_message`\n### `brand_new_tool`")), false);
+  assert.equal(await codexGuestToolsLocked("/fake/codex-h", {}, null, seen(["functions.exec"], "Run JavaScript with tools.")), false);
+  assert.equal(await codexGuestToolsLocked("/fake/codex-i", {}, null, seen([])), false);
 });
 
 let codexBin: string | null = null;

@@ -9,6 +9,7 @@ import { parsePositivePgIntegerScopedId } from "../../../../shared/message-contr
 
 import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
+import { currentSessionScope } from "./session-scope.js";
 
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2, 3]);
@@ -815,6 +816,8 @@ async function resolveSupervisorCoordinates(
   env: NodeJS.ProcessEnv,
   options: SupervisorBridgeOptions,
 ): Promise<ResolvedSupervisorCoordinates | null> {
+  // A remote session is never daemon-supervised and reads no context files.
+  if (currentSessionScope()) return null;
   const environmentCoordinates: SupervisorCoordinates = {
     entryId: env.LETAGENTS_SUPERVISOR_ENTRY_ID?.trim() ?? "",
     socketPath: env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim() ?? "",

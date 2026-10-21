@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
-import { accounts } from "./core.js";
+import { accounts, rooms } from "./core.js";
 
 /** One account's authorised link to one tracker site or workspace. */
 export const tracker_connections = pgTable(
@@ -95,5 +95,50 @@ export const tracker_oauth_states = pgTable(
     expires_idx: index("tracker_oauth_states_expires_idx").on(table.expires_at),
     provider_check: check("tracker_oauth_states_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
     loopback_port_check: check("tracker_oauth_states_loopback_port_check", sql`${table.loopback_port} BETWEEN 1024 AND 65535`),
+  }),
+);
+
+/**
+ * Per room, per connection: which tickets to import (JQL for Jira, team or
+ * project for Linear). Sync (PR3) polls each enabled filter; a room with no
+ * filter runs no sync.
+ */
+export const room_tracker_filters = pgTable(
+  "room_tracker_filters",
+  {
+    id: text("id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    connection_id: text("connection_id")
+      .notNull()
+      .references(() => tracker_connections.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    /** The connection's tracker. One connection per tracker in a room: cards match by `provider:KEY`. */
+    provider: text("provider").notNull(),
+    filter: text("filter").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** The connection's owner: only they may point a room at their tracker. */
+    created_by_account_id: text("created_by_account_id").notNull(),
+    /** When the last successful poll started; the next poll asks for changes since then. */
+    last_synced_at: timestamp("last_synced_at", { mode: "string", withTimezone: true }),
+    /** A process claims a poll by setting this. A claim not finished in time expires. */
+    sync_claimed_at: timestamp("sync_claimed_at", { mode: "string", withTimezone: true }),
+    /** When the poll under the current claim finished; a running poll is never claimed again. */
+    sync_finished_at: timestamp("sync_finished_at", { mode: "string", withTimezone: true }),
+    /** A webhook asks for an early poll by setting this. */
+    sync_requested_at: timestamp("sync_requested_at", { mode: "string", withTimezone: true }),
+    /** Polls failed in a row; the next poll waits until `backoff_until`. */
+    failure_count: integer("failure_count").notNull().default(0),
+    backoff_until: timestamp("backoff_until", { mode: "string", withTimezone: true }),
+    last_error: text("last_error"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    room_connection_unique: uniqueIndex("room_tracker_filters_room_connection_uq").on(table.room_id, table.connection_id),
+    room_provider_unique: uniqueIndex("room_tracker_filters_room_provider_uq").on(table.room_id, table.provider),
+    provider_check: check("room_tracker_filters_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
+    connection_idx: index("room_tracker_filters_connection_idx").on(table.connection_id),
+    enabled_idx: index("room_tracker_filters_enabled_idx").on(table.sync_claimed_at).where(sql`${table.enabled}`),
   }),
 );

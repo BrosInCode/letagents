@@ -14,7 +14,7 @@ import { emitProjectMessage } from "../server/events.js";
 import { pruneWorkspaces, removeWorkspace } from "./workspace.js";
 import {
   ASK_CLAIM_TTL_MS, ASK_HOLD_TTL_MS, ASK_LINK_TTL_MS, ASK_LIVE_STATES, ASK_OFFLINE_AFTER_MS, ASK_OPEN_LIMIT,
-  ASK_PAUSE_TTL_MS, ASK_ROOM_TEXT, isExactMatch, type AgentAskEndReason, type AgentAskState,
+  ASK_GIVER_ACTIVE_LIMIT, ASK_PAUSE_TTL_MS, ASK_ROOM_TEXT, isExactMatch, type AgentAskEndReason, type AgentAskState,
 } from "./lifecycle.js";
 
 export type AgentAsk = typeof agent_asks.$inferSelect;
@@ -43,17 +43,24 @@ async function say(ask: AgentAsk, event: string, text: string, notifyAccountId: 
   }).catch(error => console.error("[agent asks] room message failed", ask.id, event, error));
 }
 
-/** First writer wins: the update only applies while the row is still in `from`. */
-async function move(id: string, from: readonly AgentAskState[], set: Partial<typeof agent_asks.$inferInsert>) {
+/** First writer wins: the update only applies while the row is still in `from` (and, when named, still this giver's). */
+async function move(id: string, from: readonly AgentAskState[], set: Partial<typeof agent_asks.$inferInsert>, giverAccountId?: string) {
   const [row] = await db.update(agent_asks).set({ ...set, updated_at: now() })
-    .where(and(eq(agent_asks.id, id), inArray(agent_asks.state, [...from]))).returning();
+    .where(and(eq(agent_asks.id, id), inArray(agent_asks.state, [...from]),
+      ...(giverAccountId ? [eq(agent_asks.giver_account_id, giverAccountId)] : []))).returning();
+  return row ?? null;
+}
+
+async function current(id: string): Promise<AgentAsk | null> {
+  const [row] = await db.select().from(agent_asks).where(eq(agent_asks.id, id)).limit(1);
   return row ?? null;
 }
 
 async function expireIfDue(ask: AgentAsk): Promise<AgentAsk> {
   if ((ask.state === "open" || ask.state === "claimed") && Date.parse(ask.expires_at) <= Date.now()) {
-    if (ask.grant_id) await revokeAskAuthority(ask);
-    return (await move(ask.id, ["open", "claimed"], { state: "expired", ended_at: now() })) ?? ask;
+    const expired = await move(ask.id, ["open", "claimed"], { state: "expired", ended_at: now() });
+    if (expired?.grant_id) await revokeAskAuthority(expired);
+    return expired ?? ask;
   }
   return ask;
 }
@@ -110,9 +117,11 @@ export async function personName(accountId: string | null): Promise<string> {
   return (await person(accountId)).name;
 }
 
+// State first, then authority: a change that loses its race must not end someone's live agent.
 export async function cancelAsk(ask: AgentAsk) {
-  if (ask.grant_id) await revokeAskAuthority(ask);
-  return move(ask.id, ["open", "claimed"], { state: "cancelled", ended_at: now() });
+  const cancelled = await move(ask.id, ["open", "claimed"], { state: "cancelled", ended_at: now() });
+  if (cancelled?.grant_id) await revokeAskAuthority(cancelled);
+  return cancelled;
 }
 
 /** Tapping the link reserves it (G12); the same giver renews their own claim. */
@@ -127,8 +136,9 @@ export async function claimAsk(ask: AgentAsk, giverAccountId: string) {
 /** "Can't right now" or a failed start: the link goes back to open (spec rule 3). */
 export async function releaseClaim(ask: AgentAsk, giverAccountId: string, cantHelp: boolean) {
   if (ask.state !== "claimed" || ask.giver_account_id !== giverAccountId) return null;
-  if (ask.grant_id) await revokeAskAuthority(ask);
-  const released = await move(ask.id, ["claimed"], openAgain());
+  const before = await current(ask.id);
+  const released = await move(ask.id, ["claimed"], openAgain(), giverAccountId);
+  if (released && before?.grant_id) await revokeAskAuthority(before);
   if (released && cantHelp) {
     await say(released, `cant:${randomUUID()}`, `${await personName(giverAccountId)} can't add an agent right now. The request is still open.`, released.asker_account_id);
   }
@@ -151,6 +161,9 @@ export async function createAskLaunchAuthority(ask: AgentAsk, input: {
   if (ask.state !== "claimed" || ask.giver_account_id !== input.giverAccountId) throw new Error("ask_not_claimed");
   const agent = await getAgentIdentityByCanonicalKey(input.agentKey);
   if (!agent || agent.owner_account_id !== input.giverAccountId) throw new Error("agent_identity_not_owned");
+  const giving = await db.execute(sql`SELECT count(*)::int AS total FROM agent_asks WHERE giver_account_id = ${input.giverAccountId}
+    AND state IN ('on_hold', 'active', 'paused')`);
+  if (Number(giving.rows[0]?.total) >= ASK_GIVER_ACTIVE_LIMIT) throw new Error("gift_limit");
   const created = await createSupervisorHostGrant({
     owner_account_id: input.giverAccountId, host_id: input.hostId, installation_id: input.installationId,
     allowed_room_ids: [ask.room_id], allowed_agent_keys: [agent.canonical_key],
@@ -160,7 +173,7 @@ export async function createAskLaunchAuthority(ask: AgentAsk, input: {
     grant_id: created.grant.grant_id, agent_key: agent.canonical_key, claim_expires_at: later(ASK_CLAIM_TTL_MS),
     given_provider_id: input.givenProviderId, given_model: input.givenModel, given_model_label: input.givenModelLabel,
     given_amount_percent: input.givenAmountPercent,
-  });
+  }, input.giverAccountId);
   if (!updated) {
     await revokeSupervisorHostGrant({ grant_id: created.grant.grant_id, owner_account_id: input.giverAccountId });
     throw new Error("ask_not_claimed");
@@ -218,19 +231,19 @@ export async function acceptSubstitute(ask: AgentAsk) {
 /** Declining a substitute removes it and reopens the link while it's still valid (S11). */
 export async function declineSubstitute(ask: AgentAsk) {
   if (ask.state !== "on_hold") return null;
-  await revokeAskAuthority(ask);
-  await removeWorkspace(ask.id);
+  const before = await current(ask.id);
   const reopen = Date.parse(ask.expires_at) > Date.now();
   const declined = await move(ask.id, ["on_hold"], reopen ? openAgain() : { state: "expired", ended_at: now() });
+  if (declined && before) { await revokeAskAuthority(before); await removeWorkspace(ask.id); }
   if (declined) await say(ask, `declined:${randomUUID()}`, ASK_ROOM_TEXT.ended.substitute_declined(await personName(ask.giver_account_id)), ask.giver_account_id);
   return declined;
 }
 
 export async function endAsk(ask: AgentAsk, reason: AgentAskEndReason) {
-  await revokeAskAuthority(ask);
-  await removeWorkspace(ask.id);
   const ended = await move(ask.id, ["on_hold", "active", "paused"], { state: "ended", ended_reason: reason, ended_at: now() });
   if (ended) {
+    await revokeAskAuthority(ended);
+    await removeWorkspace(ask.id);
     const giver = await personName(ended.giver_account_id);
     const notify = reason === "removed" ? ended.giver_account_id : ended.asker_account_id;
     await say(ended, "ended", ASK_ROOM_TEXT.ended[reason](giver, ended.given_amount_percent), notify);
@@ -300,7 +313,7 @@ export async function sweepAgentAsks(): Promise<void> {
   for (const ask of holds) await declineSubstitute(ask);
 
   // A deleted room takes its asks with it: open links are cancelled, running gifts end (M13).
-  const live = await db.select().from(agent_asks).where(inArray(agent_asks.state, [...ASK_LIVE_STATES])).limit(500);
+  const live = await db.select().from(agent_asks).where(inArray(agent_asks.state, [...ASK_LIVE_STATES]));
   const roomIds = [...new Set(live.map(ask => ask.room_id))];
   const present = new Set(roomIds.length
     ? (await db.select({ id: rooms.id }).from(rooms).where(inArray(rooms.id, roomIds))).map(row => row.id) : []);
@@ -314,17 +327,16 @@ export async function sweepAgentAsks(): Promise<void> {
     return row ? ["on_hold", "active", "paused"].includes(row.state) : false;
   });
 
-  const running = await db.select().from(agent_asks)
-    .where(inArray(agent_asks.state, ["active", "paused"])).orderBy(agent_asks.updated_at).limit(200);
+  // Every running gift is checked each tick (no page that could starve later ones); names are looked up only on a change.
+  const running = live.filter(ask => ask.state === "active" || ask.state === "paused");
   for (const ask of running) {
-    const live = ask.grant_id ? await workerIsLive(ask.grant_id) : false;
-    const giver = await personName(ask.giver_account_id);
-    if (ask.state === "active" && !live) {
+    const isLive = ask.grant_id ? await workerIsLive(ask.grant_id) : false;
+    if (ask.state === "active" && !isLive) {
       const paused = await move(ask.id, ["active"], { state: "paused", paused_at: stamp });
-      if (paused) await say(paused, `offline:${stamp}`, ASK_ROOM_TEXT.offline(giver), paused.asker_account_id);
-    } else if (ask.state === "paused" && live) {
+      if (paused) await say(paused, `offline:${stamp}`, ASK_ROOM_TEXT.offline(await personName(ask.giver_account_id)), paused.asker_account_id);
+    } else if (ask.state === "paused" && isLive) {
       const back = await move(ask.id, ["paused"], { state: "active", paused_at: null });
-      if (back) await say(back, `back:${stamp}`, ASK_ROOM_TEXT.back(giver));
+      if (back) await say(back, `back:${stamp}`, ASK_ROOM_TEXT.back(await personName(ask.giver_account_id)));
     } else if (ask.state === "paused" && ask.paused_at && Date.parse(ask.paused_at) + ASK_PAUSE_TTL_MS <= Date.now()) {
       await endAsk(ask, "offline");
     }

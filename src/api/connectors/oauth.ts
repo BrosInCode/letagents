@@ -39,8 +39,8 @@ const LINEAR_SCOPES = "read,write";
 export const ATLASSIAN_AUTH_HOST = "auth.atlassian.com";
 export const LINEAR_AUTH_HOST = "linear.app";
 
-/** The public base URL for callbacks, or null when none safe is configured. */
-function baseUrl(env: NodeJS.ProcessEnv): string | null {
+/** The public base URL for callbacks and webhooks, or null when none safe is configured. */
+export function connectorPublicBaseUrl(env: NodeJS.ProcessEnv): string | null {
   const raw = (env.LETAGENTS_BASE_URL || env.PUBLIC_API_URL || "").trim();
   if (!raw) return null;
   try {
@@ -66,14 +66,14 @@ export function getTrackerOAuthConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): TrackerOAuthConfig | null {
   const client = clientCredentials(provider, env);
-  const base = baseUrl(env);
+  const base = connectorPublicBaseUrl(env);
   if (!client || !base) return null;
   return { ...client, callbackUrl: `${base}/account/connectors/oauth/${provider}/callback` };
 }
 
 /** OAuth app credentials are set, but the server has no https base URL for the callback. */
 export function trackerOAuthMissingBaseUrl(provider: TrackerProvider, env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(clientCredentials(provider, env)) && !baseUrl(env);
+  return Boolean(clientCredentials(provider, env)) && !connectorPublicBaseUrl(env);
 }
 
 export function buildTrackerAuthorizeUrl(provider: TrackerProvider, config: TrackerOAuthConfig, start: TrackerOAuthStartParams): string {

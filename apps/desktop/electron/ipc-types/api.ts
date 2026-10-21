@@ -127,6 +127,8 @@ import type {
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
   DesktopTaskMention,
+  DesktopTaskTicket,
+  DesktopTrackerFilterInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -257,6 +259,13 @@ export interface DesktopApi {
       updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null; external_ref?: string | null }
     ) => Promise<DesktopTaskMutationResult>;
     getTaskMentions: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskMention[]>;
+    getTaskTicket: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskTicket | null>;
+    /** Room ticket filters (ticket connectors). Local rooms have none. */
+    listTrackerFilters: (roomIdentifier: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    saveTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    setTrackerFilterEnabled: (roomIdentifier: string, id: string, enabled: boolean) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    removeTrackerFilter: (roomIdentifier: string, id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    testTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterTestResult>;
     updateTaskLease: (
       roomIdentifier: string,
       taskId: string,
@@ -415,6 +424,8 @@ export interface DesktopApi {
     test: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionTestResult>;
     update: (id: string, patch: import("../../../../shared/ticket-connectors.mjs").TrackerConnectionPatch) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
     remove: (id: string) => Promise<void>;
+    /** The webhook URL and signing secret to paste into the tracker. */
+    webhook: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerWebhookSetup>;
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;

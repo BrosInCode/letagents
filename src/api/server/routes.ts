@@ -1,4 +1,8 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
+import { registerRoomTrackerFilterRoutes } from "../routes/rooms/tracker-filters.js";
+import { updateTaskLinkingTicket } from "../connectors/card-merge.js";
+import { getDefaultTrackerSync } from "../connectors/sync.js";
+import { registerTrackerWebhookRoutes } from "../routes/connectors/tracker-webhooks.js";
 import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
 import { registerRoomHistorySummaryRoutes } from "../routes/rooms/history-summary.js";
 import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notification-preferences.js";
@@ -163,6 +167,9 @@ import { registerExecutionApprovalPublicationRoutes } from "../routes/execution-
 import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
+import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
+import { RemoteMcpSessions } from "../remote-mcp/sessions.js";
+import { InProcessDispatcher } from "../remote-mcp/in-process-dispatch.js";
 import {
   createListing,
   updateListing,
@@ -258,7 +265,15 @@ function getRoomEventBroker(): RoomEventBroker {
   return sharedRoomEventBroker;
 }
 
+let sharedRemoteMcpSessions: RemoteMcpSessions | null = null;
+
+export function remoteMcpSessionsForTest(): RemoteMcpSessions | null {
+  return sharedRemoteMcpSessions;
+}
+
 export function closeApiRouteEventBroker(): void {
+  sharedRemoteMcpSessions?.close();
+  sharedRemoteMcpSessions = null;
   sharedRoomEventBroker?.close();
   sharedRoomEventBroker = null;
   sharedRoomMessageOverlayBatcher?.close();
@@ -403,6 +418,10 @@ export function registerApiRoutes(app: Express): void {
     getTaskById,
     getTaskOwnershipState,
     updateTask,
+    updateTaskLinkingTicket,
+    refreshLinkedTicket: async (roomId: string, externalRef: string) => {
+      await getDefaultTrackerSync()?.refreshLinkedCard(roomId, externalRef);
+    },
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -510,10 +529,15 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
   registerHealthRoutes(app);
+  // Remote MCP tool calls run this same app in process (no network, no token).
+  sharedRemoteMcpSessions?.close();
+  sharedRemoteMcpSessions = new RemoteMcpSessions({ dispatcher: new InProcessDispatcher(app) });
+  registerRemoteMcpRoutes(app, { sessions: sharedRemoteMcpSessions });
 
   registerGitHubAppCallbackRoute(app);
 
   registerGitHubWebhookRoutes(app, githubWebhookRouteDeps);
+  registerTrackerWebhookRoutes(app);
 
   registerAuthRoutes(app);
   registerAppLoginRoutes(app);
@@ -553,6 +577,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerConversationRoutingRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomTrackerFilterRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomSettingsRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomHistorySummaryRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomNotificationPreferenceRoutes(app, roomMessageRouteDeps);

@@ -6,6 +6,7 @@ import type {
   TrackerConnectionView,
   TrackerOAuthStart,
   TrackerProvider,
+  TrackerWebhookSetup,
 } from "../../../../shared/ticket-connectors.mjs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -157,4 +158,8 @@ export async function updateTrackerConnection(id: unknown, patch: TrackerConnect
 
 export async function removeTrackerConnection(id: unknown): Promise<void> {
   await apiFetch<{ deleted: boolean }>(connectionPath(id), { method: "DELETE" });
+}
+
+export function getTrackerWebhookSetup(id: unknown): Promise<TrackerWebhookSetup> {
+  return apiFetch<TrackerWebhookSetup>(`${connectionPath(id)}/webhook`);
 }

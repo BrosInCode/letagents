@@ -166,3 +166,35 @@ test("deleting the room cancels its open links and ends its running gifts", opti
   assert.equal(ended.ended_reason, "room_deleted");
   assert.equal(await grantRevoked(grant.grant_id), true);
 });
+
+test("a giver can run at most three given agents at once", options, async () => {
+  const s = await seed();
+  for (const state of ["active", "paused", "on_hold"]) {
+    await pool!.query("UPDATE agent_asks SET state=$2, giver_account_id=$3 WHERE id=$1", [(await ask(s)).row.id, state, s.john.id]);
+  }
+  const fourth = await ask(s);
+  const claimed = await asks!.claimAsk(fourth.row, s.john.id);
+  await assert.rejects(asks!.createAskLaunchAuthority(claimed!, {
+    giverAccountId: s.john.id, hostId: "host", installationId: "install", agentKey: s.agent.canonical_key,
+    givenProviderId: opus.providerId, givenModel: opus.model, givenModelLabel: opus.modelLabel, givenAmountPercent: 10,
+  }), /gift_limit/);
+});
+
+test("a stale release can't free a link someone else now holds", options, async () => {
+  const s = await seed(); const { row } = await ask(s);
+  const johns = await asks!.claimAsk(row, s.john.id);
+  // John's claim lapses and Ada takes the link.
+  await pool!.query("UPDATE agent_asks SET giver_account_id=$2 WHERE id=$1", [row.id, s.ada.id]);
+  assert.equal(await asks!.releaseClaim(johns!, s.john.id, true), null);
+  const now = await fresh(row.id);
+  assert.equal(now.state, "claimed");
+  assert.equal(now.giver_account_id, s.ada.id);
+});
+
+test("cancelling from a stale view leaves a running agent and its grant alone", options, async () => {
+  const s = await seed(); const { row } = await ask(s);
+  const { grant } = await launch(s, row);
+  assert.equal(await asks!.cancelAsk(row), null, "the link was already answered");
+  assert.equal((await fresh(row.id)).state, "active");
+  assert.equal(await grantRevoked(grant.grant_id), false);
+});

@@ -107,9 +107,9 @@ watch(() => props.token, async token => {
     if (!preview.ok) { error.value = preview.error; return; }
     ask.value = preview.value.ask; unavailable.value = preview.value.unavailable;
     const list = models.ok ? models.value : [];
-    const requested = list.find(model => model.providerId === preview.value.ask.provider_id && model.model === preview.value.ask.model)
-      ?? { providerId: preview.value.ask.provider_id, model: preview.value.ask.model, label: preview.value.ask.model_label };
-    const ordered = [requested, ...list.filter(model => model !== requested)];
+    // Only models on LetAgents' current list are offered; one that has left it can't be given.
+    const requested = list.find(model => model.providerId === preview.value.ask.provider_id && model.model === preview.value.ask.model) ?? null;
+    const ordered = requested ? [requested, ...list.filter(model => model !== requested)] : list;
     options.value = await Promise.all(ordered.map(async model => ({
       key: `${model.providerId}:${model.model ?? ""}`, model, requested: model === requested,
       canGive: await desktopIpc.asks!.canGive(model.providerId),

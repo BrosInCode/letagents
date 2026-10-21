@@ -838,15 +838,29 @@
     {
       "idx": 119,
       "version": "7",
-      "when": 1792610000000,
-      "tag": "0119_agent_asks",
+      "when": 1792700000000,
+      "tag": "0119_remote_mcp_sessions",
       "breakpoints": true
     },
     {
       "idx": 120,
       "version": "7",
-      "when": 1792620000000,
-      "tag": "0120_agent_ask_workspaces",
+      "when": 1792800000000,
+      "tag": "0120_room_tracker_filters",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1792900000000,
+      "tag": "0121_agent_asks",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1793000000000,
+      "tag": "0122_agent_ask_workspaces",
       "breakpoints": true
     }
   ]

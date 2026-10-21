@@ -5,10 +5,16 @@ import { join } from "node:path";
 import test, { mock } from "node:test";
 
 process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH = join(mkdtempSync(join(tmpdir(), "agent-gifts-")), "gifts.json");
-mock.module("electron", { defaultExport: { app: { isReady: () => false, setAsDefaultProtocolClient() {}, on() {} } }, namedExports: { app: { isReady: () => false, setAsDefaultProtocolClient() {}, on() {} } } });
+const appEvents = new Map<string, (...args: any[]) => void>();
+const appCalls: string[] = [];
+const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClient() { appCalls.push("scheme"); },
+  on(name: string, handler: (...args: any[]) => void) { appEvents.set(name, handler); }, quit() { appCalls.push("quit"); } };
+const autoUpdater = { on() {} };
+mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
 const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
-const { parseAskLink } = await import("../main/ask-links.js");
+const { parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
+const { readFileSync } = await import("node:fs");
 
 const TOKEN = "abcdefghijklmnopqrstuvwxyz012345";
 
@@ -50,13 +56,15 @@ function fakes(overrides: { readyFails?: boolean; usedPercent?: number; preview?
     release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return overrides.release ?? { ok: true }; },
     launchAuthority: async () => { calls.push("authority"); return { room_id: "room", grant: { supervisor_grant: "t", grant_id: "g", expires_at: "2099-01-01T00:00:00Z" } }; },
     joined: async () => { calls.push("joined"); return { id: "ask_1", state: "active" }; },
+    models: async () => [{ providerId: "cursor", model: null, label: "Cursor" }, { providerId: "claude-code", model: "claude-opus-5-5", label: "Claude Opus 5.5" }],
     preview: async () => ({ ask: { state: "active", is_giver: true, ...overrides.preview }, unavailable: null }), end: async () => ({}),
   };
   const entry = { id: giftEntryId("ask_1"), desiredState: "running", agentSessionId: "s", agentSessionBindingState: "active", readyReachedAt: "now", observedState: "running" };
   let stopped = false;
+  const states: string[] = [];
   const daemon = {
     ensureRunning: async () => ({ generation: 1 }),
-    compareAndSetDesiredState: async () => true,
+    compareAndSetDesiredState: async (_id: string, from: string, to: string) => { states.push(`${from}->${to}`); return true; },
     list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed" } : entry],
     getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 }] } } }),
     setDesiredState: async () => { stopped = true; calls.push("stop"); }, purgeAgent: async () => { calls.push("purge"); return { outcome: "purged" }; },
@@ -64,7 +72,7 @@ function fakes(overrides: { readyFails?: boolean; usedPercent?: number; preview?
   const grants = { createRentalPausedAndInstall: async () => { calls.push("install"); return { entry, agentKey: "john/helper" }; } };
   const coordinator = new AskGiveCoordinator(api as any, daemon as any, grants as any, () => "host",
     async () => "john/helper", async () => ({ canStart: true }) as any);
-  return { coordinator, calls };
+  return { coordinator, calls, states };
 }
 
 const give = { token: TOKEN, providerId: "cursor", model: null, modelLabel: "Cursor", amountPercent: 10 };
@@ -82,6 +90,25 @@ test("any failure before joining stops the agent and gives the link back", async
   await assert.rejects(coordinator.give(give), (error: Error) => error instanceof AskGiveError && /request is still open/.test(error.message));
   assert.ok(calls.includes("purge"));
   assert.equal(calls.at(-1), "release:false");
+});
+
+test("the pre-check counts what other gifts from the same app may still use", async () => {
+  const first = fakes({ usedPercent: 30 });
+  await first.coordinator.give({ ...give, token: "b".repeat(32), amountPercent: 50 });
+  first.coordinator.stopWatching();
+  const second = fakes({ usedPercent: 30 });
+  await assert.rejects(second.coordinator.give({ ...give, amountPercent: 30 }), /20% of your weekly limit left after your other gifts/);
+  await second.coordinator.give({ ...give, amountPercent: 20 });
+  second.coordinator.stopWatching();
+  await second.coordinator.pauseForQuit();
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+});
+
+test("only a model on the current list can be given", async () => {
+  const { coordinator, calls } = fakes();
+  await assert.rejects(coordinator.give({ ...give, providerId: "claude-code", model: "claude-opus-3" }), /isn't on the list anymore/);
+  assert.deepEqual(calls, [], "nothing is claimed or started");
 });
 
 test("the pre-check refuses to give more than is left", async () => {
@@ -159,4 +186,33 @@ test("a link that arrives while a new window loads is held for its renderer", as
   inbox.holdAskLink(TOKEN);
   assert.equal(inbox.takePendingAskLink(), TOKEN, "the new renderer takes it once it loads");
   assert.equal(inbox.takePendingAskLink(), null);
+});
+
+test("quitting pauses running gifts and the next start resumes them", async () => {
+  const { coordinator, states } = fakes();
+  await coordinator.give(give);
+  coordinator.stopWatching();
+  states.length = 0;
+  await coordinator.pauseForQuit();
+  assert.deepEqual(states, ["running->paused"]);
+  const journal = () => JSON.parse(readFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, "utf8"));
+  assert.equal(journal().gifts[TOKEN].pausedForQuit, true);
+  coordinator.startWatching();
+  coordinator.stopWatching();
+  for (let i = 0; i < 50 && journal().gifts[TOKEN].pausedForQuit; i += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(states.includes("paused->running"));
+  assert.equal(journal().gifts[TOKEN].pausedForQuit, false);
+});
+
+test("a dev run leaves the letagents:// scheme alone, and quitting waits for gifts to pause", async () => {
+  registerAskLinks();
+  assert.ok(!appCalls.includes("scheme"), "only the packaged app takes the scheme");
+  let held = false;
+  appEvents.get("before-quit")!({ preventDefault: () => { held = true; } });
+  assert.equal(held, true, "the first quit is held");
+  for (let i = 0; i < 300 && !appCalls.includes("quit"); i += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(appCalls.includes("quit"), "then the app quits");
+  let heldAgain = false;
+  appEvents.get("before-quit")!({ preventDefault: () => { heldAgain = true; } });
+  assert.equal(heldAgain, false, "the second quit goes straight through");
 });

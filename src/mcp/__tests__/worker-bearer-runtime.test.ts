@@ -702,9 +702,9 @@ test("bounded supervised tools bind the exact daemon room without joining ambien
       supervisorRoomId: "exact-supervisor-room",
     }, async () => {
       await autoJoinFromContext();
-      assert.equal(roomState.currentRoom?.room_id, "stale-or-ambient-room", "startup must not trust ambient or launch-time room state");
+      assert.equal(roomState.getCurrentRoom()?.room_id, "stale-or-ambient-room", "startup must not trust ambient or launch-time room state");
       await runWithCurrentSupervisedRoom("exact-supervisor-room", async () => {
-        assert.equal(roomState.currentRoom?.room_id, "stale-or-ambient-room", "per-call authority must not mutate process-global room state");
+        assert.equal(roomState.getCurrentRoom()?.room_id, "stale-or-ambient-room", "per-call authority must not mutate process-global room state");
 
         const currentRoom = await getCurrentRoomPayload();
         assert.equal(currentRoom.connected, true);
@@ -748,7 +748,7 @@ test("bounded supervised room joins cannot select an ambient local room", async 
       globalThis.fetch = async () => assert.fail("bounded room joins must fail before network");
       const joinRoom = toolHandler(registerRoomJoinTools, "join_room");
       await assert.rejects(() => joinRoom({ name: "ambient_local_room" }), /Room joins and creation are disabled/);
-      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+      assert.equal(roomState.getCurrentRoom()?.room_id, "exact-supervisor-room");
     });
   } finally {
     globalThis.fetch = originalFetch;

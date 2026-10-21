@@ -56,8 +56,12 @@ export function giftPermissionProfile(providerId: string): string | null {
 
 type Gift = {
   token: string; askId: string; entryId: string; roomId: string; amountPercent: number;
+  /** Gifts from the same app share one usage limit. Older journals lack it. */
+  providerId?: string;
   /** Limit window being counted, and how much of it this gift has used so far (G16: survives resets). */
   windowId: string | null; lastUsedPercent: number | null; consumedPercent: number;
+  /** Paused because the app quit; the next app start resumes it (D40: offline, then back). */
+  pausedForQuit?: boolean;
 };
 type Journal = { version: 1; gifts: Record<string, Gift> };
 
@@ -125,6 +129,12 @@ export class AskGiveCoordinator {
     if (!Number.isInteger(input.amountPercent) || input.amountPercent < 1 || input.amountPercent > 100) {
       throw new AskGiveError("Choose how much to give, from 1% to 100%.");
     }
+    // Only a model from the current list: an old or edited one would run something the asker didn't pick.
+    const known = await this.api.models().catch(() => null);
+    if (!known) throw new AskGiveError("Couldn't load the model list. Check your connection and try again.");
+    if (!known.some(model => model.providerId === input.providerId && (model.model ?? null) === (input.model ?? null))) {
+      throw new AskGiveError("That model isn't on the list anymore. Choose another model.");
+    }
     const readiness = await this.preflight(input.providerId as DesktopAgentProviderId, {
       repoRootPath: process.cwd(), model: input.model, permissionProfileId: profile,
     }).catch(() => null);
@@ -159,24 +169,38 @@ export class AskGiveCoordinator {
         },
       });
       prepared = entry;
+      // Recorded before the agent runs, so a crash from here on still leaves it watched.
+      await updateJournal(journal => {
+        journal.gifts[input.token] = { token: input.token, askId: claimed.id, entryId: entry.id, roomId, providerId: input.providerId, amountPercent: input.amountPercent,
+          windowId: null, lastUsedPercent: null, consumedPercent: 0 };
+      });
       if (!await this.daemon.compareAndSetDesiredState(entry.id, "paused", "running")) {
         throw new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
       }
       const ready = await this.waitUntilReady(entry.id);
       const usage = await this.readUsage(ready.id, roomId);
       const window = mainWindow(usage, null);
-      if (window && 100 - window.usedPercent < input.amountPercent) {
-        throw new AskGiveError(`You have ${Math.max(0, Math.round(100 - window.usedPercent))}% of your ${window.label.toLowerCase()} limit left. Give less or try later.`);
+      // What this app's other gifts may still use is already promised, so it isn't left to give.
+      const promised = Object.values((await readJournal()).gifts)
+        .filter(gift => gift.token !== input.token && gift.providerId === input.providerId)
+        .reduce((total, gift) => total + Math.max(0, gift.amountPercent - gift.consumedPercent), 0);
+      const left = window ? 100 - window.usedPercent - promised : 100;
+      if (window && left < input.amountPercent) {
+        throw new AskGiveError(`You have ${Math.max(0, Math.round(left))}% of your ${window.label.toLowerCase()} limit left${promised ? " after your other gifts" : ""}. Give less or try later.`);
       }
       const joined = await this.api.joined(input.token, ready.agentSessionId!);
       await updateJournal(journal => {
-        journal.gifts[input.token] = { token: input.token, askId: claimed.id, entryId: ready.id, roomId, amountPercent: input.amountPercent,
-          windowId: window?.id ?? null, lastUsedPercent: window?.usedPercent ?? null, consumedPercent: 0 };
+        const gift = journal.gifts[input.token];
+        if (gift) journal.gifts[input.token] = { ...gift, entryId: ready.id, windowId: window?.id ?? null, lastUsedPercent: window?.usedPercent ?? null };
       });
       this.startWatching();
       return joined;
     } catch (error) {
-      if (prepared) await this.stopAndPurge(prepared.id).catch(() => undefined);
+      if (prepared) {
+        const stopped = await this.stopAndPurge(prepared.id).then(() => true, () => false);
+        // Forget it only once it is really gone; otherwise the watcher keeps trying.
+        if (stopped) await updateJournal(journal => { delete journal.gifts[input.token]; });
+      }
       await this.api.release(input.token, false).catch(() => undefined);
       throw error instanceof AskGiveError ? error : new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
     }
@@ -191,6 +215,7 @@ export class AskGiveCoordinator {
 
   startWatching(): void {
     if (this.watchTimer) return;
+    void this.resumeAfterQuit();
     this.watchTimer = setInterval(() => void this.watchOnce(), WATCH_MS);
     this.watchTimer.unref?.();
     void this.watchOnce();
@@ -230,12 +255,35 @@ export class AskGiveCoordinator {
       await this.api.end(gift.token, "amount_used").catch(() => undefined);
       return this.finish(gift);
     }
-    await updateJournal(journal => { if (journal.gifts[gift.token]) journal.gifts[gift.token] = { ...gift, ...counted }; });
+    await updateJournal(journal => { const current = journal.gifts[gift.token]; if (current) journal.gifts[gift.token] = { ...current, ...counted }; });
   }
 
+  /** Stop and forget a gift. A failed stop keeps it in the journal, so the next check tries again. */
   private async finish(gift: Gift): Promise<void> {
-    await this.stopAndPurge(gift.entryId).catch(() => undefined);
+    await this.stopAndPurge(gift.entryId);
     await updateJournal(journal => { delete journal.gifts[gift.token]; });
+  }
+
+  /**
+   * The app is quitting: the watch stops with it, so running gifts are paused
+   * (the room sees them go offline) rather than left running unwatched.
+   */
+  async pauseForQuit(): Promise<void> {
+    this.stopWatching();
+    const journal = await readJournal();
+    for (const gift of Object.values(journal.gifts)) {
+      const paused = await this.daemon.compareAndSetDesiredState(gift.entryId, "running", "paused").catch(() => false);
+      if (paused) await updateJournal(next => { if (next.gifts[gift.token]) next.gifts[gift.token]!.pausedForQuit = true; });
+    }
+  }
+
+  /** On the next start, gifts paused by a quit come back and are watched again. */
+  private async resumeAfterQuit(): Promise<void> {
+    const journal = await readJournal();
+    for (const gift of Object.values(journal.gifts).filter(entry => entry.pausedForQuit)) {
+      const resumed = await this.daemon.compareAndSetDesiredState(gift.entryId, "paused", "running").catch(() => false);
+      if (resumed) await updateJournal(next => { if (next.gifts[gift.token]) next.gifts[gift.token]!.pausedForQuit = false; });
+    }
   }
 
   private async readUsage(entryId: string, roomId: string): Promise<ProviderUsage | null> {

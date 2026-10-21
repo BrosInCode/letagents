@@ -56,10 +56,28 @@ export interface ExternalItem {
   payload: Record<string, unknown>;
 }
 
+/**
+ * One ticket a webhook names. `item` is null when the payload is not trusted
+ * as the ticket's state: sync then reads the ticket, so a webhook and a poll
+ * always map the same record the same way.
+ */
 export interface ExternalItemChange {
   key: string;
   item: ExternalItem | null;
   deleted: boolean;
+}
+
+export interface WebhookRequest {
+  headers: Record<string, string | string[] | undefined>;
+  rawBody: Buffer;
+  /** The connection's signing secret. */
+  secret: string;
+  now?: Date;
+}
+
+export interface WebhookVerification {
+  ok: boolean;
+  deliveryId: string;
 }
 
 export interface TrackerUser {
@@ -72,6 +90,8 @@ export interface TrackerUser {
 export interface ListItemsOptions {
   assigneeMe?: boolean;
   updatedSince?: string;
+  /** Only tickets updated at or before this time (inclusive; Jira rounds out to the minute). */
+  updatedBefore?: string;
   /** Upper bound on items returned. Default 50, at most 200. */
   limit?: number;
 }
@@ -86,7 +106,13 @@ export type TrackerErrorOutcome = "definite" | "ambiguous" | "auth";
 
 export class TrackerProviderError extends Error {
   readonly code = "tracker_provider_error";
-  constructor(readonly outcome: TrackerErrorOutcome, message: string, readonly status: number | null = null) {
+  constructor(
+    readonly outcome: TrackerErrorOutcome,
+    message: string,
+    readonly status: number | null = null,
+    /** How long the tracker asked callers to wait (Retry-After), when it said. */
+    readonly retryAfterMs: number | null = null,
+  ) {
     super(message);
     this.name = "TrackerProviderError";
   }
@@ -114,6 +140,6 @@ export interface WorkItemProvider {
   findTransition(conn: ProviderConnection, key: string, toStatus: string, since: string): Promise<TrackerWriteResult | null>;
   /** Reconciliation for an ambiguous comment: the comment with the marker, or null. */
   findComment(conn: ProviderConnection, key: string, correlationKey: string): Promise<TrackerWriteResult | null>;
-  verifyWebhook?(req: { headers: Record<string, string | string[] | undefined>; rawBody: Buffer }): { ok: boolean; deliveryId: string };
+  verifyWebhook?(req: WebhookRequest): WebhookVerification;
   parseWebhook?(payload: unknown): ExternalItemChange[];
 }

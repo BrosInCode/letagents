@@ -72,6 +72,12 @@
           @update:model-value="emit('update:status-filter', $event)"
         />
         <DesktopSelectField
+          v-if="showSourceFilter"
+          :model-value="sourceFilter || 'all'" :options="sourceSelectOptions" label="Filter by source" label-hidden
+          data-testid="room-board-source-filter"
+          @update:model-value="emit('update:source-filter', $event)"
+        />
+        <DesktopSelectField
           :model-value="sort" :options="sortOptions" label="Sort tasks" label-hidden
           @update:model-value="emit('update:sort', $event)"
         />
@@ -94,6 +100,7 @@ import { computed, ref } from "vue";
 import { Plus, Search, X } from "@lucide/vue";
 import DesktopSegmentedControl from "../../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../../controls/DesktopSelectField.vue";
+import { BOARD_SOURCE_OPTIONS } from "./ticket-ref";
 
 const props = defineProps<{
   searchQuery: string;
@@ -103,6 +110,9 @@ const props = defineProps<{
   ownerOptions: Array<{ id: string; label: string }>;
   statusFilter: string;
   statusOptions: Array<{ id: string; label: string }>;
+  /** Shown only when the room has imported tracker cards. */
+  showSourceFilter?: boolean;
+  sourceFilter?: string;
   sort: string;
   busy: boolean;
   managerMode: string;
@@ -117,13 +127,15 @@ const countFor = (id: string): number => Number(
 const searchInput = ref<HTMLInputElement | null>(null);
 const ownerSelectOptions = computed(() => props.ownerOptions.map(option => ({ value: option.id, label: option.label })));
 const statusSelectOptions = computed(() => props.statusOptions.map(option => ({ value: option.id, label: option.label })));
+const sourceSelectOptions = BOARD_SOURCE_OPTIONS.map(option => ({ value: option.id, label: option.label }));
 const sortOptions = [
   { value: "recent", label: "Recently updated" },
   { value: "oldest", label: "Oldest first" },
   { value: "title", label: "Title A-Z" },
 ];
 const hasFilters = computed(() => Boolean(props.searchQuery.trim())
-  || props.ownerFilter !== "all" || props.statusFilter !== "all");
+  || props.ownerFilter !== "all" || props.statusFilter !== "all"
+  || Boolean(props.showSourceFilter && props.sourceFilter && props.sourceFilter !== "all"));
 const summaryText = computed(() => {
   const open = countFor("open");
   const review = countFor("needs-review");
@@ -140,6 +152,7 @@ const emit = defineEmits<{
   "update:active-filter": [value: string];
   "update:owner-filter": [value: string];
   "update:status-filter": [value: string];
+  "update:source-filter": [value: string];
   "update:sort": [value: string];
   "clear-filters": [];
   "open-governance": [];

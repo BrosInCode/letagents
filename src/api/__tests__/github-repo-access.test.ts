@@ -7,6 +7,7 @@ import {
   getGitHubRepoVisibility,
   githubRepoAccessInvalidationEvents,
   isGitHubRepoCollaborator,
+  isGitHubRepoWriter,
   resetGitHubRepoVisibilityBackoffForTests,
   resolveGitHubRepoRoomAccessDecision,
 } from "../github/repo-access.js";
@@ -684,4 +685,19 @@ test("a signed-in not-found answer still retires a remembered public answer", as
   await withClockOffset(61_000, async () => {
     assert.equal(await getGitHubRepoVisibility(roomName), "unknown");
   });
+});
+
+test("isGitHubRepoWriter passes owners and writers, and refuses readers and failures", async () => {
+  const fetchFor = (permission: { permission?: string; role_name?: string } | null, owner = "acme") => (async (url: string | URL | Request) => {
+    const path = String(url);
+    if (path.endsWith("/permission")) return permission ? new Response(JSON.stringify(permission), { status: 200 }) : new Response("", { status: 404 });
+    return new Response(JSON.stringify({ owner: { login: owner }, private: true }), { status: 200 });
+  }) as typeof fetch;
+  const check = (login: string, fetchImpl: typeof fetch) => isGitHubRepoWriter({ roomName: "github.com/acme/app", login, accessToken: "t", fetchImpl });
+  assert.equal(await check("acme", fetchFor(null)), true);
+  assert.equal(await check("sam", fetchFor({ permission: "write" })), true);
+  assert.equal(await check("sam", fetchFor({ permission: "read", role_name: "maintain" })), true);
+  assert.equal(await check("sam", fetchFor({ permission: "read", role_name: "triage" })), false);
+  assert.equal(await check("sam", fetchFor(null)), false);
+  assert.equal(await isGitHubRepoWriter({ roomName: "github.com/acme/app", login: "sam", accessToken: "", fetchImpl: fetchFor({ permission: "write" }) }), false);
 });

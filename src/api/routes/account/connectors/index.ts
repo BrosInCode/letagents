@@ -9,6 +9,7 @@ import {
   type TrackerConnectionTestResult,
   type TrackerOAuthStart,
   type TrackerProvider,
+  type TrackerWebhookSetup,
 } from "../../../../../shared/ticket-connectors.mjs";
 import {
   type ConnectionService,
@@ -19,6 +20,7 @@ import {
 import { type ConnectorCipher, ConnectorDecryptError, loadConnectorCipher } from "../../../connectors/crypto.js";
 import {
   buildTrackerAuthorizeUrl,
+  connectorPublicBaseUrl,
   exchangeTrackerCode,
   createPkcePair,
   getTrackerOAuthConfig,
@@ -83,7 +85,7 @@ function boundedString(value: unknown, max: number): string | null {
  * tickets with it, or turn on Jev consent. Cookie-only requests are refused so
  * no other site can drive these routes.
  */
-function requireAccount(req: AuthenticatedRequest, res: Response): string | null {
+export function requireAccount(req: AuthenticatedRequest, res: Response): string | null {
   const bearer = parseBearerAuthorization(req.headers.authorization).kind === "token";
   if (!req.sessionAccount || !bearer || req.authKind !== "session") {
     res.status(req.authKind ? 403 : 401).json({ error: "Sign in to the LetAgents app to manage ticket connections." });
@@ -416,6 +418,25 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       result = { ok: false, connection: toConnectionView((await deps.store.get(row.id)) ?? row), items: [], error: text };
     }
     res.json(result);
+  });
+
+  /** Where to point the tracker's webhook for this connection, and its signing secret. */
+  app.get("/account/connectors/:id/webhook", async (req: AuthenticatedRequest, res) => {
+    if (!ready(res)) return;
+    const accountId = requireAccount(req, res);
+    if (!accountId) return;
+    const row = await ownedRow(req, res, accountId);
+    if (!row) return;
+    const base = connectorPublicBaseUrl(env);
+    if (!base) {
+      res.status(503).json({ error: "Set LETAGENTS_BASE_URL to an https URL to receive tracker webhooks." });
+      return;
+    }
+    const setup: TrackerWebhookSetup = {
+      url: `${base}/webhooks/trackers/${row.provider}/${encodeURIComponent(row.id)}`,
+      secret: deps.cipher!.webhookSecret(row.id),
+    };
+    res.set("Cache-Control", "no-store").json(setup);
   });
 
   app.patch("/account/connectors/:id", async (req: AuthenticatedRequest, res) => {

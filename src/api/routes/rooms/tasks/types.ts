@@ -42,6 +42,13 @@ export interface RoomTaskRouteDeps {
   getTaskById: typeof import("../../../db.js").getTaskById;
   getTaskOwnershipState: typeof import("../../../db.js").getTaskOwnershipState;
   updateTask: typeof import("../../../db.js").updateTask;
+  /**
+   * Ticket connectors PR3: an update that links a card to a ticket an
+   * imported card holds folds that card in, in the update's transaction.
+   */
+  updateTaskLinkingTicket?: typeof import("../../../connectors/card-merge.js").updateTaskLinkingTicket;
+  /** Binds a newly linked card to its ticket when the room's filter matches it. Best effort. */
+  refreshLinkedTicket?: (roomId: string, externalRef: string) => Promise<void>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,

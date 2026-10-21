@@ -381,7 +381,8 @@ async function createPatchCommitBranch(input: {
       url: `${repoUrl}/git/refs/${workRef}`,
       method: "PATCH",
       token: input.token,
-      body: { sha: commitSha, force: true },
+      // Stacked changes only ever fast-forward: a branch that moved underneath fails instead of losing a change.
+      body: { sha: commitSha, force: !input.stack },
     });
   } else {
     await githubApiRequest({

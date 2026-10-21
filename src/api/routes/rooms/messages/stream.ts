@@ -298,6 +298,9 @@ export function registerMessageStreamRoute(
         case "task_updated":
           await writeEvent(`${eventId}event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: projectId })}\n\n`);
           return;
+        case "task_removed":
+          await writeEvent(`${eventId}event: task_remove\ndata: ${JSON.stringify({ task_id: event.taskId, room_id: projectId })}\n\n`);
+          return;
         case "github_event_updated":
           await writeEvent(`${eventId}event: github_event\ndata: ${JSON.stringify({
             ...toPublicGitHubRoomEvent(event.event),

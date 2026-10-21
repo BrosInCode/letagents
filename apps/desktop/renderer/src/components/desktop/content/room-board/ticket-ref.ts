@@ -43,3 +43,39 @@ export function normalizedExternalRef(value: string): string | null | undefined 
   if (provider === "jira" && !/^[A-Za-z][A-Za-z0-9]+-/.test(match[2]!)) return undefined;
   return `${provider}:${match[2]!.toUpperCase()}`;
 }
+
+/** Cards that sync imported carry `created_by` `tracker:jira` or `tracker:linear`. */
+export function isImportedTask(task: { createdBy?: string | null }): boolean {
+  return task.createdBy === "tracker:jira" || task.createdBy === "tracker:linear";
+}
+
+const TICKET_STATE_LABELS: Record<string, string> = {
+  todo: "To do",
+  in_progress: "In progress",
+  in_review: "In review",
+  done: "Done",
+};
+
+/** The tracker's state, as a short label; null when the card has none. */
+export function ticketStateLabel(state: string | null | undefined): string | null {
+  if (!state) return null;
+  return TICKET_STATE_LABELS[state] ?? state.replace(/_/g, " ");
+}
+
+/** Board source filter: every card, cards that name a ticket, or cards that do not. */
+export type BoardSourceFilter = "all" | "tracker" | "native";
+
+export const BOARD_SOURCE_OPTIONS: ReadonlyArray<{ id: BoardSourceFilter; label: string }> = [
+  { id: "all", label: "All cards" },
+  { id: "tracker", label: "Tracker cards" },
+  { id: "native", label: "Native cards" },
+];
+
+export function isBoardSourceFilter(value: string): value is BoardSourceFilter {
+  return value === "all" || value === "tracker" || value === "native";
+}
+
+export function taskMatchesSource(task: { externalRef?: string | null }, source: string | undefined): boolean {
+  if (!source || source === "all") return true;
+  return source === "tracker" ? Boolean(task.externalRef) : !task.externalRef;
+}

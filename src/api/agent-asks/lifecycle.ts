@@ -14,6 +14,8 @@ export const ASK_PAUSE_TTL_MS = 24 * 60 * 60_000;
  */
 export const ASK_OFFLINE_AFTER_MS = 5 * 60_000;
 export const ASK_OPEN_LIMIT = 5;
+/** Gifts one giver can run at once (G20). */
+export const ASK_GIVER_ACTIVE_LIMIT = 3;
 export const ASK_NOTE_MAX = 500;
 
 export type AgentAskState = "open" | "claimed" | "on_hold" | "active" | "paused" | "ended" | "expired" | "cancelled";

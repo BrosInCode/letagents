@@ -45,6 +45,8 @@ export type RoomEvent =
     wakeAgentKeys?: ReadonlySet<string>;
   }
   | { kind: "task_updated"; roomId: string; task: Task }
+  /** A card left the board (a merged tracker duplicate). */
+  | { kind: "task_removed"; roomId: string; taskId: string }
   | { kind: "github_event_updated"; roomId: string; event: GitHubRoomEvent }
   | {
     kind: "reasoning_updated";
@@ -250,6 +252,10 @@ export class RoomEventBroker {
     this.addSource(deps.taskEvents, "task:updated", (payload) => {
       const event = payload as { projectId: string; task: Task };
       return { kind: "task_updated", roomId: event.projectId, task: event.task };
+    });
+    this.addSource(deps.taskEvents, "task:removed", (payload) => {
+      const event = payload as { projectId: string; taskId: string };
+      return { kind: "task_removed", roomId: event.projectId, taskId: event.taskId };
     });
     if (deps.githubRoomEvents) {
       this.addSource(deps.githubRoomEvents, "github_event:updated", (payload) => {

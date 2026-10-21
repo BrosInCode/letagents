@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { CODEX_OWNER_FEATURE_OVERRIDES, codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
@@ -26,6 +27,7 @@ export const CODEX_GUEST_TOOL_OVERRIDES: readonly string[] = Object.freeze([
   "features.multi_agent=false",
   "features.image_generation=false",
   "features.in_app_browser=false",
+  "features.js_repl=false",
   'web_search="disabled"',
 ]);
 
@@ -40,8 +42,13 @@ const HARMLESS_TOOLS = new Set([
   "functions.exec", "functions.wait", "functions.request_user_input", "functions.request_user_input_async", "clock.sleep",
 ]);
 const HARMLESS_PREFIXES = ["mcp__letagents__", "collaboration.", "functions.mcp__letagents__"];
-/** Nested tools that would reach this Mac from inside code mode. */
-const FORBIDDEN_NESTED = ["exec_command", "write_stdin", "view_image", "web_search", "shell", "node_repl", "computer_use", "browser"];
+/**
+ * Tools code mode may nest under `exec`: the room's tools and ones that read
+ * nothing on this Mac. An allowlist, so a tool Codex adds later is refused.
+ * apply_patch only writes, and Read-only's sandbox refuses every write.
+ */
+const HARMLESS_NESTED = new Set(["apply_patch", "clock__curr_time", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "request_user_input", "request_user_input_async"]);
 
 export type CodexGuestProbe = { tools: string[]; nestedText: string };
 
@@ -52,8 +59,13 @@ export function nestedCodeModeTools(nestedText: string): string[] {
 
 export function isGuestCodexToolSet(probe: CodexGuestProbe | string[]): boolean {
   const { tools, nestedText } = Array.isArray(probe) ? { tools: probe, nestedText: "" } : probe;
+  if (!tools.length) return false;
   const allowed = tools.every(tool => HARMLESS_TOOLS.has(tool) || HARMLESS_PREFIXES.some(prefix => tool.startsWith(prefix)));
-  return allowed && !nestedCodeModeTools(nestedText).some(tool => FORBIDDEN_NESTED.some(name => tool.includes(name)));
+  if (!allowed) return false;
+  if (!tools.includes("functions.exec")) return true;
+  // Code mode: its nested tools must parse, and every one must be allowed.
+  const nested = nestedCodeModeTools(nestedText);
+  return nested.length > 0 && nested.every(tool => HARMLESS_NESTED.has(tool) || tool.startsWith("mcp__letagents__"));
 }
 
 const PROBE_TIMEOUT_MS = 45_000;
@@ -82,6 +94,8 @@ function collect(list: unknown, prefix = ""): { names: string[]; text: string } 
 export async function probeCodexGuestTools(codexBin: string, env: NodeJS.ProcessEnv, model: string | null = null): Promise<CodexGuestProbe | null> {
   let seen: CodexGuestProbe | null = null;
   const server = http.createServer((req, res) => {
+    // Only a real model request counts: POST /v1/responses carrying a tool list.
+    const isModelRequest = req.method === "POST" && (req.url ?? "").split("?")[0] === "/v1/responses";
     let body = "";
     req.on("data", chunk => { body += chunk; });
     req.on("end", () => {
@@ -89,7 +103,8 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
         const parsed = JSON.parse(body) as { tools?: unknown; input?: Array<{ type?: string; tools?: unknown }> };
         const top = collect(parsed.tools);
         const extra = (parsed.input ?? []).filter(item => item?.type === "additional_tools").map(item => collect(item.tools));
-        seen ??= { tools: [...top.names, ...extra.flatMap(part => part.names)], nestedText: [top.text, ...extra.map(part => part.text)].join("\n") };
+        const tools = [...top.names, ...extra.flatMap(part => part.names)];
+        if (isModelRequest && tools.length) seen ??= { tools, nestedText: [top.text, ...extra.map(part => part.text)].join("\n") };
       } catch { /* not a model request */ }
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "letagents guest tool probe", type: "invalid_request_error" } }));
@@ -116,6 +131,7 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
     });
     return seen;
   } finally {
+    server.closeAllConnections();
     server.close();
     rmSync(folder, { recursive: true, force: true });
   }
@@ -123,12 +139,18 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
 
 const passed = new Map<string, Promise<boolean>>();
 
+function ownerConfigFingerprint(env: NodeJS.ProcessEnv): string {
+  const home = env.CODEX_HOME?.trim() || join(env.HOME?.trim() || homedir(), ".codex");
+  try { return createHash("sha256").update(readFileSync(join(home, "config.toml"))).digest("hex"); } catch { return "no-config"; }
+}
+
 /** Whether this exact Codex binary, for this model, offers a guest only safe tools. Only a pass is remembered. */
 export function codexGuestToolsLocked(codexBin: string, env: NodeJS.ProcessEnv, model: string | null = null,
   probe: typeof probeCodexGuestTools = probeCodexGuestTools): Promise<boolean> {
   let identity = codexBin;
   try { const path = realpathSync(codexBin); const file = statSync(path); identity = `${path}\n${file.size}\n${file.mtimeMs}`; } catch { /* checked by name */ }
-  identity += `\n${model ?? ""}`;
+  // A pass holds only for the same model and the same owner config (its default model and features).
+  identity += `\n${model ?? ""}\n${ownerConfigFingerprint(env)}`;
   let result = passed.get(identity);
   if (!result) {
     result = probe(codexBin, env, model).then(seen => seen !== null && isGuestCodexToolSet(seen)).catch(() => false);

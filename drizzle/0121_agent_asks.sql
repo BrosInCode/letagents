@@ -40,3 +40,5 @@ CREATE INDEX agent_asks_asker_open_idx ON agent_asks (asker_account_id) WHERE st
 CREATE INDEX agent_asks_giver_idx ON agent_asks (giver_account_id) WHERE state IN ('claimed', 'on_hold', 'active', 'paused');
 --> statement-breakpoint
 CREATE INDEX agent_asks_live_idx ON agent_asks (state, updated_at) WHERE state IN ('open', 'claimed', 'on_hold', 'active', 'paused');
+--> statement-breakpoint
+CREATE INDEX agent_asks_grant_idx ON agent_asks (grant_id) WHERE grant_id IS NOT NULL;

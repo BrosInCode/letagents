@@ -23,21 +23,23 @@ function harness(ask: Record<string, unknown> | null = row(), extra: Record<stri
     create: async (input: any) => { calls.push(["create", input]); return extra.limit ? { error: "ask_limit" } : { ask: row(), token: TOKEN, error: null }; },
     byToken: async () => ask, byId: async () => ask, listRoom: async () => [], listAccount: async () => [],
     cancel: async () => row({ state: "cancelled" }), claim: async (_a: any, who: string) => { calls.push(["claim", who]); return row({ state: "claimed", giver_account_id: who }); },
-    release: async () => row(), authority: async () => { throw new Error("ask_not_claimed"); }, joined: async () => row({ state: "active" }),
+    release: async () => row(),
+    authority: async (_a: any, input: any) => { calls.push(["authority", input]); if (extra.authority) return { ask: row({ state: "claimed" }), grant: { grant_id: "g" } }; throw new Error(String(extra.authorityError ?? "ask_not_claimed")); }, joined: async () => row({ state: "active" }),
     accept: async () => row({ state: "active" }), decline: async () => row(), end: async (_a: any, reason: string) => { calls.push(["end", reason]); return row({ state: "ended" }); },
     name: async (id: string | null) => id === "sam" ? "Sam" : "John", isAdmin: async () => false, room: async () => ({ display_name: "feat-auth" }),
     forWorker: async (sessionId: string) => sessionId === "given" ? ask : null,
+    canWrite: async () => extra.canWrite !== false,
     files: async () => { calls.push(["files"]); return ["src/a.ts"]; },
     read: async (_a: any, path: string) => { calls.push(["read", path]); return { path, content: "x", redacted: false }; },
     search: async () => [], propose: async () => ({ id: "chg_1", state: "waiting" }),
-    proposals: async () => [], reads: async () => [], decide: async () => null,
+    proposals: async () => [], reads: async () => [], decide: async (_a: any, id: string) => { calls.push(["decide", id]); return null; },
   } as any);
   async function request(method: string, path: string, body: any = {}, auth: string | null = "session", account = "john") {
     const route = routes.find(r => r.method === method && (r.path instanceof RegExp ? r.path.test(path)
-      : new RegExp(`^${r.path.replace(/:[a-z]+/g, "[^/]+")}$`).test(path)));
+      : new RegExp(`^${r.path.replace(/:[A-Za-z]+/g, "[^/]+")}$`).test(path)));
     assert.ok(route, `${method} ${path}`);
     const params = route.path instanceof RegExp ? Object.fromEntries(path.match(route.path)!.slice(1).map((v: string, i: number) => [i, v]))
-      : Object.fromEntries((route.path.match(/:[a-z]+/g) ?? []).map((name: string) => [name.slice(1), path.split("/")[route.path.split("/").indexOf(name)]]));
+      : Object.fromEntries((route.path.match(/:[A-Za-z]+/g) ?? []).map((name: string) => [name.slice(1), path.split("/")[route.path.split("/").indexOf(name)]]));
     const req = { params, body, query: {}, authKind: auth, sessionAccount: auth && auth !== "agent_session" ? { account_id: account } : undefined,
       agentSession: auth === "agent_session" ? { agent_session_id: account } : undefined, headers: {}, protocol: "https", get: () => "letagents.chat" };
     const res = { code: 200, body: null as any, status(code: number) { this.code = code; return this; }, json(value: any) { this.body = value; return this; } };
@@ -133,4 +135,37 @@ test("only a given agent, while its ask runs, can use the code tools; the ask co
   assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/github.com/acme/app/agent-ask-workspace/read"), "coordination.read");
   assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/github.com/acme/app/agent-ask-workspace/proposals"), "coordination.propose");
   assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/github.com/acme/app/agent-ask-workspace/delete"), null);
+});
+
+test("only people who can push to the room's repo can ask, or approve a change", async () => {
+  const h = harness(row({ state: "active", giver_account_id: "john" }), { canWrite: false });
+  const asked = await h.request("post", "/rooms/room/agent-asks", { provider_id: "claude-code", model: "claude-opus-5-5" }, "session", "sam");
+  assert.equal(asked.code, 403);
+  assert.equal(asked.body.code, "write_required");
+  const approve = await h.request("post", `/agent-asks/${ID}/proposals/chg_1/approve`, {}, "session", "sam");
+  assert.equal(approve.code, 403);
+  assert.equal((await h.request("post", `/agent-asks/${ID}/proposals/chg_1/decline`, {}, "session", "sam")).code, 409, "declining needs no write access");
+  assert.deepEqual(h.calls, [["decide", "chg_1"]]);
+});
+
+test("the giver's model must be on LetAgents' list, and the room sees LetAgents' label", async () => {
+  const claimed = row({ state: "claimed", giver_account_id: "john" });
+  const launch = (extra: Record<string, unknown>) => ({ host_id: "h", installation_id: "i", agent_key: "john/helper", amount_percent: 10, ...extra });
+  const bad = harness(claimed, { authority: true });
+  const refused = await bad.request("post", `/agent-asks/link/${TOKEN}/launch-authority`, launch({ provider_id: "claude-code", model: "claude-opus-3", model_label: "Claude Opus 9" }));
+  assert.equal(refused.code, 400);
+  assert.deepEqual(bad.calls, []);
+  const good = harness(claimed, { authority: true });
+  const ok = await good.request("post", `/agent-asks/link/${TOKEN}/launch-authority`, launch({ provider_id: "claude-code", model: "claude-opus-5-5", model_label: "Totally Opus" }));
+  assert.equal(ok.code, 200);
+  assert.equal(good.calls[0][1].givenModelLabel, "Claude Opus 5.5");
+});
+
+test("a giver already giving three agents is told to wait", async () => {
+  const h = harness(row({ state: "claimed", giver_account_id: "john" }), { authorityError: "gift_limit" });
+  const result = await h.request("post", `/agent-asks/link/${TOKEN}/launch-authority`, {
+    host_id: "h", installation_id: "i", agent_key: "john/helper", provider_id: "claude-code", model: "claude-opus-5-5", model_label: "Opus", amount_percent: 10,
+  });
+  assert.equal(result.code, 409);
+  assert.match(result.body.error, /already giving 3 agents/);
 });

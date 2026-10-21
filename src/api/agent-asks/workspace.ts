@@ -9,14 +9,14 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { and, desc, eq } from "drizzle-orm";
 
 import { getGitHubAppInstallationById, getGitHubAppRepositoryByFullName } from "../db.js";
-import { db } from "../db/client.js";
+import { db, pool } from "../db/client.js";
 import { getGitRoomBindingForRoom } from "../db/git-room-bindings.js";
 import { agent_ask_proposals, agent_ask_reads, agent_ask_workspaces } from "../db/schema.js";
 import { getGitHubAppConfig } from "../github/config.js";
@@ -35,6 +35,8 @@ const MAX_FILE_BYTES = 256 * 1024;
 const MAX_LIST = 2000;
 const MAX_SEARCH = 100;
 const MAX_PROPOSAL_FILES = 50;
+/** A copy larger than this is refused and removed. */
+const MAX_CHECKOUT_BYTES = 500 * 1024 * 1024;
 
 /** A failure the agent should read as-is. */
 export class AskWorkspaceError extends Error {
@@ -90,6 +92,11 @@ function checkout(ask: AgentAsk): Promise<string> {
 
 async function cloneInto(ask: AgentAsk, dir: string): Promise<string> {
   const access = await repoAccess(ask.room_id);
+  // Code access needs the repo's GitHub App: it is how changes reach a PR, and it keeps
+  // the server from cloning any public repo on request. Tests point at a local base instead.
+  if (!access.token && !process.env.LETAGENTS_ASK_GIT_BASE_URL) {
+    throw new AskWorkspaceError("app_required", "Ask the room owner to connect the LetAgents GitHub App so the agent can see the code.");
+  }
   await mkdir(ROOT, { recursive: true, mode: 0o700 });
   // Clone beside the final folder and rename it in, so no reader sees a half-written tree.
   const staging = `${dir}.cloning-${randomUUID()}`;
@@ -97,9 +104,14 @@ async function cloneInto(ask: AgentAsk, dir: string): Promise<string> {
     // core.symlinks=false: a link in the repo arrives as a plain file holding its target, never a path out of the copy.
     await run("git", ["-c", "core.symlinks=false", "clone", "--depth", "1", "--single-branch", "--branch", access.baseBranch, "--no-tags",
       `${gitBase()}/${access.fullName}.git`, staging], { env: gitAuthEnv(access.token), timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
+    if (await folderBytes(staging) > MAX_CHECKOUT_BYTES) {
+      await rm(staging, { recursive: true, force: true });
+      throw new AskWorkspaceError("too_large", "This repo is too large for a given agent to work on (over 500 MB).");
+    }
     await rm(dir, { recursive: true, force: true });
     await rename(staging, dir);
-  } catch {
+  } catch (error) {
+    if (error instanceof AskWorkspaceError) throw error;
     await rm(staging, { recursive: true, force: true });
     throw new AskWorkspaceError("clone_failed", access.token
       ? "LetAgents couldn't copy this repo right now. Try again in a minute."
@@ -111,6 +123,15 @@ async function cloneInto(ask: AgentAsk, dir: string): Promise<string> {
     work_branch: `letagents/ask-${ask.id.slice(4, 12)}`,
   }).onConflictDoNothing();
   return dir;
+}
+
+async function folderBytes(dir: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile()) total += (await lstat(path.join(entry.parentPath, entry.name)).catch(() => null))?.size ?? 0;
+    if (total > MAX_CHECKOUT_BYTES) break;
+  }
+  return total;
 }
 
 /** A repo-relative path, or null if it escapes the repo or is a secret. */
@@ -158,15 +179,17 @@ export async function readRepoFile(ask: AgentAsk, requested: unknown): Promise<{
 export async function searchRepo(ask: AgentAsk, query: unknown): Promise<Array<{ path: string; line: number; text: string }>> {
   if (typeof query !== "string" || !query.trim() || query.length > 200) throw new AskWorkspaceError("invalid_query", "Search for some text, up to 200 characters.", 400);
   const dir = await checkout(ask);
-  const { stdout } = await run("git", ["grep", "-n", "-I", "-F", "--max-count=5", "-e", query], { cwd: dir, env: materializerGitEnv(), maxBuffer: 16 * 1024 * 1024 })
+  // -z and quotePath=false: paths come back verbatim, so the secret-path filter sees the real name.
+  const { stdout } = await run("git", ["-c", "core.quotePath=false", "grep", "-z", "-n", "-I", "-F", "--max-count=5", "-e", query], { cwd: dir, env: materializerGitEnv(), maxBuffer: 16 * 1024 * 1024 })
     .catch((error: { code?: number; stdout?: string }) => error.code === 1 ? { stdout: "" } : Promise.reject(error));
   const hits: Array<{ path: string; line: number; text: string }> = [];
   for (const row of stdout.split("\n")) {
-    const match = /^([^:]+):(\d+):(.*)$/.exec(row);
-    if (!match || isPathBlocked(match[1]!)) continue;
-    const scan = scanContent(match[3]!.slice(0, 400));
-    if (scan.verdict === "blocked" || scan.content === null) continue;
-    hits.push({ path: match[1]!, line: Number(match[2]), text: scan.content });
+    const [file, line, ...rest] = row.split("\0");
+    if (!file || !line || isPathBlocked(file)) continue;
+    // Scan the whole line before cutting it, and drop any line that held a secret, so search
+    // can't return part of one or confirm a guessed prefix.
+    if (scanContent(rest.join("\0")).verdict !== "passed") continue;
+    hits.push({ path: file, line: Number(line), text: rest.join("\0").slice(0, 400) });
     if (hits.length >= MAX_SEARCH) break;
   }
   await record(ask.id, "search", query, false);
@@ -174,6 +197,12 @@ export async function searchRepo(ask: AgentAsk, query: unknown): Promise<Array<{
 }
 
 export type ProposedFile = { path: string; content: string | null };
+
+/** Files that make CI run, possibly with the repo's secrets, as soon as a branch is pushed. */
+export function isCiPath(file: string): boolean {
+  return /^(\.github|\.circleci|\.buildkite|\.gitea|\.forgejo)\//i.test(file)
+    || /^(\.gitlab-ci\.ya?ml|\.travis\.ya?ml|azure-pipelines\.ya?ml|Jenkinsfile|bitbucket-pipelines\.ya?ml|appveyor\.ya?ml|\.drone\.ya?ml)$/i.test(file);
+}
 
 /** Validate and store a proposed change, then tell the room. Nothing reaches GitHub until the asker approves. */
 export async function proposeChange(ask: AgentAsk, summary: unknown, files: unknown, giverName: string) {
@@ -187,6 +216,7 @@ export async function proposeChange(ask: AgentAsk, summary: unknown, files: unkn
     const content = entry?.content === null ? null : typeof entry?.content === "string" ? entry.content : undefined;
     if (!file || content === undefined) throw new AskWorkspaceError("invalid_files", "Each file needs a path and its full new content (or null to delete it).", 400);
     if (isPathBlocked(file)) throw new AskWorkspaceError("blocked", `${file} may hold secrets, so it can't be changed.`);
+    if (isCiPath(file)) throw new AskWorkspaceError("blocked", `${file} controls the repo's CI, so a given agent can't change it.`);
     if (content !== null && (Buffer.byteLength(content) > MAX_FILE_BYTES || scanFile(file, content).verdict !== "passed")) {
       throw new AskWorkspaceError("blocked", `The new ${file} looks like it contains a secret or is too large. Remove it and propose again.`);
     }
@@ -207,7 +237,32 @@ export async function listReads(askId: string) {
 }
 
 /** The asker's decision. Approving adds the change to the ask's one PR (created on first approval). */
-export async function decideProposal(ask: AgentAsk, proposalId: string, approve: boolean) {
+/** Approvals for one ask run one at a time, so each builds on the last. */
+async function withAskLock<T>(askId: string, run: () => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock(1095979852, hashtext($1))", [askId]);
+    try { return await run(); } finally { await client.query("SELECT pg_advisory_unlock(1095979852, hashtext($1))", [askId]).catch(() => undefined); }
+  } finally { client.release(); }
+}
+
+/** The server copy shows approved changes, so the agent reads and builds on them. */
+async function applyToCheckout(askId: string, files: ProposedFile[]): Promise<void> {
+  const dir = dirFor(askId);
+  if (!existsSync(path.join(dir, ".git"))) return;
+  for (const file of files) {
+    const full = path.join(dir, file.path);
+    if (file.content === null) { await unlink(full).catch(() => undefined); continue; }
+    await mkdir(path.dirname(full), { recursive: true });
+    await writeFile(full, file.content, "utf8");
+  }
+}
+
+export function decideProposal(ask: AgentAsk, proposalId: string, approve: boolean) {
+  return withAskLock(ask.id, () => decideProposalLocked(ask, proposalId, approve));
+}
+
+async function decideProposalLocked(ask: AgentAsk, proposalId: string, approve: boolean) {
   const [proposal] = await db.update(agent_ask_proposals).set({ state: approve ? "approved" : "declined", decided_at: new Date().toISOString() })
     .where(and(eq(agent_ask_proposals.id, proposalId), eq(agent_ask_proposals.ask_id, ask.id), eq(agent_ask_proposals.state, "waiting"))).returning();
   if (!proposal || !approve) return proposal ?? null;
@@ -223,6 +278,7 @@ export async function decideProposal(ask: AgentAsk, proposalId: string, approve:
       body: "Proposed by an agent someone added to this room through LetAgents, and approved in the room.", stackOnWorkBranch: true,
     });
     await db.update(agent_ask_workspaces).set({ pr_number: pr.number, pr_url: pr.url, updated_at: new Date().toISOString() }).where(eq(agent_ask_workspaces.ask_id, ask.id));
+    await applyToCheckout(ask.id, proposal.files as ProposedFile[]).catch(() => undefined);
     const [done] = await db.update(agent_ask_proposals).set({ pr_url: pr.url }).where(eq(agent_ask_proposals.id, proposal.id)).returning();
     const line = `Added to pull request #${pr.number}: ${proposal.summary}`;
     await emitProjectMessage(ask.room_id, "letagents", line, { source: "system", display_text: line, client_message_id: `agent_ask:${ask.id}:approved:${proposal.id}` }).catch(() => undefined);

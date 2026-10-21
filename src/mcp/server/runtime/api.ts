@@ -7,6 +7,7 @@ import {
 } from "../../../shared/request-headers.js";
 import { endStoredAgentSession } from "../../local-state/agent-sessions.js";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
+import { currentSessionScope, requireScopeWhenHosted } from "./session-scope.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import {
   borrowCurrentSupervisedWorkerCredential,
@@ -53,6 +54,10 @@ async function getSupervisedCredential(): Promise<string> {
 export const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 
 export function getApiUrl(): string {
+  // In a remote session this names the public origin for links and keys only;
+  // requests never go to it (see apiCall).
+  const scope = currentSessionScope();
+  if (scope) return scope.publicBaseUrl;
   return getDaemonToolExecutionContext()?.apiUrl.replace(/\/+$/, "") ?? API_URL;
 }
 
@@ -68,7 +73,18 @@ export class ApiError extends Error {
   }
 }
 
+/** Whether this runtime acts for a LetAgents account, without reading a token. */
+export async function hasLetagentsCredential(): Promise<boolean> {
+  if (currentSessionScope()) return true;
+  return Boolean(await getLetagentsToken());
+}
+
 export async function getLetagentsToken(): Promise<string> {
+  if (currentSessionScope()) {
+    // A remote session's identity is bound to its in-process dispatcher.
+    throw new Error("A remote MCP session has no token to read.");
+  }
+  requireScopeWhenHosted("An MCP token");
   const runtime = requireValidWorkerBearerRuntime();
   if (runtime.mode === "worker") {
     return runtime.bearer;
@@ -177,6 +193,20 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
   const headers = new Headers(options?.headers);
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+
+  const scope = currentSessionScope();
+  if (scope) {
+    // The API's own routes, in process, as the session's account. Any caller
+    // Authorization header is dropped: the dispatcher alone sets identity.
+    headers.delete("Authorization");
+    const res = await scope.dispatch(path, { ...options, headers });
+    const body = await res.text();
+    if (!res.ok) {
+      if (res.status === 401 && body.includes(AGENT_SESSION_ENDED_ERROR)) forgetEndedSession(headers, options?.body);
+      throw new ApiError(res.status, body);
+    }
+    return (body ? JSON.parse(body) : null) as T;
   }
 
   const runtime = requireValidWorkerBearerRuntime();
