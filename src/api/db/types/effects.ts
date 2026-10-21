@@ -18,6 +18,8 @@ export interface WorkflowEffect {
   request_payload: Record<string, unknown>;
   state: WorkflowEffectState;
   attempt_count: number;
+  /** Reconciliation lookups that found no marker (absent on rows read by older code). */
+  lookup_count?: number;
   max_attempts: number;
   processing_token: string | null;
   processing_started_at: string | null;

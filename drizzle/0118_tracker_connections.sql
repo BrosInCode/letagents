@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS "tracker_oauth_states" (
 	"account_id" text NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE,
 	"provider" text NOT NULL,
 	"loopback_port" integer NOT NULL,
+	"code_verifier" text,
 	"expires_at" timestamp with time zone NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "tracker_oauth_states_provider_check" CHECK ("provider" IN ('jira', 'linear')),
@@ -71,7 +72,10 @@ CREATE TABLE IF NOT EXISTS "tracker_oauth_states" (
 CREATE INDEX IF NOT EXISTS "tracker_oauth_states_expires_idx" ON "tracker_oauth_states" USING btree ("expires_at");
 --> statement-breakpoint
 -- Tracker effects are reserved by rules on repo events, not under a review
--- lease. A GitHub review verdict still needs its lease.
+-- lease. A GitHub review verdict still needs its lease. lookup_count counts
+-- reconciliation lookups that found nothing (a tracker transition fails after 3).
+ALTER TABLE "workflow_effects" ADD COLUMN IF NOT EXISTS "lookup_count" integer DEFAULT 0 NOT NULL;
+--> statement-breakpoint
 ALTER TABLE "workflow_effects" ALTER COLUMN "lease_id" DROP NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "workflow_effects" DROP CONSTRAINT IF EXISTS "workflow_effects_kind_check";

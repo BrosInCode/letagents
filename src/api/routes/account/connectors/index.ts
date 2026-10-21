@@ -20,8 +20,10 @@ import { type ConnectorCipher, ConnectorDecryptError, loadConnectorCipher } from
 import {
   buildTrackerAuthorizeUrl,
   exchangeTrackerCode,
+  createPkcePair,
   getTrackerOAuthConfig,
   listAtlassianResources,
+  trackerOAuthMissingBaseUrl,
 } from "../../../connectors/oauth.js";
 import { createWorkItemProviders, type WorkItemProviders } from "../../../connectors/providers/index.js";
 import { TrackerProviderError, type TrackerCredentials } from "../../../connectors/providers/types.js";
@@ -144,16 +146,27 @@ function sendCallbackPage(res: Response, status: number, title: string, detail: 
       + `</head><body><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p></body></html>`);
 }
 
+/** The Jira site's https origin for links, or null. OAuth calls never use it. */
+function displaySiteUrl(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && !url.username && !url.password ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
 async function oauthCredentials(
   provider: TrackerProvider,
   code: string,
+  codeVerifier: string | null,
   deps: ConnectorRouteDeps,
 ): Promise<{ credentials: TrackerCredentials; site: { key: string; url: string | null; name: string } | null }> {
   const env = deps.env ?? process.env;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const config = getTrackerOAuthConfig(provider, env);
   if (!config) throw new TrackerProviderError("definite", "OAuth for this tracker is not set up on this server.");
-  const tokens = await exchangeTrackerCode(provider, config, code, fetchImpl, deps.now?.() ?? new Date());
+  const tokens = await exchangeTrackerCode(provider, config, code, fetchImpl, deps.now?.() ?? new Date(), codeVerifier);
   if (provider === "linear") {
     return { credentials: { kind: "oauth", ...tokens }, site: null };
   }
@@ -162,10 +175,12 @@ async function oauthCredentials(
   // the user can connect again to choose another (follow-up).
   const resource = resources.find((entry) => isAtlassianCloudId(entry.id));
   if (!resource) throw new TrackerProviderError("definite", "This Atlassian account has no Jira site that LetAgents can use.");
-  const siteUrl = normalizeJiraSiteUrl(resource.url, env);
+  // OAuth calls go to api.atlassian.com/ex/jira/{cloud_id}; the site URL is
+  // only shown and used in links, so a custom domain is fine.
+  const siteUrl = displaySiteUrl(resource.url);
   return {
-    credentials: { kind: "oauth", cloud_id: resource.id, site_url: siteUrl, ...tokens },
-    site: { key: new URL(siteUrl).hostname, url: siteUrl, name: resource.name },
+    credentials: { kind: "oauth", cloud_id: resource.id, site_url: siteUrl ?? "", ...tokens },
+    site: { key: siteUrl ? new URL(siteUrl).hostname : `cloud:${resource.id}`, url: siteUrl, name: resource.name },
   };
 }
 
@@ -224,6 +239,10 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       return;
     }
     const config = getTrackerOAuthConfig(provider, env);
+    if (!config && trackerOAuthMissingBaseUrl(provider, env)) {
+      res.status(503).json({ error: "OAuth needs an https LETAGENTS_BASE_URL on this server. Use an API token instead." });
+      return;
+    }
     if (!config) {
       res.status(409).json({ error: "OAuth for this tracker is not set up on this server. Use an API token instead." });
       return;
@@ -238,15 +257,21 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       return;
     }
     const state = randomBytes(32).toString("base64url");
+    // Linear supports PKCE; Atlassian 3LO for confidential apps does not.
+    const pkce = provider === "linear" ? createPkcePair() : null;
     const expiresAt = new Date(now().getTime() + TRACKER_OAUTH_STATE_TTL_MS).toISOString();
     await deps.store.createOAuthState({
       state_hash: hashOAuthState(state),
       account_id: accountId,
       provider,
       loopback_port: loopbackPort,
+      code_verifier: pkce?.verifier ?? null,
       expires_at: expiresAt,
     });
-    const body: TrackerOAuthStart = { authorize_url: buildTrackerAuthorizeUrl(provider, config, state), expires_at: expiresAt };
+    const body: TrackerOAuthStart = {
+      authorize_url: buildTrackerAuthorizeUrl(provider, config, { state, codeChallenge: pkce?.challenge }),
+      expires_at: expiresAt,
+    };
     res.json(body);
   });
 
@@ -306,7 +331,7 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       return;
     }
     try {
-      const { credentials, site } = await oauthCredentials(provider, code, deps);
+      const { credentials, site } = await oauthCredentials(provider, code, owner.code_verifier, deps);
       const row = await connections.connect({ account_id: accountId, provider, auth_kind: "oauth", credentials, site });
       res.status(201).json({ connection: toConnectionView(row) });
     } catch (error) {

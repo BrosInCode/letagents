@@ -1,3 +1,5 @@
+import { createHash, randomBytes } from "node:crypto";
+
 import type { TrackerProvider } from "../../../shared/ticket-connectors.mjs";
 import { asRecord, asString, trackerRequest } from "./providers/http.js";
 import { TrackerProviderError } from "./providers/types.js";
@@ -10,11 +12,19 @@ import { TrackerProviderError } from "./providers/types.js";
  *   LETAGENTS_LINEAR_CLIENT_ID / LETAGENTS_LINEAR_CLIENT_SECRET Linear OAuth app
  *
  * Callback URLs are `${LETAGENTS_BASE_URL}/account/connectors/oauth/<provider>/callback`.
+ * OAuth is off unless LETAGENTS_BASE_URL (or PUBLIC_API_URL) is set to an
+ * https URL; plain http is accepted only for an explicit localhost base.
  */
 export interface TrackerOAuthConfig {
   clientId: string;
   clientSecret: string;
   callbackUrl: string;
+}
+
+export interface TrackerOAuthStartParams {
+  state: string;
+  /** PKCE S256 challenge (Linear). */
+  codeChallenge?: string;
 }
 
 export interface TrackerOAuthTokens {
@@ -29,26 +39,45 @@ const LINEAR_SCOPES = "read,write";
 export const ATLASSIAN_AUTH_HOST = "auth.atlassian.com";
 export const LINEAR_AUTH_HOST = "linear.app";
 
-function baseUrl(env: NodeJS.ProcessEnv): string {
-  return (env.LETAGENTS_BASE_URL || env.PUBLIC_API_URL || "http://localhost:3001").replace(/\/+$/, "");
+/** The public base URL for callbacks, or null when none safe is configured. */
+function baseUrl(env: NodeJS.ProcessEnv): string | null {
+  const raw = (env.LETAGENTS_BASE_URL || env.PUBLIC_API_URL || "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return null;
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
-export function trackerOAuthCallbackUrl(provider: TrackerProvider, env: NodeJS.ProcessEnv = process.env): string {
-  return `${baseUrl(env)}/account/connectors/oauth/${provider}/callback`;
+function clientCredentials(provider: TrackerProvider, env: NodeJS.ProcessEnv) {
+  const prefix = provider === "jira" ? "LETAGENTS_JIRA" : "LETAGENTS_LINEAR";
+  const clientId = env[`${prefix}_CLIENT_ID`]?.trim();
+  const clientSecret = env[`${prefix}_CLIENT_SECRET`]?.trim();
+  return clientId && clientSecret ? { clientId, clientSecret } : null;
 }
 
+/** The provider's OAuth app, or null when it is not set up or no https base URL is configured. */
 export function getTrackerOAuthConfig(
   provider: TrackerProvider,
   env: NodeJS.ProcessEnv = process.env,
 ): TrackerOAuthConfig | null {
-  const prefix = provider === "jira" ? "LETAGENTS_JIRA" : "LETAGENTS_LINEAR";
-  const clientId = env[`${prefix}_CLIENT_ID`]?.trim();
-  const clientSecret = env[`${prefix}_CLIENT_SECRET`]?.trim();
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret, callbackUrl: trackerOAuthCallbackUrl(provider, env) };
+  const client = clientCredentials(provider, env);
+  const base = baseUrl(env);
+  if (!client || !base) return null;
+  return { ...client, callbackUrl: `${base}/account/connectors/oauth/${provider}/callback` };
 }
 
-export function buildTrackerAuthorizeUrl(provider: TrackerProvider, config: TrackerOAuthConfig, state: string): string {
+/** OAuth app credentials are set, but the server has no https base URL for the callback. */
+export function trackerOAuthMissingBaseUrl(provider: TrackerProvider, env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(clientCredentials(provider, env)) && !baseUrl(env);
+}
+
+export function buildTrackerAuthorizeUrl(provider: TrackerProvider, config: TrackerOAuthConfig, start: TrackerOAuthStartParams): string {
+  const { state } = start;
   if (provider === "jira") {
     const params = new URLSearchParams({
       audience: "api.atlassian.com",
@@ -70,6 +99,10 @@ export function buildTrackerAuthorizeUrl(provider: TrackerProvider, config: Trac
     actor: "user",
     prompt: "consent",
   });
+  if (start.codeChallenge) {
+    params.set("code_challenge", start.codeChallenge);
+    params.set("code_challenge_method", "S256");
+  }
   return `https://${LINEAR_AUTH_HOST}/oauth/authorize?${params.toString()}`;
 }
 
@@ -94,7 +127,7 @@ async function tokenRequest(
   fetchImpl: typeof fetch,
   now: Date,
 ): Promise<TrackerOAuthTokens> {
-  const secrets = [config.clientSecret, grant.code, grant.refresh_token];
+  const secrets = [config.clientSecret, grant.code, grant.refresh_token, grant.code_verifier];
   try {
     const response = provider === "jira"
       ? await trackerRequest(fetchImpl, {
@@ -125,12 +158,20 @@ export function exchangeTrackerCode(
   code: string,
   fetchImpl: typeof fetch = fetch,
   now = new Date(),
+  codeVerifier: string | null = null,
 ): Promise<TrackerOAuthTokens> {
   return tokenRequest(provider, config, {
     grant_type: "authorization_code",
     code,
     redirect_uri: config.callbackUrl,
+    ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
   }, fetchImpl, now);
+}
+
+/** PKCE (RFC 7636) S256 verifier and challenge. */
+export function createPkcePair(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(32).toString("base64url");
+  return { verifier, challenge: createHash("sha256").update(verifier).digest("base64url") };
 }
 
 export function refreshTrackerTokens(

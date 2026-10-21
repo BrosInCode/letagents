@@ -14,7 +14,15 @@ export const WORKFLOW_EFFECT_SETTLED_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const FAILED_RETRY_BASE_MS = 30_000;
 
 export type WorkflowEffectCreateResult = GitHubReviewCreateResult;
-export type WorkflowEffectLookupResult = GitHubReviewLookupResult;
+/** `gone`: the target the effect writes through no longer exists; the effect fails for good. */
+export type WorkflowEffectLookupResult = GitHubReviewLookupResult | { kind: "gone"; error: string };
+
+/**
+ * Lookups that find nothing before an ambiguous tracker transition is retried.
+ * A transition re-reads the ticket's status before it writes, so a retry of
+ * one that did land makes no second change. Comments stay ambiguous.
+ */
+export const TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY = 3;
 
 /** Runs one effect kind against its provider. */
 export interface WorkflowEffectExecutor {
@@ -44,6 +52,8 @@ export interface WorkflowEffectStore {
   }): Promise<WorkflowEffect | null>;
   fail(input: {
     id: string; processing_token: string; error: string; next_attempt_at: Date | null; now?: Date;
+    /** Use up the remaining attempts: the effect is never retried. */
+    exhaust?: boolean;
   }): Promise<WorkflowEffect | null>;
   ambiguous(input: {
     id: string; processing_token: string; error: string; now?: Date;
@@ -187,22 +197,47 @@ async function performLookup(input: {
 }): Promise<WorkflowEffect> {
   try {
     const result = await input.executor.lookup(input.effect);
-    const persisted = result.kind === "found"
-      ? await input.store.succeed({
-          id: input.effect.id,
-          processing_token: input.token,
-          external_id: result.external_id,
-          external_url: result.external_url,
-          response_payload: result.response_payload,
-          now: input.now,
-        })
-      : await input.store.releaseLookup({
-          id: input.effect.id,
-          processing_token: input.token,
-          error: "Provider lookup completed without finding the correlation marker; creation was not retried.",
-          next_attempt_at: new Date(input.now.getTime() + WORKFLOW_EFFECT_AMBIGUOUS_LOOKUP_INTERVAL_MS),
-          now: input.now,
-        });
+    let persisted: WorkflowEffect | null;
+    if (result.kind === "found") {
+      persisted = await input.store.succeed({
+        id: input.effect.id,
+        processing_token: input.token,
+        external_id: result.external_id,
+        external_url: result.external_url,
+        response_payload: result.response_payload,
+        now: input.now,
+      });
+    } else if (result.kind === "gone") {
+      persisted = await input.store.fail({
+        id: input.effect.id,
+        processing_token: input.token,
+        error: result.error,
+        next_attempt_at: null,
+        exhaust: true,
+        now: input.now,
+      });
+    } else if (
+      input.effect.kind === "tracker_transition"
+      && (input.effect.lookup_count ?? 0) + 1 >= TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY
+    ) {
+      const exhausted = input.effect.attempt_count >= input.effect.max_attempts;
+      persisted = await input.store.fail({
+        id: input.effect.id,
+        processing_token: input.token,
+        error: `The tracker shows no change to the target status after ${TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY} lookups; `
+          + (exhausted ? "no attempts are left." : "the transition is retried."),
+        next_attempt_at: exhausted ? null : input.now,
+        now: input.now,
+      });
+    } else {
+      persisted = await input.store.releaseLookup({
+        id: input.effect.id,
+        processing_token: input.token,
+        error: "Provider lookup completed without finding the correlation marker; creation was not retried.",
+        next_attempt_at: new Date(input.now.getTime() + WORKFLOW_EFFECT_AMBIGUOUS_LOOKUP_INTERVAL_MS),
+        now: input.now,
+      });
+    }
     return persisted ?? await input.store.get(input.effect.id) ?? input.effect;
   } catch (error) {
     const persisted = await input.store.releaseLookup({

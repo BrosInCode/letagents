@@ -86,6 +86,8 @@ export const tracker_oauth_states = pgTable(
       .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
     provider: text("provider").notNull(),
     loopback_port: integer("loopback_port").notNull(),
+    /** PKCE verifier (Linear). Single use, and useless without the code and the client secret. */
+    code_verifier: text("code_verifier"),
     expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   },

@@ -83,7 +83,9 @@ export function createTrackerEffectExecutor(deps: {
       let found: TrackerWriteResult | null;
       try {
         const { row, conn } = await openFor(effect);
-        if (!row || !conn) throw new Error("The tracker connection was removed; the effect cannot be checked.");
+        if (!row || !conn) {
+          return { kind: "gone", error: "The tracker connection was removed, so the effect cannot be checked or retried." };
+        }
         const provider = deps.providers[row.provider as TrackerProvider];
         found = effect.kind === "tracker_transition"
           ? await provider.findTransition(conn, request.key, request.to_status ?? "", effect.created_at)

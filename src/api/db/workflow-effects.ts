@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { and, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 
 import { db } from "./client.js";
 import { repositoryRoomIds } from "./github/repository-rooms.js";
@@ -128,6 +129,14 @@ export async function reserveWorkflowEffect(
 
 type EffectTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
+function isCorrelationConflict(error: unknown): boolean {
+  for (let current: unknown = error; current && typeof current === "object"; current = (current as { cause?: unknown }).cause) {
+    const record = current as { code?: unknown; constraint?: unknown };
+    if (record.code === "23505" && record.constraint === "workflow_effects_provider_correlation_uq") return true;
+  }
+  return false;
+}
+
 async function insertOrLoadEffect(tx: EffectTransaction, input: {
   room_id: string;
   task_id: string;
@@ -149,7 +158,7 @@ async function insertOrLoadEffect(tx: EffectTransaction, input: {
   const quarantined = Boolean(input.quarantine_reason);
   const correlationKey = input.correlation_key;
   const requestFingerprint = input.request_fingerprint;
-  const [inserted] = await tx
+  const insert = (target: EffectTransaction) => target
     .insert(workflow_effects)
     .values({
       id: `effect_${randomUUID()}`,
@@ -179,12 +188,21 @@ async function insertOrLoadEffect(tx: EffectTransaction, input: {
       updated_at: now,
       completed_at: null,
     })
-    // No conflict target: a concurrent reservation of the same key can hit the
-    // (provider, correlation_key) index before the (room_id, idempotency_key)
-    // one. The correlation key is derived from room, kind and idempotency key,
-    // so either conflict means the same logical effect; load it below.
-    .onConflictDoNothing()
+    .onConflictDoNothing({
+      target: [workflow_effects.room_id, workflow_effects.idempotency_key],
+    })
     .returning();
+  let inserted: typeof workflow_effects.$inferSelect | undefined;
+  try {
+    // A concurrent reservation of the same key can reach the
+    // (provider, correlation_key) index before the conflict target. The
+    // correlation key is derived from room, kind and idempotency key, so that
+    // violation means the same logical effect: load it below. The savepoint
+    // keeps the transaction usable; any other error still raises.
+    [inserted] = await tx.transaction((savepoint) => insert(savepoint));
+  } catch (error) {
+    if (!isCorrelationConflict(error)) throw error;
+  }
 
   if (inserted) {
     return {
@@ -360,7 +378,7 @@ async function finishWithToken(input: {
   token: string;
   state: WorkflowEffectState;
   now?: Date;
-  values: Partial<typeof workflow_effects.$inferInsert>;
+  values: PgUpdateSetSource<typeof workflow_effects>;
 }): Promise<WorkflowEffect | null> {
   const at = (input.now ?? new Date()).toISOString();
   const [row] = await db
@@ -411,6 +429,7 @@ export function markWorkflowEffectFailed(input: {
   error: string;
   next_attempt_at: Date | null;
   now?: Date;
+  exhaust?: boolean;
 }): Promise<WorkflowEffect | null> {
   return finishWithToken({
     id: input.id,
@@ -421,6 +440,7 @@ export function markWorkflowEffectFailed(input: {
       last_error: input.error,
       next_attempt_at: input.next_attempt_at?.toISOString() ?? null,
       completed_at: null,
+      ...(input.exhaust ? { attempt_count: sql`${workflow_effects.max_attempts}` } : {}),
     },
   });
 }
@@ -456,6 +476,7 @@ export function releaseWorkflowEffectLookup(input: {
       last_error: input.error,
       next_attempt_at: input.next_attempt_at.toISOString(),
       completed_at: null,
+      lookup_count: sql`${workflow_effects.lookup_count} + 1`,
     },
   });
 }

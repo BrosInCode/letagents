@@ -64,7 +64,12 @@ from the room's own configuration, never from agent input.
   from the correlation key.
 - After an uncertain result, reconciliation only looks: it finds the comment by
   its marker, or a transition in the Jira changelog or Linear issue history that
-  reached the target status after the effect started. It never writes again.
+  reached the target status after the effect started. A comment that is not
+  found stays uncertain and is looked for again every five minutes; it is never
+  written again. A transition that is not found after three lookups is retried
+  within its bounded attempts: the retry reads the ticket's status first, so a
+  transition that did land makes no second change.
+- If the connection is removed, a pending tracker effect fails for good.
 
 ### Server setup
 
@@ -75,7 +80,9 @@ from the room's own configuration, never from agent input.
 | `LETAGENTS_LINEAR_CLIENT_ID`, `LETAGENTS_LINEAR_CLIENT_SECRET` | no | A Linear OAuth app. Without them, Linear connects with API keys only. |
 | `LETAGENTS_JIRA_ALLOWED_HOSTS` | no | Extra Jira host names (comma separated) for a site that is not on `atlassian.net`. |
 
-Make a key with `openssl rand -hex 32`. The OAuth callback URLs are
+Make a key with `openssl rand -hex 32`. OAuth needs `LETAGENTS_BASE_URL` set to
+an https URL (plain http only for an explicit localhost base); without it the
+OAuth start answers 503 and only API tokens work. The OAuth callback URLs are
 `${LETAGENTS_BASE_URL}/account/connectors/oauth/jira/callback` and
 `${LETAGENTS_BASE_URL}/account/connectors/oauth/linear/callback`. The Jira app
 needs the scopes `read:jira-work write:jira-work read:jira-user offline_access`;
@@ -103,7 +110,12 @@ the tracker again.
   waits for it, so nobody can link someone else's tracker to their account.
 - The OAuth `state` is random (256 bits), stored only as a hash, bound to the
   account, the tracker and the loopback port, valid for 10 minutes, and good for
-  one attempt.
+  one attempt. Linear sign-ins also use PKCE (S256); Atlassian 3LO does not
+  offer it for server apps.
+- The callback URL carries the one-time `code` in its query string. Configure
+  the reverse proxy not to log query strings for
+  `/account/connectors/oauth/*/callback`. The code is useless without the client
+  secret and the starting app's session, but it should not sit in logs.
 - Connector routes accept only the desktop app's session sent as a bearer.
   Owner tokens (what MCP agents carry), worker bearers, supervisor grants and
   cookie-only requests are refused, so an agent cannot add or remove a
@@ -117,7 +129,9 @@ the tracker again.
   credentials another process saved. Two API instances can still both refresh
   in rare timing; the loser then asks the person to reconnect.
 - Jira OAuth: one connection per Jira site. If the Atlassian account can reach
-  several sites, the first one is connected.
+  several sites, the first one is connected. OAuth calls go only to
+  `api.atlassian.com/ex/jira/{cloud id}`; the site URL Atlassian reports (which
+  may be a custom domain) is stored only for display and links.
 
 ### HTTP routes
 

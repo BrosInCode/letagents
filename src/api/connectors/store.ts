@@ -45,12 +45,13 @@ export interface TrackerConnectionStore {
     account_id: string;
     provider: TrackerProvider;
     loopback_port: number;
+    code_verifier?: string | null;
     expires_at: string;
   }): Promise<void>;
   /** The unexpired state's loopback port, without using the state up. */
   peekOAuthState(stateHash: string, provider: TrackerProvider): Promise<{ loopback_port: number } | null>;
   /** Single use: the row is deleted on read, and only an unexpired one is returned. */
-  consumeOAuthState(stateHash: string, provider: TrackerProvider): Promise<{ account_id: string } | null>;
+  consumeOAuthState(stateHash: string, provider: TrackerProvider): Promise<{ account_id: string; code_verifier: string | null } | null>;
 }
 
 const MAX_UNMAPPED = 50;
@@ -136,14 +137,19 @@ export const trackerConnectionStore: TrackerConnectionStore = {
 
   async addUnmapped(id, names) {
     if (!names.length) return;
-    // Merge without duplicates, newest names kept within the bound.
+    // Merge without duplicates, at most MAX_UNMAPPED names. Once the bound is
+    // reached, names already stored are kept and new ones are dropped.
     await db.execute(sql`
       UPDATE ${tracker_connections}
          SET unmapped_statuses = (
-               SELECT COALESCE(jsonb_agg(name), '[]'::jsonb) FROM (
-                 SELECT DISTINCT name FROM jsonb_array_elements_text(
-                   ${tracker_connections.unmapped_statuses} || ${JSON.stringify(names)}::jsonb
-                 ) AS name LIMIT ${MAX_UNMAPPED}
+               SELECT COALESCE(jsonb_agg(name ORDER BY first_seen), '[]'::jsonb) FROM (
+                 SELECT name, min(position) AS first_seen
+                   FROM jsonb_array_elements_text(
+                     ${tracker_connections.unmapped_statuses} || ${JSON.stringify(names)}::jsonb
+                   ) WITH ORDINALITY AS entry(name, position)
+                  GROUP BY name
+                  ORDER BY first_seen
+                  LIMIT ${MAX_UNMAPPED}
                ) AS merged
              ),
              updated_at = now()
@@ -175,6 +181,6 @@ export const trackerConnectionStore: TrackerConnectionStore = {
       .where(eq(tracker_oauth_states.state_hash, stateHash))
       .returning();
     if (!row || row.provider !== provider || Date.parse(row.expires_at) <= Date.now()) return null;
-    return { account_id: row.account_id };
+    return { account_id: row.account_id, code_verifier: row.code_verifier };
   },
 };

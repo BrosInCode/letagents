@@ -23,6 +23,8 @@ export const workflow_effects = pgTable(
     request_payload: jsonb("request_payload").$type<Record<string, unknown>>().notNull(),
     state: text("state").notNull().default("pending"),
     attempt_count: integer("attempt_count").notNull().default(0),
+    /** Reconciliation lookups that found no marker. */
+    lookup_count: integer("lookup_count").notNull().default(0),
     max_attempts: integer("max_attempts").notNull().default(3),
     processing_token: text("processing_token"),
     processing_started_at: timestamp("processing_started_at", { mode: "string", withTimezone: true }),

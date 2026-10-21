@@ -94,11 +94,11 @@ test("connections upsert per account and site, merge unmapped statuses, and stay
 test("OAuth states are single use, provider bound and expire", { skip }, async () => {
   const owner = await account();
   const future = new Date(Date.now() + 60_000).toISOString();
-  await trackerConnectionStore.createOAuthState({ state_hash: "h1", account_id: owner, provider: "jira", loopback_port: 49152, expires_at: future });
-  assert.deepEqual(await trackerConnectionStore.peekOAuthState("h1", "jira"), { loopback_port: 49152 });
-  assert.equal(await trackerConnectionStore.peekOAuthState("h1", "linear"), null);
-  assert.deepEqual(await trackerConnectionStore.consumeOAuthState("h1", "jira"), { account_id: owner });
-  assert.equal(await trackerConnectionStore.consumeOAuthState("h1", "jira"), null);
+  await trackerConnectionStore.createOAuthState({ state_hash: "h1", account_id: owner, provider: "linear", loopback_port: 49152, code_verifier: "v".repeat(43), expires_at: future });
+  assert.deepEqual(await trackerConnectionStore.peekOAuthState("h1", "linear"), { loopback_port: 49152 });
+  assert.equal(await trackerConnectionStore.peekOAuthState("h1", "jira"), null);
+  assert.deepEqual(await trackerConnectionStore.consumeOAuthState("h1", "linear"), { account_id: owner, code_verifier: "v".repeat(43) });
+  assert.equal(await trackerConnectionStore.consumeOAuthState("h1", "linear"), null);
   await trackerConnectionStore.createOAuthState({ state_hash: "h2", account_id: owner, provider: "jira", loopback_port: 49152, expires_at: future });
   assert.equal(await trackerConnectionStore.consumeOAuthState("h2", "linear"), null);
   assert.equal(await trackerConnectionStore.consumeOAuthState("h2", "jira"), null, "a wrong-provider try used it up");
@@ -204,4 +204,36 @@ test("the broker runs a tracker effect through the PostgreSQL journal: failure, 
   assert.equal(settled?.attempt_count, 2);
   assert.equal((await broker.submitTrackerEffect(input)).state, "succeeded");
   assert.equal(attempts, 2);
+});
+
+test("lookups are counted and a removed connection exhausts the effect in PostgreSQL", { skip }, async () => {
+  const owner = await account();
+  await trackerConnectionStore.upsert(connectionValues(owner, "tcon_1"));
+  const room = await db!.createProjectWithName("tracker-lookup-room");
+  const reserved = await db!.reserveTrackerWorkflowEffect({
+    room_id: room.id,
+    task_id: "task_1",
+    connection_id: "tcon_1",
+    connection_account_id: owner,
+    kind: "tracker_transition",
+    provider: "jira",
+    idempotency_key: "rule_1:delivery_2:0",
+    request_payload: { key: "HT-1", to_status: "Done" },
+    created_by: "Rule",
+  });
+  assert.equal(reserved.effect.lookup_count, 0);
+  const ambiguous = await db!.markWorkflowEffectAmbiguous({ id: reserved.effect.id, processing_token: reserved.processing_token!, error: "502" });
+  assert.equal(ambiguous?.state, "ambiguous");
+  const claim = await db!.claimAmbiguousWorkflowEffect(reserved.effect.id);
+  const released = await db!.releaseWorkflowEffectLookup({
+    id: reserved.effect.id, processing_token: claim!.processing_token, error: "not found", next_attempt_at: new Date(),
+  });
+  assert.equal(released?.lookup_count, 1);
+  const again = await db!.claimAmbiguousWorkflowEffect(reserved.effect.id);
+  const failed = await db!.markWorkflowEffectFailed({
+    id: reserved.effect.id, processing_token: again!.processing_token, error: "connection removed", next_attempt_at: null, exhaust: true,
+  });
+  assert.equal(failed?.state, "failed");
+  assert.equal(failed?.attempt_count, failed?.max_attempts);
+  assert.equal(await db!.claimFailedWorkflowEffect(reserved.effect.id), null, "no retry is left");
 });

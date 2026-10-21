@@ -78,7 +78,7 @@ function memoryStore() {
       const state = states.get(hash);
       states.delete(hash);
       if (!state || state.provider !== provider || Date.parse(state.expires_at) <= Date.now()) return null;
-      return { account_id: state.account_id };
+      return { account_id: state.account_id, code_verifier: (state as { code_verifier?: string | null }).code_verifier ?? null };
     },
   };
   return { store, rows, states };
@@ -317,6 +317,8 @@ test("OAuth: the callback only forwards to the starting app's loopback port; com
     const started = await server.call("POST", "/account/connectors/oauth/linear/start", { loopback_port: 49152 });
     const authorize = new URL(started.json.authorize_url);
     assert.equal(authorize.origin, "https://linear.app");
+    assert.equal(authorize.searchParams.get("code_challenge_method"), "S256");
+    assert.match(authorize.searchParams.get("code_challenge") ?? "", /^[A-Za-z0-9_-]{43}$/);
     assert.equal(authorize.searchParams.get("redirect_uri"), "https://letagents.example/account/connectors/oauth/linear/callback");
     const state = authorize.searchParams.get("state")!;
     assert.ok(state.length >= 40);
@@ -356,6 +358,7 @@ test("OAuth: the callback only forwards to the starting app's loopback port; com
     assert.equal(completed.json.connection.display_name, "Herotel");
     assert.equal(completed.json.connection.auth_kind, "oauth");
     assert.match(tokenCalls[0], /code=the-code/);
+    assert.match(tokenCalls[0], /code_verifier=[A-Za-z0-9_-]{43}/);
     assert.ok(!completed.text.includes("lin_oauth_access"));
     const [row] = server.memory.rows.values();
     assert.equal(row.account_id, "acct_1");
@@ -380,6 +383,48 @@ test("connection attempts are rate limited per account", async () => {
     assert.equal((await server.call("POST", "/account/connectors/api-token", {
       provider: "jira", site_url: "acme.atlassian.net", email: "emmy@example.com", api_token: "bad-token",
     }, "other_account")).status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+test("OAuth is unavailable without an https base URL, and Jira OAuth keeps a custom-domain site for display only", async () => {
+  const noBase = await serve({ env: { LETAGENTS_JIRA_CLIENT_ID: "id", LETAGENTS_JIRA_CLIENT_SECRET: "secret" } });
+  try {
+    assert.equal((await noBase.call("GET", "/account/connectors")).json.providers.jira.oauth, false);
+    assert.equal((await noBase.call("POST", "/account/connectors/oauth/jira/start", { loopback_port: 49152 })).status, 503);
+  } finally {
+    await noBase.close();
+  }
+  const httpBase = await serve({ env: { LETAGENTS_BASE_URL: "http://letagents.example", LETAGENTS_JIRA_CLIENT_ID: "id", LETAGENTS_JIRA_CLIENT_SECRET: "secret" } });
+  try {
+    assert.equal((await httpBase.call("POST", "/account/connectors/oauth/jira/start", { loopback_port: 49152 })).status, 503);
+  } finally {
+    await httpBase.close();
+  }
+
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "https://auth.atlassian.com/oauth/token") {
+      return new Response(JSON.stringify({ access_token: "atl-access", refresh_token: "atl-refresh", expires_in: 3600 }), { status: 200 });
+    }
+    if (url === "https://api.atlassian.com/oauth/token/accessible-resources") {
+      return new Response(JSON.stringify([{ id: "11111111-2222-3333-4444-555555555555", url: "https://jira.acme-corp.com", name: "Acme", scopes: ["read:jira-work"] }]), { status: 200 });
+    }
+    throw new Error(`Unexpected live request: ${url}`);
+  }) as typeof fetch;
+  const server = await serve({
+    env: { LETAGENTS_BASE_URL: "https://letagents.example", LETAGENTS_JIRA_CLIENT_ID: "id", LETAGENTS_JIRA_CLIENT_SECRET: "secret" },
+    fetchImpl,
+  });
+  try {
+    const started = await server.call("POST", "/account/connectors/oauth/jira/start", { loopback_port: 49152 });
+    const authorize = new URL(started.json.authorize_url);
+    assert.equal(authorize.origin, "https://auth.atlassian.com");
+    assert.equal(authorize.searchParams.get("code_challenge"), null);
+    const completed = await server.call("POST", "/account/connectors/oauth/jira/complete", { state: authorize.searchParams.get("state"), code: "c" });
+    assert.equal(completed.status, 201, completed.text);
+    assert.equal(completed.json.connection.site_url, "https://jira.acme-corp.com");
   } finally {
     await server.close();
   }

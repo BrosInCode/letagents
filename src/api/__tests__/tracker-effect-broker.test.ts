@@ -18,6 +18,7 @@ import {
   createWorkflowEffectBroker,
   WORKFLOW_EFFECT_AMBIGUOUS_LOOKUP_INTERVAL_MS,
   WORKFLOW_EFFECT_PENDING_STALE_MS,
+  TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY,
   type SubmitTrackerEffectInput,
   type WorkflowEffectStore,
 } from "../workflow-effects/broker.js";
@@ -64,6 +65,7 @@ function memoryJournal() {
         request_payload: { ...input.request_payload, connection_id: input.connection_id },
         state: "pending",
         attempt_count: token ? 1 : 0,
+        lookup_count: 0,
         max_attempts: input.max_attempts ?? 3,
         processing_token: token,
         processing_started_at: token ? now : null,
@@ -117,13 +119,20 @@ function memoryJournal() {
       });
     },
     async fail(input) {
-      return finish(input, { state: "failed", last_error: input.error, next_attempt_at: input.next_attempt_at?.toISOString() ?? null });
+      const effect = effects.get(input.id);
+      return finish(input, {
+        state: "failed",
+        last_error: input.error,
+        next_attempt_at: input.next_attempt_at?.toISOString() ?? null,
+        ...(input.exhaust && effect ? { attempt_count: effect.max_attempts } : {}),
+      });
     },
     async ambiguous(input) {
       return finish(input, { state: "ambiguous", last_error: input.error, next_attempt_at: null });
     },
     async releaseLookup(input) {
-      return finish(input, { state: "ambiguous", last_error: input.error, next_attempt_at: input.next_attempt_at.toISOString() });
+      const lookups = (effects.get(input.id)?.lookup_count ?? 0) + 1;
+      return finish(input, { state: "ambiguous", last_error: input.error, next_attempt_at: input.next_attempt_at.toISOString(), lookup_count: lookups });
     },
     async listReconcilable() { return [...effects.values()]; },
     async pruneSettled() { return 0; },
@@ -385,4 +394,66 @@ test("without a tracker executor, tracker effects fail without a write", async (
   const effect = await broker.submitTrackerEffect(transition());
   assert.equal(effect.state, "failed");
   assert.match(effect.last_error ?? "", /not configured/);
+});
+
+test("an ambiguous transition not found after three lookups is retried, and the retry reads the status first", async () => {
+  let transitions = 0;
+  let lookups = 0;
+  const jira = stubProvider({
+    async transition() {
+      transitions += 1;
+      if (transitions === 1) throw new TrackerProviderError("ambiguous", "Tracker answered 502", 502);
+      return { externalId: "HT-1234:status:In Review" };
+    },
+    async findTransition() { lookups += 1; return null; },
+  });
+  const { broker, journal, advance } = harness({ jira, linear: stubProvider({}) });
+  const effect = await broker.submitTrackerEffect(transition());
+  assert.equal(effect.state, "ambiguous");
+  for (let lookup = 1; lookup < TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY; lookup += 1) {
+    const checked = await broker.reconcile(journal.effects.get(effect.id)!);
+    assert.equal(checked.state, "ambiguous");
+    assert.equal(checked.lookup_count, lookup);
+    advance(WORKFLOW_EFFECT_AMBIGUOUS_LOOKUP_INTERVAL_MS);
+  }
+  const failed = await broker.reconcile(journal.effects.get(effect.id)!);
+  assert.equal(failed.state, "failed");
+  assert.match(failed.last_error ?? "", /retried/);
+  assert.equal(transitions, 1, "the third lookup itself does not write");
+  const retried = await broker.reconcile(failed);
+  assert.equal(retried.state, "succeeded");
+  assert.equal(retried.attempt_count, 2);
+  assert.equal(transitions, 2);
+  assert.equal(lookups, TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY);
+});
+
+test("an ambiguous comment that is never found stays ambiguous and is never written again", async () => {
+  let comments = 0;
+  const jira = stubProvider({
+    async comment() { comments += 1; throw new TrackerProviderError("ambiguous", "Tracker answered 504", 504); },
+    async findComment() { return null; },
+  });
+  const { broker, journal, advance } = harness({ jira, linear: stubProvider({}) });
+  const effect = await broker.submitTrackerEffect(transition({ action: { kind: "tracker_comment", body: "PR opened" } }));
+  for (let lookup = 0; lookup < TRACKER_TRANSITION_LOOKUPS_BEFORE_RETRY + 2; lookup += 1) {
+    const checked = await broker.reconcile(journal.effects.get(effect.id)!);
+    assert.equal(checked.state, "ambiguous");
+    advance(WORKFLOW_EFFECT_AMBIGUOUS_LOOKUP_INTERVAL_MS);
+  }
+  assert.equal(comments, 1);
+});
+
+test("an ambiguous effect whose connection was removed fails for good", async () => {
+  const jira = stubProvider({
+    async transition() { throw new TrackerProviderError("ambiguous", "Tracker answered 502", 502); },
+  });
+  const { broker, journal, connections } = harness({ jira, linear: stubProvider({}) });
+  const effect = await broker.submitTrackerEffect(transition());
+  assert.equal(effect.state, "ambiguous");
+  connections.rows.delete("tcon_jira");
+  const gone = await broker.reconcile(journal.effects.get(effect.id)!);
+  assert.equal(gone.state, "failed");
+  assert.equal(gone.attempt_count, gone.max_attempts);
+  assert.match(gone.last_error ?? "", /removed/);
+  assert.equal((await broker.reconcile(gone)).state, "failed", "no retry is left");
 });

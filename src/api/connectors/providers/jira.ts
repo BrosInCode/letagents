@@ -123,8 +123,10 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     });
   }
 
-  function siteUrl(conn: ProviderConnection): string {
-    return (conn.credentials as JiraCredentials).site_url;
+  /** A browser link into the site, or null when the site has no known URL. */
+  function siteLink(conn: ProviderConnection, path: string): string | null {
+    const site = (conn.credentials as JiraCredentials).site_url;
+    return site ? `${site}${path}` : null;
   }
 
   function toItem(conn: ProviderConnection, issue: unknown): ExternalItem | null {
@@ -145,7 +147,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       unmapped: mapped.unmapped,
       assignee_id: asString(assignee.accountId),
       assignee_label: asString(assignee.displayName),
-      url: `${siteUrl(conn)}/browse/${encodeURIComponent(key)}`,
+      url: siteLink(conn, `/browse/${encodeURIComponent(key)}`),
       tracker_updated_at: jiraTime(fields.updated),
       payload: {
         id: asString(record.id),
@@ -264,7 +266,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       });
       const id = asString(asRecord(response.json).id);
       if (!id) throw new TrackerProviderError("ambiguous", "Jira accepted the comment but returned no comment id.");
-      return { externalId: id, url: `${siteUrl(conn)}/browse/${encodeURIComponent(key)}?focusedCommentId=${encodeURIComponent(id)}` };
+      return { externalId: id, url: siteLink(conn, `/browse/${encodeURIComponent(key)}?focusedCommentId=${encodeURIComponent(id)}`) ?? undefined };
     },
 
     async findTransition(conn, rawKey, toStatus, since) {
@@ -306,7 +308,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         });
         const id = asString(comment.id);
         if (marked && id) {
-          return { externalId: id, url: `${siteUrl(conn)}/browse/${encodeURIComponent(key)}?focusedCommentId=${encodeURIComponent(id)}` };
+          return { externalId: id, url: siteLink(conn, `/browse/${encodeURIComponent(key)}?focusedCommentId=${encodeURIComponent(id)}`) ?? undefined };
         }
       }
       return null;
