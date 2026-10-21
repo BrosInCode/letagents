@@ -67,6 +67,14 @@ function sessions() {
   return routesModule!.remoteMcpSessionsForTest()!;
 }
 
+if (testDatabaseUrl) {
+  // No request may stay counted once a test's clients are done with it.
+  test.afterEach(async () => {
+    for (let i = 0; i < 100 && sessions().stats().inFlight > 0; i += 1) await new Promise((done) => setTimeout(done, 20));
+    assert.equal(sessions().stats().inFlight, 0, "in-flight requests leaked past the test");
+  });
+}
+
 async function connect(token = TOKEN_A): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
@@ -263,8 +271,16 @@ test("an account's in-flight requests are capped", { skip, timeout: 60_000 }, as
       { jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "get_current_room", arguments: {} } });
     assert.equal(refused.status, 429, "a fourth request in flight is refused");
     await Promise.all(waits);
+    // A slot is free by the time its response arrives: the very next call fits.
+    assert.equal(sessions().stats().inFlight, 0, "the polls' slots were released before their responses arrived");
     const after = await call(client, "get_current_room");
     assert.equal(after.room_id, "remote-mcp-in-flight", "requests are served again once the polls end");
+    assert.equal(sessions().stats().inFlight, 0, "a call's slot is released before its response arrives");
+    for (let round = 0; round < 5; round += 1) {
+      const burst = await Promise.all(Array.from({ length: 3 }, () => call(client, "get_current_room")));
+      assert.deepEqual(burst.map((result) => result.room_id), Array(3).fill("remote-mcp-in-flight"),
+        `back-to-back bursts at the cap are never refused (round ${round})`);
+    }
   } finally {
     await client.close();
   }

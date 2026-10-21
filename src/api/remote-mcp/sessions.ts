@@ -299,40 +299,49 @@ export class RemoteMcpSessions {
     res: ServerResponse, body: unknown): Promise<void> {
     if (account.account_id !== session.accountId) throw new Error("Remote MCP session account mismatch.");
     const release = this.enter(session.accountId, session.sessionId);
-    // Mark the session used now, not only when a call saves: a long-poll may
-    // run longer than a sweep interval.
-    await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
+    // The slot is free once the response is written ("finish") or the client
+    // is gone ("close"): before the client can send its next call, and before
+    // the server-side cleanup and save below.
+    const responseDone = new Promise<void>((resolve) => {
+      if (res.writableFinished || res.destroyed) resolve();
+      res.once("finish", resolve);
+      res.once("close", resolve);
+    });
+    void responseDone.then(release);
     // A dropped client ends the request's in-process calls (long-polls included).
     const disconnected = new AbortController();
+    if (res.destroyed) disconnected.abort();
     res.once("close", () => disconnected.abort());
-    const bound = this.dispatcher.bind({ account, tokenHash: session.tokenHash, remoteMcpSessionId: session.sessionId });
-    const scope: McpSessionScope = {
-      sessionId: session.sessionId,
-      accountId: session.accountId,
-      agentInstanceId: session.agentInstanceId,
-      clientName: session.clientName,
-      publicBaseUrl: this.publicBaseUrl,
-      dispatch: (path, init) => bound(path, {
-        ...init,
-        signal: init.signal ? AbortSignal.any([init.signal, disconnected.signal]) : disconnected.signal,
-      }),
-      state: session.state,
-      get dirty() { return session.dirty; },
-      set dirty(value: boolean) { session.dirty = session.dirty || value; },
-      memory: session.memory,
-      persist: () => this.save(session),
-    };
     try {
+      // Mark the session used now, not only when a call saves: a long-poll may
+      // run longer than a sweep interval.
+      await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
+      const bound = this.dispatcher.bind({ account, tokenHash: session.tokenHash, remoteMcpSessionId: session.sessionId });
+      const scope: McpSessionScope = {
+        sessionId: session.sessionId,
+        accountId: session.accountId,
+        agentInstanceId: session.agentInstanceId,
+        clientName: session.clientName,
+        publicBaseUrl: this.publicBaseUrl,
+        dispatch: (path, init) => bound(path, {
+          ...init,
+          signal: init.signal ? AbortSignal.any([init.signal, disconnected.signal]) : disconnected.signal,
+        }),
+        state: session.state,
+        get dirty() { return session.dirty; },
+        set dirty(value: boolean) { session.dirty = session.dirty || value; },
+        memory: session.memory,
+        persist: () => this.save(session),
+      };
       // Each request gets its own server object and stateless transport; the
       // session id and state live in Postgres, not in transport memory.
       const server = createLetAgentsMcpServer({ profile: "autonomous_mcp_worker", supervisedProvider: null, remote: true });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await server.connect(transport);
       res.setHeader("Mcp-Session-Id", session.sessionId);
-      const finished = new Promise<void>((resolve) => res.once("close", resolve));
       try {
         await runInSessionScope(scope, () => transport.handleRequest(req, res, body));
-        await finished;
+        await responseDone;
       } finally {
         await server.close().catch(() => undefined);
         session.lastUsedAt = Date.now();
@@ -341,6 +350,7 @@ export class RemoteMcpSessions {
         await this.save(session).catch(() => undefined);
       }
     } finally {
+      // Backstop for paths that never wrote a response; release is idempotent.
       release();
     }
   }
