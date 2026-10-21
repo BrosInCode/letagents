@@ -407,16 +407,16 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   );
 
   assert.deepEqual(ciScripts.filter(containsDirectNpmAudit), [
-    "npm audit signatures",
-    "cd src/web && npm audit signatures",
-    "npm audit signatures --prefix apps/desktop",
-    "npm audit signatures\nnpm audit signatures --prefix apps/desktop",
-    "npm audit signatures",
-    "npm audit signatures",
-    "npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures\nnode scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures",
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
-    "npm audit signatures\nnpm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures\nnode scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
   ]);
 
   assert.deepEqual(
@@ -442,10 +442,10 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   );
 });
 
-test("the retry wrapper only wraps the pinned npm ci installs", () => {
+test("the retry wrapper only wraps the pinned npm ci installs and signature checks", () => {
   // scripts/retry-command.mjs runs any command, so a step could use it to hide
-  // an install the npm ci checks above would not see.
-  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs npm ci --ignore-scripts --no-audit(?: --prefix apps\/desktop)?$/;
+  // an install or audit the npm ci and npm audit checks above would not see.
+  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs (?:npm ci --ignore-scripts --no-audit|npm audit signatures)(?: --prefix apps\/desktop)?$/;
   for (const path of workflowPaths) {
     const commands = workflowRunScripts(workflowJobs(path))
       .flatMap((script) => script.split("\n"))
