@@ -410,6 +410,15 @@ test("task leases carry the holder's room label, not only its agent handle", () 
   }).activeLeases[0]?.holderLabel, "Local reviewer");
 });
 
+test("only a card that names a ticket carries the ticket fields", () => {
+  const ticketCard = mapDesktopTaskSummaryPayload({ id: "task_1", external_ref: "jira:HT-1234", ticket_state: "in_review" });
+  assert.equal(ticketCard.externalRef, "jira:HT-1234");
+  assert.equal(ticketCard.ticketState, "in_review");
+  const nativeCard = mapDesktopTaskSummaryPayload({ id: "task_2", external_ref: null, ticket_state: null });
+  assert.equal("externalRef" in nativeCard, false);
+  assert.equal("ticketState" in nativeCard, false);
+});
+
 test("mapSnapshotData carries per-source states through unchanged", () => {
   const data: RoomSnapshotData = {
     ...emptySnapshotData,

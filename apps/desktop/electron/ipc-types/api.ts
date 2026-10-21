@@ -125,6 +125,7 @@ import type { DesktopUpdateStatus } from "./updates.js";
 import type {
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -252,8 +253,9 @@ export interface DesktopApi {
     updateTask: (
       roomIdentifier: string,
       taskId: string,
-      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null }
+      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null; external_ref?: string | null }
     ) => Promise<DesktopTaskMutationResult>;
+    getTaskMentions: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskMention[]>;
     updateTaskLease: (
       roomIdentifier: string,
       taskId: string,

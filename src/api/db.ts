@@ -140,3 +140,4 @@ export {
 } from "./db/coordination.js";
 
 export { approveTaskClaimBoardIntent, BoardIntentClaimConflictError } from "./db/coordination/board-intent-claim.js";
+export { findTaskByExternalRefs, getRoomExternalRefScope, getTaskMentions, TaskExternalRefConflictError, type TaskMention } from "./db/task-external-refs.js";

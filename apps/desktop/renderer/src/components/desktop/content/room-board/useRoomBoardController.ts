@@ -1,5 +1,5 @@
 import { computed, ref } from "vue";
-import type { TaskContentPatch } from '../../../../../../../../shared/task-markdown-editing.mjs';
+import type { TaskEditPatch } from './ticket-ref';
 import type {
   DesktopAgentPresence,
   DesktopTaskCreateInput,
@@ -175,7 +175,7 @@ export function useRoomBoardController(
     await runBoardMutation(`${task.id}:${action.id}`, () => action.run(task));
   }
 
-  async function saveTaskContent(task: DesktopTaskSummary, input: TaskContentPatch): Promise<boolean> {
+  async function saveTaskContent(task: DesktopTaskSummary, input: TaskEditPatch): Promise<boolean> {
     return runBoardMutation(`${task.id}:edit`, async () => (await desktopIpc.room.updateTask(props.roomIdentifier, task.id, input)).task);
   }
 

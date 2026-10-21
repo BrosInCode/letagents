@@ -172,6 +172,7 @@ export async function handleMaterializedGitHubRoomEvent(
     installationId: input.installationId,
     githubRoutingContext,
     messageIdBase,
+    matchedByTicketKey: taskResolution.matchedByTicketKey === true,
   });
   if (!taskProjection.authoritative && linkedTask) {
     await deps.updateGitHubRoomEventLinkedTaskId(persisted.event.idempotency_key, null);

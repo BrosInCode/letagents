@@ -162,6 +162,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>
       ipcRenderer.invoke("desktop:room:update-task", roomIdentifier, taskId, updates),
+    getTaskMentions: (roomIdentifier: string, taskId: string) =>
+      ipcRenderer.invoke("desktop:room:get-task-mentions", roomIdentifier, taskId),
     updateTaskLease: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:update-task-lease", roomIdentifier, taskId, input),
     updateTaskReviewLease: (roomIdentifier: string, taskId: string, input) =>
