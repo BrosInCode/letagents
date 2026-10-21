@@ -17,6 +17,17 @@ import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.
  */
 export const REMOTE_MCP_PATH = "/mcp";
 
+/**
+ * Request bodies above this are refused before the MCP SDK validates them.
+ * The API's global JSON parser allows 1 MB; MCP tool calls need far less, and
+ * SDK validation cost grows with the number of array elements and object keys
+ * (GHSA-46jr-4wx8-v453).
+ */
+export function remoteMcpMaxBodyBytes(): number {
+  const value = Number.parseInt(process.env.LETAGENTS_REMOTE_MCP_MAX_BODY_BYTES ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? value : 256 * 1024;
+}
+
 export interface RemoteMcpRouteDeps {
   sessions?: RemoteMcpSessionManager;
   /** Base URL the per-connection MCP child uses to call this API. */
@@ -67,6 +78,12 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps =
     const accountId = req.sessionAccount.account_id;
     if (!allowRequest(accountId)) {
       jsonRpcError(res, 429, "Too many remote MCP requests. Slow down.");
+      return;
+    }
+    const declaredLength = Number.parseInt(req.headers["content-length"] ?? "0", 10) || 0;
+    const parsedLength = req.body === undefined ? 0 : Buffer.byteLength(JSON.stringify(req.body));
+    if (Math.max(declaredLength, parsedLength) > remoteMcpMaxBodyBytes()) {
+      jsonRpcError(res, 413, "The MCP request body is too large.");
       return;
     }
 

@@ -31,8 +31,10 @@ writes, as an npm-package agent does.
 | `LETAGENTS_REMOTE_MCP_IDLE_TIMEOUT_MS` | 30 min, or 2 × poll cap if larger | A session with no call in flight and no traffic for this long closes. |
 | `LETAGENTS_REMOTE_MCP_MAX_LIFETIME_MS` | 24 h | A session older than this closes. The client initializes again. |
 | `LETAGENTS_POLL_MAX_MS` | 180000 | Cap for `wait_for_messages`, shared with the API's poll route. |
+| `LETAGENTS_REMOTE_MCP_MAX_BODY_BYTES` | 262144 | Larger request bodies get `413` before the MCP SDK validates them. |
+| `LETAGENTS_REMOTE_MCP_CHILD_HEAP_MB` | 256 | Heap cap for each session's MCP process. |
 
-Each account may open 10 sessions and send 600 requests per minute. Request bodies use the API's 1 MB JSON limit.
+Each account may open 10 sessions and send 600 requests per minute.
 When a session closes, the client gets `404` and initializes a new one. The agent must then join its room and
 register its worker again.
 

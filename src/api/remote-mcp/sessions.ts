@@ -56,9 +56,12 @@ export type RemoteMcpChildCommand = { command: string; args: string[] };
 export function defaultRemoteMcpChildCommand(): RemoteMcpChildCommand {
   const sourceMode = import.meta.url.endsWith(".ts");
   const entry = fileURLToPath(new URL(`../../mcp/server.${sourceMode ? "ts" : "js"}`, import.meta.url));
+  // A heap cap keeps one connection's runaway input from taking server memory
+  // with it: the child aborts, its session closes, the API keeps running.
+  const heap = `--max-old-space-size=${positiveIntEnv("LETAGENTS_REMOTE_MCP_CHILD_HEAP_MB", 256)}`;
   return sourceMode
-    ? { command: process.execPath, args: ["--import", import.meta.resolve("tsx"), entry] }
-    : { command: process.execPath, args: [entry] };
+    ? { command: process.execPath, args: [heap, "--import", import.meta.resolve("tsx"), entry] }
+    : { command: process.execPath, args: [heap, entry] };
 }
 
 export function hashRemoteMcpToken(token: string): Buffer {

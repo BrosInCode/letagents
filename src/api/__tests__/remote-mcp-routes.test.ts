@@ -98,6 +98,9 @@ test("the remote endpoint refuses requests without an owner bearer before starti
     const notInitialize = await post(url, { Authorization: "Bearer owner-a" },
       { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     assert.equal(notInitialize.status, 400, "no child starts for a request that is not initialize");
+    const oversized = await post(url, { Authorization: "Bearer owner-a" },
+      { ...initializeBody, params: { ...initializeBody.params, padding: "x".repeat(300 * 1024) } });
+    assert.equal(oversized.status, 413, "bodies over the MCP cap never reach SDK validation");
     const getWithoutSession = await fetch(url, { headers: { Authorization: "Bearer owner-a" } });
     assert.equal(getWithoutSession.status, 400);
     assert.equal(sessions.size, 0, "no session was created by a rejected request");
