@@ -18,6 +18,7 @@ function world() {
   let nextTimer = 1;
   const presence = new EventEmitter();
   const messages = new EventEmitter();
+  const tasks = new EventEmitter();
   let failNextRead = false;
   let latestGate: Promise<void> | null = null;
   const hub = new AccountActivityHub({
@@ -46,9 +47,9 @@ function world() {
     setTimer: (run, ms) => { const id = nextTimer++; timers.set(id, { at: now + ms, run }); return id; },
     clearTimer: (id) => { timers.delete(id as number); },
   });
-  hub.attach({ presence, messages });
+  hub.attach({ presence, messages, tasks });
   return {
-    hub, presence, messages, working, latest, reads, timers,
+    hub, presence, messages, tasks, working, latest, reads, timers,
     failNextRead: () => { failNextRead = true; },
     /** Hold the next latest-message read until the returned function is called. */
     holdNextLatestRead() {
@@ -75,8 +76,8 @@ test('a watcher starts with each room as it is', async () => {
   w.latest.set('room-b', { latest_message_id: 'msg_7', latest_message_at: '2026-09-30T10:00:00.000Z' });
   const watch = await w.hub.watch(['room-a', 'room-b', 'room-a'], () => assert.fail('nothing changed'));
   assert.deepEqual(watch.snapshot, [
-    { room_id: 'room-a', latest_message_id: null, latest_message_at: null, working: [{ agent_key: 'k1', display_name: 'MapleRidge' }] },
-    { room_id: 'room-b', latest_message_id: 'msg_7', latest_message_at: '2026-09-30T10:00:00.000Z', working: [] },
+    { room_id: 'room-a', latest_message_id: null, latest_message_at: null, working: [{ agent_key: 'k1', display_name: 'MapleRidge' }], tasks_changed_at: null },
+    { room_id: 'room-b', latest_message_id: 'msg_7', latest_message_at: '2026-09-30T10:00:00.000Z', working: [], tasks_changed_at: null },
   ]);
   watch.close();
 });
@@ -269,4 +270,23 @@ test('a change that lands while a snapshot loads is not lost', async () => {
   await w.hub.settle();
   const second = await pending;
   assert.deepEqual(second.snapshot[0].working.map(a => a.display_name), ['MapleRidge']);
+});
+
+test('a card change or removal stamps the room without a database read', async () => {
+  const w = world();
+  const seen: AccountRoomActivity[] = [];
+  const watch = await w.hub.watch(['room-a'], activity => seen.push(activity));
+  const readsBefore = w.reads.working.length + w.reads.latest.length;
+  w.tasks.emit('task:updated', { projectId: 'room-a', task: { id: 'task_1' } });
+  w.tasks.emit('task:updated', { projectId: 'room-a', task: { id: 'task_2' } });
+  w.tasks.emit('task:updated', { projectId: 'room-z', task: { id: 'task_9' } });
+  await w.advance(10);
+  assert.equal(seen.length, 1, 'a burst in one room is one frame');
+  assert.equal(seen[0]?.tasks_changed_at, new Date(w.now).toISOString());
+  assert.equal(w.reads.working.length + w.reads.latest.length, readsBefore, 'a stamp reads nothing');
+  w.tasks.emit('task:removed', { projectId: 'room-a', taskId: 'task_2' });
+  await w.advance(10);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1]?.tasks_changed_at, new Date(w.now).toISOString());
+  watch.close();
 });

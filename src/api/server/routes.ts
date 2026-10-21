@@ -68,6 +68,7 @@ import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js"
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
 import { registerAccountActivityStreamRoute } from "../routes/account/activity-stream.js";
+import { registerMyWorkRoute } from "../routes/account/my-work.js";
 import { registerConnectorRoutes } from "../routes/account/connectors/index.js";
 import { AccountActivityHub } from "../account-activity/hub.js";
 import { databaseAccountActivityLoaders } from "../account-activity/loaders.js";
@@ -236,7 +237,7 @@ let sharedAccountActivityHub: AccountActivityHub | null = null;
 function getAccountActivityHub(): AccountActivityHub {
   if (!sharedAccountActivityHub) {
     sharedAccountActivityHub = new AccountActivityHub(databaseAccountActivityLoaders);
-    sharedAccountActivityHub.attach({ presence: presenceChangeEvents, messages: messageEvents });
+    sharedAccountActivityHub.attach({ presence: presenceChangeEvents, messages: messageEvents, tasks: taskEvents });
   }
   return sharedAccountActivityHub;
 }
@@ -543,6 +544,7 @@ export function registerApiRoutes(app: Express): void {
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
   registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });
+  registerMyWorkRoute(app);
   registerConnectorRoutes(app);
   registerDesktopPushRoutes(app);
 

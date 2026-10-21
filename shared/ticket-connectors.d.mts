@@ -137,3 +137,62 @@ export interface TrackerWebhookSetup {
   url: string;
   secret: string;
 }
+
+/** Why a My work card needs the account (PR4). Only signals that already exist. */
+export type MyWorkNeedsMeReason = "review_requested" | "human_request" | "ticket_done_pr_open";
+
+/** One pull request on a My work card. Summaries come from the card's GitHub events. */
+export interface MyWorkPullRequest {
+  url: string;
+  number: string | null;
+  title: string | null;
+  state: string | null;
+  draft: boolean | null;
+  merged: boolean | null;
+  review_summary: { total: number; approved: number; changes_requested: number } | null;
+  check_summary: { total: number; success: number; failure: number; pending: number } | null;
+}
+
+/** One card on `GET /account/my-work`. */
+export interface MyWorkCard {
+  task_id: string;
+  room_id: string;
+  room_name: string;
+  title: string;
+  /** `provider:KEY`, or null for a card that names no ticket. */
+  external_ref: string | null;
+  key: string | null;
+  provider: TrackerProvider | null;
+  /** Owned by the tracker; null when no room filter synced the ticket. */
+  ticket_state: TicketState | null;
+  ticket_status: string | null;
+  ticket_url: string | null;
+  ticket_assignee_label: string | null;
+  /** The card's LetAgents work state. */
+  work_state: string;
+  /** `tracker`: the ticket is assigned to you. `native`: the card is assigned to you or your agent. */
+  assigned_via: "tracker" | "native";
+  agent: {
+    label: string;
+    agent_key: string | null;
+    display_name: string | null;
+    status: string | null;
+    status_text: string | null;
+    last_heartbeat_at: string | null;
+  } | null;
+  threads: { count: number; last_activity_at: string | null };
+  pull_requests: MyWorkPullRequest[];
+  needs_me: boolean;
+  needs_me_reasons: MyWorkNeedsMeReason[];
+  updated_at: string;
+}
+
+export interface MyWorkPage {
+  cards: MyWorkCard[];
+  /** Pass back as `cursor` for the next page; null on the last page. */
+  next_cursor: string | null;
+  /** False in zero-connector mode: the page lists native cards and hides ticket state. */
+  has_connections: boolean;
+  /** The trackers the account has connected. */
+  providers: TrackerProvider[];
+}
