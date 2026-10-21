@@ -13,6 +13,15 @@ export interface RepoRoomEventTaskResolution {
   task: Task | undefined;
   matchedByTaskReference: boolean;
   matchedByWorkflowArtifact: boolean;
+  /** The card's `external_ref` names a ticket key found in the branch, PR title or PR body. */
+  matchedByTicketKey?: boolean;
+}
+
+/** The texts a ticket key may appear in. */
+export interface RepoEventTicketKeyInputs {
+  branchRef?: string | null;
+  title?: string | null;
+  body?: string | null;
 }
 
 export interface RepoRoomEventTaskResolverDeps {
@@ -26,6 +35,15 @@ export interface RepoRoomEventTaskResolverDeps {
     workflow: { prUrl?: string | null; branchRef?: string | null }
   ): Promise<Task | undefined>;
   getTaskById(projectId: string, taskId: string): Promise<Task | undefined>;
+  /**
+   * Finds the card whose `external_ref` names a key in the inputs. It must
+   * return undefined without running a detector when the room has no card
+   * with an external ref.
+   */
+  findTaskByTicketKeys?(
+    projectId: string,
+    inputs: RepoEventTicketKeyInputs
+  ): Promise<Task | undefined>;
 }
 
 export function emptyRepoRoomEventTaskResolution(): RepoRoomEventTaskResolution {
@@ -66,11 +84,46 @@ export function getBranchWorkflowRef(event: RepoRoomEvent): string | null {
   }
 }
 
+/**
+ * True when a ticket key, not a lease or an explicit link, put this pull
+ * request on the card. Later events for it match by URL and keep the key's
+ * quiet handling.
+ */
+function linkedByTicketKey(task: Task, pullRequestUrl: string): boolean {
+  return task.workflow_artifacts.some((artifact) =>
+    artifact.url === pullRequestUrl && artifact.linked_by === "ticket_key");
+}
+
 function taskIdsMatch(left: string | null | undefined, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
 }
 
 export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverDeps) {
+  async function resolveTaskByTicketKeys(
+    project: { id: string },
+    inputs: RepoEventTicketKeyInputs,
+    referencedTaskId: string | null
+  ): Promise<RepoRoomEventTaskResolution | null> {
+    if (!deps.findTaskByTicketKeys) {
+      return null;
+    }
+
+    const task = await deps.findTaskByTicketKeys(project.id, inputs);
+    if (!task) {
+      return null;
+    }
+
+    // A key is an explicit link, like a PR URL on the card. It runs only after
+    // URL and lease matching find nothing, so those always win. The branch and
+    // title count in any form; the body counts only as "Fixes|Closes|Resolves KEY".
+    return {
+      task,
+      matchedByTaskReference: taskIdsMatch(referencedTaskId, task.id),
+      matchedByWorkflowArtifact: true,
+      matchedByTicketKey: true,
+    };
+  }
+
   async function resolveTaskByActiveWorkflowLease(
     project: { id: string },
     pullRequest: RepoPullRequestRef,
@@ -159,6 +212,11 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
         }
       }
 
+      const keyTask = await resolveTaskByTicketKeys(project, { branchRef }, referencedTaskId);
+      if (keyTask) {
+        return keyTask;
+      }
+
       if (!referencedTaskId) {
         return emptyRepoRoomEventTaskResolution();
       }
@@ -181,6 +239,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
           task: artifactTask,
           matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
           matchedByWorkflowArtifact: true,
+          ...(linkedByTicketKey(artifactTask, event.pullRequest.url) ? { matchedByTicketKey: true } : {}),
         };
       }
 
@@ -191,6 +250,15 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
       );
       if (leaseTask) {
         return leaseTask;
+      }
+
+      const keyTask = await resolveTaskByTicketKeys(project, {
+        branchRef: event.pullRequest.headRef,
+        title: event.pullRequest.title,
+        body: event.pullRequest.body,
+      }, referencedTaskId);
+      if (keyTask) {
+        return keyTask;
       }
 
       // PR/review prose can quote examples or tasks belonging to other rooms.
@@ -208,6 +276,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
           task: artifactTask,
           matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
           matchedByWorkflowArtifact: true,
+          ...(linkedByTicketKey(artifactTask, event.pullRequest.url) ? { matchedByTicketKey: true } : {}),
         };
       }
 
@@ -227,6 +296,15 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
       );
       if (leaseTask) {
         return leaseTask;
+      }
+
+      const keyTask = await resolveTaskByTicketKeys(project, {
+        branchRef: event.pullRequest.headRef,
+        title: event.pullRequest.title,
+        body: event.pullRequest.body,
+      }, referencedTaskId);
+      if (keyTask) {
+        return keyTask;
       }
 
       // PR/review prose can quote examples or tasks belonging to other rooms.

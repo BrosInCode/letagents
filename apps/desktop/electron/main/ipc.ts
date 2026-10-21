@@ -5,6 +5,7 @@ import type { IpcMain } from "electron";
 import { registerDesktopAppIpcHandlers } from "./ipc-handlers/app.js";
 import { registerDesktopAskIpcHandlers } from "./ipc-handlers/asks.js";
 import { registerConversationIpcHandlers } from "./ipc-handlers/conversations.js";
+import { registerTicketConnectorIpcHandlers } from "./ipc-handlers/connectors.js";
 import { registerDesktopAuthAndSetupIpcHandlers } from "./ipc-handlers/auth-setup.js";
 import { registerDesktopRentalDomainIpcHandlers } from "./ipc-handlers/rental.js";
 import { registerDesktopRepoIpcHandlers } from "./ipc-handlers/repos.js";
@@ -34,5 +35,6 @@ export function registerDesktopIpcHandlers(
   registerDesktopRepoIpcHandlers(targetIpcMain);
   registerDesktopSupervisorIpcHandlers(targetIpcMain);
   registerDesktopWorkerIpcHandlers(targetIpcMain);
+  registerTicketConnectorIpcHandlers(targetIpcMain);
   return startRentalServices;
 }

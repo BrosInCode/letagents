@@ -1,10 +1,9 @@
 import { app } from "electron";
 
+import { askLinkRendererReady, clearHeldAskLink, holdAskLink } from "./ask-link-inbox.js";
 import { createWindow, emitToMainWindow, focusMainWindow, hasOpenWindows } from "./window.js";
 
 const TOKEN = /^[A-Za-z0-9_-]{20,64}$/;
-let pendingToken: string | null = null;
-let rendererReady = false;
 
 /** `letagents://ask/<token>` or `https://<host>/ask/<token>` → the link token. */
 export function parseAskLink(url: string): string | null {
@@ -17,19 +16,11 @@ export function parseAskLink(url: string): string | null {
 }
 
 function deliver(token: string): void {
-  pendingToken = token;
+  holdAskLink(token);
   if (!app.isReady()) return;
   if (!hasOpenWindows()) createWindow();
   focusMainWindow();
-  if (rendererReady) { emitToMainWindow("desktop:asks:open-link", token); pendingToken = null; }
-}
-
-/** The renderer takes a link that arrived before it loaded, once. */
-export function takePendingAskLink(): string | null {
-  rendererReady = true;
-  const token = pendingToken;
-  pendingToken = null;
-  return token;
+  if (askLinkRendererReady()) { emitToMainWindow("desktop:asks:open-link", token); clearHeldAskLink(); }
 }
 
 /** Register before "ready": macOS delivers a launch link through open-url before the app is ready. */

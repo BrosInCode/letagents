@@ -136,6 +136,9 @@ jobs:
       - name: Run GitHub room event unit tests
         run: node --import tsx --test src/api/__tests__/github-notify-account-access.test.ts src/api/__tests__/github-room-events.test.ts src/api/__tests__/github-room-event-projection.test.ts src/api/__tests__/github-room-event-artifacts.test.ts src/api/__tests__/github-git-room-routing.test.ts
 
+      - name: Test ticket connectors and the workflow effect broker
+        run: node --import tsx --test src/api/__tests__/connector-crypto.test.ts src/api/__tests__/connector-providers.test.ts src/api/__tests__/connector-routes.test.ts src/api/__tests__/tracker-effect-broker.test.ts src/api/__tests__/workflow-effect-broker.test.ts src/api/__tests__/github-review-effect-provider.test.ts
+
       - name: Build Vue app
         run: npm run build:web
 
@@ -202,7 +205,7 @@ jobs:
             # file cannot leave the set unnoticed, and paths are not quoted.
             changed=$(git -c core.quotePath=false diff --no-renames --name-only "${base}" HEAD)
             matched=0
-            grep -E -q '^(apps/desktop/package\.json|apps/desktop/tsconfig\.electron\.json|apps/desktop/electron/main/agents/(opencode-[^/]+|open-model-provider-adapter|provider-adapter)\.ts|apps/desktop/electron/scripts/opencode-runtime-contract-smoke\.mjs|\.github/workflows/ci\.yml)$' <<< "${changed}" || matched=$?
+            grep -E -q '^(apps/desktop/package\.json|apps/desktop/tsconfig\.electron\.json|apps/desktop/electron/main/agents/(opencode-[^/]+|open-model-provider-adapter|provider-adapter|open-model/[^/]+)\.ts|apps/desktop/electron/scripts/opencode-runtime-contract-smoke\.mjs|\.github/workflows/ci\.yml)$' <<< "${changed}" || matched=$?
             # grep exits 1 for no match; anything else is an error and keeps the smoke.
             if [ "${matched}" -eq 1 ]; then
               run=false
@@ -429,6 +432,18 @@ jobs:
       - name: Test room settings, event filters and agent guidelines
         if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-settings-routes.test.ts src/api/__tests__/room-settings-delivery.test.ts src/api/__tests__/room-settings-db.test.ts
+
+      - name: Test ticket keys on cards
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/ticket-key-detectors.test.ts src/api/__tests__/repo-event-task-resolution.test.ts src/api/__tests__/ticket-connectors-db.test.ts
+
+      - name: Test room history summaries
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-history-summary.test.ts src/api/__tests__/room-history-summary-routes.test.ts src/api/__tests__/room-history-summary-db.test.ts
+
+      - name: Test tracker connections and the workflow effect journal
+        if: matrix.group == 2
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts
 
       - name: Test agent wake rules and room resource invalidation
         if: matrix.group == 2

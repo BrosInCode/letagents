@@ -38,6 +38,7 @@ import {
   supervisedActivityIdentity,
 } from "../src/domain/room-agent-delivery";
 import { roomMentionCandidates } from "../src/domain/participants";
+import { STATE_WATCH_RECEIPT_TIMELINE_PHASES } from "../../daemon/state-watch-projection";
 import type {
   DesktopParticipantSummary,
   DesktopRoomAgentDeliveryReceipt,
@@ -1802,4 +1803,44 @@ test('Overview signal distinguishes responding, compaction and stale observation
   assert.equal(agentInspectorSignal(compacting).tone, 'violet');
   assert.equal(agentInspectorSignal({ ...compacting, resourceFreshness: 'stale' }).state, 'stale');
   assert.equal(agentInspectorSignal({ ...compacting, resourceFreshness: 'stale' }).moving, false);
+});
+
+/** The receipts as manifest.watch_state carries them: each timeline keeps only the phases room-level readers use. */
+function stateWatchTrimmed(value: DesktopSupervisorManifestEntry): DesktopSupervisorManifestEntry {
+  return { ...value, deliveryReceipts: value.deliveryReceipts?.map((delivery) => ({
+    ...delivery, timeline: delivery.timeline.filter((event) => STATE_WATCH_RECEIPT_TIMELINE_PHASES.has(event.phase)),
+  })) };
+}
+
+const FULL_DELIVERY_TIMELINE: DesktopRoomAgentDeliveryReceipt["timeline"] = [
+  { sequence: 1, phase: "received", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+  { sequence: 2, phase: "queued", observedAt: "2026-07-23T10:00:00.500Z", detail: null },
+  { sequence: 3, phase: "turn_started", observedAt: "2026-07-23T10:00:01.000Z", detail: null },
+  { sequence: 4, phase: "retry_scheduled", observedAt: "2026-07-23T10:00:01.500Z", detail: "provider fault" },
+  { sequence: 5, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null },
+  { sequence: 6, phase: "conversation_restoring", observedAt: "2026-07-23T10:00:02.500Z", detail: null },
+  { sequence: 7, phase: "conversation_restored", observedAt: "2026-07-23T10:00:03.000Z", detail: "The saved conversation is available again." },
+  { sequence: 8, phase: "turn_finished", observedAt: "2026-07-23T10:00:04.000Z", detail: null },
+];
+
+test("a state-watch receipt timeline gives the same turn start and continuation recovery as the full one", () => {
+  const delivery = receipt("message_1", "awaiting_result", { timeline: FULL_DELIVERY_TIMELINE });
+  const responding = entry({
+    activity: [activity(1, { summary: "Old work" }), activity(4, { summary: "Checking the workspace" })],
+    deliveryReceipts: [delivery],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: delivery.inboxItemId, sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const trimmed = stateWatchTrimmed(responding);
+  assert.deepEqual(trimmed.deliveryReceipts![0]!.timeline.map((event) => event.sequence), [3, 5, 7]);
+  const full = projectAgentInspector(responding, { roomId: "focus_1" });
+  const fromWatch = projectAgentInspector(trimmed, { roomId: "focus_1" });
+  assert.equal(full?.liveWork.startedAt, "2026-07-23T10:00:02.000Z", "the latest turn_started of the current turn");
+  assert.deepEqual(fromWatch?.liveWork, full?.liveWork);
+  assert.deepEqual(fromWatch?.now, full?.now);
+  assert.equal(full?.continuationRecovery?.state, "restored");
+  assert.equal(full?.continuationRecovery?.noticeId, `supervised_1:${delivery.inboxItemId}:7`);
+  assert.deepEqual(fromWatch?.continuationRecovery, full?.continuationRecovery);
 });

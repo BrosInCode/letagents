@@ -2,6 +2,7 @@ import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room
 import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
 import { getDesktopExpressions, setDesktopExpressions, desktopGiphy } from "../rooms/expressions.js";
+import { getDesktopHistorySummarySetting, setDesktopHistorySummarySetting } from "../rooms/history-summary.js";
 import { getDesktopReplyOrder, setDesktopReplyOrder } from "../rooms/reply-order.js";
 import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
@@ -53,6 +54,7 @@ import type {
   DesktopStagedAttachment,
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -120,6 +122,7 @@ import {
   updateDesktopAccountRoom,
   updateDesktopFocusRoomSettings,
   updateDesktopRoomTask,
+  getDesktopRoomTaskMentions,
   updateDesktopRoomTaskLease,
   updateDesktopRoomTaskReviewLease,
 } from "../rooms.js";
@@ -355,9 +358,15 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
         status?: string;
         assignee?: string | null;
         pr_url?: string | null;
+        external_ref?: string | null;
       },
     ): Promise<DesktopTaskMutationResult> =>
       updateDesktopRoomTask(roomIdentifier, taskId, updates),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-task-mentions",
+    async (_event, roomIdentifier: string, taskId: string): Promise<DesktopTaskMention[]> =>
+      getDesktopRoomTaskMentions(roomIdentifier, taskId),
   );
   targetIpcMain.handle(
     "desktop:room:update-task-lease",
@@ -451,6 +460,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
   targetIpcMain.handle("desktop:room:get-expressions", (_event, room: string) => getDesktopExpressions(room));
   targetIpcMain.handle("desktop:room:set-expressions", (_event, room: string, enabled: boolean) => setDesktopExpressions(room, enabled));
+  targetIpcMain.handle("desktop:room:get-history-summary-setting", (_event, room: string) => getDesktopHistorySummarySetting(room));
+  targetIpcMain.handle("desktop:room:set-history-summary-setting", (_event, room: string, enabled: boolean) => setDesktopHistorySummarySetting(room, enabled));
   targetIpcMain.handle("desktop:room:search-gifs", (_event, room: string, query: string, offset?: number) => desktopGiphy(room, { query, offset }));
   targetIpcMain.handle("desktop:room:resolve-gif", (_event, room: string, id: string) => desktopGiphy(room, { id }));
   targetIpcMain.handle("desktop:room:get-reply-order", (_event, roomIdentifier: string) => getDesktopReplyOrder(roomIdentifier));

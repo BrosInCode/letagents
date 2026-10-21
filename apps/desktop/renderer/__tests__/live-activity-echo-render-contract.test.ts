@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { roomShellSource } from "./room-shell-source";
 
 const viewportSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/room-chat/RoomMessageViewport.vue",
@@ -59,10 +60,7 @@ const surfaceSource = readFileSync(fileURLToPath(new URL(
   import.meta.url,
 )), "utf8");
 
-const shellSource = readFileSync(fileURLToPath(new URL(
-  "../src/components/desktop/content/DesktopRoomShell.vue",
-  import.meta.url,
-)), "utf8");
+const shellSource = roomShellSource();
 
 test("the work indicator renders as a clickable button with accessible name and phrasing content", () => {
   assert.match(viewportSource, /<button[\s\S]*?class="room-local-agent-work"[\s\S]*?:aria-label="`\$\{work\.displayName\}: \$\{work\.summary\}\. Open live activity`"[\s\S]*?@click="\$emit\('open-agent', workIndicatorAgentTarget\(work\)\)"/);

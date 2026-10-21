@@ -30,6 +30,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatCompactNumber, formatDate } from "../../../../domain/formatters";
 import { computed } from "vue";
 import type { ProviderUsage } from "../../../../../../shared/provider-usage";
 const props = defineProps<{ usage: ProviderUsage | null; loading: boolean; stale: boolean; compacting: boolean }>();
@@ -45,13 +46,13 @@ const contextLabel = computed(() => isCompacting.value ? 'Compacting' : contextP
   : props.usage?.context ? 'Capacity not reported' : props.loading ? 'Reading…' : 'Not reported');
 function tone(remaining: number): string { return remaining < 10 ? 'red' : remaining < 30 ? 'amber' : remaining < 80 ? 'blue' : 'green'; }
 function remaining(used: number): number { return Math.max(0, Math.round((100 - used) * 10) / 10); }
-function tokens(value: number): string { return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value); }
+function tokens(value: number): string { return formatCompactNumber(value); }
 function resetLabel(value: string | null): string {
   if (!value) return 'Reset not reported';
   const date = new Date(value);
   if (date.getTime() <= Date.now()) return 'Awaiting reset';
   const today = date.toDateString() === new Date().toDateString();
-  return `Resets ${date.toLocaleString(undefined, today ? { hour: 'numeric', minute: '2-digit' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' })}`;
+  return `Resets ${formatDate(today ? 'hourMinute' : 'weekdayHourMinute', date)}`;
 }
 </script>
 

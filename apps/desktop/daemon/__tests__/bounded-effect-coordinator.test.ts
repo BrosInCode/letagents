@@ -813,8 +813,9 @@ const READ_ONLY_REFUSAL = (toolName: string) => new RegExp(`^Error: Read-only ac
 test("the daemon lets a Read-only Codex agent use the named room tools and refuses every other one, before anything is journaled or run", { timeout: 30_000 }, async () => {
   const registered = await registeredRoomTools();
   const allowed = [
-    "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
-    "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
+    "expand_room_history_summary", "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts",
+    "get_room_events", "get_room_guidelines", "get_room_history_summary", "get_room_memory", "list_board_intents", "list_wake_rules",
+    "post_reasoning", "post_status",
     "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ];
   // One list: the one Codex is told is the one the daemon keeps.

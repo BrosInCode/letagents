@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { appSource as readAppSource } from "./app-source";
 
 function source(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
 }
 
-const appSource = source("../src/App.vue");
+const appSource = readAppSource();
 const authOnboardingSource = source("../src/components/desktop/content/AuthOnboardingView.vue");
 const navigationSource = source("../src/composables/useDesktopNavigationState.ts");
 const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.vue");
@@ -34,7 +35,7 @@ describe("desktop sidebar visibility contract", () => {
   });
 
   it("moves focus to the reveal control when the sidebar becomes inert", () => {
-    assert.match(appSource, /const hidingSidebar = sidebarMode\.value !== "hidden"/);
+    assert.match(appSource, /const hidingSidebar = (?:app\.)?sidebarMode\.value !== "hidden"/);
     assert.match(appSource, /await nextTick\(\)/);
     assert.match(
       appSource,

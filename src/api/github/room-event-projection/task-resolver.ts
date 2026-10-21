@@ -1,3 +1,4 @@
+import { findTaskByTicketKeys } from "../../connectors/key-task-resolution.js";
 import {
   findTaskByPrUrl,
   findTaskByWorkflowArtifactMatches,
@@ -49,4 +50,5 @@ export const { resolveLinkedTaskForRepoRoomEvent } = createRepoRoomEventTaskReso
     return undefined;
   },
   getTaskById,
+  findTaskByTicketKeys,
 });

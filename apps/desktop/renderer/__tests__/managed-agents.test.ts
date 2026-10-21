@@ -12,6 +12,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
 import { supervisedPermissionProfilesForProvider } from "../../daemon/supervised-permission-profiles";
+import { STATE_WATCH_RECEIPT_TIMELINE_PHASES } from "../../daemon/state-watch-projection";
 import {
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
@@ -56,6 +57,7 @@ import {
   supervisedRuntimeCardLabel,
 } from "../src/domain/supervised-recovery";
 import { isMentionableRoomParticipant, roomMentionCandidates } from "../src/domain/participants";
+import { roomShellSource } from "./room-shell-source";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -276,6 +278,36 @@ test("supervised recovery keeps an honest fallback and surfaces the latest durab
       durablePayloadRef: null,
     }],
   })), "provider restart failed before MCP registration");
+});
+
+test("the chat work indicator reads the same turn start from a state-watch receipt timeline", () => {
+  const timeline = [
+    { sequence: 1, phase: "received" as const, observedAt: "2026-07-15T18:00:00.000Z", detail: null },
+    { sequence: 2, phase: "turn_started" as const, observedAt: "2026-07-15T18:00:00.200Z", detail: null },
+    { sequence: 3, phase: "retry_scheduled" as const, observedAt: "2026-07-15T18:00:00.300Z", detail: null },
+    { sequence: 4, phase: "turn_started" as const, observedAt: "2026-07-15T18:00:00.500Z", detail: null },
+    { sequence: 5, phase: "turn_finished" as const, observedAt: "2026-07-15T18:00:00.900Z", detail: null },
+  ];
+  const working = supervisorEntry({
+    id: "supervised_working", agentKey: "codex:dawn-harbor", agentSessionId: "agent_session_403",
+    agentSessionBindingState: "active", observedState: "working", condition: "none",
+    roomAgentState: {
+      connection: { state: "connected", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
+      ingress: { state: "observing", observedAt: "2026-07-15T18:00:00.000Z", detail: null },
+      inbox: { state: "queued", pendingCount: 1, blockedByMessageId: null, detail: null },
+      turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_source", providerTurnId: "turn_1", detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+    deliveryReceipts: [{ inboxItemId: "inbox_1", sourceMessageId: "message_source", state: "awaiting_result", attemptCount: 2,
+      providerTurnId: "turn_1", blockedByMessageId: null, error: null, updatedAt: "2026-07-15T18:00:00.900Z", timeline }],
+    nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
+  });
+  const trimmed = { ...working, deliveryReceipts: working.deliveryReceipts!.map((receipt) => ({
+    ...receipt, timeline: receipt.timeline.filter((event) => STATE_WATCH_RECEIPT_TIMELINE_PHASES.has(event.phase)) })) };
+  const people = [presence({ agentSessionId: "agent_session_403", actorLabel: "DawnHarbor", displayName: "DawnHarbor" })];
+  const full = supervisedAgentWorkIndicators([working], people, "room_1");
+  assert.equal(full[0]?.startedAt, "2026-07-15T18:00:00.500Z");
+  assert.deepEqual(supervisedAgentWorkIndicators([trimmed], people, "room_1"), full);
 });
 
 test("supervisor native activity drives the chat work indicator for the bound room identity", () => {
@@ -1130,7 +1162,7 @@ test("supervisor reachability preserves server-owned attribution while replacing
 });
 
 test("presence restores message-history identity before supervisor rows are projected", () => {
-  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  const shell = roomShellSource();
   assert.match(shell, /const roomParticipants = computed\(\(\) =>\s*mergeDesktopSupervisorAgentParticipants\(\s*(?:\/\/[^\n]*\n\s*)*mergeReachableAgentPresenceParticipants\(props\.participants,/);
   const history = [participant({
     participantKey: "agent:dawnhaven | emmymay's agent | codex",

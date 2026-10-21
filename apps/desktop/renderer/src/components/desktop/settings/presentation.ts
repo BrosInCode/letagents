@@ -1,3 +1,4 @@
+import { formatDate } from "../../../domain/formatters";
 import type {
   DesktopAccountRoomEntry,
   DesktopAgentCommitIdentitySettings,
@@ -68,12 +69,7 @@ export function lastOpenedLabel(room: DesktopAccountRoomEntry): string {
   if (!room.lastOpenedAt) return "No recent activity";
   const timestamp = new Date(room.lastOpenedAt);
   if (Number.isNaN(timestamp.getTime())) return "Recent";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
+  return formatDate("monthDayTime", timestamp);
 }
 
 export function roleSourceLabel(room: DesktopAccountRoomEntry): string {

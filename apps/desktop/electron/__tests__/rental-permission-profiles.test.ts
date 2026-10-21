@@ -12,17 +12,19 @@ test("only a verified workspace-rooted provider profile is rental-admissible", (
     listRentalSafePermissionProfiles("cursor").map((profile) => profile.id),
     ["sandboxed_write"],
   );
-  // Codex is admitted only Read-only, where a guest launch switches off every local tool (codex-guest-lock).
-  assert.deepEqual(listRentalSafePermissionProfiles("codex").map((profile) => profile.id), ["read_only"]);
-  // Claude is admitted only Read-only, where a guest launch carries no built-in tools (provider-spawn-configuration).
-  assert.deepEqual(listRentalSafePermissionProfiles("claude-code").map((profile) => profile.id), ["read_only"]);
-  assert.equal(isRentalSafePermissionProfile("claude-code", "full_access"), false);
+  assert.deepEqual(listRentalSafePermissionProfiles("codex"), []);
+  assert.deepEqual(listRentalSafePermissionProfiles("claude-code"), []);
   assert.deepEqual(listRentalSafePermissionProfiles("open-model"), []);
   assert.equal(isRentalSafePermissionProfile("cursor", "sandboxed_write"), true);
   assert.equal(isRentalSafePermissionProfile("cursor", "full_access"), false);
-  assert.equal(isRentalSafePermissionProfile("codex", "read_only"), true);
+  // A read-only sandbox is not a workspace-rooted boundary: Codex Read-only stays out of rentals.
+  assert.equal(isRentalSafePermissionProfile("codex", "read_only"), false);
+  assert.throws(
+    () => assertRentalSafePermissionProfile("codex", "read_only"),
+    /verified workspace-rooted rental profile/,
+  );
   assert.throws(
     () => assertRentalSafePermissionProfile("codex", "full_access"),
-    /rental-safe permission profile for codex/,
+    /verified workspace-rooted rental profile/,
   );
 });

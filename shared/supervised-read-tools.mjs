@@ -10,6 +10,8 @@ export const SUPERVISED_READ_ONLY_TOOLS = new Set([
   "check_repo",
   "check_repo_visibility",
   "read_messages",
+  "get_room_history_summary",
+  "expand_room_history_summary",
   "wait_for_messages",
   "get_board",
   "get_board_settings",

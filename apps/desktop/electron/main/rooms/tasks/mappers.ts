@@ -52,6 +52,8 @@ export type DesktopTaskSummaryPayload = {
     muted_by?: string | null;
     muted_at?: string | null;
   } | null;
+  external_ref?: string | null;
+  ticket_state?: string | null;
   created_at?: string | null;
   updated_at?: string;
   updatedAt?: string;
@@ -117,6 +119,10 @@ export function mapDesktopTaskSummaryPayload(
           mutedAt: task.stale_prompt_state.muted_at || null,
         }
       : null,
+    // Only cards that name a ticket carry these, so other cards map as before.
+    ...(task.external_ref
+      ? { externalRef: task.external_ref, ticketState: task.ticket_state || null }
+      : {}),
     createdAt: task.created_at || null,
     updatedAt: task.updated_at || task.updatedAt || new Date().toISOString(),
   };

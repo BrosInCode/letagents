@@ -1,3 +1,4 @@
+import { compareText } from "./formatters";
 import type { DesktopParticipantSummary } from "../../../electron/ipc-types";
 
 const AGENT_RUNTIME_PREFIXES = [
@@ -119,7 +120,7 @@ export function sortMentionableRoomParticipants<T extends Pick<
 >>(participants: readonly T[]): T[] {
   return [...participants].sort((left, right) =>
     mentionPriority(left) - mentionPriority(right) ||
-    left.displayName.localeCompare(right.displayName)
+    compareText(left.displayName, right.displayName)
   );
 }
 

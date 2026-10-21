@@ -8,7 +8,7 @@ import type { DesktopSupervisorManifestEntry } from "../ipc-types/agents.js";
 import type { DesktopAgentAsk, DesktopGiveAgentInput } from "../ipc-types/asks.js";
 import type { ProviderUsage } from "../../shared/provider-usage.js";
 import { getOrCreateDesktopHostId } from "../main/agents/state.js";
-import { listRentalSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
+import { listGuestSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 import { getOrCreateDesktopSupervisorAgentIdentity } from "../main/supervisor-grant.js";
 import { supervisorDaemonClient, type SupervisorDaemonClient } from "../main/supervisor-daemon.js";
@@ -51,7 +51,7 @@ export const GUEST_CLAUDE_LAUNCH_POLICY = Object.freeze({
 /** The permission profile a given agent runs with, or null when this provider can't be given safely yet. */
 export function giftPermissionProfile(providerId: string): string | null {
   if (!["codex", "claude-code", "cursor", "open-model"].includes(providerId)) return null;
-  return listRentalSafePermissionProfiles(providerId as DesktopAgentProviderId)[0]?.id ?? null;
+  return listGuestSafePermissionProfiles(providerId as DesktopAgentProviderId)[0]?.id ?? null;
 }
 
 type Gift = {

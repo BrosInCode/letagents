@@ -1,7 +1,7 @@
 import type { IpcMain } from "electron";
 
 import { askApi, askErrorMessage } from "../../asks/api.js";
-import { takePendingAskLink } from "../ask-links.js";
+import { takePendingAskLink } from "../ask-link-inbox.js";
 import { askGiveCoordinator, giftPermissionProfile } from "../../asks/give-coordinator.js";
 import type { DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "../../ipc-types/asks.js";
 

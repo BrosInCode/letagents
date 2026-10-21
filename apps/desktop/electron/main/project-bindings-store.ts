@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
-import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { chmodSync, existsSync, statSync } from "node:fs";
+import { lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,7 +19,12 @@ import {
   projectBindingIdentityKey,
   projectBindingVerificationKeys,
 } from "../project-bindings.js";
-import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../repo-status.js";
+import {
+  buildRepoStatus,
+  normalizeGitRemoteToRoomIdentifier,
+  resolveRoomIdentifierFromPath,
+} from "../repo-status.js";
+import { runGit } from "./git-exec.js";
 
 const require = createRequire(import.meta.url);
 
@@ -77,8 +82,50 @@ export function getProjectBindingsStorePath(
     );
 }
 
+type OpenStore = { database: SqliteDatabase; dev: number; ino: number };
+
+const openStores = new Map<string, OpenStore>();
+const OPEN_STORE_LIMIT = 4;
+
+/**
+ * One long-lived connection per store file. Every statement runs
+ * synchronously, so callers never interleave inside a transaction. The file's
+ * identity is checked on each use: a deleted or replaced store reopens.
+ */
 function openStore(options: ProjectBindingsStoreOptions = {}): SqliteDatabase {
   const storePath = getProjectBindingsStorePath(options);
+  const cached = openStores.get(storePath);
+  if (cached) {
+    try {
+      const current = statSync(storePath);
+      if (current.dev === cached.dev && current.ino === cached.ino) return cached.database;
+    } catch {
+      // Missing store: reopen below, which recreates it.
+    }
+    openStores.delete(storePath);
+    try { cached.database.close(); } catch { /* already closed */ }
+  }
+  const database = openStoreConnection(storePath);
+  const identity = statSync(storePath);
+  if (openStores.size >= OPEN_STORE_LIMIT) {
+    const [oldestPath, oldest] = openStores.entries().next().value as [string, OpenStore];
+    openStores.delete(oldestPath);
+    try { oldest.database.close(); } catch { /* already closed */ }
+  }
+  openStores.set(storePath, { database, dev: identity.dev, ino: identity.ino });
+  return database;
+}
+
+/** Test-only: close long-lived connections and forget every validation memo. */
+export function resetProjectBindingsStoreCachesForTest(): void {
+  for (const { database } of openStores.values()) {
+    try { database.close(); } catch { /* already closed */ }
+  }
+  openStores.clear();
+  validatedBindings.clear();
+}
+
+function openStoreConnection(storePath: string): SqliteDatabase {
   require("node:fs").mkdirSync(dirname(storePath), { recursive: true });
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => SqliteDatabase;
@@ -102,6 +149,18 @@ function openStore(options: ProjectBindingsStoreOptions = {}): SqliteDatabase {
     if (existsSync(path)) chmodSync(path, 0o600);
   }
   return database;
+}
+
+function discardStore(storePath: string, database: SqliteDatabase): void {
+  if (openStores.get(storePath)?.database === database) openStores.delete(storePath);
+  try { database.close(); } catch { /* already closed */ }
+}
+
+/** Test-only hook run inside the bind transaction, just before COMMIT. */
+export const projectBindingsStoreTestHooks: { beforeCommit?: (database: SqliteDatabase) => void } = {};
+
+function releaseStore(_database: SqliteDatabase): void {
+  // The connection is shared and long-lived; see openStore.
 }
 
 function parseStringArray(value: string): string[] | null {
@@ -191,7 +250,7 @@ function readBindings(options: ProjectBindingsStoreOptions = {}): DesktopProject
       ORDER BY created_at ASC
     `).all().map(mapRow).filter((binding): binding is DesktopProjectBinding => Boolean(binding));
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
@@ -208,7 +267,7 @@ function readBindingById(
       WHERE id = ?
     `).get(bindingId));
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
@@ -226,23 +285,73 @@ async function canonicalDirectory(rootPath: string): Promise<string> {
   return canonical;
 }
 
+/**
+ * Mount device number -> volume UUID (df + diskutil), shared only inside one
+ * listProjectBindings pass. Device numbers are reused when another volume is
+ * mounted at the same place, so an answer never outlives the pass.
+ */
+type FilesystemNamespaceCache = Map<string, Promise<string | null>>;
+
+let filesystemNamespaceResolver: (path: string) => Promise<string | null> = defaultFilesystemNamespace;
+
+/** Test-only: replace the df + diskutil lookup used for the default namespace path. */
+export function setFilesystemNamespaceResolverForTest(
+  resolver: ((path: string) => Promise<string | null>) | null,
+): void {
+  filesystemNamespaceResolver = resolver ?? defaultFilesystemNamespace;
+}
+
+function resolveFilesystemNamespace(
+  path: string,
+  device: bigint,
+  options: ProjectBindingsStoreOptions,
+  namespaceCache: FilesystemNamespaceCache,
+): Promise<string | null> {
+  if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
+  const cacheKey = device.toString();
+  let namespace = namespaceCache.get(cacheKey);
+  if (!namespace) {
+    namespace = filesystemNamespaceResolver(path);
+    namespaceCache.set(cacheKey, namespace);
+  }
+  return namespace;
+}
+
+/**
+ * The volume UUIDs behind the folder and its `.git`, looked up in this pass.
+ * Checked on every pass, memo hit or not: a different volume mounted at the
+ * same path can reuse the device number and even the inode numbers.
+ */
+async function bindingVolumes(
+  rootPath: string,
+  options: ProjectBindingsStoreOptions,
+  namespaceCache: FilesystemNamespaceCache,
+): Promise<string | null> {
+  try {
+    const gitPath = join(rootPath, ".git");
+    const [rootStats, gitStats] = await Promise.all([
+      stat(rootPath, { bigint: true }),
+      stat(gitPath, { bigint: true }),
+    ]);
+    const volumes = await Promise.all([
+      resolveFilesystemNamespace(rootPath, rootStats.dev, options, namespaceCache),
+      resolveFilesystemNamespace(gitPath, gitStats.dev, options, namespaceCache),
+    ]);
+    return volumes.every(Boolean) ? JSON.stringify(volumes) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function filesystemVerificationKeys(
   rootPath: string,
   context: DesktopProjectBindingContext,
   options: ProjectBindingsStoreOptions,
-  namespaceCache: Map<string, Promise<string | null>> = new Map(),
+  namespaceCache: FilesystemNamespaceCache = new Map(),
 ): Promise<FilesystemVerification> {
   const rootStats = await stat(rootPath, { bigint: true });
-  const resolveNamespace = async (path: string, device: bigint): Promise<string | null> => {
-    if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
-    const cacheKey = device.toString();
-    let namespace = namespaceCache.get(cacheKey);
-    if (!namespace) {
-      namespace = defaultFilesystemNamespace(path);
-      namespaceCache.set(cacheKey, namespace);
-    }
-    return namespace;
-  };
+  const resolveNamespace = (path: string, device: bigint) =>
+    resolveFilesystemNamespace(path, device, options, namespaceCache);
   const rootNamespace = await resolveNamespace(rootPath, rootStats.dev);
   const rootNamespaceKey = rootNamespace ? namespaceDigest(rootNamespace) : null;
   const keys = new Set(projectBindingVerificationKeys(context));
@@ -305,7 +414,7 @@ function replaceVerificationKeysIfCurrent(
     ) as { changes?: number | bigint };
     return Number(result.changes || 0) === 1;
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
@@ -327,20 +436,218 @@ function sameLocalProjectAfterGitSetup(
     && compareVerificationKeys(filesystemKeys, current).matches;
 }
 
+/**
+ * Bindings that passed the full validation below, keyed by binding id. A memo
+ * is reused only while all of these still hold:
+ *  - the stored row is byte-for-byte the row that was validated;
+ *  - the folder still canonicalizes to the same path and is not a managed
+ *    worktree (canonicalDirectory runs on every call);
+ *  - the folder and its `.git` directory are the same filesystem objects
+ *    (device, inode, birth time) - a swapped folder or Git directory differs;
+ *  - HEAD, config, config.worktree, commondir, packed-refs and
+ *    refs/remotes/origin/HEAD are unchanged (device, inode, size, mtime,
+ *    ctime) - these feed the derived room;
+ *  - the global and system Git config files and the GIT_CONFIG_* variables
+ *    are unchanged (they can rewrite the origin URL through insteadOf);
+ *  - the folder and `.git` are on the same volumes (UUID), checked in every
+ *    pass, memo hit or not;
+ *  - `git remote get-url origin`, run on every pass, still returns the URL
+ *    recorded with the entry (Git resolves includes, insteadOf, commondir
+ *    and GIT_CONFIG_* itself, so this is the authority; the file checks
+ *    above are extra conditions);
+ *  - fewer than 45 seconds have passed (fallback for anything not listed,
+ *    for example a nested local branch file).
+ * Only folders whose `.git` is a real directory are memoized. Plain folders,
+ * linked worktrees (`.git` file), nested checkouts and any repository whose
+ * config (or the global config) uses [include]/[includeIf] validate in full:
+ * an included file can change the origin URL without touching these files.
+ */
+type ValidatedBinding = {
+  row: string;
+  fingerprint: string;
+  volumes: string;
+  origin: string;
+  expiresAt: number;
+};
+
+const validatedBindings = new Map<string, ValidatedBinding>();
+const VALIDATED_BINDING_TTL_MS = 45_000;
+const VALIDATED_BINDING_LIMIT = 256;
+
+/** Test-only counters: full validations and memo hits. */
+export const projectBindingValidationCountsForTest = { full: 0, memo: 0 };
+
+function bindingRowKey(binding: DesktopProjectBinding): string {
+  return JSON.stringify([
+    binding.id,
+    binding.identityKey,
+    binding.verificationKeys,
+    binding.aliases,
+    binding.rootPath,
+    binding.source,
+    binding.createdAt,
+    binding.updatedAt,
+  ]);
+}
+
+async function statIdentity(path: string, content: boolean): Promise<string> {
+  // Both the entry itself (lstat) and what it points to (stat): replacing a
+  // symlinked config's target changes only the second.
+  const describe = async (read: typeof lstat): Promise<string> => {
+    try {
+      const info = await read(path, { bigint: true });
+      const identity = [info.dev, info.ino, info.birthtimeNs, info.mode];
+      if (content) identity.push(info.size, info.mtimeNs, info.ctimeNs);
+      return identity.join(":");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return "-";
+      throw error;
+    }
+  };
+  return `${await describe(lstat)}>${await describe(stat)}`;
+}
+
+/**
+ * The origin URL exactly as Git resolves it now, normalized the way full
+ * validation derives the room. Git itself applies every config source
+ * (include, includeIf, insteadOf, commondir, GIT_CONFIG_* variables, the
+ * system and Xcode configs), so no input list here can go stale. Returns
+ * "no-origin" only when Git says the remote does not exist; any other
+ * failure returns null and the binding is validated in full.
+ */
+async function resolvedOrigin(rootPath: string): Promise<string | null> {
+  const result = await runGit(rootPath, ["remote", "get-url", "origin"]);
+  return encodeOrigin(result.code === 0 ? { stdout: result.stdout } : { code: result.code, stderr: result.stderr });
+}
+
+/** One encoding for both reads: the normalized room and the raw URL, or "no-origin". */
+function encodeOrigin(read: { stdout: string } | { code: unknown; stderr: unknown }): string | null {
+  if ("stdout" in read) {
+    const raw = read.stdout.trim();
+    return raw ? JSON.stringify([normalizeGitRemoteToRoomIdentifier(raw), raw]) : null;
+  }
+  return read.code === 2 && /no such remote/i.test(String(read.stderr ?? "")) ? "no-origin" : null;
+}
+
+const GIT_CONFIG_INCLUDE = /^\s*\[\s*include(?:if)?\b/im;
+
+function globalGitConfigPaths(): string[] {
+  const home = homedir();
+  const xdg = process.env.XDG_CONFIG_HOME?.trim() || join(home, ".config");
+  return [
+    process.env.GIT_CONFIG_GLOBAL?.trim() || join(home, ".gitconfig"),
+    join(xdg, "git", "config"),
+    process.env.GIT_CONFIG_SYSTEM?.trim() || "/etc/gitconfig",
+    "/opt/homebrew/etc/gitconfig",
+    "/usr/local/etc/gitconfig",
+  ];
+}
+
+async function readOptionalText(path: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+async function bindingFingerprint(rootPath: string): Promise<string | null> {
+  try {
+    const gitPath = join(rootPath, ".git");
+    const gitInfo = await lstat(gitPath);
+    if (!gitInfo.isDirectory()) return null;
+    // A commondir makes Git read config and refs from another directory:
+    // treat it like a linked worktree and always validate in full.
+    if ((await statIdentity(join(gitPath, "commondir"), false)) !== "->-") return null;
+    const configFiles = [join(gitPath, "config"), join(gitPath, "config.worktree"), ...globalGitConfigPaths()];
+    const configTexts = await Promise.all(configFiles.map(readOptionalText));
+    if (configTexts.some((text) => GIT_CONFIG_INCLUDE.test(text))) return null;
+    const parts = await Promise.all([
+      statIdentity(rootPath, false),
+      statIdentity(gitPath, false),
+      ...["HEAD", "packed-refs", join("refs", "remotes", "origin", "HEAD")]
+        .map((name) => statIdentity(join(gitPath, name), true)),
+      ...configFiles.map((path) => statIdentity(path, true)),
+    ]);
+    const environment = Object.keys(process.env)
+      .filter((name) => name.startsWith("GIT_") || name === "PATH")
+      .sort()
+      .map((name) => [name, process.env[name]]);
+    return JSON.stringify([rootPath, ...parts, environment]);
+  } catch {
+    return null;
+  }
+}
+
+function rememberValidatedBinding(
+  binding: DesktopProjectBinding,
+  fingerprint: string,
+  volumes: string,
+  origin: string,
+): void {
+  const now = Date.now();
+  if (validatedBindings.size >= VALIDATED_BINDING_LIMIT) {
+    for (const [id, entry] of validatedBindings) {
+      if (entry.expiresAt <= now) validatedBindings.delete(id);
+    }
+    if (validatedBindings.size >= VALIDATED_BINDING_LIMIT) validatedBindings.clear();
+  }
+  validatedBindings.set(binding.id, {
+    row: bindingRowKey(binding),
+    fingerprint,
+    volumes,
+    origin,
+    expiresAt: now + VALIDATED_BINDING_TTL_MS,
+  });
+}
+
 async function validateProjectBinding(
   binding: DesktopProjectBinding,
   options: ProjectBindingsStoreOptions,
-  namespaceCache: Map<string, Promise<string | null>>,
+  namespaceCache: FilesystemNamespaceCache,
   rereadOnConflict: boolean,
 ): Promise<DesktopProjectBinding | null> {
   try {
     const rootPath = await canonicalDirectory(binding.rootPath);
+    // Taken before validation: a change during validation alters the next
+    // fingerprint, so a racing swap can never be served from this memo.
+    const fingerprint = await bindingFingerprint(rootPath);
+    // The volume check is never skipped: df + diskutil run once per device in
+    // each pass, shared by every binding; the memo saves only the git spawns.
+    const volumes = fingerprint ? await bindingVolumes(rootPath, options, namespaceCache) : null;
+    // One git spawn, never skipped: the origin URL as Git resolves it now must
+    // equal the one recorded with the memo entry.
+    const origin = fingerprint && volumes ? await resolvedOrigin(rootPath) : null;
+    const memo = validatedBindings.get(binding.id);
+    if (
+      memo && fingerprint && volumes && origin
+      && memo.expiresAt > Date.now()
+      && memo.row === bindingRowKey(binding)
+      && memo.fingerprint === fingerprint
+      && memo.volumes === volumes
+      && memo.origin === origin
+    ) {
+      projectBindingValidationCountsForTest.memo += 1;
+      return binding;
+    }
+    validatedBindings.delete(binding.id);
+    projectBindingValidationCountsForTest.full += 1;
     const derived = await deriveFilesystemContext(rootPath);
     const current = await filesystemVerificationKeys(rootPath, derived.context, options, namespaceCache);
     const comparison = compareVerificationKeys(binding.verificationKeys, current);
     const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
     if (!comparison.matches && !gitSetup) return null;
-    if (!comparison.shouldUpgrade && !gitSetup) return binding;
+    if (!comparison.shouldUpgrade && !gitSetup) {
+      // Store only when the origin read before validation is the one the
+      // validation itself used. An origin can flip back and forth, so a
+      // mismatch here means the decision was made on a different origin.
+      if (fingerprint && volumes && origin && derived.origin === origin) {
+        rememberValidatedBinding(binding, fingerprint, volumes, origin);
+      }
+      return binding;
+    }
     try {
       if (replaceVerificationKeysIfCurrent(binding, current.keys, options)) {
         return { ...binding, verificationKeys: current.keys };
@@ -361,11 +668,25 @@ async function validateProjectBinding(
 async function deriveFilesystemContext(rootPath: string): Promise<{
   context: DesktopProjectBindingContext;
   source: DesktopProjectBindingSource;
+  /** The origin this derivation actually used (encodeOrigin), or null if unknown. */
+  origin: string | null;
 }> {
-  const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
+  let origin: string | null = null;
+  const resolved = await resolveRoomIdentifierFromPath(rootPath, {
+    ignoreConfiguredRoom: true,
+    onOriginRemoteRead: (read) => {
+      if ("stdout" in read) {
+        origin = encodeOrigin(read);
+      } else {
+        const error = read.error as { code?: unknown; stderr?: unknown };
+        origin = encodeOrigin({ code: error?.code, stderr: error?.stderr });
+      }
+    },
+  });
   return {
     context: { roomIdentifier: resolved.roomIdentifier, gitRoom: resolved.gitRoom },
     source: resolved.source || "local_folder",
+    origin,
   };
 }
 
@@ -373,7 +694,7 @@ export async function listProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBinding[]> {
   const bindings = readBindings(options);
-  const namespaceCache = new Map<string, Promise<string | null>>();
+  const namespaceCache: FilesystemNamespaceCache = new Map();
   const available = await Promise.all(bindings.map((binding) =>
     validateProjectBinding(binding, options, namespaceCache, true)
   ));
@@ -439,17 +760,21 @@ export async function bindProjectRoot(input: {
       binding.createdAt,
       binding.updatedAt,
     );
+    projectBindingsStoreTestHooks.beforeCommit?.(database);
     database.exec("COMMIT");
     return binding;
   } catch (error) {
     try {
       database.exec("ROLLBACK");
     } catch {
-      // Preserve the transaction's original failure.
+      // The shared connection may still be inside the transaction. Discard
+      // it so no later caller inherits (or commits) half of this write.
+      // The original failure is preserved below.
+      discardStore(getProjectBindingsStorePath(options), database);
     }
     throw error;
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 

@@ -73,3 +73,6 @@ export const workflowArtifactSchema = z
     state: z.string().nullable().optional(),
   })
   .strict();
+
+/** The server checks the key's form; this bounds the input only. */
+export const externalRefSchema = z.string().trim().min(1).max(64);

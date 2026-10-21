@@ -245,14 +245,16 @@ export function assertSupervisedPermissionProfileAvailable(providerId: string, r
 export function assertSupervisedRentalPermissionProfileAvailable(
   providerId: string,
   requestedId: string | null,
+  entryId: string | null = null,
 ): string {
   const provider = providerId.trim().toLowerCase();
   const requested = requestedId?.trim() || null;
+  // A given agent (Ask for an agent, entry id supervised_rental_ask_*) may also run with no local tools
+  // at all; the rental marketplace stays Cursor's verified sandbox only.
+  const given = entryId?.startsWith("supervised_rental_ask_") === true;
   const verified = (provider === "cursor" && requested === "sandboxed_write")
-    // Claude as a guest: Read-only with no built-in tools (see rental-permission-profiles.ts).
-    || (provider === "claude-code" && requested === "read_only")
-    // Codex as a guest: Read-only with its local tools switched off (codex-guest-lock.ts).
-    || (provider === "codex" && requested === "read_only");
+    || (given && provider === "claude-code" && requested === "read_only")
+    || (given && provider === "codex" && requested === "read_only");
   if (!verified) {
     throw new Error(
       "Rented agents require an explicit verified workspace-rooted permission profile.",

@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { SettingsFileCache } from "../settings-file-cache.js";
 import type {
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
@@ -207,29 +208,47 @@ export function assertValidOpenModelBaseUrl(baseUrl: string): void {
   }
 }
 
+// Decrypted settings, reused while the file is unchanged. See SettingsFileCache.
+const openModelSettingsCache = new SettingsFileCache<StoredOpenModelSettings>();
+
+export function clearOpenModelSettingsCacheForTest(): void {
+  openModelSettingsCache.invalidate();
+}
+
 export async function readOpenModelSettings(
   options: OpenModelSettingsStoreOptions = {},
 ): Promise<StoredOpenModelSettings> {
   const settingsPath = getOpenModelSettingsStorePath(options);
   const secretStorage = options.secretStorage || defaultSecretStorage();
-  try {
-    const raw = await readFile(settingsPath, "utf8");
-    const parsed = JSON.parse(raw) as PersistedOpenModelSettings;
-    return {
-      apiKey: decryptSecret(parsed.encryptedApiKey, secretStorage),
-      baseUrl: normalizeBaseUrl(parsed.baseUrl),
-      model: normalizeModel(parsed.model),
-      savedAt: parsed.savedAt || null,
-      contextWindow: Number.isSafeInteger(parsed.contextWindow) && (parsed.contextWindow ?? 0) >= 2 ? parsed.contextWindow : null,
-    };
-  } catch {
-    return {
-      apiKey: null,
-      baseUrl: DEFAULT_OPEN_MODEL_BASE_URL,
-      model: "",
-      savedAt: null,
-    };
-  }
+  return openModelSettingsCache.read(settingsPath, secretStorage, async () => {
+    try {
+      const raw = await readFile(settingsPath, "utf8");
+      const parsed = JSON.parse(raw) as PersistedOpenModelSettings;
+      const apiKey = decryptSecret(parsed.encryptedApiKey, secretStorage);
+      return {
+        value: {
+          apiKey,
+          baseUrl: normalizeBaseUrl(parsed.baseUrl),
+          model: normalizeModel(parsed.model),
+          savedAt: parsed.savedAt || null,
+          contextWindow: Number.isSafeInteger(parsed.contextWindow) && (parsed.contextWindow ?? 0) >= 2 ? parsed.contextWindow : null,
+        },
+        // A key that exists but could not be decrypted (locked Keychain) is retried on the next read.
+        cacheable: apiKey !== null || !parsed.encryptedApiKey,
+      };
+    } catch (error) {
+      return {
+        value: {
+          apiKey: null,
+          baseUrl: DEFAULT_OPEN_MODEL_BASE_URL,
+          model: "",
+          savedAt: null,
+        },
+        // A missing file is a stable answer; any other failure is retried.
+        cacheable: (error as NodeJS.ErrnoException)?.code === "ENOENT",
+      };
+    }
+  });
 }
 
 export async function saveOpenModelSettings(
@@ -270,7 +289,12 @@ export async function saveOpenModelSettings(
     contextWindow: nextSettings.contextWindow,
   };
   await mkdir(dirname(settingsPath), { recursive: true });
-  await writeFile(settingsPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+  openModelSettingsCache.invalidate(settingsPath);
+  try {
+    await writeFile(settingsPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+  } finally {
+    openModelSettingsCache.invalidate(settingsPath);
+  }
   return getOpenModelSettingsStatus(options);
 }
 

@@ -245,7 +245,7 @@ import type {
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
 import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
-import { decideHostApproval, hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./host-approvals";
+import { decideHostApproval, hostApprovalIdentity, hostApprovalPollDue, hostApprovalRoom, refreshHostApprovals, watchHostApprovalPushes } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
@@ -329,6 +329,7 @@ const dismissedHostApprovalIds = ref(new Set<string>());
 const rememberedHostApprovalDismissals = ref(readHostApprovalDismissals());
 const showApprovalHistory = ref(false);
 let approvalTimer: ReturnType<typeof setInterval> | null = null;
+let stopApprovalPushes: (() => void) | null = null;
 // Moves with the approval refresh, so a request's grace can end without new data.
 const approvalNowMs = ref(Date.now());
 
@@ -581,12 +582,26 @@ onMounted(() => {
   void refreshRoomHostApprovals();
   // The listener comes before the interval: if this hook throws, no interval is left running.
   setVisibilityListener(true);
-  approvalTimer = setInterval(() => { approvalNowMs.value = Date.now(); void refreshRoomHostApprovals(); }, 3_000);
+  // The 3 s tick moves the grace clock. It lists approvals only when one is due:
+  // every 3 s while a request needs an answer, every 15 s otherwise. A state
+  // push from the supervisor lists them at once.
+  approvalTimer = setInterval(() => {
+    approvalNowMs.value = Date.now();
+    if (props.roomIdentifier && hostApprovalPollDue(props.roomIdentifier)) void refreshRoomHostApprovals();
+  }, 3_000);
+  stopApprovalPushes = props.roomIdentifier ? watchHostApprovalPushes(props.roomIdentifier) : null;
   void nextTick(syncTextareaHeight);
+});
+
+// The push subscription follows the visible room; the tick above already follows it.
+watch(() => props.roomIdentifier, (roomIdentifier) => {
+  stopApprovalPushes?.();
+  stopApprovalPushes = roomIdentifier ? watchHostApprovalPushes(roomIdentifier) : null;
 });
 
 onBeforeUnmount(() => {
   if (approvalTimer) clearInterval(approvalTimer);
+  stopApprovalPushes?.();
   if (decisionTimer) clearTimeout(decisionTimer);
   setVisibilityListener(false);
 });

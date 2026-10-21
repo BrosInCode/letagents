@@ -68,6 +68,8 @@
       :review-assignment-candidates="modalReviewAssignmentCandidates"
       :selected-reviewer="modalSelectedReviewer"
       :can-edit="canEditTasks"
+      :room-identifier="roomIdentifier"
+      :ticket-keys="ticketKeys"
       @save="saveModalTask"
       @close="clearTaskSelection"
       @assign-review="assignModalReview"
@@ -75,6 +77,7 @@
       @update:selected-reviewer="setModalReviewer"
       @view-events="emit('view-events', $event)"
       @view-artifacts="emit('view-artifacts', $event)"
+      @open-thread="emit('open-thread', $event)"
     />
 
     <RoomBoardCreateTaskDialog
@@ -111,7 +114,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { TaskContentPatch } from '../../../../../../../shared/task-markdown-editing.mjs';
+import type { TaskEditPatch } from './room-board/ticket-ref';
 import type {
   DesktopAgentPresence,
   DesktopBoardSettingsSummary,
@@ -135,6 +138,8 @@ import { useRoomBoardController } from "./room-board/useRoomBoardController";
 import { useRoomBoardPresentation } from "./room-board/useRoomBoardPresentation";
 
 const props = defineProps<{
+  /** Cloud rooms only: local rooms cannot store ticket keys. */
+  ticketKeys?: boolean;
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
   boardSettings?: DesktopBoardSettingsSummary | null;
@@ -153,6 +158,7 @@ const emit = defineEmits<{
   "update:governance-section": [section: null];
   "view-events": [taskId: string];
   "view-artifacts": [taskId: string];
+  "open-thread": [threadRootId: string];
 }>();
 
 const {
@@ -294,7 +300,7 @@ function setModalReviewer(value: string): void {
   if (modalTask.value) setSelectedReviewer(modalTask.value.id, value);
 }
 
-async function saveModalTask(input: TaskContentPatch, onSettled: (saved: boolean) => void): Promise<void> {
+async function saveModalTask(input: TaskEditPatch, onSettled: (saved: boolean) => void): Promise<void> {
   const task = modalTask.value;
   onSettled(Boolean(task && await saveTaskContent(task, input)));
 }

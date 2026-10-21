@@ -1,4 +1,5 @@
 import { renderDesktopMarkdown } from "../formatting/markdown";
+import { formatDate } from "../../../../domain/formatters";
 
 export function formatTimestamp(value: string): string {
   const date = new Date(value);
@@ -6,8 +7,8 @@ export function formatTimestamp(value: string): string {
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
   return isToday
-    ? date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-    : date.toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    ? formatDate("clockTime", date)
+    : formatDate("monthDayTime2", date);
 }
 
 export function truncate(value: string, maxLength: number): string {
@@ -38,49 +39,99 @@ export function renderMessageText(
   return highlightRenderedMessage(linked, highlightQuery);
 }
 
+const messageOrTaskReference = /\b(?:msg|task)_\d+/;
+
+/**
+ * True when the HTML can hold a message or task reference at all. Callers use
+ * it to skip the link pass, and to avoid reading the reference sets (so a
+ * message with no references never depends on them).
+ */
+export function mayContainMessageReference(html: string): boolean {
+  return messageOrTaskReference.test(html);
+}
+
 /** Decorate only HTML already escaped by renderMessageText. */
 export function linkRenderedMessageReferences(
   html: string,
   messageReferenceIds?: ReadonlySet<string>,
   taskReferenceIds?: ReadonlySet<string>,
 ): string {
+  if (!mayContainMessageReference(html)) return html;
   return linkTaskReferences(linkMessageReferences(html, messageReferenceIds), taskReferenceIds);
+}
+
+// One query is highlighted across every mounted message, so the compiled
+// patterns are kept for the latest query only. A new query replaces them.
+let highlightPatternQuery: string | null = null;
+let highlightPattern: RegExp | null = null;
+let highlightProbe: RegExp | null = null;
+
+/** Counts RegExp builds so tests can prove one query builds one pattern. */
+export const highlightPatternBuilds = { count: 0 };
+
+function patternsForQuery(query: string): { pattern: RegExp; probe: RegExp } {
+  if (highlightPatternQuery !== query || !highlightPattern || !highlightProbe) {
+    const source = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    highlightPattern = new RegExp(source, "gi");
+    highlightProbe = new RegExp(source, "i");
+    highlightPatternQuery = query;
+    highlightPatternBuilds.count += 1;
+  }
+  return { pattern: highlightPattern, probe: highlightProbe };
 }
 
 export function highlightRenderedMessage(html: string, highlightQuery: string): string {
   const normalizedQuery = highlightQuery.trim();
   if (!normalizedQuery) return html;
+  const { pattern, probe } = patternsForQuery(normalizedQuery);
+  // A query without an HTML-escaped character appears verbatim in the escaped
+  // HTML whenever it appears in the visible text. Skip the full pass when it
+  // does not appear at all. A false positive (a match inside a tag) only
+  // costs the full pass.
+  if (!/[&<>"]/.test(normalizedQuery) && !probe.test(html)) return html;
   const chunks = html.split(/(<[^>]+>)/g);
   const codeStack: string[] = [];
-  return chunks.map((chunk) => {
+  let changed = false;
+  const result = chunks.map((chunk) => {
     if (!chunk) return "";
     if (chunk.startsWith("<") && chunk.endsWith(">")) {
       updateSingleTagStack(codeStack, chunk, "code");
       return chunk;
     }
     if (codeStack.length) return chunk;
-    return highlightEscapedTextChunk(chunk, normalizedQuery);
-  }).join("");
+    const highlighted = highlightEscapedTextChunk(chunk, pattern);
+    if (highlighted !== chunk) changed = true;
+    return highlighted;
+  });
+  return changed ? result.join("") : html;
 }
 
-function highlightEscapedTextChunk(chunk: string, query: string): string {
-  const units: Array<{ decoded: string; encoded: string }> = [];
+const markOpen = '<mark class="message-search-hit">';
+const entityAt = /&(amp|lt|gt|quot);/iy;
+
+function highlightEscapedTextChunk(chunk: string, pattern: RegExp): string {
+  if (chunk.indexOf("&") === -1) {
+    // No entities: the decoded text is the chunk, so mark matches in place.
+    return chunk.replace(pattern, (match) => (match ? `${markOpen}${match}</mark>` : match));
+  }
+  const decodedChars: string[] = [];
+  const encoded: string[] = [];
   for (let index = 0; index < chunk.length;) {
-    const entityMatch = /^&(amp|lt|gt|quot);/i.exec(chunk.slice(index));
+    entityAt.lastIndex = index;
+    const entityMatch = entityAt.exec(chunk);
     if (entityMatch) {
-      units.push({
-        decoded: decodeHtmlEntity(entityMatch[1]!.toLowerCase()),
-        encoded: entityMatch[0],
-      });
+      decodedChars.push(decodeHtmlEntity(entityMatch[1]!.toLowerCase()));
+      encoded.push(entityMatch[0]);
       index += entityMatch[0].length;
       continue;
     }
-    units.push({ decoded: chunk[index]!, encoded: chunk[index]! });
+    decodedChars.push(chunk[index]!);
+    encoded.push(chunk[index]!);
     index += 1;
   }
 
-  const decoded = units.map((unit) => unit.decoded).join("");
-  const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  const decoded = decodedChars.join("");
+  pattern.lastIndex = 0;
   const starts = new Set<number>();
   const ends = new Set<number>();
   for (const match of decoded.matchAll(pattern)) {
@@ -90,11 +141,13 @@ function highlightEscapedTextChunk(chunk: string, query: string): string {
   }
   if (!starts.size) return chunk;
 
-  return units.map((unit, index) => [
-    starts.has(index) ? '<mark class="message-search-hit">' : "",
-    unit.encoded,
-    ends.has(index + 1) ? "</mark>" : "",
-  ].join("")).join("");
+  let out = "";
+  for (let index = 0; index < encoded.length; index += 1) {
+    if (starts.has(index)) out += markOpen;
+    out += encoded[index];
+    if (ends.has(index + 1)) out += "</mark>";
+  }
+  return out;
 }
 
 function decodeHtmlEntity(entity: string): string {
@@ -105,7 +158,7 @@ function decodeHtmlEntity(entity: string): string {
 }
 
 function linkMessageReferences(html: string, messageReferenceIds?: ReadonlySet<string>): string {
-  if (!messageReferenceIds?.size) return html;
+  if (!messageReferenceIds) return html;
   const chunks = html.split(/(<[^>]+>)/g);
   const skipStack: string[] = [];
   return chunks
@@ -131,7 +184,7 @@ function linkMessageReferences(html: string, messageReferenceIds?: ReadonlySet<s
 }
 
 function linkTaskReferences(html: string, taskReferenceIds?: ReadonlySet<string>): string {
-  if (!taskReferenceIds?.size) return html;
+  if (!taskReferenceIds) return html;
   const chunks = html.split(/(<[^>]+>)/g);
   const skipStack: string[] = [];
   return chunks

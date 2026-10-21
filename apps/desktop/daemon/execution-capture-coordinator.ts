@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue, StatementSync } from "node:sqlite";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
 import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
@@ -39,6 +39,10 @@ type Lane = {
   notifiedAdmission: string | null;
   storageRetry: NodeJS.Timeout | null;
   storageRetryAttempts: number;
+  /** Positive knownRuntime results only; see knownRuntime for why they cannot go stale. */
+  knownRuntimes: Map<string, Runtime>;
+  /** The last source ID this lane's enqueue already validated. */
+  validatedSourceId: string | null;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -50,6 +54,8 @@ const QUEUE_BYTES = 256 * 1024;
 const BATCH_FACTS = 32;
 const LIFECYCLE_PROJECTION_RETRY_MS = 25;
 const CAPTURE_RETRY_MAX_MS = 30_000;
+const KNOWN_RUNTIMES_PER_LANE = 8;
+const MAX_CACHED_STATEMENTS = 32;
 function lifecycleProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleProjectionProvider | null {
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
@@ -76,6 +82,7 @@ export class ExecutionCaptureCoordinator {
   private scheduled: NodeJS.Immediate | null = null;
   private closed = false;
   private handoffSealed = false;
+  private readonly statements = new Map<string, StatementSync>();
 
   /** Production capture is optional; opening failure cannot prevent daemon startup. */
   static open(path: string, provider: CaptureOptions["provider"] | undefined,
@@ -122,7 +129,7 @@ export class ExecutionCaptureCoordinator {
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
       expectedAuthorityMode: installation.authorityMode, pendingChange: true, notifiedAdmission: null,
-      storageRetry: null, storageRetryAttempts: 0 };
+      storageRetry: null, storageRetryAttempts: 0, knownRuntimes: new Map(), validatedSourceId: null };
     this.lanes.set(agentId, lane);
     let pending: Promise<NativeExecutionSubscription>;
     try {
@@ -429,6 +436,7 @@ export class ExecutionCaptureCoordinator {
       catch { this.report(lane, "storage_unavailable"); }
     }
     for (const lane of closing) this.remove(lane);
+    this.statements.clear();
     try { this.database.close(); } catch { console.warn("[execution_capture] close_failed"); }
   }
 
@@ -724,9 +732,11 @@ export class ExecutionCaptureCoordinator {
   private enqueue(lane: Lane, event: NativeExecutionObservation): void {
     if (!this.current(lane) || lane.detached || lane.suspended) return;
     try {
-      if (!Number.isSafeInteger(event.sequence) || event.sequence < 1 || !executionIdentity.safeParse(event.sourceId).success) {
+      if (!Number.isSafeInteger(event.sequence) || event.sequence < 1
+        || (event.sourceId !== lane.validatedSourceId && !executionIdentity.safeParse(event.sourceId).success)) {
         lane.overflow = true; this.schedule(lane); return;
       }
+      lane.validatedSourceId = event.sourceId;
       const bytes = Buffer.byteLength(JSON.stringify(event));
       if (bytes > QUEUE_BYTES) lane.overflow = true;
       else if (!lane.pending.has(event.sequence)) {
@@ -742,9 +752,23 @@ export class ExecutionCaptureCoordinator {
   private row(sql: string, ...values: SQLInputValue[]): Row | undefined {
     return this.database.prepare(sql).get(...values) as Row | undefined;
   }
+  /**
+   * The drain path's constant reads, prepared once on this owned connection.
+   * Callers finish get() synchronously. Admission and handoff reads keep
+   * row(): they run once per pass, not once per fact.
+   */
+  private hotRow(sql: string, ...values: SQLInputValue[]): Row | undefined {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      if (this.statements.size >= MAX_CACHED_STATEMENTS) this.statements.clear();
+      statement = this.database.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement.get(...values) as Row | undefined;
+  }
 
   private liveRuntime(lane: Lane): Runtime | null {
-    const row = this.row(`SELECT d.provider_execution_generation_id,d.provider_work_attempt_id,d.work_attempt_id,
+    const row = this.hotRow(`SELECT d.provider_execution_generation_id,d.provider_work_attempt_id,d.work_attempt_id,
       d.provider_connection_kind,d.provider_connection_pid,d.provider_process_identity,d.provider_connection_url,d.provider_server_auth_path,
       c.delivery_mode,c.runtime_configuration_revision
       FROM runtime_deployments d JOIN agent_configurations c USING(agent_id) WHERE d.agent_id=?`, lane.agentId);
@@ -768,19 +792,30 @@ export class ExecutionCaptureCoordinator {
   ): Runtime | null {
     const kind = lane.handle.providerConnection?.kind;
     if (!birth || !kind || !Number.isSafeInteger(pid) || pid! < 1) return null;
+    const revision = lane.installation.configurationRevision;
+    // A found runtime row is an exact native birth: its identity, authority
+    // mode and config revision are frozen at first materialization and no
+    // code updates or deletes them. So a positive answer for the same
+    // inputs stays true for this lane. A miss is never remembered: the row
+    // can be materialized later.
+    const key = JSON.stringify([generation, kind, pid, birth, revision]);
+    const remembered = lane.knownRuntimes.get(key);
+    if (remembered) return remembered;
     const id = executionRuntimeStorageIdentity(lane.agentId, generation, kind, pid!, birth);
-    const runtime = this.row("SELECT runtime_generation_id,authority_mode,config_revision FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
+    const runtime = this.hotRow("SELECT runtime_generation_id,authority_mode,config_revision FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
     const authorityMode = lifecycleAuthorityModeSchema.safeParse(runtime?.authority_mode);
-    return runtime && authorityMode.success
-      && Number(runtime.config_revision) === lane.installation.configurationRevision
-      ? { id, generation, authorityMode: authorityMode.data } : null;
+    if (!runtime || !authorityMode.success || Number(runtime.config_revision) !== revision) return null;
+    const known: Runtime = Object.freeze({ id, generation, authorityMode: authorityMode.data });
+    if (lane.knownRuntimes.size >= KNOWN_RUNTIMES_PER_LANE) lane.knownRuntimes.clear();
+    lane.knownRuntimes.set(key, known);
+    return known;
   }
 
   private bind(lane: Lane, subject: Runtime, observer: Runtime, recovery?: NativeTurnIdentity): ShadowObserver {
     const previous = lane.observer;
     if (previous && previous.runtimeGenerationId === subject.id && previous.observerRuntimeGenerationId === observer.id
       && previous.recoveryTurnId === (recovery?.turnId ?? null)) return previous;
-    const current = this.row("SELECT observer_epoch FROM execution_observers WHERE agent_id=?", lane.agentId);
+    const current = this.hotRow("SELECT observer_epoch FROM execution_observers WHERE agent_id=?", lane.agentId);
     lane.observer = this.store.bindObserver({ agentId: lane.agentId, subjectRuntimeGenerationId: subject.id,
       observerRuntimeGenerationId: observer.id, sourceId: lane.subscription!.sourceId,
       daemonGenerationId: String(this.options.daemonGeneration()), expectedEpoch: Number(current?.observer_epoch ?? 0), boundAtMs: Date.now(),
@@ -792,7 +827,7 @@ export class ExecutionCaptureCoordinator {
   private turn(lane: Lane, event: NativeExecutionObservation, observed: Runtime): { runtime: Runtime; identity: NativeTurnIdentity } | null {
     const fact = event.fact;
     if (fact.domain !== "turn" && fact.domain !== "execution") return null;
-    const existing = this.row(`SELECT t.turn_id,t.execution_generation_id,t.runtime_generation_id,t.provider_continuation_id,t.provider_turn_id,
+    const existing = this.hotRow(`SELECT t.turn_id,t.execution_generation_id,t.runtime_generation_id,t.provider_continuation_id,t.provider_turn_id,
       r.authority_mode FROM execution_turns t JOIN execution_runtime_generations r USING(agent_id,execution_generation_id,runtime_generation_id)
       WHERE t.agent_id=? AND t.provider_continuation_id=? AND t.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
     const authorityMode = lifecycleAuthorityModeSchema.safeParse(existing?.authority_mode);
@@ -840,7 +875,7 @@ export class ExecutionCaptureCoordinator {
       lane.checkpoints.delete(birth);
     }
     const source = lane.subscription!.sourceId;
-    const prior = this.row("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
+    const prior = this.hotRow("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", lane.agentId);
     // Do not try to re-bind an exited Cursor child merely because the helper
     // replayed its already-committed prefix. Admission below still validates
     // the exact source witness and epoch before accepting anything new.
@@ -866,7 +901,7 @@ export class ExecutionCaptureCoordinator {
     if (prior?.source_id !== source || Number(prior.max_observed_sequence) < position.latestSequence) lane.pendingChange = true;
     lane.frontierStored = true;
     if (lane.suspended) return false;
-    const current = this.row("SELECT last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId)!;
+    const current = this.hotRow("SELECT last_source_sequence FROM execution_observers WHERE agent_id=?", lane.agentId)!;
     let cursor = Number(current.last_source_sequence);
     this.discardPrefix(lane, cursor);
     // Queued live observations can precede the helper's bounded retained suffix.
@@ -883,7 +918,7 @@ export class ExecutionCaptureCoordinator {
       }
       let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
       if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
-        const known = this.row("SELECT execution_generation_id FROM execution_turns WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
+        const known = this.hotRow("SELECT execution_generation_id FROM execution_turns WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
         if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
           event.nativeProcessIdentity, String(known.execution_generation_id));
       }

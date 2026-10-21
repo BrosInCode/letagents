@@ -449,6 +449,7 @@ import {
   formatTimestamp,
   highlightRenderedMessage,
   linkRenderedMessageReferences,
+  mayContainMessageReference,
   renderMessageText,
   isAmbientSystemMessage,
   stripStatusPrefix,
@@ -731,11 +732,13 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
   stopTrackingPreviews?.();
   stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: previewUrls.value }) ?? null;
 }, { immediate: true });
-const linkedText = computed(() => linkRenderedMessageReferences(
-  renderedMessage.value.html,
-  props.messageReferenceIds,
-  props.taskReferenceIds,
-));
+// A message with no msg_/task_ text must not read the reference sets, so a new
+// message elsewhere in the room does not re-run this pass for it.
+const linkedText = computed(() => {
+  const html = renderedMessage.value.html;
+  if (!mayContainMessageReference(html)) return html;
+  return linkRenderedMessageReferences(html, props.messageReferenceIds, props.taskReferenceIds);
+});
 const renderedText = computed(() => highlightRenderedMessage(linkedText.value, props.highlightQuery));
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");

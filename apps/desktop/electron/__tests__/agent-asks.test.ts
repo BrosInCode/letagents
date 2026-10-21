@@ -117,3 +117,15 @@ test("a guest Codex launch must be Read-only", async () => {
   assert.throws(() => attestProviderSpawnPolicy("codex", request("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } })), /guest agent runs Read-only/);
   assert.equal(attestProviderSpawnPolicy("codex", request("read_only", { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } })).approvalPolicy, "never");
 });
+
+test("given agents have their own guest list; the rental marketplace stays Cursor-only", async () => {
+  const profiles = await import("../main/agents/rental-permission-profiles.js");
+  assert.deepEqual(profiles.listRentalSafePermissionProfiles("claude-code"), []);
+  assert.deepEqual(profiles.listRentalSafePermissionProfiles("codex"), []);
+  assert.deepEqual(profiles.listGuestSafePermissionProfiles("claude-code").map(p => p.id), ["read_only"]);
+  assert.deepEqual(profiles.listGuestSafePermissionProfiles("codex").map(p => p.id), ["read_only"]);
+  assert.deepEqual(profiles.listGuestSafePermissionProfiles("cursor").map(p => p.id), ["sandboxed_write"]);
+  assert.throws(() => profiles.assertGuestSafePermissionProfile("codex", "full_access"), /can't be given/);
+  assert.equal(profiles.isGivenAgentEntryId(giftEntryId("ask_1")), true);
+  assert.equal(profiles.isGivenAgentEntryId("supervised_rental_0123456789abcdef"), false);
+});

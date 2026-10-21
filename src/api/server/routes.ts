@@ -1,5 +1,6 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
 import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
+import { registerRoomHistorySummaryRoutes } from "../routes/rooms/history-summary.js";
 import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notification-preferences.js";
 import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
@@ -64,6 +65,7 @@ import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js"
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
 import { registerAccountActivityStreamRoute } from "../routes/account/activity-stream.js";
+import { registerConnectorRoutes } from "../routes/account/connectors/index.js";
 import { AccountActivityHub } from "../account-activity/hub.js";
 import { databaseAccountActivityLoaders } from "../account-activity/loaders.js";
 import { getAccountRoomsForAccount } from "../account-room-membership/list.js";
@@ -518,6 +520,7 @@ export function registerApiRoutes(app: Express): void {
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
   registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });
+  registerConnectorRoutes(app);
   registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
@@ -551,6 +554,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerConversationRoutingRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomSettingsRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomHistorySummaryRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomNotificationPreferenceRoutes(app, roomMessageRouteDeps);
   registerAgentAskRoutes(app, roomMessageRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);

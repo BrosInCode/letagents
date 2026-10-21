@@ -129,6 +129,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { computed, nextTick, ref, watch } from "vue";
 import { Activity, ArrowUpRight, Check, ChevronDown, CircleDashed, Clock3, CornerDownRight, Layers, MessageSquare } from "@lucide/vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
@@ -165,7 +166,7 @@ const recordedTurns = computed(() => execution.value?.availability === "availabl
 const operationCount = computed(() => recordedTurns.value.reduce((count, turn) => count + turn.operations.length, 0));
 function timeLabel(value: string): string {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Time unavailable';
+  return Number.isFinite(date.getTime()) ? formatDate('clockTime', date) : 'Time unavailable';
 }
 const outcomeDescription = computed(() => {
   const receipt = detail.value?.receipt;

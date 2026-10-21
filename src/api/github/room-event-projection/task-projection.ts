@@ -82,6 +82,20 @@ function followUpPullRequestArtifacts(
   });
 }
 
+/** The card's artifacts with this event's pull request added, or null when it is already there. */
+function ticketKeyPullRequestArtifacts(task: Task, event: RepoRoomEvent): TaskWorkflowArtifact[] | null {
+  if (event.kind !== "pull_request") return null;
+  return upsertTaskPullRequestArtifact(task.workflow_artifacts, {
+    provider: event.provider,
+    kind: "pull_request",
+    number: event.pullRequest.number,
+    title: event.pullRequest.title,
+    url: event.pullRequest.url,
+    state: pullRequestState(event),
+    linked_by: "ticket_key",
+  });
+}
+
 export async function getProjectForResolvedTask(
   fallbackProject: Project,
   linkedTask: Pick<Task, "room_id"> | undefined
@@ -141,6 +155,7 @@ export async function applyRepoRoomEventToTask(
     installationId: string | null;
     githubRoutingContext: FocusGitHubRoutingContext;
     messageIdBase?: string | null;
+    matchedByTicketKey?: boolean;
   }
 ): Promise<RepoRoomEventTaskProjection> {
   if (!linkedTask) {
@@ -178,6 +193,20 @@ export async function applyRepoRoomEventToTask(
         : decision.lease?.id ?? null,
       lockId: decision.kind === "deny" ? decision.lock?.id ?? null : null,
     });
+
+    // A pull request that only names the card's ticket was never claimed
+    // work: no lease check on GitHub, no "ignored" notice in the room.
+    if (decision.kind === "deny" && input.matchedByTicketKey) {
+      if (decision.code === "missing_lease") {
+        // Nobody holds the card's work lease: show the pull request on the
+        // card, keep its state current, and leave the work state alone.
+        const linked = ticketKeyPullRequestArtifacts(linkedTask, event);
+        const refreshed = linked ? await updateTask(project.id, linkedTask.id, { workflow_artifacts: linked }) : null;
+        return { task: refreshed ?? linkedTask, authoritative: true };
+      }
+      // A lock, or a lease on another branch: a key alone is too weak to override it.
+      return { task: linkedTask, authoritative: false };
+    }
 
     await maybePublishGitHubLeaseEnforcement({
       project,

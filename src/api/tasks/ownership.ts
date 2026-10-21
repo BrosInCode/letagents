@@ -54,6 +54,7 @@ export function buildTaskUpdatePatch(input: {
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+    external_ref?: string | null;
   };
   actorLabel: string | null;
   actorKey: string | null;
@@ -68,6 +69,7 @@ export function buildTaskUpdatePatch(input: {
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+    external_ref?: string | null;
   } = {};
 
   if (Object.prototype.hasOwnProperty.call(body, "title")) {

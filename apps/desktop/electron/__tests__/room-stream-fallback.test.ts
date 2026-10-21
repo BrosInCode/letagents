@@ -1403,3 +1403,20 @@ test('typing bypasses bootstrap buffers and cannot reach cursors or gap repair',
     reconnected.close();
   } finally { await stopDesktopRoomStream(); router.restore(); }
 });
+
+test("an idle local room skips the message query until a write or the fallback interval", async () => {
+  const room = await localStore.createLocalRoom({ displayName: "Idle poll room" });
+  localPollRooms.length = 0;
+  try {
+    await startDesktopRoomStream(room.roomIdentifier);
+    await sleep(3300);
+    const idleQueries = localPollRooms.filter((id) => id === room.roomIdentifier).length;
+    console.log(`item3 idle local poll over 3.3s: message queries=${idleQueries}`);
+    assert.equal(idleQueries, 1, "one look when the stream opens; no repeat while the room is idle");
+    await localMessages.addLocalChatMessage(room.roomIdentifier, { sender: "tester", text: "wake" });
+    await waitUntil(() => messageIds().length > 0, 4000);
+    assert.ok(localPollRooms.filter((id) => id === room.roomIdentifier).length > idleQueries);
+  } finally {
+    await stopDesktopRoomStream();
+  }
+});

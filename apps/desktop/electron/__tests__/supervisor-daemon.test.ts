@@ -42,7 +42,8 @@ import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/h
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
-const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon/client-lifecycle.ts");
+const daemonClientDirectory = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon");
 
 function approvalStorage() {
   const key = randomBytes(32);
@@ -861,7 +862,7 @@ test("socket readiness timeout preserves the original child and releases it only
   let server: Server | null = null;
   const children: ChildProcess[] = [];
   const client = new SupervisorDaemonClient({
-    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25,
+    socketPath: env.socketPath, daemonScriptPath, startTimeoutMs: 25, readyStatusTtlMs: 0, // this test checks every negotiation
     spawnDaemon: () => {
       const child = new EventEmitter() as ChildProcess;
       children.push(child);
@@ -891,6 +892,102 @@ test("socket readiness timeout preserves the original child and releases it only
     assert.equal(children.length, 2, "losing a ready child's socket still does not prove process exit");
   } finally {
     await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a ready daemon answers repeated ensureRunning calls from a short cache that failures and expiry clear", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 51);
+  const negotiations = () => wire.requests.filter(request => request.method === "daemon.negotiate").length;
+  const spawnDaemon = () => { throw new Error("healthy daemon must be reused"); };
+  let wireOpen = true;
+  try {
+    const uncached = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 0, spawnDaemon });
+    for (let index = 0; index < 10; index += 1) await uncached.ensureRunning();
+    const before = negotiations();
+    console.log(`item4 per 10 ensureRunning calls: negotiations before cache=${before}`);
+    assert.equal(before, 10);
+
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 200, spawnDaemon });
+    const first = await client.ensureRunning();
+    const afterFirst = negotiations();
+    for (let index = 0; index < 9; index += 1) assert.equal((await client.ensureRunning()).generation, first.generation);
+    console.log(`item4 per 10 ensureRunning calls: negotiations with cache=${negotiations() - afterFirst + 1}`);
+    assert.equal(negotiations(), afterFirst, "nine calls inside the window cost no negotiation");
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+    await client.ensureRunning();
+    assert.equal(negotiations(), afterFirst + 1, "an expired entry negotiates again");
+
+    await closeServer(wire.server, env.socketPath);
+    wireOpen = false;
+    await assert.rejects(client.list(), /ENOENT|ECONNREFUSED/, "the lost connection reaches the caller");
+    await assert.rejects(client.ensureRunning(), /healthy daemon must be reused/, "the failure cleared the cached ready status");
+  } finally {
+    if (wireOpen) await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a stale-generation answer or a capability rejection clears the cached ready status, even with no connection error", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const spawnDaemon = () => { throw new Error("healthy daemon must be reused"); };
+  let wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 61);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 60_000, spawnDaemon });
+    assert.equal((await client.ensureRunning()).generation, 61);
+    // Another party replaces the daemon. Each request opens a new socket, so no connection error is raised.
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 62);
+    assert.equal((await client.ensureRunning()).generation, 61, "the cache still answers");
+    assert.equal(await client.bootstrapRoomIngress("entry-1", 62), "stale", "the caller sees the generation mismatch");
+    assert.equal((await client.ensureRunning()).generation, 62, "and the mismatch cleared the cache");
+
+    // Capability rejection from a cached status of an older daemon.
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 63, undefined, undefined, 0, false, false);
+    const old = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 60_000, spawnDaemon });
+    assert.equal((await old.ensureRunning()).capabilities.agentLifecycle, false);
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 64);
+    await assert.rejects(old.setDesiredState("entry-1", "paused"), /too old/);
+    const refreshed = await old.ensureRunning();
+    assert.equal(refreshed.capabilities.agentLifecycle, true, "the rejection cleared the cache");
+    assert.equal(refreshed.generation, 64);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("an error reply from the daemon clears the cached ready status", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const spawnDaemon = () => { throw new Error("healthy daemon must be reused"); };
+  let wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 71);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 60_000, spawnDaemon });
+    assert.equal((await client.ensureRunning()).generation, 71);
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 72);
+    assert.equal((await client.ensureRunning()).generation, 71, "the cache answers until something fails");
+    // This wire daemon answers the method with an error reply, as the real one does for a generation fence.
+    await assert.rejects(client.setDisplayName("entry-1", "Renamed"), /unsupported/);
+    assert.equal((await client.ensureRunning()).generation, 72, "the error reply cleared the cache");
+  } finally {
+    await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
@@ -1786,6 +1883,66 @@ test("a follow-up crosses to the desktop only when every part of it is what the 
   assert.equal(Object.hasOwn(mapEntry(wireEntryWithCausalProjection()).deliveryReceipts![0]!, "followUp"), false, "a receipt that is no follow-up has no such field");
 });
 
+/** A receipt timeline as the daemon keeps it for manifest.list: every phase of one delivered message, with a retry. */
+function wireEntryWithFullReceiptTimeline(): Parameters<typeof mapEntry>[0] {
+  const wire = wireEntryWithCausalProjection();
+  const phases = ["received", "queued", "turn_started", "retry_scheduled", "turn_started", "turn_finished",
+    "conversation_restoring", "conversation_restored", "publish_started", "published"] as const;
+  wire.delivery_receipts = [
+    { ...wire.delivery_receipts![0]!, state: "acknowledged", error: null,
+      timeline: phases.map((phase, index) => ({ event_sequence: index + 1, phase, observed_at: `2026-01-01T00:00:0${index}.000Z`,
+        detail: phase === "conversation_restored" ? "The saved conversation is available again." : null })) },
+    // A receipt none of whose events the state channel keeps.
+    { ...wire.delivery_receipts![0]!, inbox_item_id: "inbox_2", source_message_id: "msg_2", fifo_sequence: 8, state: "pending",
+      attempt_count: 0, canonical_message_id: null, reply_client_message_id: "supervised-room:agent_1:msg_2:reply:v1", error: null,
+      timeline: [{ event_sequence: 1, phase: "received", observed_at: "2026-01-01T00:00:10.000Z", detail: null },
+        { event_sequence: 2, phase: "queued", observed_at: "2026-01-01T00:00:10.000Z", detail: null }] },
+  ];
+  return wire;
+}
+
+test("a state watch snapshot with trimmed receipt timelines keeps every receipt and the kept events", async () => {
+  const full = wireEntryWithFullReceiptTimeline();
+  // The shape the daemon's state-watch projection sends (daemon/state-watch-projection.ts, tested there):
+  // every receipt, each timeline cut to its turn_started and conversation_restored events, in order.
+  const trimmed: Parameters<typeof mapEntry>[0] = { ...full, delivery_receipts: full.delivery_receipts!.map((receipt) => ({
+    ...receipt, timeline: receipt.timeline!.filter((event) => event.phase === "turn_started" || event.phase === "conversation_restored") })) };
+  const mappedFull = mapEntry(full);
+  const mappedTrimmed = mapEntry(trimmed);
+  assert.equal(mappedTrimmed.deliveryReceipts?.length, 2, "a receipt with an emptied timeline is not dropped");
+  assert.deepEqual(mappedTrimmed.deliveryReceipts![0]!.timeline, [
+    { sequence: 3, phase: "turn_started", observedAt: "2026-01-01T00:00:02.000Z", detail: null },
+    { sequence: 5, phase: "turn_started", observedAt: "2026-01-01T00:00:04.000Z", detail: null },
+    { sequence: 8, phase: "conversation_restored", observedAt: "2026-01-01T00:00:07.000Z", detail: "The saved conversation is available again." },
+  ]);
+  assert.deepEqual(mappedTrimmed.deliveryReceipts![1]!.timeline, []);
+  assert.deepEqual(
+    mappedTrimmed.deliveryReceipts!.map((receipt) => ({ ...receipt, timeline: [] })),
+    mappedFull.deliveryReceipts!.map((receipt) => ({ ...receipt, timeline: [] })),
+    "every other receipt field reads the same",
+  );
+
+  // The same snapshot over the client's own watch_state call.
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("This read must not start the daemon"); } });
+  try {
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+    wire.entries.push(trimmed);
+    try {
+      await client.connectIfRunning();
+      const snapshot = await client.watchState({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0 });
+      assert.deepEqual(snapshot.entries[0]?.deliveryReceipts, mappedTrimmed.deliveryReceipts);
+    } finally { await closeServer(wire.server, env.socketPath); }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
   const legacy = wireEntryWithCausalProjection();
   legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
@@ -2156,7 +2313,7 @@ test("runtime recovery sends exact daemon authority and returns the durable repl
     activity: [],
   });
   try {
-    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 0, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
     const recovered = await client.recoverAgentRuntime("agent_dead");
     assert.equal(recovered.id, "agent_dead");
     assert.equal(recovered.observedState, "starting");
@@ -2308,7 +2465,7 @@ test("production create durably proves no mint, grant-only purge survives restar
     await daemon.start();
     const client = new SupervisorDaemonClient({
       socketPath: env.socketPath,
-      daemonScriptPath,
+      daemonScriptPath, readyStatusTtlMs: 0, // the test restarts the daemon behind the client
       spawnDaemon: () => { throw new Error("the real in-process daemon must be reused"); },
     });
     const createInput = {
@@ -3399,7 +3556,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.264");
+    assert.equal(status.implementationVersion, "2.0.265");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3652,9 +3809,11 @@ test("replacement cannot report healthy without acquiring a newer singleton gene
 });
 
 test("every daemon termination signal is identity-guarded and positive-PID only", async () => {
-  const source = await readFile(daemonClientPath, "utf8");
-  const signalCalls = [...source.matchAll(/this\.signalDaemon\(([^;]+)\);/g)].map((match) => match[1]);
+  const clientFiles = (await readdir(daemonClientDirectory)).filter((name) => name.endsWith(".ts")).sort();
+  const allSource = (await Promise.all(clientFiles.map((name) => readFile(join(daemonClientDirectory, name), "utf8")))).join("\n");
+  const signalCalls = [...allSource.matchAll(/this\.signalDaemon\(([^;]+)\);/g)].map((match) => match[1]);
   assert.deepEqual(signalCalls, ["retired.pid, signal"], "all injected daemon signalling is centralized in the guarded helper");
+  const source = await readFile(daemonClientPath, "utf8");
   const helper = source.slice(
     source.indexOf("private guardedSignalRetiredDaemon"),
     source.indexOf("private async waitForRetiredProcessChange"),
