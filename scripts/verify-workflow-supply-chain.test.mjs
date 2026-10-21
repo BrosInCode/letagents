@@ -422,21 +422,21 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   assert.deepEqual(
     ciScripts.filter(containsDirectNpmCi),
     [
-      "npm ci --ignore-scripts --no-audit",
-      "cd src/web && npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
-      "npm ci --ignore-scripts --no-audit\nnpm ci --ignore-scripts --no-audit --prefix apps/desktop",
-      "npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\nnode scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
     ],
     "CI installs must disable npm's implicit unbounded audit",
   );
   assert.deepEqual(
     releaseScripts.filter(containsDirectNpmCi),
     [
-      "npm ci --ignore-scripts --no-audit\n" +
-        "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\n" +
+        "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
     ],
     "release installs must disable npm's implicit unbounded audit",
   );
