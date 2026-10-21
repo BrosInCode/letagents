@@ -50,10 +50,12 @@ function fakeJira(tickets: Map<string, ExternalItem>) {
     listItems: [] as Array<{ filter: string | null; updatedSince?: string; updatedBefore?: string }>,
     getItem: [] as string[],
   };
+  const failures = { listItems: null as Error | null, getItem: null as Error | null };
   const provider = {
     name: "jira",
     async listItems(_conn: ProviderConnection, filter: string | null, opts: { updatedSince?: string; updatedBefore?: string; limit?: number }) {
       calls.listItems.push({ filter, updatedSince: opts.updatedSince, updatedBefore: opts.updatedBefore });
+      if (failures.listItems) throw failures.listItems;
       const project = /project = (\w+)/.exec(filter ?? "")?.[1];
       const key = /key = "([^"]+)"/.exec(filter ?? "")?.[1];
       return [...tickets.values()]
@@ -65,10 +67,11 @@ function fakeJira(tickets: Map<string, ExternalItem>) {
     },
     async getItem(_conn: ProviderConnection, key: string) {
       calls.getItem.push(key);
+      if (failures.getItem) throw failures.getItem;
       return tickets.get(key) ?? null;
     },
   } as unknown as WorkItemProvider;
-  return { provider, calls };
+  return { provider, calls, failures };
 }
 
 async function setup(label: string, tickets = new Map<string, ExternalItem>()) {
@@ -85,7 +88,7 @@ async function setup(label: string, tickets = new Map<string, ExternalItem>()) {
     credentials_version: 1, tracker_user_id: "acc-1", tracker_user_label: "Emmy", status_map: {},
   }).returning();
   const room = await db!.createProjectWithName(unique(`tickets-${label}`));
-  await filters!.upsertRoomTrackerFilter({ room_id: room.id, connection_id: connectionId, filter: "project = HT", enabled: true, account_id: accountId });
+  await filters!.upsertRoomTrackerFilter({ room_id: room.id, connection_id: connectionId, provider: "jira", filter: "project = HT", enabled: true, account_id: accountId });
   const [filter] = await client!.db.select().from(schema!.room_tracker_filters)
     .where((await import("drizzle-orm")).eq(schema!.room_tracker_filters.room_id, room.id));
   const jira = fakeJira(tickets);
@@ -180,8 +183,8 @@ test("a ticket moved to Done updates ticket_state only and leaves the work state
   assert.equal(after?.ticket_state, "done");
   assert.equal(after?.status, "in_progress");
   assert.equal(after?.assignee, "agent-1");
-  // An imported card follows the ticket's title.
-  assert.equal(after?.title, "Ticket HT-2");
+  // A person renamed the imported card, so the rename stays.
+  assert.equal(after?.title, "Our own title");
 });
 
 test("linking a native card merges the imported card and keeps artifacts and mentions", options, async () => {
@@ -297,7 +300,7 @@ test("a room without a filter runs no sync and gets no ticket state", options, a
   assert.equal(await trackerEvents(bare.id), 0);
 
   // Only enabled filters are polled.
-  await filters!.upsertRoomTrackerFilter({ room_id: ctx.room.id, connection_id: ctx.connection.id, filter: "project = HT", enabled: false, account_id: ctx.accountId });
+  await filters!.upsertRoomTrackerFilter({ room_id: ctx.room.id, connection_id: ctx.connection.id, provider: "jira", filter: "project = HT", enabled: false, account_id: ctx.accountId });
   const claimed = await filters!.claimDueRoomTrackerFilters({ now: new Date(), intervalMs: 60_000, limit: 500 });
   assert.ok(!claimed.some((filter) => filter.room_id === ctx.room.id || filter.room_id === bare.id));
 });
@@ -373,4 +376,121 @@ test("a link update that fails leaves the imported card in place", options, asyn
   assert.equal(linked.task?.status, "accepted");
   assert.equal(linked.task?.ticket_state, "todo");
   assert.equal(await db!.getTaskById(ctx.room.id, imported!.id), undefined);
+});
+
+async function filterRow(id: string) {
+  const { eq } = await import("drizzle-orm");
+  const [row] = await client!.db.select().from(schema!.room_tracker_filters).where(eq(schema!.room_tracker_filters.id, id));
+  return row!;
+}
+
+test("a webhook reads only tickets LetAgents holds, and asks for a poll only for new ones", options, async () => {
+  const ctx = await setup("webhook-known");
+  ctx.tickets.set("HT-20", item("HT-20", "todo", "2026-10-21T10:00:00.000Z", "To Do"));
+  await ctx.service.syncFilter(ctx.filter);
+  const before = await filterRow(ctx.filter.id);
+  ctx.jira.calls.getItem.length = 0;
+
+  ctx.tickets.set("HT-20", item("HT-20", "in_progress", "2026-10-21T10:10:00.000Z"));
+  await ctx.service.handleWebhook(ctx.connection, [{ key: "HT-20", item: null, deleted: false }]);
+  assert.deepEqual(ctx.jira.calls.getItem, ["HT-20"]);
+  assert.equal((await filterRow(ctx.filter.id)).sync_requested_at, before.sync_requested_at, "a known ticket asks for no poll");
+
+  await ctx.service.handleWebhook(ctx.connection, [{ key: "ZZ-1", item: null, deleted: false }]);
+  assert.deepEqual(ctx.jira.calls.getItem, ["HT-20"], "an unknown ticket is not read");
+  assert.equal(await count("SELECT count(*)::int AS n FROM external_items WHERE connection_id = $1 AND key = 'ZZ-1'", [ctx.connection.id]), 0);
+  assert.ok((await filterRow(ctx.filter.id)).sync_requested_at, "it asks the filters for an early poll");
+});
+
+test("an early poll waits a minimum gap after the last claim", options, async () => {
+  const ctx = await setup("early-gap");
+  const start = new Date(Date.now() + 60 * 60_000);
+  const claim = (at: Date) => filters!.claimDueRoomTrackerFilters({ now: at, intervalMs: 120_000, limit: 500, earlyGapMs: 15_000 })
+    .then((rows) => rows.find((row) => row.id === ctx.filter.id));
+  const first = await claim(start);
+  assert.ok(first);
+  await client!.pool.query("UPDATE room_tracker_filters SET sync_finished_at = $2, sync_requested_at = $3 WHERE id = $1",
+    [ctx.filter.id, new Date(start.getTime() + 1_000).toISOString(), new Date(start.getTime() + 2_000).toISOString()]);
+  assert.equal(await claim(new Date(start.getTime() + 5_000)), undefined, "not within the gap");
+  assert.ok(await claim(new Date(start.getTime() + 16_000)), "due once the gap passed");
+});
+
+test("a failed poll backs off, doubling, and does not stop the other filters", options, async () => {
+  const { TrackerProviderError } = await import("../connectors/providers/types.js");
+  const ctx = await setup("backoff");
+  ctx.jira.failures.listItems = new TrackerProviderError("definite", "Tracker answered 500", 500);
+  const first = await filters!.claimDueRoomTrackerFilters({ now: new Date(), intervalMs: 60_000, limit: 500 });
+  const mine = first.find((row) => row.id === ctx.filter.id)!;
+  const result = await ctx.service.syncFilter(mine, 60_000);
+  assert.match(result.error ?? "", /500/);
+  const once = await filterRow(ctx.filter.id);
+  assert.equal(once.failure_count, 1);
+  const wait1 = Date.parse(once.backoff_until!) - Date.parse(once.sync_finished_at!);
+  assert.ok(wait1 >= 59_000 && wait1 <= 61_000, `first backoff is one interval (${wait1})`);
+
+  // While backing off, the filter is not claimed.
+  assert.equal((await filters!.claimDueRoomTrackerFilters({ now: new Date(Date.now() + 30_000), intervalMs: 1_000, limit: 500 }))
+    .some((row) => row.id === ctx.filter.id), false);
+
+  // A 429 honours Retry-After when it is longer than the doubled interval.
+  ctx.jira.failures.listItems = new TrackerProviderError("definite", "Tracker answered 429", 429, 20 * 60_000);
+  await ctx.service.syncFilter({ ...(await filterRow(ctx.filter.id)) }, 60_000);
+  const twice = await filterRow(ctx.filter.id);
+  assert.equal(twice.failure_count, 2);
+  const wait2 = Date.parse(twice.backoff_until!) - Date.parse(twice.sync_finished_at!);
+  assert.ok(wait2 >= 20 * 60_000 - 1_000, `Retry-After wins (${wait2})`);
+
+  // Success clears the backoff.
+  ctx.jira.failures.listItems = null;
+  await ctx.service.syncFilter({ ...(await filterRow(ctx.filter.id)) }, 60_000);
+  const ok = await filterRow(ctx.filter.id);
+  assert.equal(ok.failure_count, 0);
+  assert.equal(ok.backoff_until, null);
+});
+
+test("auto import does not ask a failing tracker again for a minute", options, async () => {
+  const { TrackerProviderError } = await import("../connectors/providers/types.js");
+  const ctx = await setup("import-errors");
+  ctx.jira.failures.getItem = new TrackerProviderError("definite", "Tracker answered 503", 503);
+  const tryImport = () => ctx.service.importTicketForRoom(ctx.room.id, [{ provider: "jira", key: "HT-30", ref: "jira:HT-30" }]);
+  assert.equal(await tryImport(), undefined);
+  assert.equal(await tryImport(), undefined);
+  assert.deepEqual(ctx.jira.calls.getItem, ["HT-30"], "the second event is answered from the error cache");
+});
+
+test("a person's rename of an imported card survives later syncs", options, async () => {
+  const ctx = await setup("rename");
+  ctx.tickets.set("HT-40", item("HT-40", "todo", "2026-10-21T10:00:00.000Z", "To Do"));
+  await ctx.service.syncFilter(ctx.filter);
+  const [card] = await roomTasks(ctx.room.id);
+  ctx.tickets.set("HT-40", { ...item("HT-40", "todo", "2026-10-21T10:05:00.000Z", "To Do"), title: "Tracker renamed it" });
+  await ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-40")!, { roomIds: [ctx.room.id] });
+  assert.equal((await db!.getTaskById(ctx.room.id, card!.id))?.title, "Tracker renamed it", "untouched imported titles follow the ticket");
+  await db!.updateTask(ctx.room.id, card!.id, { title: "Our words" });
+  ctx.tickets.set("HT-40", { ...item("HT-40", "in_progress", "2026-10-21T10:09:00.000Z"), title: "Tracker again" });
+  await ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-40")!, { roomIds: [ctx.room.id] });
+  const after = await db!.getTaskById(ctx.room.id, card!.id);
+  assert.equal(after?.title, "Our words");
+  assert.equal(after?.ticket_state, "in_progress");
+});
+
+test("busy tickets do not push pull request status out of the artifact status read", options, async () => {
+  const ctx = await setup("artifact-status");
+  ctx.tickets.set("HT-50", item("HT-50", "todo", "2026-10-21T09:00:00.000Z", "To Do"));
+  await ctx.service.syncFilter(ctx.filter);
+  const [card] = await roomTasks(ctx.room.id);
+  const prUrl = "https://github.com/BrosInCode/letagents/pull/950";
+  await db!.insertGitHubRoomEvent({
+    room_id: ctx.room.id, event_type: "pull_request", action: "opened", idempotency_key: unique("pr"),
+    github_object_url: prUrl, title: "Fix", state: "open", linked_task_id: card!.id,
+    provider_event_at: "2026-10-21T09:30:00.000Z",
+  });
+  // 600 newer tracker events linked to the same card.
+  const values = Array.from({ length: 600 }, (_, index) => {
+    const at = new Date(Date.parse("2026-10-21T10:00:00.000Z") + index * 1_000).toISOString();
+    return `('gre_t${index}_${Date.now()}', '${ctx.room.id}', 'tracker_ticket', 'ticket_state_changed', '${unique("t")}', '${card!.id}', '${at}', '${at}')`;
+  });
+  await client!.pool.query(`INSERT INTO github_room_events (id, room_id, event_type, action, idempotency_key, linked_task_id, event_order_at, created_at) VALUES ${values.join(",")}`);
+  const status = (await db!.getTasksGitHubArtifactStatus(ctx.room.id)).get(card!.id);
+  assert.equal(status?.pr_state, "open");
 });

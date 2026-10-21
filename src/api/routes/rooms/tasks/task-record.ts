@@ -380,6 +380,13 @@ export function registerTaskRecordRoutes(
         } catch {
           console.warn("Task event delivery failed after committed update", { roomId: project.id, taskId });
         }
+        if (mergedTaskId) {
+          try {
+            deps.taskEvents.emit("task:removed", { projectId: project.id, taskId: mergedTaskId });
+          } catch {
+            console.warn("Task removal event failed after a ticket merge", { roomId: project.id, taskId: mergedTaskId });
+          }
+        }
         // merged_task_id names the imported card this link removed from the board.
         res.json({ ...taskWithDetails, room_id: project.id, ...(mergedTaskId ? { merged_task_id: mergedTaskId } : {}) });
       } else {

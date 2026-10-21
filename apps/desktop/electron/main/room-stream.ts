@@ -351,6 +351,15 @@ function handleRoomStreamFrame(
     return;
   }
 
+  // A card left the board: a tracker duplicate merged into a person's card.
+  if (eventName === "task_remove") {
+    if (typeof payload.task_id === "string" && payload.task_id) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+      emitRoomStreamEvent({ type: "task_remove", roomIdentifier: eventRoomIdentifier, taskId: payload.task_id });
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
+
   if (eventName === "room_sync") {
     const cursorPresent = Object.prototype.hasOwnProperty.call(payload, "event_cursor")
       || eventCursor !== null;

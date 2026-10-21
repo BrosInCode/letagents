@@ -12,6 +12,7 @@ const { createConnectorCipher } = await import("../connectors/crypto.js");
 const { createWorkItemProviders } = await import("../connectors/providers/index.js");
 const { trackerPollIntervalMs, DEFAULT_TRACKER_POLL_MS } = await import("../connectors/sync.js");
 const { linearTeamKeysInFilter } = await import("../connectors/room-filters.js");
+const { parseRetryAfterMs } = await import("../connectors/providers/http.js");
 import type { ExternalItemChange } from "../connectors/providers/types.js";
 import type { TrackerConnectionRow } from "../connectors/store.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
@@ -58,6 +59,10 @@ test("poll interval and Linear team keys", () => {
   assert.equal(trackerPollIntervalMs({ LETAGENTS_TRACKER_POLL_MS: "1000" }), 15_000);
   assert.equal(trackerPollIntervalMs({ LETAGENTS_TRACKER_POLL_MS: "nope" }), DEFAULT_TRACKER_POLL_MS);
   assert.deepEqual(linearTeamKeysInFilter("team:eng project:abc"), ["ENG"]);
+  assert.equal(parseRetryAfterMs("120"), 120_000);
+  assert.equal(parseRetryAfterMs(new Date(1_000_000 + 30_000).toUTCString(), 1_000_000), 30_000);
+  assert.equal(parseRetryAfterMs("99999"), 60 * 60_000);
+  assert.equal(parseRetryAfterMs("soon"), null);
 });
 
 test("the webhook route verifies the signature, then hands the keys to sync once", async () => {

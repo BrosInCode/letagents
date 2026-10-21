@@ -16,6 +16,7 @@ import {
   deleteRoomTrackerFilter,
   getRoomTrackerFilter,
   listRoomTrackerFilters,
+  RoomTrackerFilterProviderTakenError,
   toRoomTrackerFilterView,
   upsertRoomTrackerFilter,
 } from "../../connectors/room-filters.js";
@@ -147,13 +148,20 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
       });
       return;
     }
-    await upsertRoomTrackerFilter({
-      room_id: project.id,
-      connection_id: connection.id,
-      filter,
-      enabled: body.enabled !== false,
-      account_id: accountId,
-    });
+    try {
+      await upsertRoomTrackerFilter({
+        room_id: project.id,
+        connection_id: connection.id,
+        provider: connection.provider as TrackerProvider,
+        filter,
+        enabled: body.enabled !== false,
+        account_id: accountId,
+      });
+    } catch (error) {
+      if (!(error instanceof RoomTrackerFilterProviderTakenError)) throw error;
+      res.status(409).json({ error: error.message, code: error.code });
+      return;
+    }
     res.json(await list(req, project));
   });
 
@@ -177,6 +185,7 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
     await upsertRoomTrackerFilter({
       room_id: project.id,
       connection_id: existing.connection_id,
+      provider: existing.provider,
       filter,
       enabled: typeof body.enabled === "boolean" ? body.enabled : existing.enabled,
       account_id: accountId,

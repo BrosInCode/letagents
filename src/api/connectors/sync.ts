@@ -55,6 +55,7 @@ const FILTERS_PER_TICK = 10;
 const MAX_WEBHOOK_KEYS = 20;
 const MAX_AUTO_IMPORT_KEYS = 3;
 const NOT_FOUND_TTL_MS = 10 * 60_000;
+const ERROR_SKIP_MS = 60_000;
 const MAX_TITLE_LENGTH = 500;
 
 export function trackerPollIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -93,7 +94,7 @@ export interface ApplyTrackerItemOptions {
 
 export interface TrackerSync {
   applyItem(connection: TrackerConnectionRow, item: ExternalItem, options?: ApplyTrackerItemOptions): Promise<ApplyTrackerItemResult>;
-  syncFilter(filter: RoomTrackerFilterRow): Promise<{ seen: number; changed: number; error: string | null }>;
+  syncFilter(filter: RoomTrackerFilterRow, intervalMs?: number): Promise<{ seen: number; changed: number; error: string | null }>;
   handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]): Promise<{ applied: number }>;
   importTicketForRoom(roomId: string, matches: readonly TicketKeyMatch[]): Promise<Task | undefined>;
   /** After a person links a card to a ticket: bind it if the room's filter matches the ticket. */
@@ -157,7 +158,12 @@ function cardTitle(item: ExternalItem): string {
 
 export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
   const now = deps.now ?? (() => new Date());
-  const notFound = new Map<string, number>();
+  // Per filter and key: until when auto import does not ask the tracker again.
+  const skipped = new Map<string, number>();
+  const skip = (key: string, ms: number) => {
+    if (skipped.size > 10_000) skipped.clear();
+    skipped.set(key, now().getTime() + ms);
+  };
 
   async function applyItem(
     connection: TrackerConnectionRow,
@@ -223,7 +229,10 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
           },
         });
       }
-      const changeId = item.tracker_updated_at ?? `${item.ticket_state}:${item.raw_status}`;
+      // Events are recorded only on a card change under the item lock, so this
+      // id never repeats a write; the time keeps A → B → A distinct without
+      // a tracker timestamp.
+      const changeId = item.tracker_updated_at ?? syncedAt;
 
       // Ticket states belong only in rooms that import from this connection.
       const filterRooms = await roomIdsWithTrackerFilter(connection.id, tx);
@@ -238,8 +247,12 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         const patch: Partial<TaskRow> = {};
         if (card.ticket_state !== item.ticket_state) patch.ticket_state = item.ticket_state;
         if (card.external_item_id !== itemId) patch.external_item_id = itemId;
-        // A person's own card keeps its title; an imported card follows the ticket.
-        if (isTrackerImportCreator(card.created_by) && card.title !== cardTitle(item)) patch.title = cardTitle(item);
+        // A person's own card keeps its title. An imported card follows the
+        // ticket until someone renames it: a title that no longer equals the
+        // last synced one is theirs.
+        const syncedTitle = cached ? cardTitle(rowToItem(cached)) : null;
+        if (isTrackerImportCreator(card.created_by) && card.title !== cardTitle(item)
+          && (syncedTitle === null || card.title === syncedTitle)) patch.title = cardTitle(item);
         if (Object.keys(patch).length === 0) continue;
         const [row] = await tx.update(tasks).set({ ...patch, updated_at: syncedAt })
           .where(and(eq(tasks.room_id, card.room_id), eq(tasks.number, card.number)))
@@ -341,13 +354,13 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     return LOCAL_SYNC_ERROR;
   }
 
-  async function syncFilter(filter: RoomTrackerFilterRow) {
+  async function syncFilter(filter: RoomTrackerFilterRow, intervalMs = trackerPollIntervalMs()) {
     const claimedAt = filter.sync_claimed_at;
     const startedAt = now().toISOString();
     const connection = await deps.store.get(filter.connection_id);
     if (!connection || connection.status !== "active") {
       const error = connection ? "The tracker connection needs attention in Settings → Ticket trackers." : "The tracker connection was removed.";
-      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error });
+      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error, failed: { intervalMs } });
       return { seen: 0, changed: 0, error };
     }
     try {
@@ -387,8 +400,15 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
       await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: true, error: warning });
       return { seen, changed, error: warning };
     } catch (error) {
-      const text = await failureText(connection, error);
-      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error: text });
+      const text = await failureText(connection, error).catch(() => LOCAL_SYNC_ERROR);
+      await finishRoomTrackerFilterSync({
+        id: filter.id,
+        claimed_at: claimedAt,
+        started_at: startedAt,
+        advance: false,
+        error: text,
+        failed: { intervalMs, retryAfterMs: error instanceof TrackerProviderError ? error.retryAfterMs : null },
+      });
       return { seen: 0, changed: 0, error: text };
     }
   }
@@ -396,7 +416,11 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
   async function handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]) {
     if (connection.status !== "active") return { applied: 0 };
     const provider = deps.providers[connection.provider as TrackerProvider];
-    const keys = [...new Set(changes.filter((change) => !change.deleted).map((change) => change.key))].slice(0, MAX_WEBHOOK_KEYS);
+    const named = [...new Set(changes.filter((change) => !change.deleted).map((change) => change.key))].slice(0, MAX_WEBHOOK_KEYS);
+    // Only tickets LetAgents already holds are read: a cached item, or a card
+    // naming the key in a room that imports from this connection. Any other
+    // key is left to the filters' next poll.
+    const keys = named.length === 0 ? [] : await knownKeys(connection, named);
     let applied = 0;
     for (const key of keys) {
       try {
@@ -412,9 +436,26 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         if (error instanceof TrackerProviderError && error.outcome === "auth") break;
       }
     }
-    // A new ticket may match a room's filter: poll this connection's filters soon.
-    if (keys.length > 0) await requestRoomTrackerFilterSync(connection.id, now());
+    // A ticket new to LetAgents may match a room's filter: poll soon.
+    if (named.length > keys.length) await requestRoomTrackerFilterSync(connection.id, now());
     return { applied };
+  }
+
+  async function knownKeys(connection: TrackerConnectionRow, keys: readonly string[]): Promise<string[]> {
+    const provider = connection.provider as TrackerProvider;
+    const cached = await db.select({ key: external_items.key }).from(external_items)
+      .where(and(eq(external_items.connection_id, connection.id), inArray(external_items.key, [...keys])));
+    const known = new Set(cached.map((row) => row.key));
+    const rest = keys.filter((key) => !known.has(key));
+    if (rest.length > 0) {
+      const rooms = await roomIdsWithTrackerFilter(connection.id);
+      if (rooms.length > 0) {
+        const cards = await db.select({ ref: tasks.external_ref }).from(tasks)
+          .where(and(inArray(tasks.room_id, rooms), inArray(tasks.external_ref, rest.map((key) => formatExternalRef(provider, key)))));
+        for (const card of cards) if (card.ref) known.add(card.ref.slice(card.ref.indexOf(":") + 1));
+      }
+    }
+    return keys.filter((key) => known.has(key));
   }
 
   /**
@@ -445,20 +486,23 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const scope = await getCachedRoomTrackerScope(roomId);
     for (const source of scope.sources.filter((candidate) => candidate.provider === match.provider)) {
       const missKey = `${source.filter_id}:${match.key}`;
-      const missedAt = notFound.get(missKey);
-      if (missedAt !== undefined && now().getTime() - missedAt < NOT_FOUND_TTL_MS) continue;
+      const skipUntil = skipped.get(missKey);
+      if (skipUntil !== undefined && now().getTime() < skipUntil) continue;
       const connection = await activeConnection(source.connection_id);
       if (!connection) continue;
       try {
         const item = await fetchMatchingItem(source, connection, match.key);
         if (!item) {
-          if (notFound.size > 10_000) notFound.clear();
-          notFound.set(missKey, now().getTime());
+          skip(missKey, NOT_FOUND_TTL_MS);
           continue;
         }
         await applyItem(connection, item, { roomIds: [roomId] });
         return true;
       } catch (error) {
+        // This runs inline in the GitHub projection path: a failing tracker is
+        // not asked again for this key for a minute, or as long as it asked.
+        const retryAfter = error instanceof TrackerProviderError ? error.retryAfterMs ?? 0 : 0;
+        skip(missKey, Math.max(ERROR_SKIP_MS, retryAfter));
         await failureText(connection, error).catch(() => undefined);
       }
     }
@@ -485,8 +529,15 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
   }
 
   async function tick(intervalMs = trackerPollIntervalMs()) {
-    const due = await claimDueRoomTrackerFilters({ now: now(), intervalMs, limit: FILTERS_PER_TICK });
-    for (const filter of due) await syncFilter(filter);
+    const due = await claimDueRoomTrackerFilters({ now: now(), intervalMs, limit: FILTERS_PER_TICK, earlyGapMs: MIN_TRACKER_POLL_MS });
+    for (const filter of due) {
+      try {
+        await syncFilter(filter, intervalMs);
+      } catch (error) {
+        // One filter's failure never stops the others; its claim expires.
+        console.error("Tracker filter sync failed:", connectorErrorText(error));
+      }
+    }
     return due.length;
   }
 
@@ -508,8 +559,13 @@ export function getDefaultTrackerSync(): TrackerSync | null {
     providers,
     connections: createConnectionService({ store: trackerConnectionStore, cipher, providers }),
     store: trackerConnectionStore,
-    // No task event: boards read cards on their own refresh, and a ticket
-    // change must not look like room work to wake rules (invariant 4).
+    // Open boards and MCP streams get the card at once. Wake rules read the
+    // card's work state, which sync never changes.
+    onTaskChanged: (roomId, task) => {
+      void import("../server/events.js").then(({ taskEvents }) => {
+        taskEvents.emit("task:updated", { projectId: roomId, task });
+      }).catch(() => undefined);
+    },
   });
   return defaultSync;
 }

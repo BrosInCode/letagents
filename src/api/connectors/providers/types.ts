@@ -106,7 +106,13 @@ export type TrackerErrorOutcome = "definite" | "ambiguous" | "auth";
 
 export class TrackerProviderError extends Error {
   readonly code = "tracker_provider_error";
-  constructor(readonly outcome: TrackerErrorOutcome, message: string, readonly status: number | null = null) {
+  constructor(
+    readonly outcome: TrackerErrorOutcome,
+    message: string,
+    readonly status: number | null = null,
+    /** How long the tracker asked callers to wait (Retry-After), when it said. */
+    readonly retryAfterMs: number | null = null,
+  ) {
     super(message);
     this.name = "TrackerProviderError";
   }

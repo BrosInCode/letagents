@@ -113,6 +113,8 @@ export const room_tracker_filters = pgTable(
     connection_id: text("connection_id")
       .notNull()
       .references(() => tracker_connections.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    /** The connection's tracker. One connection per tracker in a room: cards match by `provider:KEY`. */
+    provider: text("provider").notNull(),
     filter: text("filter").notNull(),
     enabled: boolean("enabled").notNull().default(true),
     /** The connection's owner: only they may point a room at their tracker. */
@@ -125,12 +127,17 @@ export const room_tracker_filters = pgTable(
     sync_finished_at: timestamp("sync_finished_at", { mode: "string", withTimezone: true }),
     /** A webhook asks for an early poll by setting this. */
     sync_requested_at: timestamp("sync_requested_at", { mode: "string", withTimezone: true }),
+    /** Polls failed in a row; the next poll waits until `backoff_until`. */
+    failure_count: integer("failure_count").notNull().default(0),
+    backoff_until: timestamp("backoff_until", { mode: "string", withTimezone: true }),
     last_error: text("last_error"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     room_connection_unique: uniqueIndex("room_tracker_filters_room_connection_uq").on(table.room_id, table.connection_id),
+    room_provider_unique: uniqueIndex("room_tracker_filters_room_provider_uq").on(table.room_id, table.provider),
+    provider_check: check("room_tracker_filters_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
     connection_idx: index("room_tracker_filters_connection_idx").on(table.connection_id),
     enabled_idx: index("room_tracker_filters_enabled_idx").on(table.sync_claimed_at).where(sql`${table.enabled}`),
   }),

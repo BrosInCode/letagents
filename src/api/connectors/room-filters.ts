@@ -15,6 +15,24 @@ export interface RoomTrackerFilterWithConnection extends RoomTrackerFilterRow {
   connection_status: string;
 }
 
+export class RoomTrackerFilterProviderTakenError extends Error {
+  readonly code = "tracker_filter_provider_taken";
+  constructor(provider: TrackerProvider) {
+    super(`This room already imports ${provider === "jira" ? "Jira" : "Linear"} tickets through another connection. Remove that filter first.`);
+    this.name = "RoomTrackerFilterProviderTakenError";
+  }
+}
+
+function isUniqueViolation(error: unknown, constraint: string): boolean {
+  for (let current: unknown = error, depth = 0; current && depth < 4; depth += 1) {
+    const candidate = current as { code?: unknown; constraint?: unknown; message?: unknown; cause?: unknown };
+    if (candidate.code === "23505" && (candidate.constraint === constraint
+      || (typeof candidate.message === "string" && candidate.message.includes(constraint)))) return true;
+    current = candidate.cause;
+  }
+  return false;
+}
+
 export function newRoomTrackerFilterId(): string {
   return `rtf_${randomUUID()}`;
 }
@@ -77,15 +95,17 @@ export async function getRoomTrackerFilter(roomId: string, id: string): Promise<
 export async function upsertRoomTrackerFilter(input: {
   room_id: string;
   connection_id: string;
+  provider: TrackerProvider;
   filter: string;
   enabled: boolean;
   account_id: string;
 }): Promise<RoomTrackerFilterRow> {
   const now = new Date().toISOString();
-  const [row] = await db.insert(room_tracker_filters).values({
+  const write = () => db.insert(room_tracker_filters).values({
     id: newRoomTrackerFilterId(),
     room_id: input.room_id,
     connection_id: input.connection_id,
+    provider: input.provider,
     filter: input.filter,
     enabled: input.enabled,
     created_by_account_id: input.account_id,
@@ -99,12 +119,22 @@ export async function upsertRoomTrackerFilter(input: {
       last_synced_at: sql`CASE WHEN ${room_tracker_filters.filter} = ${input.filter} THEN ${room_tracker_filters.last_synced_at} ELSE NULL END`,
       sync_claimed_at: null,
       sync_finished_at: null,
+      failure_count: 0,
+      backoff_until: null,
       last_error: null,
       updated_at: now,
     },
   }).returning();
+  let rows: RoomTrackerFilterRow[];
+  try {
+    rows = await write();
+  } catch (error) {
+    // The unique index settles two admins adding filters at the same moment.
+    if (isUniqueViolation(error, "room_tracker_filters_room_provider_uq")) throw new RoomTrackerFilterProviderTakenError(input.provider);
+    throw error;
+  }
   invalidateRoomTrackerScope(input.room_id);
-  return row!;
+  return rows[0]!;
 }
 
 export async function deleteRoomTrackerFilter(roomId: string, id: string): Promise<boolean> {
@@ -127,9 +157,12 @@ export async function claimDueRoomTrackerFilters(input: {
   intervalMs: number;
   limit: number;
   staleMs?: number;
+  /** A webhook's early poll waits at least this long after the last claim. */
+  earlyGapMs?: number;
 }): Promise<RoomTrackerFilterRow[]> {
   const claimedAt = input.now.toISOString();
   const dueCutoff = new Date(input.now.getTime() - input.intervalMs).toISOString();
+  const earlyCutoff = new Date(input.now.getTime() - Math.min(input.earlyGapMs ?? 15_000, input.intervalMs)).toISOString();
   const staleCutoff = new Date(input.now.getTime() - Math.max(input.staleMs ?? 10 * 60_000, input.intervalMs)).toISOString();
   const f = room_tracker_filters;
   const result = await db.execute(sql`
@@ -137,11 +170,13 @@ export async function claimDueRoomTrackerFilters(input: {
      WHERE ${f.id} IN (
        SELECT ${f.id} FROM ${f}
         WHERE ${f.enabled}
+          AND (${f.backoff_until} IS NULL OR ${f.backoff_until} <= ${claimedAt})
           AND (
             ${f.sync_claimed_at} IS NULL
             OR ${f.sync_claimed_at} < ${staleCutoff}
             OR (${f.sync_finished_at} >= ${f.sync_claimed_at}
-                AND (${f.sync_claimed_at} < ${dueCutoff} OR ${f.sync_requested_at} > ${f.sync_claimed_at}))
+                AND (${f.sync_claimed_at} < ${dueCutoff}
+                     OR (${f.sync_requested_at} > ${f.sync_claimed_at} AND ${f.sync_claimed_at} < ${earlyCutoff})))
           )
         ORDER BY ${f.sync_claimed_at} ASC NULLS FIRST
         LIMIT ${input.limit}
@@ -153,6 +188,7 @@ export async function claimDueRoomTrackerFilters(input: {
     id: String(row.id),
     room_id: String(row.room_id),
     connection_id: String(row.connection_id),
+    provider: String(row.provider),
     filter: String(row.filter),
     enabled: Boolean(row.enabled),
     created_by_account_id: String(row.created_by_account_id),
@@ -160,6 +196,8 @@ export async function claimDueRoomTrackerFilters(input: {
     sync_claimed_at: toIso(row.sync_claimed_at),
     sync_finished_at: toIso(row.sync_finished_at),
     sync_requested_at: toIso(row.sync_requested_at),
+    failure_count: Number(row.failure_count ?? 0),
+    backoff_until: toIso(row.backoff_until),
     last_error: row.last_error == null ? null : String(row.last_error),
     created_at: toIso(row.created_at) ?? claimedAt,
     updated_at: toIso(row.updated_at) ?? claimedAt,
@@ -172,10 +210,14 @@ function toIso(value: unknown): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+export const MAX_FILTER_BACKOFF_MS = 30 * 60_000;
+
 /**
  * Records a finished poll under its claim. A filter changed meanwhile (its
  * claim was cleared) keeps its fresh state. `advance` moves the cursor;
  * `error` is shown to the room (a warning when the cursor still advances).
+ * A failed poll (`failed`) backs off: the interval doubles per failure in a
+ * row, at most 30 minutes, and never less than the tracker's Retry-After.
  */
 export async function finishRoomTrackerFilterSync(input: {
   id: string;
@@ -184,15 +226,28 @@ export async function finishRoomTrackerFilterSync(input: {
   started_at: string;
   advance: boolean;
   error: string | null;
+  failed?: { intervalMs: number; retryAfterMs?: number | null };
 }): Promise<void> {
-  await db.update(room_tracker_filters).set({
+  const now = new Date();
+  const f = room_tracker_filters;
+  const failed = input.failed;
+  await db.update(f).set({
     ...(input.advance ? { last_synced_at: input.started_at } : {}),
     last_error: input.error,
-    sync_finished_at: new Date().toISOString(),
+    sync_finished_at: now.toISOString(),
+    ...(failed
+      ? {
+          failure_count: sql`${f.failure_count} + 1`,
+          backoff_until: sql`${now.toISOString()}::timestamptz + make_interval(secs => GREATEST(
+            ${Math.max(0, Math.round((failed.retryAfterMs ?? 0) / 1000))},
+            LEAST(${MAX_FILTER_BACKOFF_MS / 1000}, ${Math.round(failed.intervalMs / 1000)} * power(2, LEAST(${f.failure_count}, 16)))
+          ))`,
+        }
+      : { failure_count: 0, backoff_until: null }),
   })
     .where(and(
-      eq(room_tracker_filters.id, input.id),
-      sql`${room_tracker_filters.sync_claimed_at} IS NOT DISTINCT FROM ${input.claimed_at}::timestamptz`,
+      eq(f.id, input.id),
+      sql`${f.sync_claimed_at} IS NOT DISTINCT FROM ${input.claimed_at}::timestamptz`,
     ));
 }
 

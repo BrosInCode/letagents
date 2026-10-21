@@ -121,7 +121,9 @@ the cards it imported stay on the board with their last ticket state.
   external ref, its ticket state, and the work state `proposed`. The card's
   creator is `tracker:jira` or `tracker:linear`.
 - **Changed ticket**: sync updates the card's ticket state. An imported card
-  also takes the ticket's new title. A card a person made keeps its own title.
+  also takes the ticket's new title, until someone renames the card: a title
+  that no longer equals the last synced title is kept. A card a person made
+  keeps its own title.
   Sync never changes a card's work state, owner or anything else.
 - **Two states, two owners.** The board column is the work state, owned by
   LetAgents. The ticket state is the tracker's. For example, a ticket moved
@@ -141,6 +143,10 @@ it saw, up to 1,000 tickets. Past that the oldest changes are skipped and the
 filter shows a warning: narrow the filter. Two API processes never poll the
 same filter at once: each poll claims its filter row first, and a running poll
 keeps its claim until it finishes (or for 10 minutes if its process died).
+A failed poll waits before the next try: one interval after the first
+failure, doubling after each further failure, at most 30 minutes, and never
+less than the tracker's `Retry-After`. A success clears the wait. One filter's
+failure never stops the others.
 
 ### One path for polls and webhooks
 
@@ -169,10 +175,11 @@ extra is stored. A webhook needs `LETAGENTS_BASE_URL` set to an https URL.
   the body's `timestamp` must be within 10 minutes.
 - Linear deliveries must carry `Linear-Signature` (HMAC of the body), and the
   body's `webhookTimestamp` must be within 5 minutes.
-- The server answers `202` at once. The payload only names tickets: sync reads
-  each ticket from the tracker and updates the cards already bound to it. It
-  then asks for an early poll of the connection's filters, so a new ticket
-  that matches a filter is imported at the next tick.
+- The server answers `202` at once. The payload only names tickets. Sync reads
+  only tickets LetAgents already holds (a cached ticket, or a card naming the
+  key in a room that imports from the connection) and updates the cards bound
+  to them. A ticket new to LetAgents makes the connection's filters ask for an
+  early poll, which runs at least 15 seconds after the previous poll began.
 
 ### Auto import
 
@@ -183,7 +190,8 @@ filter's JQL plus `key = "<KEY>"`; for Linear it compares the ticket's team and
 project with the filter's terms. A key outside the filter imports nothing, so
 a pull request cannot pull an unrelated ticket into the room. The pull
 request then attaches to that card. At most three keys are tried per event; a
-key the tracker does not know is not asked for again for 10 minutes. Room
+key the tracker does not know is not asked for again for 10 minutes, and a
+key whose read failed waits a minute (or the tracker's `Retry-After`). Room
 messages do not import tickets.
 
 ### Linking your own card
@@ -204,7 +212,7 @@ Only an untouched imported card is merged: status proposed, accepted or
 cancelled, no owner, and no lease ever. Otherwise the link is refused with
 `imported_card_busy`; use that card, or cancel it first. If any part of your
 edit fails, nothing is merged. The response names the removed card in
-`merged_task_id`. A card that a person
+`merged_task_id`, and the room stream sends `task_remove` so open boards drop it. A card that a person
 or an agent created is never merged away (`created_by` values that start with
 `tracker:` are reserved for sync).
 
@@ -213,7 +221,8 @@ or an agent created is never merged away (`created_by` values that start with
 Each import and each ticket state change adds a quiet event in the room's
 **Events** tab, never a chat message. These events have
 `event_type = "tracker_ticket"` and `metadata.source = "tracker_sync"`. They
-are not sent on the GitHub event bus, so wake rules and the rules engine
+are left out of a card's pull request and CI status, and they are not sent
+on the GitHub event bus, so wake rules and the rules engine
 (a later part of this feature) never act on them: a ticket transition cannot
 trigger itself.
 
