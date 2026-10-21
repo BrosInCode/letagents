@@ -196,9 +196,11 @@ export const tracker_rule_versions = pgTable(
 );
 
 /**
- * One row per rule that matched one repo event: the audit shown in the board
- * governance section. Unique per rule and delivery, so a rule that applies to
- * several rooms writes once per event, and a redelivery reserves nothing new.
+ * One row per rule that matched one repo event for one ticket: the audit
+ * shown in the board governance section. Unique per rule, delivery and
+ * ticket, so a rule that applies to several rooms writes once per event, and
+ * a redelivery reserves nothing new. `effect_ids` grows one journal row at a
+ * time: an action is reserved only after the one before it succeeded.
  */
 export const tracker_rule_runs = pgTable(
   "tracker_rule_runs",
@@ -226,12 +228,13 @@ export const tracker_rule_runs = pgTable(
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    rule_delivery_unique: uniqueIndex("tracker_rule_runs_rule_delivery_uq").on(table.rule_id, table.delivery_id),
+    rule_delivery_unique: uniqueIndex("tracker_rule_runs_rule_delivery_uq").on(table.rule_id, table.delivery_id, table.external_ref),
+    pending_idx: index("tracker_rule_runs_pending_idx").on(table.updated_at).where(sql`${table.outcome} = 'pending'`),
     room_created_idx: index("tracker_rule_runs_room_created_idx").on(table.room_id, table.created_at),
     debounce_idx: index("tracker_rule_runs_debounce_idx").on(table.rule_id, table.external_ref, table.created_at),
     outcome_check: check(
       "tracker_rule_runs_outcome_check",
-      sql`${table.outcome} IN ('pending', 'succeeded', 'failed', 'quarantined', 'error')`,
+      sql`${table.outcome} IN ('pending', 'succeeded', 'failed', 'quarantined', 'error', 'skipped')`,
     ),
   }),
 );

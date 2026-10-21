@@ -12,6 +12,7 @@ import type { TrackerRuleRouteDeps } from "../routes/account/connectors/rules.js
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerTrackerRuleRoutes } = await import("../routes/account/connectors/rules.js");
+const { TrackerRuleLimitError } = await import("../connectors/rules/store.js");
 
 const CONNECTION = "tcon_00000000-0000-0000-0000-000000000001";
 const OTHER_CONNECTION = "tcon_00000000-0000-0000-0000-000000000002";
@@ -26,9 +27,9 @@ function memoryRules() {
   });
   const rules: TrackerRuleRouteDeps["rules"] = {
     async list(connectionId) { return [...rows.values()].filter((row) => row.connection_id === connectionId); },
-    async count(connectionId) { return [...rows.values()].filter((row) => row.connection_id === connectionId).length; },
     async get(connectionId, id) { const row = rows.get(id); return row && row.connection_id === connectionId ? row : null; },
-    async create(connectionId, accountId, input) {
+    async create(connectionId, accountId, input, max = 50) {
+      if ([...rows.values()].filter((row) => row.connection_id === connectionId).length >= max) throw new TrackerRuleLimitError(max);
       const now = new Date().toISOString();
       const row: TrackerRuleRow = {
         id: `trule_00000000-0000-0000-0000-00000000000${++next}`, connection_id: connectionId, room_id: input.room_id,
@@ -180,6 +181,10 @@ test("rule JSON is validated strictly on write", async () => {
     }
     assert.equal((await server.call("POST", path, { ...rule, room_id: "room-billing" })).status, 201);
     assert.equal(server.memory.rows.size, 1);
+    for (let index = 1; index < 50; index += 1) assert.equal((await server.call("POST", path, rule)).status, 201);
+    const over = await server.call("POST", path, rule);
+    assert.equal(over.status, 400);
+    assert.match(over.json.error, /at most 50 rules/);
   } finally {
     await server.close();
   }

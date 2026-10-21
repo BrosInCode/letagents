@@ -53,11 +53,13 @@ CREATE TABLE IF NOT EXISTS "tracker_rule_runs" (
 	"detail" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "tracker_rule_runs_outcome_check" CHECK ("outcome" IN ('pending', 'succeeded', 'failed', 'quarantined', 'error'))
+	CONSTRAINT "tracker_rule_runs_outcome_check" CHECK ("outcome" IN ('pending', 'succeeded', 'failed', 'quarantined', 'error', 'skipped'))
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "tracker_rule_runs_rule_delivery_uq" ON "tracker_rule_runs" USING btree ("rule_id", "delivery_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "tracker_rule_runs_rule_delivery_uq" ON "tracker_rule_runs" USING btree ("rule_id", "delivery_id", "external_ref");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "tracker_rule_runs_room_created_idx" ON "tracker_rule_runs" USING btree ("room_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "tracker_rule_runs_debounce_idx" ON "tracker_rule_runs" USING btree ("rule_id", "external_ref", "created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "tracker_rule_runs_pending_idx" ON "tracker_rule_runs" USING btree ("updated_at") WHERE "outcome" = 'pending';

@@ -186,9 +186,10 @@ export async function handleMaterializedGitHubRoomEvent(
   }
   linkedTask = taskProjection.task;
 
-  // Ticket connectors PR5: a card with a ticket, linked by a key match or a
-  // confirmed link, runs its connection's rules. A card the projection did
-  // not accept (a lock, or a lease on another branch) runs none.
+  // Ticket connectors PR5: a card with a ticket runs its connection's rules
+  // when the event reached it through a confirmed link (the ticket key; the
+  // engine checks). A card the projection did not accept (a lock, or a lease
+  // on another branch) runs none.
   if (taskProjection.authoritative && linkedTask?.external_ref) {
     await deps.runTrackerRulesForRepoEvent({
       deliveryId: input.deliveryId,
@@ -196,6 +197,7 @@ export async function handleMaterializedGitHubRoomEvent(
       eventRoomId: eventProject.id,
       roomEvent,
       task: linkedTask,
+      matchedByTicketKey: taskResolution.matchedByTicketKey === true,
     });
   }
 

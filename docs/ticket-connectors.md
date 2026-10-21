@@ -474,42 +474,49 @@ name to a transition at run time, as for any tracker write. A `comment` template
 ### When a rule runs
 
 1. A webhook for a pull request, review or check reaches the room-event projection.
-2. The projection resolves the event to a card. The rule engine runs only when the card has an `external_ref` and
-   the projection accepted the link: a ticket key in the branch, title or body, or a confirmed link (lease or pull
-   request URL). A card that a lock or another branch's lease protects runs no rule.
+2. The projection resolves the event to a card and accepts the link. The rule engine runs only when the card has an
+   `external_ref` and the link is confirmed: the resolver matched the pull request or review by the ticket key (in
+   the branch, title or body, or a pull request the key linked before), or the check ran for a pull request that
+   the key linked to the card. A work lease, a `pr_url` set by hand, or another artifact is not enough. A card that
+   a lock or another branch's lease protects runs no rule. (PR6 adds a human-confirmed Jev link here.)
 3. The engine finds the room's enabled filter for the card's tracker. The filter's author must own the connection,
    and the connection must be active. A room without such a filter runs nothing more (invariant 1).
 4. The engine loads the connection's enabled rules for the room (rules for every room, and rules for this room).
    With no rule, it stops.
-5. The event must come from someone with access to the repository (see "Who can fire a rule" below).
-6. The card must be bound to the ticket by sync: its `external_item_id` names this connection's cached item for the
+5. The card must be bound to the ticket by sync: its `external_item_id` names this connection's cached item for the
    card's key. Sync binds a card only in a room whose filter matched the ticket. So a key that a room member or an
    agent typed onto a card cannot aim the owner's rules at another ticket the owner's credentials can reach.
-7. The pure matcher (`src/api/connectors/rules/matcher.ts`) returns every rule that matches, oldest first.
-8. For each match the engine records a `tracker_rule_runs` row, unique per rule and webhook delivery. When the same
-   delivery reaches a second room, that room finds the row and writes nothing: one write per event. A rule also runs
-   at most once per ticket, event type and action in 10 minutes, so a burst of failing checks or a close-and-reopen
-   loop writes once. Claims for one rule and ticket take an advisory lock, so deliveries that arrive together
-   cannot all pass this check.
-9. Before the webhook answers, the engine reserves one `tracker_transition` or `tracker_comment` journal row per
-   action, with the idempotency key `${rule.id}:${deliveryId}:${action.index}`. A crash after this point leaves
-   pending rows that the journal sweep reconciles, not a lost write.
-10. After the webhook answers, the broker runs the writes in order. When one does not succeed, the later ones are
-   failed for good before any tracker call, so the journal sweep never runs a later action without the ones
-   before it (a failed transition may still be retried by the journal; its comment is not). The run row holds the
-   effect ids; the audit reads the outcome from the journal rows as they are now: `succeeded`, `pending` (the
-   journal still reconciles), `failed`, `quarantined` or `error` (for example the connection was removed). The
-   audit shows a fixed sentence for each outcome; the provider's error text stays in the journal row, which only
-   the server reads.
-
-A process that stops after step 9 and before step 10 leaves pending journal rows. The sweep reconciles them as for
-any tracker effect: a transition is checked in the ticket's history and created again if missing; a comment that was
-never sent stays ambiguous (shown as pending) and is not sent twice.
+6. The pure matcher (`src/api/connectors/rules/matcher.ts`) returns every rule that matches, oldest first.
+7. For each match the engine records a `tracker_rule_runs` row, unique per rule, webhook delivery and ticket. When
+   the same delivery reaches a second room for the same ticket, that room finds the row and writes nothing: one
+   write per event. A rule that matched but will not write gets a `skipped` row with a reason, shown in the audit:
+   `untrusted_actor` (see "Who can fire a rule"), `owner_not_admin` (the filter's author is no longer an admin of
+   the room), or `debounced` (the rule already ran for this ticket, event type and action in the last 10 minutes,
+   so a burst of failing checks or a close-and-reopen loop writes once). One skipped row per reason is kept in
+   that window. Claims for one rule and ticket take an advisory lock, so deliveries that arrive together cannot all
+   pass these checks.
+8. Before the webhook answers, the engine reserves the journal row for the first action, with the idempotency key
+   `${rule.id}:${deliveryId}:${external_ref}:${action.index}`. A crash after this point leaves a pending row that
+   the journal sweep reconciles, not a lost write.
+9. After the webhook answers, the broker runs that write. Each next action is reserved and run only after the one
+   before it succeeded, so no action runs without the ones before it. When a write failed but may be retried
+   (for example the tracker answered 503), or its outcome is unknown, the run waits: the journal sweep retries or
+   checks the write, and the rule run sweep that follows it (`advancePendingRuns`, every liveness tick) continues
+   the run once it succeeded. A write with no attempts left, or one held for a person, ends the run; later actions
+   are never reserved. The sweep also starts a run that has no journal row yet (the process stopped right after
+   the claim). Pending runs are continued for 7 days.
+10. The run's outcome is `succeeded`, `failed`, `quarantined`, `error` (the connection was removed or changed),
+   `skipped`, or `pending`. While a run is pending, the audit shows its current journal row, so a write the sweep is
+   still retrying reads `failed` until it lands. The audit shows a fixed sentence for each reason; the provider's
+   error text stays in the journal row, which only the server reads.
 
 A redelivered webhook is a duplicate to the projection and reaches no rule. A delivery the route retries after a
-failure reaches the rules again: the run row and the journal give back the earlier rows, so nothing new is reserved
-and the tracker is not called again for an effect that succeeded. A retry submits the actions the first attempt
+failure reaches the rules again: the run row and the journal give back the earlier rows, the run continues where
+it stands, and nothing new is reserved for a write that succeeded. A retry uses the actions the first attempt
 planned, so a rule edited in between does not change them.
+
+A comment interrupted by a crash before the tracker answered stays ambiguous in the journal (shown as pending): the
+journal never sends a comment twice.
 
 **No loops (invariant 4).** Rules fire on repo events only. Tracker sync writes `tracker_ticket` events tagged
 `metadata.source = "tracker_sync"`; the engine refuses any event that `isTrackerSyncEvent` flags before the
@@ -528,7 +535,7 @@ only for events from people with access to the repository, by GitHub's `author_a
 |---|---|
 | `pull_request` | The author is `OWNER`, `MEMBER` or `COLLABORATOR`, or the pull request merged (a merge needs write access). |
 | `pull_request_review` | The reviewer is `OWNER`, `MEMBER` or `COLLABORATOR`. |
-| `check_run` | The check ran for a branch in the repository itself (GitHub lists no pull request for a fork's branch). |
+| `check_run` | The check ran for a pull request from a branch in the repository itself (GitHub lists none for a fork's branch). |
 
 `approvalsAtLeast` counts only reviewers with that access, across the event's room and the card's room. Reviews
 stored before this change carry no association and do not count.
@@ -574,7 +581,7 @@ All under the desktop app's session bearer, for a connection the account owns.
 | Route | Purpose |
 |---|---|
 | `GET /account/connectors/:id/rules` | The rules and the rooms that import with the connection. |
-| `POST /account/connectors/:id/rules` | Create a rule (at most 50 per connection). |
+| `POST /account/connectors/:id/rules` | Create a rule (at most 50 per connection, counted under a lock). |
 | `PUT /account/connectors/:id/rules/:ruleId` | Save a new version. |
 | `POST /account/connectors/:id/rules/:ruleId/enabled` | `{ "enabled": true }` or `false`. |
 | `GET /account/connectors/:id/rules/:ruleId/versions` | Version history, newest first. |
@@ -584,8 +591,8 @@ All under the desktop app's session bearer, for a connection the account owns.
 ### Tables
 
 Migration `0123_tracker_rules`: `tracker_rules`, `tracker_rule_versions` (unique per rule and version), and
-`tracker_rule_runs` (unique per rule and delivery, indexed by room and time, and by rule, ticket and time for
-the debounce).
+`tracker_rule_runs` (unique per rule, delivery and ticket; indexed by room and time, by rule, ticket and time for
+the debounce, and by update time for pending runs).
 
 ### Tests
 
@@ -594,8 +601,10 @@ the debounce).
 - `src/api/__tests__/tracker-rules-db.test.ts` (needs `TEST_DB_URL`): a PR opened from `HT-1234-x` with the rule
   above reserves two effects and calls the tracker once for each; a redelivery and a retried delivery reserve
   nothing; a disabled or non-matching rule never fires; a `tracker_ticket` event never triggers a rule; two rooms
-  write once; a filter its owner did not set writes nothing; an outside author and an unbound card write nothing;
-  the debounce; versions and rollback.
+  write once; a filter its owner did not set writes nothing; an outside author (recorded as skipped) and an unbound
+  card write nothing; the debounce; a transition refused once is retried by the sweep and the comment then posts;
+  a transition refused until no attempts are left ends the run without the comment; a `pr_url` set by hand with a
+  work lease runs no rule; an owner who lost room admin is skipped; versions and rollback.
 - `src/api/__tests__/tracker-rule-routes.test.ts`: owner-only access, versions, rollback, strict validation.
 - `apps/desktop/renderer/__tests__/settings-connector-rules.test.ts`: the editor and the audit text.
 

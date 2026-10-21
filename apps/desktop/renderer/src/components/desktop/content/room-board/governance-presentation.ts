@@ -205,6 +205,7 @@ const TRACKER_RULE_OUTCOMES: Record<string, string> = {
   failed: "failed",
   quarantined: "held for a person",
   error: "not written",
+  skipped: "skipped",
 };
 
 function auditMetadataText(entry: DesktopBoardGovernanceAuditEntry, key: string): string | null {

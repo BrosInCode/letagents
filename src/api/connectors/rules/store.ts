@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
 
-import type {
-  TrackerRuleAction,
-  TrackerRuleInput,
-  TrackerRuleTrigger,
-  TrackerRuleVersionView,
-  TrackerRuleView,
+import {
+  TRACKER_RULES_PER_CONNECTION_MAX,
+  type TrackerRuleAction,
+  type TrackerRuleInput,
+  type TrackerRuleTrigger,
+  type TrackerRuleVersionView,
+  type TrackerRuleView,
 } from "../../../../shared/ticket-connectors.mjs";
 import { db } from "../../db/client.js";
 import { room_tracker_filters, tracker_rule_runs, tracker_rule_versions, tracker_rules } from "../../db/schema.js";
@@ -15,7 +16,9 @@ import { parseTrackerRuleAction, parseTrackerRuleTrigger } from "./validate.js";
 
 export type TrackerRuleRow = typeof tracker_rules.$inferSelect;
 export type TrackerRuleRunRow = typeof tracker_rule_runs.$inferSelect;
-export type TrackerRuleRunOutcome = "pending" | "succeeded" | "failed" | "quarantined" | "error";
+export type TrackerRuleRunOutcome = "pending" | "succeeded" | "failed" | "quarantined" | "error" | "skipped";
+/** Why a matching rule wrote nothing; stored in `detail` of a `skipped` run. */
+export type TrackerRuleSkipReason = "untrusted_actor" | "debounced" | "owner_not_admin";
 
 /** A stored rule whose trigger and actions passed validation again on read. */
 export interface LoadedTrackerRule {
@@ -31,6 +34,16 @@ export interface LoadedTrackerRule {
 
 /** A rule runs at most once per ticket and event type and action in this window. */
 export const TRACKER_RULE_RUN_DEBOUNCE_MS = 10 * 60_000;
+
+/** A pending run is continued by the sweep for this long after it started. */
+export const TRACKER_RULE_RUN_RESUME_MS = 7 * 24 * 60 * 60_000;
+
+export class TrackerRuleLimitError extends Error {
+  constructor(readonly max: number) {
+    super(`A connection can have at most ${max} rules.`);
+    this.name = "TrackerRuleLimitError";
+  }
+}
 
 export function newTrackerRuleId(): string {
   return `trule_${randomUUID()}`;
@@ -113,9 +126,17 @@ export const trackerRuleStore = {
     return row ?? null;
   },
 
-  async create(connectionId: string, accountId: string, input: TrackerRuleInput): Promise<TrackerRuleRow> {
+  /**
+   * Creates a rule unless the connection already has `max`. The count runs
+   * under a per-connection advisory lock, so two saves cannot both pass it.
+   */
+  async create(connectionId: string, accountId: string, input: TrackerRuleInput, max = TRACKER_RULES_PER_CONNECTION_MAX): Promise<TrackerRuleRow> {
     const at = new Date().toISOString();
     return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`tracker_rules:${connectionId}`}))`);
+      const [counted] = await tx.select({ count: sql<number>`count(*)::int` }).from(tracker_rules)
+        .where(eq(tracker_rules.connection_id, connectionId));
+      if ((counted?.count ?? 0) >= max) throw new TrackerRuleLimitError(max);
       const [row] = await tx.insert(tracker_rules).values({
         id: newTrackerRuleId(),
         connection_id: connectionId,
@@ -215,57 +236,107 @@ export const trackerRuleStore = {
   },
 
   /**
-   * Records that a rule matched one delivery. Unique per rule and delivery:
-   * the first room to record it owns the run; `claimed` is false when another
-   * room did. A retry of the same delivery in the same room gets its earlier
-   * row back, with the actions it planned then. A rule runs at most once per
-   * ticket and event (type and action) in `TRACKER_RULE_RUN_DEBOUNCE_MS`, so a
-   * burst of check runs or a close-and-reopen loop writes once.
+   * Records that a rule matched one delivery for one ticket. Unique per rule,
+   * delivery and ticket: the first room to record it owns the run, so a rule
+   * for every room writes once per event; `claimed` is false for another
+   * room. A retry of the same delivery in the same room gets its earlier row
+   * back, with the actions it planned then.
+   *
+   * A run that would not write is recorded as `skipped` with a reason code:
+   * `skipReason` from the caller (an untrusted actor, an owner who lost
+   * admin), or `debounced` when the rule already ran for this ticket, event
+   * type and action within `TRACKER_RULE_RUN_DEBOUNCE_MS`. One skipped row
+   * per reason is kept in that window, so a burst does not flood the audit.
+   * Claims for one rule and ticket are serialised by an advisory lock.
    */
   async claimRun(
     input: Omit<TrackerRuleRunRow, "id" | "effect_ids" | "outcome" | "detail" | "created_at" | "updated_at">,
-    now = new Date(),
+    options: { skipReason?: TrackerRuleSkipReason; now?: Date } = {},
   ): Promise<{ run: TrackerRuleRunRow | null; claimed: boolean }> {
-    const sameDelivery = and(eq(tracker_rule_runs.rule_id, input.rule_id!), eq(tracker_rule_runs.delivery_id, input.delivery_id));
-    const owns = (run: TrackerRuleRunRow) => run.room_id === input.room_id && run.task_id === input.task_id;
+    const now = options.now ?? new Date();
+    const sameDelivery = and(
+      eq(tracker_rule_runs.rule_id, input.rule_id!),
+      eq(tracker_rule_runs.delivery_id, input.delivery_id),
+      eq(tracker_rule_runs.external_ref, input.external_ref),
+    );
+    const owns = (run: TrackerRuleRunRow) => run.room_id === input.room_id && run.task_id === input.task_id
+      && run.outcome !== "skipped";
     return db.transaction(async (tx) => {
-      // One claim at a time per rule and ticket, so a burst of deliveries
-      // (check runs finish together) cannot all pass the debounce check.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`tracker_rule_run:${input.rule_id}:${input.external_ref}`}))`);
       const [earlier] = await tx.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
       if (earlier) return { run: earlier, claimed: owns(earlier) };
-      const [recent] = await tx.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
-        .where(and(
-          eq(tracker_rule_runs.rule_id, input.rule_id!),
-          eq(tracker_rule_runs.external_ref, input.external_ref),
-          eq(tracker_rule_runs.event_type, input.event_type),
-          eq(tracker_rule_runs.event_action, input.event_action),
-          gt(tracker_rule_runs.created_at, new Date(now.getTime() - TRACKER_RULE_RUN_DEBOUNCE_MS).toISOString()),
-        ))
-        .limit(1);
-      if (recent) return { run: null, claimed: false };
+      const windowStart = new Date(now.getTime() - TRACKER_RULE_RUN_DEBOUNCE_MS).toISOString();
+      const sameEvent = and(
+        eq(tracker_rule_runs.rule_id, input.rule_id!),
+        eq(tracker_rule_runs.external_ref, input.external_ref),
+        eq(tracker_rule_runs.event_type, input.event_type),
+        eq(tracker_rule_runs.event_action, input.event_action),
+        gt(tracker_rule_runs.created_at, windowStart),
+      );
+      let skipReason = options.skipReason ?? null;
+      if (!skipReason) {
+        const [recent] = await tx.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
+          .where(and(sameEvent, ne(tracker_rule_runs.outcome, "skipped"))).limit(1);
+        if (recent) skipReason = "debounced";
+      }
       const at = now.toISOString();
+      if (skipReason) {
+        const [recentSkip] = await tx.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
+          .where(and(sameEvent, eq(tracker_rule_runs.outcome, "skipped"), eq(tracker_rule_runs.detail, skipReason))).limit(1);
+        if (recentSkip) return { run: null, claimed: false };
+        const [skipped] = await tx.insert(tracker_rule_runs).values({
+          ...input, planned_actions: [], id: `trun_${randomUUID()}`, effect_ids: [], outcome: "skipped",
+          detail: skipReason, created_at: at, updated_at: at,
+        }).onConflictDoNothing().returning();
+        return { run: skipped ?? null, claimed: false };
+      }
       const [inserted] = await tx.insert(tracker_rule_runs).values({
-        ...input,
-        id: `trun_${randomUUID()}`,
-        effect_ids: [],
-        outcome: "pending",
-        detail: null,
-        created_at: at,
-        updated_at: at,
-      }).onConflictDoNothing({ target: [tracker_rule_runs.rule_id, tracker_rule_runs.delivery_id] }).returning();
+        ...input, id: `trun_${randomUUID()}`, effect_ids: [], outcome: "pending", detail: null, created_at: at, updated_at: at,
+      }).onConflictDoNothing().returning();
       if (inserted) return { run: inserted, claimed: true };
-      // The same delivery for another ticket of this rule was claimed meanwhile.
       const [existing] = await tx.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
       if (!existing) throw new Error("The rule run conflict row could not be loaded.");
       return { run: existing, claimed: owns(existing) };
     });
   },
 
-  async finishRun(id: string, input: { effect_ids: string[]; outcome: TrackerRuleRunOutcome; detail: string | null }): Promise<void> {
+  async getRun(id: string): Promise<TrackerRuleRunRow | null> {
+    const [row] = await db.select().from(tracker_rule_runs).where(eq(tracker_rule_runs.id, id)).limit(1);
+    return row ?? null;
+  },
+
+  /**
+   * Adds the journal row for action `index`, only if it is the next one. A
+   * concurrent advance that reserved the same action (the same idempotency
+   * key, so the same row) has already added it; both are fine.
+   */
+  async appendEffect(id: string, index: number, effectId: string): Promise<void> {
+    await db.update(tracker_rule_runs)
+      .set({ effect_ids: sql`${tracker_rule_runs.effect_ids} || ${JSON.stringify([effectId])}::jsonb`, updated_at: new Date().toISOString() })
+      .where(and(
+        eq(tracker_rule_runs.id, id),
+        eq(tracker_rule_runs.outcome, "pending"),
+        sql`jsonb_array_length(${tracker_rule_runs.effect_ids}) = ${index}`,
+      ));
+  },
+
+  /** Settles a pending run once; a settled run is never changed again. */
+  async finishRun(id: string, input: { outcome: Exclude<TrackerRuleRunOutcome, "pending" | "skipped">; detail: string | null }): Promise<void> {
     await db.update(tracker_rule_runs)
       .set({ ...input, updated_at: new Date().toISOString() })
-      .where(eq(tracker_rule_runs.id, id));
+      .where(and(eq(tracker_rule_runs.id, id), eq(tracker_rule_runs.outcome, "pending")));
+  },
+
+  /** Pending runs to continue, least recently touched first, from the last week. */
+  async pendingRuns(limit = 50, now = new Date()): Promise<string[]> {
+    const rows = await db.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
+      .where(and(
+        eq(tracker_rule_runs.outcome, "pending"),
+        gt(tracker_rule_runs.created_at, new Date(now.getTime() - TRACKER_RULE_RUN_RESUME_MS).toISOString()),
+      ))
+      .orderBy(asc(tracker_rule_runs.updated_at))
+      .limit(limit);
+    return rows.map((row) => row.id);
   },
 
   /** Rooms with a filter on this connection, enabled or not: the rooms a rule may name. */

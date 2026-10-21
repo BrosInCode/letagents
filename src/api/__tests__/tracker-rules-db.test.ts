@@ -36,11 +36,16 @@ const unique = (label: string) => `${label}-${Date.now()}-${++sequence}`;
 /** A tracker executor that records each write instead of calling Jira. */
 function fakeTracker() {
   const created: Array<{ kind: string; payload: Record<string, unknown>; correlation_key: string }> = [];
-  const refuse = new Set<string>();
+  /** Kinds the tracker refuses, with how many more refusals (Infinity: always). */
+  const refuse = new Map<string, number>();
   const executor: WorkflowEffectExecutor = {
     async create(effect: WorkflowEffect) {
       created.push({ kind: effect.kind, payload: effect.request_payload, correlation_key: effect.correlation_key });
-      if (refuse.has(effect.kind)) return { kind: "definite_failure", error: "Jira has no transition to In Review." };
+      const left = refuse.get(effect.kind) ?? 0;
+      if (left > 0) {
+        refuse.set(effect.kind, left - 1);
+        return { kind: "definite_failure", error: "Jira answered 503." };
+      }
       return { kind: "succeeded", external_id: `jira-${created.length}`, external_url: null, response_payload: null };
     },
     async lookup() {
@@ -76,6 +81,7 @@ async function setup(label: string) {
     credentials_version: 1, tracker_user_id: "acc-1", tracker_user_label: "Emmy", status_map: {},
   });
   const room = await db!.createProjectWithName(unique(`rules-${label}`));
+  await db!.assignProjectAdmin(room.id, accountId);
   await filters!.upsertRoomTrackerFilter({
     room_id: room.id, connection_id: connectionId, provider: "jira", filter: "project = HT", enabled: true, account_id: accountId,
   });
@@ -89,6 +95,7 @@ async function setup(label: string) {
   assert.equal(bound.rows[0].external_item_id, itemId);
 
   const tracker = fakeTracker();
+  const clock = { now: new Date() };
   const broker = brokerModule!.createWorkflowEffectBroker({
     store: {
       reserve: db!.reserveWorkflowEffect,
@@ -106,6 +113,7 @@ async function setup(label: string) {
     },
     provider: { create: async () => { throw new Error("no GitHub"); }, lookup: async () => { throw new Error("no GitHub"); } } as never,
     tracker: tracker.executor,
+    now: () => clock.now,
   });
   const pending: Array<Promise<void>> = [];
   const engine = engineModule!.createTrackerRuleEngine({
@@ -113,15 +121,15 @@ async function setup(label: string) {
     roomScope: filters!.getRoomTrackerScope,
     roomConnection: engineModule!.findRoomRuleConnection,
     ticketBound: engineModule!.isTicketBoundToConnection,
+    ownerIsRoomAdmin: engineModule!.isRoomAdminAccount,
     countApprovals: engineModule!.countPullRequestApprovals,
     reserve: (input) => broker.reserveTrackerEffect(input),
     drive: (reserved) => broker.driveTrackerEffect(reserved),
-    abandon: (reserved, reason) => broker.abandonTrackerEffect(reserved, reason),
     getEffect: (id) => broker.getEffect(id),
     schedule: (work) => { pending.push(work()); },
   });
   const settle = async () => { await Promise.all(pending.splice(0)); };
-  return { accountId, connectionId, room, card, tracker, engine, settle };
+  return { accountId, connectionId, room, card, tracker, engine, settle, broker, clock };
 }
 
 const openedRule: TrackerRuleInput = {
@@ -193,8 +201,8 @@ test("a PR opened from HT-1234-x reserves two effects once, and a redelivery res
   const deliveryId = (await runRows(context.room.id))[0]?.delivery_id as string;
   const effects = await effectRows(context.room.id);
   assert.deepEqual(effects.map((effect) => [effect.kind, effect.state, effect.idempotency_key]), [
-    ["tracker_transition", "succeeded", `${rule.id}:${deliveryId}:0`],
-    ["tracker_comment", "succeeded", `${rule.id}:${deliveryId}:1`],
+    ["tracker_transition", "succeeded", `${rule.id}:${deliveryId}:jira:HT-1234:0`],
+    ["tracker_comment", "succeeded", `${rule.id}:${deliveryId}:jira:HT-1234:1`],
   ]);
   assert.equal(effects[0]!.request_payload.to_status, "In Review");
   assert.equal(effects[1]!.request_payload.body,
@@ -259,6 +267,7 @@ test("a tracker_ticket sync event never triggers a rule", options, async () => {
       eventRoomId: context.room.id,
       roomEvent,
       task: context.card,
+      matchedByTicketKey: true,
     });
     assert.deepEqual(result.runs, []);
   }
@@ -280,8 +289,8 @@ test("a rule for every room writes once when two rooms see the same delivery", o
   const deliveryId = unique("delivery");
   const roomEvent = materialize!.materializeGitHubWebhookEvent("pull_request", openedPayload(PR_BASE + 95) as never, deliveryId)!.roomEvent!;
   const storedEvent = { event_type: "pull_request", metadata: {}, base_ref: "main", head_ref: "HT-1234-fix-proration-rounding" };
-  const first = await context.engine.runForRepoEvent({ deliveryId, storedEvent, eventRoomId: context.room.id, roomEvent, task: context.card });
-  const second = await context.engine.runForRepoEvent({ deliveryId, storedEvent, eventRoomId: other.id, roomEvent, task: otherCard });
+  const first = await context.engine.runForRepoEvent({ deliveryId, storedEvent, eventRoomId: context.room.id, roomEvent, task: context.card, matchedByTicketKey: true });
+  const second = await context.engine.runForRepoEvent({ deliveryId, storedEvent, eventRoomId: other.id, roomEvent, task: otherCard, matchedByTicketKey: true });
   await context.settle();
   assert.equal(first.runs.length, 1);
   assert.deepEqual(second.runs, []);
@@ -324,6 +333,10 @@ test("a PR from an outside author, or a card the connection never bound, writes 
   // Anyone can open a pull request on a public repository and name a key.
   await deliver(context, unique("delivery"), openedPayload(PR_BASE + 97, { association: "NONE" }));
   assert.equal((await effectRows(context.room.id)).length, 0);
+  const skipped = await runRows(context.room.id);
+  assert.deepEqual(skipped.map((run) => [run.outcome, run.detail]), [["skipped", "untrusted_actor"]], "the owner sees why");
+  const audit = await governance!.listBoardGovernanceAudit(context.room.id);
+  assert.match(audit.find((entry) => entry.kind === "tracker_rule_run")?.reason ?? "", /no write access/);
 
   // A key typed onto a card by hand is not a ticket sync bound through this connection.
   const loose = await db!.createTask(context.room.id, "Loose", "human", undefined, undefined, { externalRef: "jira:HR-17" });
@@ -334,6 +347,7 @@ test("a PR from an outside author, or a card the connection never bound, writes 
     eventRoomId: context.room.id,
     roomEvent,
     task: loose,
+    matchedByTicketKey: true,
   });
   // Bound to the cached item of another key: refused as well.
   await bindTicket(context.connectionId, context.room.id, loose.id);
@@ -343,6 +357,7 @@ test("a PR from an outside author, or a card the connection never bound, writes 
     eventRoomId: context.room.id,
     roomEvent,
     task: loose,
+    matchedByTicketKey: true,
   });
   await context.settle();
   assert.deepEqual([result.runs, forged.runs], [[], []]);
@@ -355,20 +370,88 @@ test("a rule runs once per ticket and event within the debounce window", options
   await deliver(context, unique("delivery"), openedPayload(PR_BASE + 99));
   await deliver(context, unique("delivery"), openedPayload(PR_BASE + 100));
   assert.equal(context.tracker.created.length, 2, "the second opened PR within the window writes nothing");
-  assert.equal((await runRows(context.room.id)).length, 1);
+  assert.deepEqual((await runRows(context.room.id)).map((run) => [run.outcome, run.detail]),
+    [["succeeded", null], ["skipped", "debounced"]]);
 });
 
-test("a refused transition fails the comment after it before any tracker call", options, async () => {
-  const context = await setup("sequence");
+test("a transition the tracker refuses once is retried by the sweep, and then the comment posts", options, async () => {
+  const context = await setup("retry");
   await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
-  context.tracker.refuse.add("tracker_transition");
+  context.tracker.refuse.set("tracker_transition", 1);
   await deliver(context, unique("delivery"), openedPayload(PR_BASE + 101));
   assert.deepEqual(context.tracker.created.map((entry) => entry.kind), ["tracker_transition"]);
-  const effects = await client!.pool.query(
-    "SELECT kind, state, attempt_count, max_attempts, processing_token FROM workflow_effects WHERE room_id = $1 ORDER BY kind DESC", [context.room.id]);
-  const comment = effects.rows.find((row) => row.kind === "tracker_comment");
-  assert.equal(comment.state, "failed");
-  assert.equal(comment.attempt_count, comment.max_attempts, "the sweep never retries it");
-  const audit = await governance!.listBoardGovernanceAudit(context.room.id);
-  assert.equal(audit.find((entry) => entry.kind === "tracker_rule_run")?.metadata?.outcome, "failed");
+  assert.deepEqual((await effectRows(context.room.id)).map((effect) => [effect.kind, effect.state]), [["tracker_transition", "failed"]],
+    "the comment is not reserved while the transition can still be retried");
+  assert.equal((await runRows(context.room.id))[0]!.outcome, "pending");
+  let audit = await governance!.listBoardGovernanceAudit(context.room.id);
+  assert.equal(audit.find((entry) => entry.kind === "tracker_rule_run")?.metadata?.outcome, "failed", "the audit shows the retrying write");
+
+  // The journal sweep retries the transition after its backoff; then the run continues.
+  context.clock.now = new Date(Date.now() + 5 * 60_000);
+  await context.broker.sweepOnce();
+  await context.engine.advancePendingRuns();
+  await context.settle();
+  assert.deepEqual(context.tracker.created.map((entry) => entry.kind), ["tracker_transition", "tracker_transition", "tracker_comment"]);
+  assert.deepEqual((await effectRows(context.room.id)).map((effect) => [effect.kind, effect.state]),
+    [["tracker_transition", "succeeded"], ["tracker_comment", "succeeded"]]);
+  assert.equal((await runRows(context.room.id))[0]!.outcome, "succeeded");
+  audit = await governance!.listBoardGovernanceAudit(context.room.id);
+  assert.equal(audit.find((entry) => entry.kind === "tracker_rule_run")?.metadata?.outcome, "succeeded");
+});
+
+test("a transition refused until no attempts are left ends the run without the comment", options, async () => {
+  const context = await setup("dead");
+  await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
+  context.tracker.refuse.set("tracker_transition", Infinity);
+  await deliver(context, unique("delivery"), openedPayload(PR_BASE + 102));
+  for (let minutes = 5; minutes <= 20; minutes += 5) {
+    context.clock.now = new Date(Date.now() + minutes * 60_000);
+    await context.broker.sweepOnce();
+    await context.engine.advancePendingRuns();
+  }
+  await context.settle();
+  assert.ok(context.tracker.created.every((entry) => entry.kind === "tracker_transition"));
+  assert.deepEqual((await effectRows(context.room.id)).map((effect) => effect.kind), ["tracker_transition"]);
+  assert.equal((await runRows(context.room.id))[0]!.outcome, "failed");
+});
+
+test("a pull request URL set by hand on an imported card runs no rule", options, async () => {
+  const context = await setup("pr-url");
+  await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
+  const number = PR_BASE + 103;
+  // A room member points the card at a pull request that does not name the
+  // ticket, and an agent holds the card's work lease for it: the projection
+  // accepts the link, but it is not the ticket key.
+  const prUrl = `https://github.com/BrosInCode/letagents/pull/${number}`;
+  await db!.updateTask(context.room.id, context.card.id, { pr_url: prUrl });
+  await db!.createTaskLease({
+    room_id: context.room.id, task_id: context.card.id, kind: "work", agent_key: "agent-1", actor_label: "Agent | emmy | codex",
+    created_by: "Agent | emmy | codex", branch_ref: "feature/unrelated", pr_url: prUrl,
+  });
+  let accepted = false;
+  const original = context.engine.runForRepoEvent;
+  context.engine.runForRepoEvent = async (input) => {
+    accepted = input.task.id === context.card.id && input.matchedByTicketKey === false;
+    return original(input);
+  };
+  const payload = buildPullRequestPayload({
+    number, title: "Unrelated change", body: "", url: `https://github.com/BrosInCode/letagents/pull/${number}`,
+    branchRef: "feature/unrelated", sha: `sha-${number}`, actor: "kai",
+  });
+  await deliver(context, unique("delivery"), {
+    ...payload, pull_request: { ...payload.pull_request, base: { ref: "main" }, author_association: "MEMBER" },
+  });
+  assert.equal(accepted, true, "the projection accepted the lease link and asked the engine");
+  assert.equal((await effectRows(context.room.id)).length, 0);
+  assert.equal((await runRows(context.room.id)).length, 0);
+  assert.equal(context.tracker.created.length, 0);
+});
+
+test("a rule stops when the filter's owner is no longer a room admin", options, async () => {
+  const context = await setup("admin");
+  await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
+  await client!.pool.query("DELETE FROM project_admins WHERE project_id = $1", [context.room.id]);
+  await deliver(context, unique("delivery"), openedPayload(PR_BASE + 104));
+  assert.equal(context.tracker.created.length, 0);
+  assert.deepEqual((await runRows(context.room.id)).map((run) => [run.outcome, run.detail]), [["skipped", "owner_not_admin"]]);
 });

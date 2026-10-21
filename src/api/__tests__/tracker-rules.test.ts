@@ -15,6 +15,7 @@ const {
   createTrackerRuleEngine,
   repoEventIsTrusted,
   repositoryPullRequestUrl,
+  eventLinkIsConfirmed,
   trackerRuleEffectKey,
   trackerRuleFacts,
   trackerRuleTemplateValues,
@@ -170,40 +171,69 @@ test("facts come from the event and the stored row", () => {
   assert.equal(trackerRuleFacts({ ...pullRequestOpened, kind: "push" } as unknown as RepoRoomEvent, { event_type: "push" }, null), null);
 });
 
-function engineHarness(rules: LoadedTrackerRule[], bound = true, failFirst = false) {
-  const submitted: string[] = [];
+type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["drive"]>>;
+type RunRow = Awaited<ReturnType<TrackerRuleEngineDeps["store"]["getRun"]>> & object;
+
+/** The engine on in-memory runs and journal rows. `outcomes` says what each drive of an action index returns. */
+function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; trusted?: boolean; outcomes?: Record<number, string[]> } = {}) {
+  const runs = new Map<string, RunRow>();
+  const effects = new Map<string, WorkflowEffectLike>();
+  const reserved: string[] = [];
   const driven: string[] = [];
-  const abandoned: string[] = [];
+  const pending: Array<Promise<void>> = [];
+  const drives = new Map<number, number>();
   const deps: TrackerRuleEngineDeps = {
     store: {
       forRoom: async () => rules,
-      claimRun: async (input) => ({ run: { ...input, id: "run_1", effect_ids: [], outcome: "pending", detail: null, created_at: "", updated_at: "" } as never, claimed: true }),
-      finishRun: async () => undefined,
+      claimRun: async (input, claim) => {
+        if (claim?.skipReason) return { run: null, claimed: false };
+        const existing = [...runs.values()].find((run) => run.rule_id === input.rule_id && run.delivery_id === input.delivery_id);
+        if (existing) return { run: existing, claimed: true };
+        const run = { ...input, id: `run_${runs.size + 1}`, effect_ids: [], outcome: "pending", detail: null, created_at: "", updated_at: "" } as RunRow;
+        runs.set(run.id, run);
+        return { run, claimed: true };
+      },
+      getRun: async (id) => runs.get(id) ?? null,
+      appendEffect: async (id, index, effectId) => {
+        const run = runs.get(id)!;
+        if ((run.effect_ids as string[]).length === index) run.effect_ids = [...(run.effect_ids as string[]), effectId];
+      },
+      finishRun: async (id, input) => {
+        const run = runs.get(id)!;
+        if (run.outcome === "pending") Object.assign(run, input);
+      },
+      pendingRuns: async () => [...runs.values()].filter((run) => run.outcome === "pending").map((run) => run.id),
     },
     roomScope: async () => ({ sources: [{ filter_id: "f", connection_id: "tcon_1", provider: "jira", filter: "project = HT" }], linearTeamKeys: [] }),
     roomConnection: async () => ({ connection_id: "tcon_1", account_id: "acct_1", provider: "jira" }),
-    ticketBound: async () => bound,
+    ticketBound: async () => options.bound ?? true,
+    ownerIsRoomAdmin: async () => true,
     countApprovals: async () => 0,
     reserve: async (input) => {
-      submitted.push(input.idempotency_key);
-      const effect = { id: `effect_${submitted.length}`, state: "pending", quarantined_at: null } as WorkflowEffectLike;
+      const id = `effect_${input.idempotency_key}`;
+      const existing = effects.get(id);
+      if (existing) return { effect: existing, claimed: false, processing_token: null };
+      reserved.push(input.idempotency_key);
+      const effect = { id, state: "pending", quarantined_at: null, attempt_count: 1, max_attempts: 3 } as WorkflowEffectLike;
+      effects.set(id, effect);
       return { effect, claimed: true, processing_token: "t" };
     },
-    drive: async (reserved) => {
-      driven.push(reserved.effect.id);
-      return { ...reserved.effect, state: failFirst && driven.length === 1 ? "failed" : "succeeded" };
+    drive: async (entry) => {
+      const index = Number(entry.effect.id.split(":").at(-1));
+      const count = drives.get(index) ?? 0;
+      drives.set(index, count + 1);
+      driven.push(entry.effect.id);
+      const state = options.outcomes?.[index]?.[count] ?? "succeeded";
+      const effect = { ...effects.get(entry.effect.id)!, state, ...(state === "dead" ? { state: "failed", attempt_count: 3 } : {}) } as WorkflowEffectLike;
+      effects.set(effect.id, effect);
+      return effect;
     },
-    abandon: async (reserved) => {
-      abandoned.push(reserved.effect.id);
-      return { ...reserved.effect, state: "failed" };
-    },
-    getEffect: async (id) => ({ id, state: "succeeded", quarantined_at: null }) as WorkflowEffectLike,
+    getEffect: async (id) => effects.get(id) ?? null,
     schedule: (work) => { pending.push(work()); },
   };
-  const pending: Array<Promise<void>> = [];
-  return { engine: createTrackerRuleEngine(deps), submitted, driven, abandoned, settle: () => Promise.all(pending) };
+  const engine = createTrackerRuleEngine(deps);
+  return { engine, runs, effects, reserved, driven, settle: () => Promise.all(pending.splice(0)) };
 }
-type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["drive"]>>;
 
 const loadedRule: LoadedTrackerRule = {
   id: "trule_1", connection_id: "tcon_1", room_id: null, name: "Opened", enabled: true, version: 1,
@@ -211,37 +241,79 @@ const loadedRule: LoadedTrackerRule = {
   actions: [{ kind: "transition", toStatus: "In Review" }, { kind: "comment", template: "{{pr_url}}" }],
 };
 
-test("the engine reserves one effect per action with the rule, delivery and action index", async () => {
+const keyedInput = {
+  deliveryId: "d-1",
+  storedEvent: { event_type: "pull_request", base_ref: "main" },
+  eventRoomId: "room",
+  roomEvent: pullRequestOpened,
+  task: { id: "task_1", room_id: "room", external_ref: "jira:HT-1234", pr_url: null, workflow_artifacts: [] },
+  matchedByTicketKey: true,
+};
+
+test("the engine reserves each action only after the one before it succeeded", async () => {
   const harness = engineHarness([loadedRule]);
-  const result = await harness.engine.runForRepoEvent({
-    deliveryId: "d-1",
-    storedEvent: { event_type: "pull_request", base_ref: "main" },
-    eventRoomId: "room",
-    roomEvent: pullRequestOpened,
-    task: { id: "task_1", room_id: "room", external_ref: "jira:HT-1234", pr_url: null },
-  });
+  const result = await harness.engine.runForRepoEvent(keyedInput);
+  assert.deepEqual(harness.reserved, [trackerRuleEffectKey("trule_1", "d-1", "jira:HT-1234", 0)], "only the first row before the webhook answers");
   await harness.settle();
   assert.deepEqual(result.runs, ["run_1"]);
-  assert.deepEqual(harness.submitted, [trackerRuleEffectKey("trule_1", "d-1", 0), trackerRuleEffectKey("trule_1", "d-1", 1)]);
-  assert.deepEqual(harness.driven, ["effect_1", "effect_2"]);
-  assert.equal(trackerRuleEffectKey("trule_1", "d-1", 1), "trule_1:d-1:1");
+  assert.deepEqual(harness.reserved, ["trule_1:d-1:jira:HT-1234:0", "trule_1:d-1:jira:HT-1234:1"]);
+  assert.equal(harness.runs.get("run_1")!.outcome, "succeeded");
 });
 
-test("the engine skips cards without a tracker ref and tracker sync events", async () => {
-  const harness = engineHarness([loadedRule]);
-  const input = {
-    deliveryId: "d-2",
-    storedEvent: { event_type: "pull_request" },
-    eventRoomId: "room",
-    roomEvent: pullRequestOpened,
-    task: { id: "task_1", room_id: "room", external_ref: null, pr_url: null },
-  };
-  assert.deepEqual((await harness.engine.runForRepoEvent(input)).runs, []);
-  assert.deepEqual((await harness.engine.runForRepoEvent({
-    ...input, task: { ...input.task, external_ref: "jira:HT-1" }, storedEvent: { event_type: "tracker_ticket" },
-  })).runs, []);
+test("a retryable failure waits; once the sweep settles it the next action runs", async () => {
+  const harness = engineHarness([loadedRule], { outcomes: { 0: ["failed"] } });
+  await harness.engine.runForRepoEvent(keyedInput);
   await harness.settle();
-  assert.deepEqual(harness.submitted, []);
+  assert.equal(harness.reserved.length, 1, "the comment is not reserved while the transition may still be retried");
+  assert.equal(harness.runs.get("run_1")!.outcome, "pending");
+  // The journal sweep retries the transition, and it lands.
+  const transition = [...harness.effects.values()][0]!;
+  harness.effects.set(transition.id, { ...transition, state: "succeeded" });
+  await harness.engine.advancePendingRuns();
+  assert.equal(harness.reserved.length, 2);
+  assert.equal(harness.runs.get("run_1")!.outcome, "succeeded");
+});
+
+test("a failure with no attempts left ends the run; later actions are never reserved", async () => {
+  const harness = engineHarness([loadedRule], { outcomes: { 0: ["dead"] } });
+  await harness.engine.runForRepoEvent(keyedInput);
+  await harness.settle();
+  await harness.engine.advancePendingRuns();
+  assert.equal(harness.reserved.length, 1);
+  assert.equal(harness.runs.get("run_1")!.outcome, "failed");
+});
+
+test("a retried delivery continues the run and never resets it", async () => {
+  const harness = engineHarness([loadedRule]);
+  await harness.engine.runForRepoEvent(keyedInput);
+  await harness.settle();
+  await harness.engine.runForRepoEvent(keyedInput);
+  await harness.settle();
+  assert.equal(harness.reserved.length, 2);
+  assert.equal(harness.runs.get("run_1")!.outcome, "succeeded");
+});
+
+test("the engine skips cards without a tracker ref, sync events, and links that are not the ticket key", async () => {
+  const harness = engineHarness([loadedRule]);
+  assert.deepEqual((await harness.engine.runForRepoEvent({ ...keyedInput, task: { ...keyedInput.task, external_ref: null } })).runs, []);
+  assert.deepEqual((await harness.engine.runForRepoEvent({ ...keyedInput, storedEvent: { event_type: "tracker_ticket" } })).runs, []);
+  assert.deepEqual((await harness.engine.runForRepoEvent({ ...keyedInput, matchedByTicketKey: false })).runs, [],
+    "a lease or a hand-set pr_url is not a confirmed link");
+  await harness.settle();
+  assert.deepEqual(harness.reserved, []);
+});
+
+test("a check run counts as linked only for the pull request the key linked", () => {
+  const check = { provider: "github", kind: "check_run", action: "completed", repositoryFullName: "acme/app",
+    checkRun: { id: "1", name: "ci", status: "completed", conclusion: "failure", url: "u" } } as RepoRoomEvent;
+  const task = { ...keyedInput.task, workflow_artifacts: [
+    { provider: "github", kind: "pull_request", number: 91, url: "https://github.com/acme/app/pull/91", linked_by: "ticket_key" },
+    { provider: "github", kind: "pull_request", number: 92, url: "https://github.com/acme/app/pull/92" },
+  ] } as typeof keyedInput.task;
+  const stored = (numbers: number[]) => ({ event_type: "check_run", metadata: { same_repo_pull_request_numbers: numbers } });
+  assert.equal(eventLinkIsConfirmed({ roomEvent: check, storedEvent: stored([91]), task, matchedByTicketKey: false }), true);
+  assert.equal(eventLinkIsConfirmed({ roomEvent: check, storedEvent: stored([92]), task, matchedByTicketKey: false }), false);
+  assert.equal(eventLinkIsConfirmed({ roomEvent: check, storedEvent: stored([]), task, matchedByTicketKey: false }), false);
 });
 
 test("only people with access to the repository fire rules", () => {
@@ -261,8 +333,8 @@ test("only people with access to the repository fire rules", () => {
   assert.equal(repoEventIsTrusted(review("CONTRIBUTOR"), stored), false);
   const check = { provider: "github", kind: "check_run", action: "completed", repositoryFullName: "acme/app",
     checkRun: { id: "1", name: "ci", status: "completed", conclusion: "failure", url: "u" } } as RepoRoomEvent;
-  assert.equal(repoEventIsTrusted(check, { event_type: "check_run", metadata: { same_repo_pull_request_count: 1 } }), true);
-  assert.equal(repoEventIsTrusted(check, { event_type: "check_run", metadata: { same_repo_pull_request_count: 0 } }), false, "a fork's branch");
+  assert.equal(repoEventIsTrusted(check, { event_type: "check_run", metadata: { same_repo_pull_request_numbers: [1] } }), true);
+  assert.equal(repoEventIsTrusted(check, { event_type: "check_run", metadata: { same_repo_pull_request_numbers: [] } }), false, "a fork's branch");
 });
 
 test("pr_url is only ever the event repository's pull request URL", () => {
@@ -278,30 +350,10 @@ test("pr_url is only ever the event repository's pull request URL", () => {
 });
 
 test("a card that sync never bound to the ticket runs no rule", async () => {
-  const harness = engineHarness([loadedRule], false);
-  const result = await harness.engine.runForRepoEvent({
-    deliveryId: "d-3",
-    storedEvent: { event_type: "pull_request", base_ref: "main" },
-    eventRoomId: "room",
-    roomEvent: pullRequestOpened,
-    task: { id: "task_1", room_id: "room", external_ref: "jira:HR-17", pr_url: null },
-  });
+  const harness = engineHarness([loadedRule], { bound: false });
+  const result = await harness.engine.runForRepoEvent({ ...keyedInput, task: { ...keyedInput.task, external_ref: "jira:HR-17" } });
   assert.deepEqual(result.runs, []);
-  assert.deepEqual(harness.submitted, []);
-});
-
-test("when an action does not succeed, the later ones are failed before any tracker call", async () => {
-  const harness = engineHarness([loadedRule], true, true);
-  await harness.engine.runForRepoEvent({
-    deliveryId: "d-4",
-    storedEvent: { event_type: "pull_request", base_ref: "main" },
-    eventRoomId: "room",
-    roomEvent: pullRequestOpened,
-    task: { id: "task_1", room_id: "room", external_ref: "jira:HT-1234", pr_url: null },
-  });
-  await harness.settle();
-  assert.deepEqual(harness.driven, ["effect_1"]);
-  assert.deepEqual(harness.abandoned, ["effect_2"]);
+  assert.deepEqual(harness.reserved, []);
 });
 
 test("a cut comment never ends in half an escape", () => {

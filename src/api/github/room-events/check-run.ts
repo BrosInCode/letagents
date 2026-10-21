@@ -52,7 +52,11 @@ export function materializeCheckRunEvent(
       // GitHub lists only pull requests whose head is in this repository: a
       // fork's branch has none.
       ...(Array.isArray(payload.check_run.pull_requests)
-        ? { same_repo_pull_request_count: payload.check_run.pull_requests.length }
+        ? {
+            same_repo_pull_request_numbers: payload.check_run.pull_requests
+              .map((pullRequest) => pullRequest?.number)
+              .filter((number): number is number => typeof number === "number" && Number.isInteger(number)),
+          }
         : {}),
     },
     roomEvent: {

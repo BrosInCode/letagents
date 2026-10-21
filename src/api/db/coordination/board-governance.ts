@@ -30,6 +30,16 @@ import {
 } from "./board-intents.js";
 import { coordination_events } from "../schema.js";
 
+/** Fixed audit text for a rule run's reason code. Provider error text stays in the journal. */
+const TRACKER_RULE_RUN_DETAIL_TEXT: Record<string, string> = {
+  untrusted_actor: "Skipped: the pull request's author or the reviewer has no write access to the repository.",
+  debounced: "Skipped: this rule already ran for this ticket and event in the last 10 minutes.",
+  owner_not_admin: "Skipped: the connection's owner is no longer an admin of this room.",
+  reservation_failed: "Not written: the connection was removed or changed.",
+  connection_unavailable: "Not written: the room no longer imports with this connection.",
+  journal_row_missing: "Not written: the journal row for this write is gone.",
+};
+
 const BOARD_GOVERNANCE_AUDIT_EVENT_TYPES = [
   "board_manager_assigned",
   "board_manager_released",
@@ -193,12 +203,13 @@ export async function listBoardGovernanceAudit(
       .where(inArray(workflow_effects.id, effectIds)))
       .map((effect) => [effect.id, effect]),
   );
+  // A pending run shows its current journal row: a write the sweep is still
+  // retrying reads "failed" until it succeeds or runs out of attempts.
   const ruleRunOutcome = (run: (typeof ruleRunRows)[number]): string => {
-    const effects = (Array.isArray(run.effect_ids) ? run.effect_ids : []).map((id) => effectStates.get(id));
-    if (run.outcome === "error" || effects.length === 0 || effects.some((effect) => !effect)) return run.outcome;
-    if (effects.some((effect) => effect!.quarantined_at)) return "quarantined";
-    if (effects.some((effect) => effect!.state === "failed")) return "failed";
-    return effects.every((effect) => effect!.state === "succeeded") ? "succeeded" : "pending";
+    const ids = Array.isArray(run.effect_ids) ? run.effect_ids : [];
+    const last = ids.length ? effectStates.get(ids[ids.length - 1]!) : undefined;
+    if (run.outcome !== "pending" || !last) return run.outcome;
+    return last.quarantined_at ? "quarantined" : last.state === "failed" ? "failed" : "pending";
   };
 
   for (const run of ruleRunRows) {
@@ -208,7 +219,7 @@ export async function listBoardGovernanceAudit(
       kind: "tracker_rule_run",
       event_type: "tracker_rule_run",
       actor_label: `Rule: ${run.rule_name}`,
-      reason: outcome === run.outcome ? run.detail : null,
+      reason: TRACKER_RULE_RUN_DETAIL_TEXT[run.detail ?? ""] ?? null,
       created_at: run.created_at,
       metadata: {
         rule_id: run.rule_id,

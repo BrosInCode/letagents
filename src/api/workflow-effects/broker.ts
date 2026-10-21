@@ -352,23 +352,6 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
       return drive(reserved);
     },
 
-    /**
-     * Fails a fresh reservation for good before any tracker call, when the
-     * caller will not run it (an earlier action in its sequence failed). Only
-     * this call's own claim can be abandoned; anything else is left alone.
-     */
-    async abandonTrackerEffect(reserved: ReserveResult, reason: string): Promise<WorkflowEffect> {
-      if (!reserved.claimed || !reserved.processing_token) return reserved.effect;
-      return await store.fail({
-        id: reserved.effect.id,
-        processing_token: reserved.processing_token,
-        error: reason,
-        next_attempt_at: null,
-        exhaust: true,
-        now: nowFn(),
-      }) ?? reserved.effect;
-    },
-
     getEffect(id: string): Promise<WorkflowEffect | null> {
       return store.get(id);
     },

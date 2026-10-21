@@ -5,7 +5,13 @@ import {
   type TrackerRuleList,
   type TrackerRuleView,
 } from "../../../../../shared/ticket-connectors.mjs";
-import { toTrackerRuleView, trackerRuleStore, type TrackerRuleRow, type TrackerRuleStore } from "../../../connectors/rules/store.js";
+import {
+  toTrackerRuleView,
+  TrackerRuleLimitError,
+  trackerRuleStore,
+  type TrackerRuleRow,
+  type TrackerRuleStore,
+} from "../../../connectors/rules/store.js";
 import { parseTrackerRuleInput } from "../../../connectors/rules/validate.js";
 import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnectionStore } from "../../../connectors/store.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
@@ -14,7 +20,7 @@ import { requireAccount } from "./index.js";
 export interface TrackerRuleRouteDeps {
   connections: Pick<TrackerConnectionStore, "get">;
   rules: Pick<TrackerRuleStore,
-    "list" | "count" | "get" | "create" | "update" | "setEnabled" | "delete" | "versions" | "version" | "roomsForConnection">;
+    "list" | "get" | "create" | "update" | "setEnabled" | "delete" | "versions" | "version" | "roomsForConnection">;
 }
 
 export function defaultTrackerRuleRouteDeps(): TrackerRuleRouteDeps {
@@ -96,11 +102,12 @@ export function registerTrackerRuleRoutes(app: Express, deps: TrackerRuleRouteDe
     if (!owned) return;
     const input = await parseBody(req, res, owned.connection.id);
     if (!input) return;
-    if (await deps.rules.count(owned.connection.id) >= TRACKER_RULES_PER_CONNECTION_MAX) {
-      res.status(400).json({ error: `A connection can have at most ${TRACKER_RULES_PER_CONNECTION_MAX} rules.` });
-      return;
+    try {
+      sendRule(res, await deps.rules.create(owned.connection.id, owned.accountId, input, TRACKER_RULES_PER_CONNECTION_MAX), 201);
+    } catch (error) {
+      if (!(error instanceof TrackerRuleLimitError)) throw error;
+      res.status(400).json({ error: error.message });
     }
-    sendRule(res, await deps.rules.create(owned.connection.id, owned.accountId, input), 201);
   });
 
   /** Saves the rule as a new version; the old one stays in the history. */
