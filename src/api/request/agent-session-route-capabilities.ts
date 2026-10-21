@@ -35,7 +35,29 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "POST", path: /^\/rooms\/.+\/(?:tasks|board-intents)$/, capability: "coordination.propose" },
   { method: "POST", path: /^\/rooms\/.+\/board-intents\/[^/]+\/(?:approve|deny)$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.self_write" },
+  // A given agent reads the asker's code and proposes changes through LetAgents (Ask for an agent).
+  { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/(?:files|read|search)$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/proposals$/, capability: "coordination.propose" },
 ];
+
+// What a given agent may do while it waits for the asker to accept it: stay connected, nothing else.
+const WHILE_WAITING_FOR_ASKER: ReadonlyArray<{ method: string; path: RegExp }> = [
+  { method: "POST", path: /^\/rooms\/.+\/(?:presence|agent-sessions\/[^/]+\/(?:disconnect|failures|desktop-heartbeat|native-activity|desktop-pause))$/ },
+  { method: "PUT", path: /^\/rooms\/.+\/agents\/self\/observation$/ },
+  { method: "DELETE", path: /^\/rooms\/.+\/live-activity$/ },
+];
+
+// The host may keep a waiting agent's grant and worker session alive, but not publish for it.
+const GRANT_WHILE_WAITING_FOR_ASKER = /^\/supervisor-host-grants\/[^/]+\/(?:renew|handoff|worker-sessions|worker-sessions\/[^/]+\/(?:rotate|end))$/;
+
+export function isGrantRouteAllowedWhileWaitingForAsker(method: string, path: string): boolean {
+  return method.toUpperCase() === "POST" && GRANT_WHILE_WAITING_FOR_ASKER.test(path);
+}
+
+export function isAllowedWhileWaitingForAsker(method: string, path: string): boolean {
+  const normalized = path.replace(/^\/api(?=\/rooms\/)/, "");
+  return WHILE_WAITING_FOR_ASKER.some((route) => route.method === method.toUpperCase() && route.path.test(normalized));
+}
 
 export function requiredAgentSessionRouteCapability(method: string, path: string): AgentSessionBearerCapability | null {
   const normalized = path.replace(/^\/api(?=\/rooms\/)/, "");

@@ -50,17 +50,20 @@ test('desktop actual submit path creates tasks, searches through the scoped comp
   vm.draft.value = '/agent';
   await vm.submitMessage();
   assert.deepEqual(events, [['open-add-agent']]);
+  vm.draft.value = '/ask';
+  await vm.submitMessage();
+  assert.deepEqual(events, [['open-add-agent'], ['open-ask-agent']]);
 });
 
 test('desktop one suggestion model supports arrows, partial Enter, Tab, hints and Escape-to-send', async t => {
   const { vm, events, tasks } = mount(t);
   vm.draft.value = '/';
   assert.equal(vm.suggestionsOpen.value, true);
-  assert.deepEqual(vm.suggestions.value.map((item: any) => item.key), ['slash-task', 'slash-search', 'slash-agent']);
+  assert.deepEqual(vm.suggestions.value.map((item: any) => item.key), ['slash-task', 'slash-search', 'slash-agent', 'slash-ask']);
   vm.handleComposerKey(key('ArrowUp'));
-  assert.equal(vm.suggestionIndex.value, 2);
+  assert.equal(vm.suggestionIndex.value, 3);
   vm.handleComposerKey(key('Tab'));
-  assert.equal(vm.draft.value, '/agent');
+  assert.equal(vm.draft.value, '/ask');
   vm.draft.value = '/t';
   vm.handleComposerKey(key('Enter'));
   await flush();

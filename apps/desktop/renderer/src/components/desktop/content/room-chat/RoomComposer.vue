@@ -122,17 +122,25 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <div class="desktop-composer-input-row">
-      <button
-        class="desktop-composer-add-agent"
-        type="button"
-        :disabled="roomLoading || !roomIdentifier"
-        :title="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
-        :aria-label="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
-        data-testid="desktop-composer-add-agent"
-        @click="$emit('open-add-agent')"
-      >
-        <Plus :size="18" aria-hidden="true" />
-      </button>
+      <span ref="addMenuWrap" class="desktop-composer-add-wrap" style="position: relative; display: inline-flex;" data-testid="desktop-composer-add-agent">
+        <button
+          class="desktop-composer-add-agent"
+          type="button"
+          :disabled="roomLoading || !roomIdentifier"
+          :title="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
+          :aria-label="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
+          :aria-expanded="addMenuOpen"
+          aria-haspopup="menu"
+          data-testid="desktop-composer-add-agent-button"
+          @click="addMenuOpen = !addMenuOpen"
+        >
+          <Plus :size="18" aria-hidden="true" />
+        </button>
+        <span v-if="addMenuOpen" class="desktop-composer-add-menu" role="menu" @keydown.esc.stop="addMenuOpen = false">
+          <button type="button" role="menuitem" data-testid="desktop-composer-menu-add-agent" @click="addMenuOpen = false; $emit('open-add-agent')">Add agent</button>
+          <button type="button" role="menuitem" data-testid="desktop-composer-menu-ask-agent" @click="addMenuOpen = false; $emit('open-ask-agent')">Ask someone for an agent</button>
+        </span>
+      </span>
       <textarea
         ref="textareaElement"
         v-model="draft"
@@ -284,10 +292,31 @@ const props = defineProps<{
 }>();
 
 const selectedGif = ref<RoomGif | null>(null);
+const addMenuOpen = ref(false);
+const addMenuWrap = ref<HTMLElement | null>(null);
+// The "+" menu closes on a click anywhere else or on Escape, wherever focus is.
+function closeAddMenuOnOutsidePointer(event: PointerEvent) {
+  if (addMenuWrap.value && !addMenuWrap.value.contains(event.target as Node)) addMenuOpen.value = false;
+}
+function closeAddMenuOnEscape(event: KeyboardEvent) {
+  if (event.key === "Escape") addMenuOpen.value = false;
+}
+watch(addMenuOpen, open => {
+  if (typeof document === "undefined") return;
+  const method = open ? "addEventListener" : "removeEventListener";
+  document[method]("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true);
+  document[method]("keydown", closeAddMenuOnEscape as EventListener, true);
+});
+onBeforeUnmount(() => {
+  if (typeof document === "undefined") return;
+  document.removeEventListener("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true);
+  document.removeEventListener("keydown", closeAddMenuOnEscape as EventListener, true);
+});
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
   "open-add-agent": [];
+  "open-ask-agent": [];
   "remove-attachment": [uploadId: string];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "open-event-preview": [event: ComposerEventPreview];
@@ -519,6 +548,8 @@ const slash = useComposerSlashCommands({
     } else if (command.name === "search") {
       if (!openRoomSearch) throw new Error("Room search is unavailable");
       openRoomSearch(argument);
+    } else if (command.name === "ask") {
+      emit("open-ask-agent");
     } else {
       emit("open-add-agent");
     }

@@ -25,4 +25,7 @@ export const SUPERVISED_READ_ONLY_TOOLS = new Set([
   "get_onboarding_status",
   "status_local_codex_session",
   "rental_list_requests",
+  "ask_list_files",
+  "ask_read_file",
+  "ask_search",
 ]);

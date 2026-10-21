@@ -520,6 +520,36 @@ function isIndeterminateGitHubAccessResponse(response: Response): boolean {
     || response.status >= 500;
 }
 
+/**
+ * Whether this login can push to the repo (owner, or admin/maintain/write),
+ * asked of GitHub now and never cached: it gates actions where the GitHub App
+ * pushes for the caller.
+ */
+export async function isGitHubRepoWriter(input: {
+  roomName: string;
+  login: string;
+  accessToken: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const repo = parseGitHubRepoName(input.roomName);
+  if (!repo || !input.accessToken) return false;
+  const doFetch = input.fetchImpl ?? fetch;
+  const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+  if (!ownerResponse.ok) return false;
+  const repoPayload = (await ownerResponse.json()) as GitHubRepo;
+  if (repoPayload.owner?.login?.toLowerCase() === input.login.toLowerCase()) return true;
+  const permissionResponse = await githubRequest({
+    url: buildGitHubApiUrl(`/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`),
+    token: input.accessToken,
+    fetchImpl: doFetch,
+    timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
+  });
+  if (!permissionResponse.ok) return false;
+  const payload = (await permissionResponse.json()) as GitHubPermissionResponse & { role_name?: string };
+  return payload.permission === "admin" || payload.permission === "write"
+    || payload.role_name === "maintain" || payload.role_name === "write" || payload.role_name === "admin";
+}
+
 export async function isGitHubRepoAdmin(input: {
   roomName: string;
   login: string;
