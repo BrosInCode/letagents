@@ -1,6 +1,6 @@
 // Shared fixtures for the daemon-*.test.ts files that were split from daemon.test.ts.
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";

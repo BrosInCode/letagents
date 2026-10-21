@@ -1,7 +1,6 @@
 import { DaemonReadModel } from "../daemon-read-model.js";
 import { isHumanRoomActivityEvent } from "../provider-stream-policy.js";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";

@@ -1,6 +1,5 @@
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { type AddressInfo } from "node:net";

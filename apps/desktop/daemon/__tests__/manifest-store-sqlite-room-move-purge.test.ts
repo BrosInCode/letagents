@@ -11,7 +11,6 @@ import { WorkerBindingStore } from "../worker-binding-store.js";
 import {
   TEST_PROVIDER_TURN_AUTHORITY,
   IMAGE_INPUT_UPDATE,
-  terminal,
   entry,
   fixture,
   seedTerminalAttempt,

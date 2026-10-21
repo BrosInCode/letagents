@@ -17,7 +17,6 @@ import {
   localDelegationInput,
   localDelegationValidation,
   seedLocalDelegationManifest,
-  terminal,
   entry,
   fixture,
   seedTerminalExecution,
