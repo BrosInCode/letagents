@@ -1054,6 +1054,8 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
   });
   try {
     const socketPath = join(env.root, ".letagents", "daemon.sock");
+    // The entrypoint loads through tsx, which nears 2 s while the other
+    // daemon test files start in parallel.
     await eventually(async () => {
       try {
         return (await daemonRequest(socketPath, "daemon.status")).ok;
@@ -1061,7 +1063,7 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
         // The entrypoint is still acquiring its singleton and SQLite state.
         return false;
       }
-    }, "daemon entrypoint startup", 2_000);
+    }, "daemon entrypoint startup", 10_000);
     assert.equal((await daemonRequest(socketPath, "daemon.prepare_handoff")).ok, true);
     const exited = await within(new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       child.once("exit", (code, signal) => resolve({ code, signal }));
@@ -1106,16 +1108,19 @@ test("SIGTERM after authority release uses default process-only termination and 
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
   let providerPid: number | null = null;
-  const waitForMessage = (type: string) => within(new Promise<Record<string, unknown>>((resolve) => {
+  const waitForMessage = (type: string, timeoutMs = 2_000) => within(new Promise<Record<string, unknown>>((resolve) => {
     const listener = (message: unknown) => {
       if ((message as { type?: string })?.type !== type) return;
       child.off("message", listener);
       resolve(message as Record<string, unknown>);
     };
     child.on("message", listener);
-  }), `child message ${type}`, 2_000);
+  }), `child message ${type}`, timeoutMs);
   try {
-    const ready = await waitForMessage("ready");
+    // The child loads the daemon through tsx before it reports ready. That
+    // cold start nears 2 s while the other daemon test files start in
+    // parallel, so the bound only catches a child that never starts.
+    const ready = await waitForMessage("ready", 10_000);
     providerPid = Number(ready.providerPid);
     const socketPath = join(env.root, ".letagents", "daemon.sock");
     assert.equal((await daemonRequest(socketPath, "daemon.prepare_handoff")).ok, true);
