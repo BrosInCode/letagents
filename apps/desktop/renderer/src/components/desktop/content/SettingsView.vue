@@ -44,6 +44,7 @@
         :auth-status="authStatus"
       />
 
+      <SettingsConnectorsPane v-else-if="activePane === 'account:connectors'" />
       <SettingsStoragePane
         v-else-if="isStoragePane"
         :account-rooms="accountRooms"
@@ -153,6 +154,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import SettingsAgentsPane from "../settings/panes/SettingsAgentsPane.vue";
 import SettingsAppAgentPane from "../settings/panes/SettingsAppAgentPane.vue";
+import SettingsConnectorsPane from "../settings/panes/SettingsConnectorsPane.vue";
 import SettingsDiagnosticsPane from "../settings/panes/SettingsDiagnosticsPane.vue";
 import SettingsMcpPane from "../settings/panes/SettingsMcpPane.vue";
 import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";

@@ -1,7 +1,9 @@
-import type { ReserveWorkflowEffectInput } from "../db/workflow-effects.js";
+import type { ReserveTrackerWorkflowEffectInput, ReserveWorkflowEffectInput } from "../db/workflow-effects.js";
 import type { WorkflowEffect } from "../db/types/effects.js";
 import {
+  type GitHubReviewCreateResult,
   type GitHubReviewEffectRequest,
+  type GitHubReviewLookupResult,
   type GitHubReviewProvider,
   type GitHubReviewVerdict,
 } from "./github-review-provider.js";
@@ -11,12 +13,27 @@ export const WORKFLOW_EFFECT_AMBIGUOUS_LOOKUP_INTERVAL_MS = 5 * 60_000;
 export const WORKFLOW_EFFECT_SETTLED_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const FAILED_RETRY_BASE_MS = 30_000;
 
+export type WorkflowEffectCreateResult = GitHubReviewCreateResult;
+export type WorkflowEffectLookupResult = GitHubReviewLookupResult;
+
+/** Runs one effect kind against its provider. */
+export interface WorkflowEffectExecutor {
+  /** One provider write that embeds `effect.correlation_key`. */
+  create(effect: WorkflowEffect): Promise<WorkflowEffectCreateResult>;
+  /** Read-only search for an earlier write by its correlation marker. */
+  lookup(effect: WorkflowEffect): Promise<WorkflowEffectLookupResult>;
+}
+
+interface ReserveResult {
+  effect: WorkflowEffect;
+  claimed: boolean;
+  processing_token: string | null;
+}
+
 export interface WorkflowEffectStore {
-  reserve(input: ReserveWorkflowEffectInput): Promise<{
-    effect: WorkflowEffect;
-    claimed: boolean;
-    processing_token: string | null;
-  }>;
+  reserve(input: ReserveWorkflowEffectInput): Promise<ReserveResult>;
+  /** Tracker effects: reserved under a live connection instead of a lease. */
+  reserveTracker?(input: ReserveTrackerWorkflowEffectInput): Promise<ReserveResult>;
   get(id: string): Promise<WorkflowEffect | null>;
   claimFailed(id: string, now?: Date): Promise<{ effect: WorkflowEffect; processing_token: string } | null>;
   claimAmbiguous(id: string, now?: Date): Promise<{ effect: WorkflowEffect; processing_token: string } | null>;
@@ -49,11 +66,38 @@ export interface SubmitGitHubReviewVerdictInput extends GitHubReviewEffectReques
   idempotency_key: string;
 }
 
+export interface SubmitTrackerEffectInput {
+  room_id: string;
+  task_id: string;
+  connection_id: string;
+  provider: "jira" | "linear";
+  /** The ticket key, e.g. `HT-1234`. */
+  key: string;
+  idempotency_key: string;
+  actor_label: string;
+  action:
+    | { kind: "tracker_transition"; to_status: string }
+    | { kind: "tracker_comment"; body: string };
+}
+
+export const TRACKER_COMMENT_MAX_LENGTH = 16_000;
+
 export interface WorkflowEffectBrokerDeps {
   store: WorkflowEffectStore;
   provider: GitHubReviewProvider;
+  /** Jira and Linear writes. Without it, tracker effects fail definitely. */
+  tracker?: WorkflowEffectExecutor;
   now?: () => Date;
 }
+
+const unconfiguredTrackerExecutor: WorkflowEffectExecutor = {
+  async create() {
+    return { kind: "definite_failure", error: "Ticket connectors are not configured on this server; the tracker was not changed." };
+  },
+  async lookup() {
+    throw new Error("Ticket connectors are not configured on this server; the tracker cannot be checked.");
+  },
+};
 
 function toReviewRequest(effect: WorkflowEffect): GitHubReviewEffectRequest {
   const payload = effect.request_payload;
@@ -87,10 +131,16 @@ async function performCreate(input: {
   effect: WorkflowEffect;
   token: string;
   store: WorkflowEffectStore;
-  provider: GitHubReviewProvider;
+  executor: WorkflowEffectExecutor;
   now: Date;
 }): Promise<WorkflowEffect> {
-  const result = await input.provider.create(toReviewRequest(input.effect), input.effect.correlation_key);
+  let result: WorkflowEffectCreateResult;
+  try {
+    result = await input.executor.create(input.effect);
+  } catch (error) {
+    // An executor that throws cannot say whether the write landed.
+    result = { kind: "ambiguous", error: error instanceof Error ? error.message : "Provider write outcome is unknown." };
+  }
   let persisted: WorkflowEffect | null;
   if (result.kind === "succeeded") {
     persisted = await input.store.succeed({
@@ -127,11 +177,11 @@ async function performLookup(input: {
   effect: WorkflowEffect;
   token: string;
   store: WorkflowEffectStore;
-  provider: GitHubReviewProvider;
+  executor: WorkflowEffectExecutor;
   now: Date;
 }): Promise<WorkflowEffect> {
   try {
-    const result = await input.provider.lookup(toReviewRequest(input.effect), input.effect.correlation_key);
+    const result = await input.executor.lookup(input.effect);
     const persisted = result.kind === "found"
       ? await input.store.succeed({
           id: input.effect.id,
@@ -165,6 +215,28 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
   const store = deps.store;
   const provider = deps.provider;
   const nowFn = deps.now ?? (() => new Date());
+  const githubExecutor: WorkflowEffectExecutor = {
+    create: (effect) => provider.create(toReviewRequest(effect), effect.correlation_key),
+    lookup: (effect) => provider.lookup(toReviewRequest(effect), effect.correlation_key),
+  };
+  const executorFor = (effect: WorkflowEffect): WorkflowEffectExecutor =>
+    effect.kind === "github_review_verdict" ? githubExecutor : deps.tracker ?? unconfiguredTrackerExecutor;
+
+  /** Run a freshly reserved, retried or ambiguous effect once. */
+  async function drive(reserved: ReserveResult): Promise<WorkflowEffect> {
+    if (reserved.claimed && reserved.processing_token) {
+      return performCreate({ effect: reserved.effect, token: reserved.processing_token, store, executor: executorFor(reserved.effect), now: nowFn() });
+    }
+    if (reserved.effect.state === "failed") {
+      const claim = await store.claimFailed(reserved.effect.id, nowFn());
+      if (claim) return performCreate({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now: nowFn() });
+    }
+    if (reserved.effect.state === "ambiguous") {
+      const claim = await store.claimAmbiguous(reserved.effect.id, nowFn());
+      if (claim) return performLookup({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now: nowFn() });
+    }
+    return reserved.effect;
+  }
 
   return {
     async submitGitHubReviewVerdict(input: SubmitGitHubReviewVerdictInput): Promise<WorkflowEffect> {
@@ -192,19 +264,37 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
         quarantine_reason: blockingVerdictQuarantineReason(input.verdict, input.body),
         now: nowFn(),
       });
+      return drive(reserved);
+    },
 
-      if (reserved.claimed && reserved.processing_token) {
-        return performCreate({ effect: reserved.effect, token: reserved.processing_token, store, provider, now: nowFn() });
-      }
-      if (reserved.effect.state === "failed") {
-        const claim = await store.claimFailed(reserved.effect.id, nowFn());
-        if (claim) return performCreate({ effect: claim.effect, token: claim.processing_token, store, provider, now: nowFn() });
-      }
-      if (reserved.effect.state === "ambiguous") {
-        const claim = await store.claimAmbiguous(reserved.effect.id, nowFn());
-        if (claim) return performLookup({ effect: claim.effect, token: claim.processing_token, store, provider, now: nowFn() });
-      }
-      return reserved.effect;
+    /**
+     * Reserve one tracker write in the journal, then run it once. Every Jira
+     * or Linear write goes through here (ticket connectors invariant 3).
+     */
+    async submitTrackerEffect(input: SubmitTrackerEffectInput): Promise<WorkflowEffect> {
+      if (!store.reserveTracker) throw new Error("This workflow effect store cannot reserve tracker effects.");
+      const key = input.key.trim().toUpperCase();
+      const requestPayload: Record<string, unknown> = input.action.kind === "tracker_transition"
+        ? { connection_id: input.connection_id, key, to_status: input.action.to_status.trim() }
+        : { connection_id: input.connection_id, key, body: input.action.body.trim() };
+      const quarantine = input.action.kind === "tracker_comment"
+        ? (!input.action.body.trim()
+            ? "Tracker comment is empty."
+            : input.action.body.length > TRACKER_COMMENT_MAX_LENGTH ? "Tracker comment is too long." : null)
+        : (!input.action.to_status.trim() ? "Tracker transition names no target status." : null);
+      const reserved = await store.reserveTracker({
+        room_id: input.room_id,
+        task_id: input.task_id,
+        connection_id: input.connection_id,
+        kind: input.action.kind,
+        provider: input.provider,
+        idempotency_key: input.idempotency_key,
+        request_payload: requestPayload,
+        created_by: input.actor_label,
+        quarantine_reason: quarantine,
+        now: nowFn(),
+      });
+      return drive(reserved);
     },
 
     async reconcile(effect: WorkflowEffect): Promise<WorkflowEffect> {
@@ -222,13 +312,13 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
       if (current.state === "ambiguous") {
         const claim = await store.claimAmbiguous(current.id, now);
         return claim
-          ? performLookup({ effect: claim.effect, token: claim.processing_token, store, provider, now })
+          ? performLookup({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now })
           : await store.get(current.id) ?? current;
       }
       if (current.state === "failed") {
         const claim = await store.claimFailed(current.id, now);
         return claim
-          ? performCreate({ effect: claim.effect, token: claim.processing_token, store, provider, now })
+          ? performCreate({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now })
           : await store.get(current.id) ?? current;
       }
       return current;

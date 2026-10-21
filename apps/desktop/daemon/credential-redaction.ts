@@ -10,7 +10,7 @@ const SENSITIVE_KEY = /(?:^|[_-])(?:authorization|proxy[_-]?authorization|cookie
 const AUTHORIZATION_ASSIGNMENT = /((?:\\?["']?)\b(?:authorization|proxy[_-]?authorization)(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!(?:bearer|basic)\b)([^\\\s"',}\]]{4,})/gi;
 const EMBEDDED_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|set[_-]?cookie|credential|credentials|password|passwd|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
 const AUTHORIZATION_SCHEME_VALUE = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
-const KNOWN_TOKEN = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
+const KNOWN_TOKEN = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ATATT[a-z0-9_=-]{20,}|lin_(?:api|oauth)_[a-z0-9]{20,})\b/gi;
 /**
  * The password in URL userinfo of any scheme: postgres://admin:pass@host,
  * redis://:pass@host. People write passwords with an unescaped `@` or `/`, so
@@ -37,7 +37,7 @@ const PRIVATE_KEY_HINT = /PRIVATE KEY-----/;
 const AUTHORIZATION_SCHEME_HINT = /bearer|basic/i;
 const AUTHORIZATION_ASSIGNMENT_HINT = /authorization/i;
 const EMBEDDED_ASSIGNMENT_HINT = /cookie|credential|passw(?:or)?d|secret|api[_-]?key|private[_-]?key|token/i;
-const KNOWN_TOKEN_HINT = /las(?:b|hg)_|github_pat_|gh[pousr]_|sk-|akia/i;
+const KNOWN_TOKEN_HINT = /las(?:b|hg)_|github_pat_|gh[pousr]_|sk-|akia|atatt|lin_(?:api|oauth)_/i;
 const URL_PASSWORD_HINT = /:\/\//;
 const ANY_CASELESS_HINT = new RegExp([AUTHORIZATION_SCHEME_HINT, AUTHORIZATION_ASSIGNMENT_HINT,
   EMBEDDED_ASSIGNMENT_HINT, KNOWN_TOKEN_HINT].map((hint) => hint.source).join("|"), "i");
