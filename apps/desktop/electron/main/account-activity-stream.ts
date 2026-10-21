@@ -171,6 +171,7 @@ function parseRoom(value: unknown): DesktopAccountRoomActivity | null {
     roomId: room.room_id,
     latestMessageId: typeof room.latest_message_id === "string" ? room.latest_message_id : null,
     latestMessageAt: typeof room.latest_message_at === "string" ? room.latest_message_at : null,
+    tasksChangedAt: typeof room.tasks_changed_at === "string" ? room.tasks_changed_at : null,
     working: working.flatMap((agent) => {
       const displayName = (agent as { display_name?: unknown } | null)?.display_name;
       return typeof displayName === "string" && displayName ? [{ displayName }] : [];

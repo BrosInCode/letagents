@@ -1,7 +1,7 @@
 import { computed, watch } from "vue";
 import type { PersonTarget } from "../../domain/person-target";
 import { openConversationWithPerson } from "../../domain/open-conversation-with-person";
-import { inboxRoomOpenReporter, needsYouEntry, openInboxRoom } from "../../domain/desktop-navigation";
+import { inboxRoomOpenReporter, myWorkEntry, needsYouEntry, openInboxRoom } from "../../domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "../../domain/user-visible-error";
 import { findSidebarRoomEntryByIdentifier } from "../../domain/sidebar-rooms";
 import type { AttentionNavigationIntent } from "../../components/desktop/content/room-shell/types";
@@ -66,10 +66,15 @@ export function useAppInboxActions(context: unknown) {
       attentionIntent.value = intent;
     } catch (error) { app.needsYouError.value = String(error); }
   }
+  function openMyWork() { app.activeEntry.value = myWorkEntry; }
+  /** A My work row opens its card, or a linked thread, in its room as an Inbox item does. */
+  function openMyWorkCard(roomIdentifier: string, taskId: string) { void openNeedsYouRoom({ roomIdentifier, taskId }); }
+  function openMyWorkThread(roomIdentifier: string, threadRootId: string) { void openNeedsYouRoom({ roomIdentifier, threadRootId }); }
   function openNeedsYou(room?: string) { app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
   async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
   return {
     openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
+    openMyWork, openMyWorkCard, openMyWorkThread,
   };
 }
 

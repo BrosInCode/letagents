@@ -159,24 +159,6 @@ function onCardClick(event: MouseEvent): void {
 
 <style scoped>
 .desktop-task-ticket { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.desktop-task-provider-chip {
-  padding: 1px 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 16px;
-}
-.desktop-task-ticket-state {
-  margin-left: auto;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
-}
-.desktop-task-ticket-state[data-ticket-state="done"] { color: var(--success, #3fb950); }
-.desktop-task-ticket-state[data-ticket-state="in_review"] { color: var(--accent, #58a6ff); }
+/* Chip and pill colours are shared in styles/task-board/task-detail-panel.css. */
+.desktop-task-ticket-state { margin-left: auto; white-space: nowrap; }
 </style>

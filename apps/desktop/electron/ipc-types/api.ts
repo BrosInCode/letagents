@@ -127,6 +127,7 @@ import type {
   DesktopTaskLeaseActionInput,
   DesktopTaskMention,
   DesktopTaskTicket,
+  DesktopMyWorkQuery,
   DesktopTrackerFilterInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
@@ -259,6 +260,8 @@ export interface DesktopApi {
     ) => Promise<DesktopTaskMutationResult>;
     getTaskMentions: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskMention[]>;
     getTaskTicket: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskTicket | null>;
+    /** Cards that are the account's work across its rooms. Optional so a newer renderer degrades on an older main process. */
+    getMyWork?: (query?: DesktopMyWorkQuery) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkPage>;
     /** Room ticket filters (ticket connectors). Local rooms have none. */
     listTrackerFilters: (roomIdentifier: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
     saveTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;

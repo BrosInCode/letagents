@@ -44,6 +44,20 @@ export function normalizedExternalRef(value: string): string | null | undefined 
   return `${provider}:${match[2]!.toUpperCase()}`;
 }
 
+/**
+ * The card a room search names by its ticket key: `HT-1234`, `jira:HT-1234`
+ * or `linear:ENG-12`, in any case. A bare key matches a card of any tracker
+ * with that key; null when the text is not a key or no card holds it.
+ */
+export function taskForTicketQuery<T extends { externalRef?: string | null }>(tasks: readonly T[], query: string): T | null {
+  const ref = normalizedExternalRef(query);
+  if (!ref) return null;
+  const exact = tasks.find((task) => task.externalRef === ref);
+  if (exact || /^\s*(?:jira|linear):/i.test(query)) return exact ?? null;
+  const key = ref.slice(ref.indexOf(":") + 1);
+  return tasks.find((task) => ticketRefParts(task.externalRef)?.key === key) ?? null;
+}
+
 /** Cards that sync imported carry `created_by` `tracker:jira` or `tracker:linear`. */
 export function isImportedTask(task: { createdBy?: string | null }): boolean {
   return task.createdBy === "tracker:jira" || task.createdBy === "tracker:linear";

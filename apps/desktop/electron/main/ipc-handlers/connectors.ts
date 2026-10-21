@@ -18,8 +18,9 @@ import {
   setDesktopRoomTrackerFilterEnabled,
   testDesktopRoomTrackerFilter,
 } from "../rooms/tracker-filters.js";
+import { getDesktopMyWork } from "../rooms/my-work.js";
 
-/** Ticket connectors: the account's Jira and Linear connections, and room ticket filters. */
+/** Ticket connectors: the account's Jira and Linear connections, room ticket filters, and My work. */
 export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:connectors:list", () => listTrackerConnections());
   targetIpcMain.handle("desktop:connectors:connect-oauth", (_event, provider) => connectTrackerWithOAuth(provider));
@@ -29,6 +30,7 @@ export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void
   targetIpcMain.handle("desktop:connectors:update", (_event, id, patch) => updateTrackerConnection(id, patch));
   targetIpcMain.handle("desktop:connectors:remove", (_event, id) => removeTrackerConnection(id));
   targetIpcMain.handle("desktop:connectors:webhook", (_event, id) => getTrackerWebhookSetup(id));
+  targetIpcMain.handle("desktop:room:my-work", (_event, query) => getDesktopMyWork(query));
   targetIpcMain.handle("desktop:room:get-task-ticket", (_event, roomIdentifier, taskId) => getDesktopRoomTaskTicket(roomIdentifier, taskId));
   targetIpcMain.handle("desktop:room:list-tracker-filters", (_event, roomIdentifier) => listDesktopRoomTrackerFilters(roomIdentifier));
   targetIpcMain.handle("desktop:room:save-tracker-filter", (_event, roomIdentifier, input) => saveDesktopRoomTrackerFilter(roomIdentifier, input));

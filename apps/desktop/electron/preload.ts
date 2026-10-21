@@ -166,6 +166,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-task-mentions", roomIdentifier, taskId),
     getTaskTicket: (roomIdentifier: string, taskId: string) =>
       ipcRenderer.invoke("desktop:room:get-task-ticket", roomIdentifier, taskId),
+    getMyWork: (query) => ipcRenderer.invoke("desktop:room:my-work", query ?? {}),
     listTrackerFilters: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:list-tracker-filters", roomIdentifier),
     saveTrackerFilter: (roomIdentifier: string, input) =>

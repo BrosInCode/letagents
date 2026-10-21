@@ -457,3 +457,23 @@
     transform: none;
   }
 }
+
+/* Ticket provider chip and ticket state pill: board cards, the card inspector and My work. */
+.desktop-task-provider-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.desktop-task-ticket-state {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.desktop-task-ticket-state[data-ticket-state="done"] { color: var(--success, #3fb950); }
+.desktop-task-ticket-state[data-ticket-state="in_review"] { color: var(--accent, #58a6ff); }
