@@ -49,7 +49,7 @@
   },
   "license": "BUSL-1.1",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "drizzle-orm": "0.45.2",
     "express": "5.2.1",
     "pg": "8.20.0",
@@ -69,9 +69,9 @@
       "esbuild": "^0.25.12"
     },
     "fast-uri": "3.1.8",
-    "hono": "4.13.8",
+    "hono": "4.13.13",
     "ip-address": "10.7.2",
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "proxy-addr": "2.0.8"
   }
 }
