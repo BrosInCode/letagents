@@ -25,6 +25,7 @@ const ISSUE_FIELDS = `
   state { id name type }
   assignee { id name displayName }
   team { key }
+  project { id }
 `;
 
 export interface LinearProviderOptions {
@@ -129,6 +130,7 @@ export function createLinearProvider(options: LinearProviderOptions = {}): WorkI
         id: asString(record.id),
         state_type: asString(state.type),
         team_key: asString(asRecord(record.team).key),
+        project_id: asString(asRecord(record.project).id),
       },
     };
   }
@@ -203,6 +205,10 @@ export function createLinearProvider(options: LinearProviderOptions = {}): WorkI
       if (opts.updatedSince) {
         if (!Number.isFinite(Date.parse(opts.updatedSince))) throw new TrackerProviderError("definite", "updatedSince is not a valid time.");
         issueFilter.updatedAt = { gte: new Date(opts.updatedSince).toISOString() };
+      }
+      if (opts.updatedBefore) {
+        if (!Number.isFinite(Date.parse(opts.updatedBefore))) throw new TrackerProviderError("definite", "updatedBefore is not a valid time.");
+        issueFilter.updatedAt = { ...(issueFilter.updatedAt as object | undefined), lte: new Date(opts.updatedBefore).toISOString() };
       }
       const items: ExternalItem[] = [];
       let after: string | null = null;

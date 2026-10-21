@@ -119,8 +119,12 @@ export const room_tracker_filters = pgTable(
     created_by_account_id: text("created_by_account_id").notNull(),
     /** When the last successful poll started; the next poll asks for changes since then. */
     last_synced_at: timestamp("last_synced_at", { mode: "string", withTimezone: true }),
-    /** A process claims a poll by setting this; a stale claim expires after one interval. */
+    /** A process claims a poll by setting this. A claim not finished in time expires. */
     sync_claimed_at: timestamp("sync_claimed_at", { mode: "string", withTimezone: true }),
+    /** When the poll under the current claim finished; a running poll is never claimed again. */
+    sync_finished_at: timestamp("sync_finished_at", { mode: "string", withTimezone: true }),
+    /** A webhook asks for an early poll by setting this. */
+    sync_requested_at: timestamp("sync_requested_at", { mode: "string", withTimezone: true }),
     last_error: text("last_error"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),

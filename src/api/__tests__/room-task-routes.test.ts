@@ -454,7 +454,7 @@ test('recent completed tasks include new work beyond the first 200 and recently 
 function createExternalRefPatchHarness(input: {
   admin: boolean;
   updateTask?: (...args: unknown[]) => Promise<unknown>;
-  mergeImportedCardIntoNative?: (...args: unknown[]) => Promise<unknown>;
+  updateTaskLinkingTicket?: (...args: unknown[]) => Promise<unknown>;
 }) {
   const { app, handlers } = createRouteApp();
   const updates: unknown[] = [];
@@ -464,7 +464,7 @@ function createExternalRefPatchHarness(input: {
     resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
     resolveRoomOrReply: async () => ({ id: "github.com/brosincode/letagents" }),
     requireParticipant: async () => true,
-    ...(input.mergeImportedCardIntoNative ? { mergeImportedCardIntoNative: input.mergeImportedCardIntoNative } : {}),
+    ...(input.updateTaskLinkingTicket ? { updateTaskLinkingTicket: input.updateTaskLinkingTicket } : {}),
     requireAdmin: async (_req: unknown, res: { status(code: number): { json(body: unknown): void } }) => {
       if (!input.admin) res.status(403).json({ error: "Admin required" });
       return input.admin;
@@ -539,26 +539,33 @@ test("room task creation rejects a malformed ticket key before any write", async
   assert.equal(res.statusCode, 400);
 });
 
-test("linking a card to a ticket an imported card holds merges that card first", async () => {
-  const merges: unknown[] = [];
+test("linking a card to a ticket goes through the merge-aware update and names the merged card", async () => {
+  const links: unknown[] = [];
   const { patch, updates } = createExternalRefPatchHarness({
     admin: true,
-    mergeImportedCardIntoNative: async (input) => {
-      merges.push(input);
-      return { merged: true, imported_task_id: "task_9" };
+    updateTaskLinkingTicket: async (input, update) => {
+      links.push({ ...(input as object), updates: undefined });
+      const rest = { ...(input as { updates: object }).updates } as Record<string, unknown>;
+      delete rest.external_ref;
+      const task = await (update as (patch: unknown, tx: unknown) => Promise<unknown>)(rest, "tx");
+      return { task: { ...(task as object), external_ref: "jira:HT-1" }, merged_task_id: "task_9" };
     },
   });
-  assert.equal((await patch({ external_ref: "jira:HT-1" })).statusCode, 200);
-  assert.deepEqual(merges, [{ room_id: "github.com/brosincode/letagents", native_task_id: "task_5", external_ref: "jira:HT-1" }]);
-  // The merge already gave this card the key; the update does not set it again.
+  const res = await patch({ external_ref: "jira:HT-1" });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(links, [{ room_id: "github.com/brosincode/letagents", task_id: "task_5", external_ref: "jira:HT-1", updates: undefined }]);
   assert.deepEqual(updates, [{}]);
+  assert.equal((res.body as { merged_task_id?: string }).merged_task_id, "task_9");
+  // Clearing a key is a plain update.
+  assert.equal((await patch({ external_ref: null })).statusCode, 200);
+  assert.equal(links.length, 1);
 });
 
-test("a merge refused while an agent works on the imported card is a named conflict", async () => {
+test("a merge refused because work started on the imported card is a named conflict", async () => {
   const { ImportedCardBusyError } = await import("../connectors/card-merge.js");
   const { patch, updates } = createExternalRefPatchHarness({
     admin: true,
-    mergeImportedCardIntoNative: async () => { throw new ImportedCardBusyError("task_9"); },
+    updateTaskLinkingTicket: async () => { throw new ImportedCardBusyError("task_9"); },
   });
   const res = await patch({ external_ref: "jira:HT-1" });
   assert.equal(res.statusCode, 409);

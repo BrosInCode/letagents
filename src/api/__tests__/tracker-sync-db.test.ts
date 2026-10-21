@@ -40,14 +40,28 @@ function item(key: string, ticketState: ExternalItem["ticket_state"], updatedAt:
   };
 }
 
-/** A Jira provider that answers from in-memory tickets and counts calls. */
+/**
+ * A Jira provider that answers from in-memory tickets and counts calls. It
+ * reads `project = X` and `key = "K"` from the JQL, and honours the limit and
+ * the updated window, newest first, as Jira does.
+ */
 function fakeJira(tickets: Map<string, ExternalItem>) {
-  const calls = { listItems: [] as Array<{ filter: string | null; updatedSince?: string }>, getItem: [] as string[] };
+  const calls = {
+    listItems: [] as Array<{ filter: string | null; updatedSince?: string; updatedBefore?: string }>,
+    getItem: [] as string[],
+  };
   const provider = {
     name: "jira",
-    async listItems(_conn: ProviderConnection, filter: string | null, opts: { updatedSince?: string }) {
-      calls.listItems.push({ filter, updatedSince: opts.updatedSince });
-      return [...tickets.values()];
+    async listItems(_conn: ProviderConnection, filter: string | null, opts: { updatedSince?: string; updatedBefore?: string; limit?: number }) {
+      calls.listItems.push({ filter, updatedSince: opts.updatedSince, updatedBefore: opts.updatedBefore });
+      const project = /project = (\w+)/.exec(filter ?? "")?.[1];
+      const key = /key = "([^"]+)"/.exec(filter ?? "")?.[1];
+      return [...tickets.values()]
+        .filter((entry) => !project || entry.key.startsWith(`${project}-`))
+        .filter((entry) => !key || entry.key === key)
+        .filter((entry) => !opts.updatedBefore || Date.parse(entry.tracker_updated_at!) <= Date.parse(opts.updatedBefore))
+        .sort((a, b) => Date.parse(b.tracker_updated_at!) - Date.parse(a.tracker_updated_at!))
+        .slice(0, opts.limit ?? 50);
     },
     async getItem(_conn: ProviderConnection, key: string) {
       calls.getItem.push(key);
@@ -126,8 +140,8 @@ test("poll and webhook deliver the same change with one upsert and no duplicate 
   // Two deliveries of one change at once still write once.
   ctx.tickets.set("HT-1", item("HT-1", "in_review", "2026-10-21T10:09:00.000Z", "In Review"));
   const results = await Promise.all([
-    ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-1")!, { createInRoomIds: [ctx.room.id] }),
-    ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-1")!, { createInRoomIds: [ctx.room.id] }),
+    ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-1")!, { roomIds: [ctx.room.id] }),
+    ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-1")!, { roomIds: [ctx.room.id] }),
   ]);
   assert.deepEqual(results.map((result) => result.changed).sort(), [false, true]);
 
@@ -202,7 +216,7 @@ test("linking a native card merges the imported card and keeps artifacts and men
 
   // Later syncs update the native card, not a new duplicate.
   ctx.tickets.set("HT-3", item("HT-3", "done", "2026-10-21T12:00:00.000Z", "Done"));
-  await ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-3")!, { createInRoomIds: [ctx.room.id] });
+  await ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-3")!, { roomIds: [ctx.room.id] });
   const tasks = await roomTasks(ctx.room.id);
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0]?.ticket_state, "done");
@@ -242,7 +256,14 @@ test("a pull request naming an unknown key imports the ticket into a room with a
   });
   assert.equal(task?.external_ref, "jira:HT-5");
   assert.equal(task?.ticket_state, "in_progress");
-  assert.deepEqual(ctx.jira.calls.getItem, ["HT-5"]);
+  assert.equal(ctx.jira.calls.listItems.at(-1)?.filter, '(project = HT) AND key = "HT-5"', "the import asks with the room's filter");
+
+  // A ticket outside the room's filter is never read into the room.
+  ctx.tickets.set("SEC-42", item("SEC-42", "todo", "2026-10-21T10:00:00.000Z"));
+  assert.equal(await keys!.findTaskByTicketKeys(ctx.room.id, { branchRef: null, title: "SEC-42 fix", body: null }, {
+    importTicket: (roomId, matches) => ctx.service.importTicketForRoom(roomId, matches),
+  }), undefined);
+  assert.equal((await roomTasks(ctx.room.id)).some((entry) => entry.external_ref === "jira:SEC-42"), false);
 
   // A key the tracker does not know is asked for once, then remembered.
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -250,7 +271,7 @@ test("a pull request naming an unknown key imports the ticket into a room with a
       importTicket: (roomId, matches) => ctx.service.importTicketForRoom(roomId, matches),
     }), undefined);
   }
-  assert.equal(ctx.jira.calls.getItem.filter((key) => key === "HT-404").length, 1);
+  assert.equal(ctx.jira.calls.listItems.filter((call) => call.filter?.includes('"HT-404"')).length, 1);
 });
 
 test("a room without a filter runs no sync and gets no ticket state", options, async () => {
@@ -267,7 +288,7 @@ test("a room without a filter runs no sync and gets no ticket state", options, a
   assert.equal(imports, 0, "no import is tried without a filter");
 
   ctx.tickets.set("HT-6", item("HT-6", "done", "2026-10-21T10:00:00.000Z", "Done"));
-  await ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-6")!, { createInRoomIds: [bare.id] });
+  await ctx.service.applyItem(ctx.connection, ctx.tickets.get("HT-6")!, { roomIds: [bare.id] });
   const after = await db!.getTaskById(bare.id, native.id);
   assert.equal(after?.ticket_state, null, "a room that does not import from the connection gets no ticket state");
   assert.equal((await roomTasks(bare.id)).length, 1, "and no card");
@@ -277,4 +298,77 @@ test("a room without a filter runs no sync and gets no ticket state", options, a
   await filters!.upsertRoomTrackerFilter({ room_id: ctx.room.id, connection_id: ctx.connection.id, filter: "project = HT", enabled: false, account_id: ctx.accountId });
   const claimed = await filters!.claimDueRoomTrackerFilters({ now: new Date(), intervalMs: 60_000, limit: 500 });
   assert.ok(!claimed.some((filter) => filter.room_id === ctx.room.id || filter.room_id === bare.id));
+});
+
+test("a person's card linked to a ticket gets its state only when the room's filter matches", options, async () => {
+  const ctx = await setup("link-refresh");
+  ctx.tickets.set("HT-8", item("HT-8", "in_review", "2026-10-21T10:00:00.000Z", "In Review"));
+  ctx.tickets.set("OPS-1", item("OPS-1", "done", "2026-10-21T10:00:00.000Z", "Done"));
+  const mine = await db!.createTask(ctx.room.id, "My card", "human", undefined, undefined, { externalRef: "jira:HT-8" });
+  const outside = await db!.createTask(ctx.room.id, "Typed key", "human", undefined, undefined, { externalRef: "jira:OPS-1" });
+  await ctx.service.refreshLinkedCard(ctx.room.id, "jira:HT-8");
+  await ctx.service.refreshLinkedCard(ctx.room.id, "jira:OPS-1");
+  assert.equal((await db!.getTaskById(ctx.room.id, mine.id))?.ticket_state, "in_review");
+  assert.equal((await db!.getTaskById(ctx.room.id, mine.id))?.title, "My card");
+  assert.equal((await db!.getTaskById(ctx.room.id, outside.id))?.ticket_state, null);
+
+  // A webhook for a ticket outside the filter does not reach the typed card either.
+  await ctx.service.handleWebhook(ctx.connection, [{ key: "OPS-1", item: null, deleted: false }]);
+  assert.equal((await db!.getTaskById(ctx.room.id, outside.id))?.ticket_state, null);
+  assert.equal(await details!.getTaskTicketDetails(ctx.room.id, outside.id), null);
+});
+
+test("a poll pages past a full answer instead of dropping older changes", options, async () => {
+  const ctx = await setup("paging");
+  const start = Date.parse("2026-10-21T08:00:00.000Z");
+  for (let index = 0; index < 250; index += 1) {
+    const key = `HT-${1000 + index}`;
+    ctx.tickets.set(key, item(key, "todo", new Date(start + index * 1_000).toISOString(), "To Do"));
+  }
+  const result = await ctx.service.syncFilter(ctx.filter);
+  assert.equal(result.error, null);
+  assert.equal((await db!.getTasks(ctx.room.id, undefined, { limit: 500 })).tasks.length, 250);
+  assert.equal(ctx.jira.calls.listItems.length, 2);
+  assert.ok(ctx.jira.calls.listItems[1]?.updatedBefore, "the second page asks below the oldest ticket of the first");
+});
+
+test("a webhook request does not take over a poll that is still running", options, async () => {
+  const ctx = await setup("claims");
+  const now = new Date();
+  const [claimed] = (await filters!.claimDueRoomTrackerFilters({ now, intervalMs: 60_000, limit: 500 }))
+    .filter((filter) => filter.id === ctx.filter.id);
+  assert.ok(claimed, "a new filter is due");
+  await filters!.requestRoomTrackerFilterSync(ctx.connection.id, new Date(now.getTime() + 20_000));
+  const again = await filters!.claimDueRoomTrackerFilters({ now: new Date(now.getTime() + 30_000), intervalMs: 60_000, limit: 500 });
+  assert.equal(again.some((filter) => filter.id === ctx.filter.id), false, "the running poll keeps its claim");
+
+  await ctx.service.syncFilter(claimed!);
+  const after = await filters!.claimDueRoomTrackerFilters({ now: new Date(now.getTime() + 40_000), intervalMs: 60_000, limit: 500 });
+  assert.equal(after.some((filter) => filter.id === ctx.filter.id), true, "the webhook's request runs once the poll finished");
+});
+
+test("a link update that fails leaves the imported card in place", options, async () => {
+  const ctx = await setup("link-atomic");
+  ctx.tickets.set("HT-9", item("HT-9", "todo", "2026-10-21T10:00:00.000Z", "To Do"));
+  await ctx.service.syncFilter(ctx.filter);
+  const [imported] = await roomTasks(ctx.room.id);
+  const native = await db!.createTask(ctx.room.id, "Native", "human");
+
+  // An invalid transition in the same request rolls the merge back.
+  await assert.rejects(merge!.updateTaskLinkingTicket(
+    { room_id: ctx.room.id, task_id: native.id, external_ref: "jira:HT-9", updates: { external_ref: "jira:HT-9", status: "done" as const } },
+    (patch, tx) => db!.updateTask(ctx.room.id, native.id, patch, undefined, tx),
+  ), /Invalid transition/);
+  assert.ok(await db!.getTaskById(ctx.room.id, imported!.id));
+  assert.equal((await db!.getTaskById(ctx.room.id, native.id))?.external_ref, null);
+
+  const linked = await merge!.updateTaskLinkingTicket(
+    { room_id: ctx.room.id, task_id: native.id, external_ref: "jira:HT-9", updates: { external_ref: "jira:HT-9", status: "accepted" as const } },
+    (patch, tx) => db!.updateTask(ctx.room.id, native.id, patch, undefined, tx),
+  );
+  assert.equal(linked.merged_task_id, imported!.id);
+  assert.equal(linked.task?.external_ref, "jira:HT-9");
+  assert.equal(linked.task?.status, "accepted");
+  assert.equal(linked.task?.ticket_state, "todo");
+  assert.equal(await db!.getTaskById(ctx.room.id, imported!.id), undefined);
 });

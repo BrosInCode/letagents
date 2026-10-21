@@ -4,8 +4,17 @@ import { asRecord, asString } from "./http.js";
 import type { ExternalItemChange, WebhookRequest, WebhookVerification } from "./types.js";
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d{1,12}$/;
-/** Linear signs `webhookTimestamp`; an older delivery is refused as a replay. */
+/** Both trackers sign a delivery time in the body; an older delivery is refused as a replay. */
 const LINEAR_MAX_AGE_MS = 5 * 60_000;
+const JIRA_MAX_AGE_MS = 10 * 60_000;
+
+function bodyTimestamp(rawBody: Buffer, field: string): number {
+  try {
+    return Number(asRecord(JSON.parse(rawBody.toString("utf8")))[field]);
+  } catch {
+    return Number.NaN;
+  }
+}
 
 function header(headers: WebhookRequest["headers"], name: string): string | null {
   const value = headers[name.toLowerCase()] ?? headers[name];
@@ -28,14 +37,19 @@ const REFUSED: WebhookVerification = { ok: false, deliveryId: "" };
 
 /**
  * Jira Cloud webhooks registered with a secret send
- * `X-Hub-Signature: sha256=<hex HMAC of the body>`. The delivery id is
- * `X-Atlassian-Webhook-Identifier`, else the signature itself.
+ * `X-Hub-Signature: sha256=<hex HMAC of the body>`. The body's `timestamp`
+ * must be recent. The delivery id is `X-Atlassian-Webhook-Identifier`, else
+ * the signature itself.
  */
 export function verifyJiraWebhook(req: WebhookRequest): WebhookVerification {
   if (!req.secret) return REFUSED;
   const signature = header(req.headers, "x-hub-signature");
   const match = signature ? /^sha256=([0-9a-f]{64})$/i.exec(signature) : null;
   if (!match || !sameHex(hmacHex(req.secret, req.rawBody), match[1])) return REFUSED;
+  // Jira puts the event time (ms) in `timestamp`; the signature covers it.
+  const timestamp = bodyTimestamp(req.rawBody, "timestamp");
+  const now = (req.now ?? new Date()).getTime();
+  if (!Number.isFinite(timestamp) || Math.abs(now - timestamp) > JIRA_MAX_AGE_MS) return REFUSED;
   return { ok: true, deliveryId: header(req.headers, "x-atlassian-webhook-identifier") ?? `sig:${match[1].toLowerCase()}` };
 }
 
@@ -56,12 +70,7 @@ export function parseJiraWebhook(payload: unknown): ExternalItemChange[] {
 export function verifyLinearWebhook(req: WebhookRequest): WebhookVerification {
   if (!req.secret) return REFUSED;
   if (!sameHex(hmacHex(req.secret, req.rawBody), header(req.headers, "linear-signature"))) return REFUSED;
-  let timestamp = Number.NaN;
-  try {
-    timestamp = Number(asRecord(JSON.parse(req.rawBody.toString("utf8"))).webhookTimestamp);
-  } catch {
-    return REFUSED;
-  }
+  const timestamp = bodyTimestamp(req.rawBody, "webhookTimestamp");
   const now = (req.now ?? new Date()).getTime();
   if (!Number.isFinite(timestamp) || Math.abs(now - timestamp) > LINEAR_MAX_AGE_MS) return REFUSED;
   return { ok: true, deliveryId: header(req.headers, "linear-delivery") ?? `ts:${timestamp}` };

@@ -19,14 +19,21 @@ import type { AuthenticatedRequest } from "../http/helpers.js";
 const sign = (secret: string, body: string) => createHmac("sha256", secret).update(body).digest("hex");
 
 test("Jira webhooks need the connection's HMAC signature", () => {
-  const body = Buffer.from(JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { key: "HT-12" } }));
+  const now = new Date("2026-10-21T12:00:00.000Z");
+  const body = Buffer.from(JSON.stringify({ timestamp: now.getTime(), webhookEvent: "jira:issue_updated", issue: { key: "HT-12" } }));
   const ok = verifyJiraWebhook({
+    now,
     headers: { "x-hub-signature": `sha256=${sign("s3cret", body.toString())}`, "x-atlassian-webhook-identifier": "d-1" },
     rawBody: body,
     secret: "s3cret",
   });
   assert.deepEqual(ok, { ok: true, deliveryId: "d-1" });
-  assert.equal(verifyJiraWebhook({ headers: { "x-hub-signature": `sha256=${sign("other", body.toString())}` }, rawBody: body, secret: "s3cret" }).ok, false);
+  assert.equal(verifyJiraWebhook({ headers: { "x-hub-signature": `sha256=${sign("other", body.toString())}` }, rawBody: body, secret: "s3cret", now }).ok, false);
+  // A recorded delivery replayed later is refused.
+  assert.equal(verifyJiraWebhook({
+    headers: { "x-hub-signature": `sha256=${sign("s3cret", body.toString())}` },
+    rawBody: body, secret: "s3cret", now: new Date(now.getTime() + 60 * 60_000),
+  }).ok, false);
   assert.equal(verifyJiraWebhook({ headers: {}, rawBody: body, secret: "s3cret" }).ok, false);
   assert.deepEqual(parseJiraWebhook(JSON.parse(body.toString())), [{ key: "HT-12", item: null, deleted: false }]);
   assert.deepEqual(parseJiraWebhook({ webhookEvent: "jira:issue_deleted", issue: { key: "HT-3" } }), [{ key: "HT-3", item: null, deleted: true }]);
@@ -68,7 +75,7 @@ test("the webhook route verifies the signature, then hands the keys to sync once
   const server = app.listen(0);
   try {
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    const body = JSON.stringify({ webhookEvent: "jira:issue_updated", issue: { key: "HT-1" } });
+    const body = JSON.stringify({ timestamp: Date.now(), webhookEvent: "jira:issue_updated", issue: { key: "HT-1" } });
     const post = (path: string, signature: string) => fetch(`${base}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-hub-signature": `sha256=${signature}`, "x-atlassian-webhook-identifier": "d-9" },

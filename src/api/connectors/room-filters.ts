@@ -28,6 +28,8 @@ const withConnection = {
   created_by_account_id: room_tracker_filters.created_by_account_id,
   last_synced_at: room_tracker_filters.last_synced_at,
   sync_claimed_at: room_tracker_filters.sync_claimed_at,
+  sync_finished_at: room_tracker_filters.sync_finished_at,
+  sync_requested_at: room_tracker_filters.sync_requested_at,
   last_error: room_tracker_filters.last_error,
   created_at: room_tracker_filters.created_at,
   updated_at: room_tracker_filters.updated_at,
@@ -96,6 +98,7 @@ export async function upsertRoomTrackerFilter(input: {
       enabled: input.enabled,
       last_synced_at: sql`CASE WHEN ${room_tracker_filters.filter} = ${input.filter} THEN ${room_tracker_filters.last_synced_at} ELSE NULL END`,
       sync_claimed_at: null,
+      sync_finished_at: null,
       last_error: null,
       updated_at: now,
     },
@@ -113,24 +116,34 @@ export async function deleteRoomTrackerFilter(roomId: string, id: string): Promi
 }
 
 /**
- * Claims up to `limit` enabled filters whose last claim is older than
- * `intervalMs`. Two API processes never claim the same filter at once:
- * `FOR UPDATE SKIP LOCKED` and the age check make the claim single-flight.
+ * Claims up to `limit` enabled filters that are due: never polled, finished
+ * longer than `intervalMs` ago, or asked for by a webhook since their last
+ * claim. A poll still running is not claimed again unless its claim is older
+ * than `staleMs` (its process died). `FOR UPDATE SKIP LOCKED` keeps two API
+ * processes from claiming the same filter at once.
  */
 export async function claimDueRoomTrackerFilters(input: {
   now: Date;
   intervalMs: number;
   limit: number;
+  staleMs?: number;
 }): Promise<RoomTrackerFilterRow[]> {
   const claimedAt = input.now.toISOString();
-  const cutoff = new Date(input.now.getTime() - input.intervalMs).toISOString();
+  const dueCutoff = new Date(input.now.getTime() - input.intervalMs).toISOString();
+  const staleCutoff = new Date(input.now.getTime() - Math.max(input.staleMs ?? 10 * 60_000, input.intervalMs)).toISOString();
+  const f = room_tracker_filters;
   const result = await db.execute(sql`
-    UPDATE ${room_tracker_filters} SET sync_claimed_at = ${claimedAt}
-     WHERE ${room_tracker_filters.id} IN (
-       SELECT ${room_tracker_filters.id} FROM ${room_tracker_filters}
-        WHERE ${room_tracker_filters.enabled}
-          AND (${room_tracker_filters.sync_claimed_at} IS NULL OR ${room_tracker_filters.sync_claimed_at} < ${cutoff})
-        ORDER BY ${room_tracker_filters.sync_claimed_at} ASC NULLS FIRST
+    UPDATE ${f} SET sync_claimed_at = ${claimedAt}
+     WHERE ${f.id} IN (
+       SELECT ${f.id} FROM ${f}
+        WHERE ${f.enabled}
+          AND (
+            ${f.sync_claimed_at} IS NULL
+            OR ${f.sync_claimed_at} < ${staleCutoff}
+            OR (${f.sync_finished_at} >= ${f.sync_claimed_at}
+                AND (${f.sync_claimed_at} < ${dueCutoff} OR ${f.sync_requested_at} > ${f.sync_claimed_at}))
+          )
+        ORDER BY ${f.sync_claimed_at} ASC NULLS FIRST
         LIMIT ${input.limit}
         FOR UPDATE SKIP LOCKED
      )
@@ -145,6 +158,8 @@ export async function claimDueRoomTrackerFilters(input: {
     created_by_account_id: String(row.created_by_account_id),
     last_synced_at: toIso(row.last_synced_at),
     sync_claimed_at: toIso(row.sync_claimed_at),
+    sync_finished_at: toIso(row.sync_finished_at),
+    sync_requested_at: toIso(row.sync_requested_at),
     last_error: row.last_error == null ? null : String(row.last_error),
     created_at: toIso(row.created_at) ?? claimedAt,
     updated_at: toIso(row.updated_at) ?? claimedAt,
@@ -157,32 +172,34 @@ function toIso(value: unknown): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-/** Records a finished poll. A filter changed meanwhile (claim cleared) keeps its fresh state. */
+/**
+ * Records a finished poll under its claim. A filter changed meanwhile (its
+ * claim was cleared) keeps its fresh state. `advance` moves the cursor;
+ * `error` is shown to the room (a warning when the cursor still advances).
+ */
 export async function finishRoomTrackerFilterSync(input: {
   id: string;
   /** The claim the poll ran under; null for a poll run without one. */
   claimed_at: string | null;
   started_at: string;
+  advance: boolean;
   error: string | null;
 }): Promise<void> {
-  await db.update(room_tracker_filters).set(input.error
-    ? { last_error: input.error }
-    : { last_synced_at: input.started_at, last_error: null })
+  await db.update(room_tracker_filters).set({
+    ...(input.advance ? { last_synced_at: input.started_at } : {}),
+    last_error: input.error,
+    sync_finished_at: new Date().toISOString(),
+  })
     .where(and(
       eq(room_tracker_filters.id, input.id),
       sql`${room_tracker_filters.sync_claimed_at} IS NOT DISTINCT FROM ${input.claimed_at}::timestamptz`,
     ));
 }
 
-/** Makes a connection's filters due now, unless a poll claimed them in the last few seconds. */
-export async function releaseRoomTrackerFilterClaims(connectionId: string, now = new Date(), minAgeMs = 10_000): Promise<number> {
-  const cutoff = new Date(now.getTime() - minAgeMs).toISOString();
-  const rows = await db.update(room_tracker_filters).set({ sync_claimed_at: null })
-    .where(and(
-      eq(room_tracker_filters.connection_id, connectionId),
-      eq(room_tracker_filters.enabled, true),
-      sql`${room_tracker_filters.sync_claimed_at} < ${cutoff}`,
-    ))
+/** Asks for an early poll of a connection's filters. A running poll is left alone and runs again after it finishes. */
+export async function requestRoomTrackerFilterSync(connectionId: string, now = new Date()): Promise<number> {
+  const rows = await db.update(room_tracker_filters).set({ sync_requested_at: now.toISOString() })
+    .where(and(eq(room_tracker_filters.connection_id, connectionId), eq(room_tracker_filters.enabled, true)))
     .returning({ id: room_tracker_filters.id });
   return rows.length;
 }

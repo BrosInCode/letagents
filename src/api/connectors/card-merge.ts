@@ -18,14 +18,16 @@ import {
   tasks,
 } from "../db/schema.js";
 import { invalidateRoomExternalRefScope } from "../db/task-external-refs.js";
-import type { TaskRow } from "../db/types.js";
+import { toTask } from "../db/mappers.js";
+import { getTaskRowById } from "../db/tasks.js";
+import type { Task, TaskRow } from "../db/types.js";
 import { formatTaskId, parseScopedId } from "../db/utils.js";
 import { normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
 
 export class ImportedCardBusyError extends Error {
   readonly code = "imported_card_busy";
   constructor(readonly importedTaskId: string) {
-    super(`${importedTaskId} holds this ticket and an agent is working on it. Finish or release that card first.`);
+    super(`${importedTaskId} holds this ticket and work has started on it. Use that card, or cancel it first.`);
     this.name = "ImportedCardBusyError";
   }
 }
@@ -44,15 +46,20 @@ const NOT_MERGED: ImportedCardMerge = { merged: false, imported_task_id: null };
  * or when the card that holds it is not an imported card: the caller's normal
  * write then reports the usual conflict.
  */
+type Executor = Parameters<Parameters<(typeof db)["transaction"]>[0]>[0];
+
+/** Statuses an imported card may be merged from: no work, lease or review history yet. */
+const MERGEABLE_STATUSES = new Set(["proposed", "accepted", "cancelled"]);
+
 export async function mergeImportedCardIntoNative(input: {
   room_id: string;
   native_task_id: string;
   external_ref: string;
-}): Promise<ImportedCardMerge> {
+}, executor?: Executor): Promise<ImportedCardMerge> {
   const nativeNumber = parseScopedId(input.native_task_id, "task");
   if (!nativeNumber) return NOT_MERGED;
 
-  const result = await db.transaction(async (tx) => {
+  const merge = async (tx: Executor): Promise<ImportedCardMerge> => {
     // Lock both cards, in key order, before reading anything else about them.
     const rows = await tx.select().from(tasks)
       .where(and(eq(tasks.room_id, input.room_id), or(eq(tasks.number, nativeNumber), eq(tasks.external_ref, input.external_ref))))
@@ -64,10 +71,15 @@ export async function mergeImportedCardIntoNative(input: {
     const importedId = formatTaskId(imported.number);
     const nativeId = formatTaskId(native.number);
 
-    const [activeLease] = await tx.select({ id: task_leases.id }).from(task_leases)
-      .where(and(eq(task_leases.room_id, input.room_id), eq(task_leases.task_id, importedId), eq(task_leases.status, "active")))
+    // A card someone worked on carries leases, reviews, effects and intents
+    // under its id. Only an untouched imported card is folded in.
+    if (!MERGEABLE_STATUSES.has(imported.status) || imported.assignee || imported.assignee_agent_key) {
+      throw new ImportedCardBusyError(importedId);
+    }
+    const [anyLease] = await tx.select({ id: task_leases.id }).from(task_leases)
+      .where(and(eq(task_leases.room_id, input.room_id), eq(task_leases.task_id, importedId)))
       .limit(1);
-    if (activeLease) throw new ImportedCardBusyError(importedId);
+    if (anyLease) throw new ImportedCardBusyError(importedId);
 
     // Threads that name the key now list under the native card.
     await tx.execute(sql`
@@ -110,7 +122,54 @@ export async function mergeImportedCardIntoNative(input: {
       updated_at: new Date().toISOString(),
     }).where(and(eq(tasks.room_id, input.room_id), eq(tasks.number, native.number)));
     return { merged: true, imported_task_id: importedId };
-  });
+  };
+  // Inside a caller's transaction, the caller clears the scope memo after commit.
+  if (executor) return merge(executor);
+  const result = await db.transaction(merge);
   if (result.merged) invalidateRoomExternalRefScope(input.room_id);
+  return result;
+}
+
+export interface TicketLinkResult<T> {
+  task: T | null;
+  /** The imported card folded into this one, if any. */
+  merged_task_id: string | null;
+}
+
+/**
+ * A card update that sets `external_ref`. When an imported card holds the
+ * ticket, one transaction applies the rest of the update first (with its
+ * lease fence and transition checks), then folds the imported card in. When
+ * nothing is merged, the update runs as usual and a held key is a conflict.
+ */
+export async function updateTaskLinkingTicket<U extends { external_ref?: string | null }>(
+  input: { room_id: string; task_id: string; external_ref: string; updates: U },
+  update: (updates: U, tx: Executor) => Promise<Task | null>,
+): Promise<TicketLinkResult<Task>> {
+  const result = await db.transaction(async (tx) => {
+    const [holder] = await tx.select({ number: tasks.number, created_by: tasks.created_by }).from(tasks)
+      .where(and(eq(tasks.room_id, input.room_id), eq(tasks.external_ref, input.external_ref)))
+      .limit(1);
+    const nativeNumber = parseScopedId(input.task_id, "task");
+    if (!holder || holder.number === nativeNumber || !isTrackerImportCreator(holder.created_by)) {
+      return { task: await update(input.updates, tx), merged_task_id: null };
+    }
+    const rest = { ...input.updates };
+    delete rest.external_ref;
+    const written = await update(rest, tx);
+    if (!written) return { task: null, merged_task_id: null };
+    const merge = await mergeImportedCardIntoNative({
+      room_id: input.room_id,
+      native_task_id: input.task_id,
+      external_ref: input.external_ref,
+    }, tx);
+    if (!merge.merged) {
+      // The holder changed under us: let the plain write report the conflict.
+      return { task: await update({ external_ref: input.external_ref } as U, tx), merged_task_id: null };
+    }
+    const row = await getTaskRowById(input.room_id, input.task_id, tx);
+    return { task: row ? toTask(row) : null, merged_task_id: merge.imported_task_id };
+  });
+  invalidateRoomExternalRefScope(input.room_id);
   return result;
 }

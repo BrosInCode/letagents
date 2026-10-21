@@ -137,6 +137,7 @@ async function load(): Promise<void> {
   filters.value = [];
   connections.value = [];
   canManage.value = false;
+  busy.value = false;
   error.value = null;
   testResult.value = null;
   const [filterList, connectionList] = await Promise.allSettled([
@@ -157,13 +158,14 @@ async function load(): Promise<void> {
   }
 }
 
-async function run(action: () => Promise<void>, fallback: string): Promise<void> {
+/** Runs an action for the room shown now; a result that lands after a room change is dropped. */
+async function run(action: (current: () => boolean) => Promise<void>, fallback: string): Promise<void> {
   if (busy.value) return;
   const version = generation;
   busy.value = true;
   error.value = null;
   try {
-    await action();
+    await action(() => version === generation);
   } catch (cause) {
     if (version === generation) error.value = safeUserVisibleErrorDetail(cause, fallback);
   } finally {
@@ -171,18 +173,20 @@ async function run(action: () => Promise<void>, fallback: string): Promise<void>
   }
 }
 
-function applyList(list: { filters: RoomTrackerFilterView[]; can_manage: boolean }): void {
+function applyList(list: { filters: RoomTrackerFilterView[]; can_manage: boolean }, current: () => boolean): void {
+  if (!current()) return;
   filters.value = list.filters;
   canManage.value = list.can_manage;
 }
 
 function test(): Promise<void> {
   testResult.value = null;
-  return run(async () => {
+  return run(async (current) => {
     const result = await desktopIpc.room.testTrackerFilter(props.roomIdentifier, {
       connectionId: connectionId.value,
       filter: filterText.value,
     });
+    if (!current()) return;
     if (!result.ok) throw new Error(result.error || "The tracker refused the filter.");
     const count = result.count >= result.limit ? `${result.limit} or more` : String(result.count);
     testResult.value = `${count} ${result.count === 1 ? "ticket matches" : "tickets match"}.`;
@@ -190,26 +194,27 @@ function test(): Promise<void> {
 }
 
 function save(): Promise<void> {
-  return run(async () => {
+  return run(async (current) => {
     applyList(await desktopIpc.room.saveTrackerFilter(props.roomIdentifier, {
       connectionId: connectionId.value,
       filter: filterText.value,
       enabled: true,
-    }));
+    }), current);
+    if (!current()) return;
     filterText.value = "";
     testResult.value = "Saved. The first sync starts within two minutes.";
   }, "The filter could not be saved.");
 }
 
 function setEnabled(filter: RoomTrackerFilterView): Promise<void> {
-  return run(async () => {
-    applyList(await desktopIpc.room.setTrackerFilterEnabled(props.roomIdentifier, filter.id, !filter.enabled));
+  return run(async (current) => {
+    applyList(await desktopIpc.room.setTrackerFilterEnabled(props.roomIdentifier, filter.id, !filter.enabled), current);
   }, "The filter could not be changed.");
 }
 
 function remove(filter: RoomTrackerFilterView): Promise<void> {
-  return run(async () => {
-    applyList(await desktopIpc.room.removeTrackerFilter(props.roomIdentifier, filter.id));
+  return run(async (current) => {
+    applyList(await desktopIpc.room.removeTrackerFilter(props.roomIdentifier, filter.id), current);
   }, "The filter could not be removed.");
 }
 

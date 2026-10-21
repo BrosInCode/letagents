@@ -136,6 +136,17 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
       res.status(400).json({ error: "enabled must be a boolean." });
       return;
     }
+    // Cards are matched by `provider:KEY`, so one room reads each tracker
+    // through one connection: two would fight over the same cards.
+    const other = (await listRoomTrackerFilters(project.id))
+      .find((row) => row.provider === connection.provider && row.connection_id !== connection.id);
+    if (other) {
+      res.status(409).json({
+        error: `This room already imports ${other.provider === "jira" ? "Jira" : "Linear"} tickets through ${other.connection_label}. Remove that filter first.`,
+        code: "tracker_filter_provider_taken",
+      });
+      return;
+    }
     await upsertRoomTrackerFilter({
       room_id: project.id,
       connection_id: connection.id,

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
+import { TRACKER_IMPORT_CREATOR_PREFIX } from "../../../shared/ticket-connectors.mjs";
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { room_agent_sessions, task_leases, tasks } from "./schema.js";
@@ -175,6 +176,10 @@ export async function createTask(
   sourceMessageId?: string,
   options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
+  // Reserved for cards tracker sync imports: only those may be merged away.
+  if (createdBy.startsWith(TRACKER_IMPORT_CREATOR_PREFIX)) {
+    throw new Error(`created_by may not start with "${TRACKER_IMPORT_CREATOR_PREFIX}".`);
+  }
   const task = options?.boardIntentApproval
     ? await db.transaction((tx) =>
       insertTaskRow(roomId, title, createdBy, description, sourceMessageId, tx, options)

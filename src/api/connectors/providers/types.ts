@@ -90,6 +90,8 @@ export interface TrackerUser {
 export interface ListItemsOptions {
   assigneeMe?: boolean;
   updatedSince?: string;
+  /** Only tickets updated at or before this time (inclusive; Jira rounds out to the minute). */
+  updatedBefore?: string;
   /** Upper bound on items returned. Default 50, at most 200. */
   limit?: number;
 }

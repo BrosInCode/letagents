@@ -25,17 +25,19 @@ import type { Task, TaskRow } from "../db/types.js";
 import { nextRoomScopedNumber } from "../db/utils.js";
 import { type ConnectionService, connectorErrorText, createConnectionService } from "./connections.js";
 import { ConnectorDecryptError, loadConnectorCipher } from "./crypto.js";
-import { formatExternalRef, type TicketKeyMatch } from "./key-detectors.js";
+import { formatExternalRef, parseExternalRef, type TicketKeyMatch } from "./key-detectors.js";
 import { createWorkItemProviders, type WorkItemProviders } from "./providers/index.js";
 import { type ExternalItem, type ExternalItemChange, TrackerProviderError } from "./providers/types.js";
 import {
   claimDueRoomTrackerFilters,
   finishRoomTrackerFilterSync,
   getCachedRoomTrackerScope,
-  releaseRoomTrackerFilterClaims,
+  requestRoomTrackerFilterSync,
   roomIdsWithTrackerFilter,
   type RoomTrackerFilterRow,
+  type RoomTrackerSource,
 } from "./room-filters.js";
+import { jiraFilterClause } from "./providers/jira.js";
 import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnectionStore } from "./store.js";
 import { recordTrackerTicketEvent } from "./tracker-events.js";
 
@@ -47,6 +49,8 @@ const MAX_TRACKER_POLL_MS = 60 * 60_000;
 const POLL_OVERLAP_MS = 5 * 60_000;
 /** Tickets read per poll. A larger filter imports its most recently updated tickets. */
 export const MAX_ITEMS_PER_POLL = 200;
+/** Pages of MAX_ITEMS_PER_POLL read per poll before the rest is skipped with a warning. */
+const MAX_BATCHES_PER_POLL = 5;
 const FILTERS_PER_TICK = 10;
 const MAX_WEBHOOK_KEYS = 20;
 const MAX_AUTO_IMPORT_KEYS = 3;
@@ -77,11 +81,23 @@ export interface TrackerSyncDeps {
   onTaskChanged?: (roomId: string, task: Task) => void;
 }
 
+export interface ApplyTrackerItemOptions {
+  /**
+   * Rooms whose filter matched this ticket: a card is created there if
+   * missing, and updated. In other rooms that import from the connection only
+   * a card already bound to this ticket (`external_item_id`) is updated, so a
+   * key typed on a card never pulls in a ticket the room's filter excludes.
+   */
+  roomIds?: readonly string[];
+}
+
 export interface TrackerSync {
-  applyItem(connection: TrackerConnectionRow, item: ExternalItem, options?: { createInRoomIds?: readonly string[] }): Promise<ApplyTrackerItemResult>;
+  applyItem(connection: TrackerConnectionRow, item: ExternalItem, options?: ApplyTrackerItemOptions): Promise<ApplyTrackerItemResult>;
   syncFilter(filter: RoomTrackerFilterRow): Promise<{ seen: number; changed: number; error: string | null }>;
   handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]): Promise<{ applied: number }>;
   importTicketForRoom(roomId: string, matches: readonly TicketKeyMatch[]): Promise<Task | undefined>;
+  /** After a person links a card to a ticket: bind it if the room's filter matches the ticket. */
+  refreshLinkedCard(roomId: string, externalRef: string): Promise<void>;
   /** Claim and poll due filters once. */
   tick(intervalMs?: number): Promise<number>;
 }
@@ -99,6 +115,39 @@ function isOlder(incoming: string | null, cached: string | null): boolean {
   return Number.isFinite(a) && Number.isFinite(b) && a < b;
 }
 
+type ExternalItemRow = typeof external_items.$inferSelect;
+
+function rowToItem(row: ExternalItemRow): ExternalItem {
+  return {
+    provider: row.provider as TrackerProvider,
+    key: row.key,
+    title: row.title,
+    ticket_state: row.ticket_state as ExternalItem["ticket_state"],
+    raw_status: row.raw_status,
+    unmapped: false,
+    assignee_id: row.assignee_id,
+    assignee_label: row.assignee_label,
+    url: row.url,
+    tracker_updated_at: row.tracker_updated_at,
+    payload: row.payload ?? {},
+  };
+}
+
+/** Whether a Linear ticket matches a room filter's `team:` and `project:` terms. */
+export function linearFilterAllows(filter: string, item: ExternalItem): boolean {
+  const teamKey = (typeof item.payload.team_key === "string" ? item.payload.team_key : item.key.split("-")[0] ?? "").toUpperCase();
+  const projectId = typeof item.payload.project_id === "string" ? item.payload.project_id : null;
+  for (const term of filter.trim().split(/\s+/).filter(Boolean)) {
+    const [kind, value] = [term.slice(0, term.indexOf(":")), term.slice(term.indexOf(":") + 1)];
+    if (kind === "team" && value.toUpperCase() !== teamKey) return false;
+    if (kind === "project" && value !== projectId) return false;
+  }
+  return true;
+}
+
+/** Local failures stay in the server log; the room sees a fixed text. */
+const LOCAL_SYNC_ERROR = "Sync failed on the server. It retries at the next poll.";
+
 function cardTitle(item: ExternalItem): string {
   return item.title.trim().slice(0, MAX_TITLE_LENGTH) || item.key;
 }
@@ -110,7 +159,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
   async function applyItem(
     connection: TrackerConnectionRow,
     item: ExternalItem,
-    options: { createInRoomIds?: readonly string[] } = {},
+    options: ApplyTrackerItemOptions = {},
   ): Promise<ApplyTrackerItemResult> {
     const provider = connection.provider as TrackerProvider;
     const ref = formatExternalRef(provider, item.key);
@@ -120,21 +169,26 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const outcome = await db.transaction(async (tx) => {
       // One writer per ticket across API processes: a poll and a webhook for
       // the same change serialize here, and the second finds nothing to do.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`tracker-item:${connection.id}:${item.key}`}, 0))`);
+      // Keyed by ticket ref, not connection: cards are matched by ref, so two
+      // connections to one tracker serialize too.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`tracker-item:${ref}`}, 0))`);
       const [cached] = await tx.select().from(external_items)
         .where(and(eq(external_items.connection_id, connection.id), eq(external_items.key, item.key)))
         .limit(1);
-      if (cached && isOlder(item.tracker_updated_at, cached.tracker_updated_at)) return { stale: true, changed: false };
+      // An older copy (a slow poll, a lagging search index) never undoes a
+      // newer one; the cached copy still creates cards a matching room lacks.
+      const stale = Boolean(cached && isOlder(item.tracker_updated_at, cached.tracker_updated_at));
+      if (stale) item = rowToItem(cached!);
 
       const syncedAt = now().toISOString();
-      const itemChanged = !cached
+      const itemChanged = !stale && (!cached
         || cached.title !== item.title
         || cached.ticket_state !== item.ticket_state
         || cached.raw_status !== item.raw_status
         || cached.assignee_id !== item.assignee_id
         || cached.assignee_label !== item.assignee_label
         || cached.url !== item.url
-        || !sameTime(cached.tracker_updated_at, item.tracker_updated_at);
+        || !sameTime(cached.tracker_updated_at, item.tracker_updated_at));
       const itemId = cached?.id ?? `xitem_${randomUUID()}`;
       if (itemChanged) {
         await tx.insert(external_items).values({
@@ -170,10 +224,12 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
 
       // Ticket states belong only in rooms that import from this connection.
       const filterRooms = await roomIdsWithTrackerFilter(connection.id, tx);
-      const createIn = (options.createInRoomIds ?? []).filter((roomId) => filterRooms.includes(roomId));
-      const cards = filterRooms.length === 0 ? [] : await tx.select().from(tasks)
+      const matchedRooms = (options.roomIds ?? []).filter((roomId) => filterRooms.includes(roomId));
+      const cards = (filterRooms.length === 0 ? [] : await tx.select().from(tasks)
         .where(and(inArray(tasks.room_id, filterRooms), eq(tasks.external_ref, ref)))
-        .for("update") as TaskRow[];
+        .orderBy(tasks.room_id, tasks.number)
+        .for("update") as TaskRow[])
+        .filter((card) => matchedRooms.includes(card.room_id) || card.external_item_id === itemId);
 
       for (const card of cards) {
         const patch: Partial<TaskRow> = {};
@@ -206,7 +262,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         }
       }
 
-      for (const roomId of createIn) {
+      for (const roomId of matchedRooms) {
         if (cards.some((card) => card.room_id === roomId)) continue;
         const createdAt = syncedAt;
         const number = await nextRoomScopedNumber("tasks", roomId, tx);
@@ -249,7 +305,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
           change_id: "import",
         });
       }
-      return { stale: false, changed: itemChanged || created.length > 0 || updated.length > 0 };
+      return { stale, changed: itemChanged || created.length > 0 || updated.length > 0 };
     });
 
     for (const roomId of new Set(created.map((entry) => entry.room_id))) invalidateRoomExternalRefScope(roomId);
@@ -273,39 +329,63 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     return row && row.status === "active" ? row : null;
   }
 
+  /** Error text for the filter row: the tracker's own answer, or a fixed text for a local failure. */
+  async function failureText(connection: TrackerConnectionRow, error: unknown): Promise<string> {
+    if (error instanceof TrackerProviderError || error instanceof ConnectorDecryptError) {
+      return deps.connections.recordFailure(connection, error);
+    }
+    console.error("Tracker sync failed:", connectorErrorText(error));
+    return LOCAL_SYNC_ERROR;
+  }
+
   async function syncFilter(filter: RoomTrackerFilterRow) {
     const claimedAt = filter.sync_claimed_at;
     const startedAt = now().toISOString();
     const connection = await deps.store.get(filter.connection_id);
     if (!connection || connection.status !== "active") {
       const error = connection ? "The tracker connection needs attention in Settings → Ticket trackers." : "The tracker connection was removed.";
-      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, error });
+      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error });
       return { seen: 0, changed: 0, error };
     }
     try {
       const provider = deps.providers[connection.provider as TrackerProvider];
+      const open = deps.connections.open(connection);
       const since = filter.last_synced_at
         ? new Date(Date.parse(filter.last_synced_at) - POLL_OVERLAP_MS).toISOString()
         : undefined;
-      const items = await provider.listItems(deps.connections.open(connection), filter.filter.trim() || null, {
-        updatedSince: since,
-        limit: MAX_ITEMS_PER_POLL,
-      });
-      await deps.store.addUnmapped(connection.id, [...new Set(items.filter((item) => item.unmapped).map((item) => item.raw_status))]);
+      let seen = 0;
       let changed = 0;
-      for (const item of items) {
-        const result = await applyItem(connection, item, { createInRoomIds: [filter.room_id] });
-        if (result.changed) changed += 1;
+      let before: string | undefined;
+      let capped = false;
+      // Trackers answer newest first. A full page means older changes remain:
+      // read the next page below the oldest ticket seen, a bounded number of times.
+      for (let batch = 0; batch < MAX_BATCHES_PER_POLL; batch += 1) {
+        const items = await provider.listItems(open, filter.filter.trim() || null, {
+          updatedSince: since,
+          updatedBefore: before,
+          limit: MAX_ITEMS_PER_POLL,
+        });
+        await deps.store.addUnmapped(connection.id, [...new Set(items.filter((item) => item.unmapped).map((item) => item.raw_status))]);
+        seen += items.length;
+        for (const item of items) {
+          const result = await applyItem(connection, item, { roomIds: [filter.room_id] });
+          if (result.changed) changed += 1;
+        }
+        capped = items.length >= MAX_ITEMS_PER_POLL;
+        if (!capped) break;
+        const oldest = items.map((item) => Date.parse(item.tracker_updated_at ?? "")).filter(Number.isFinite).sort((x, y) => x - y)[0];
+        // No older bound to page by (or no progress): stop here.
+        if (oldest === undefined || (before !== undefined && oldest >= Date.parse(before))) break;
+        before = new Date(oldest).toISOString();
       }
-      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, error: null });
-      return { seen: items.length, changed, error: null };
+      const warning = capped
+        ? `More than ${MAX_ITEMS_PER_POLL * MAX_BATCHES_PER_POLL} tickets changed in one poll; the oldest changes were skipped. Narrow the filter.`
+        : null;
+      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: true, error: warning });
+      return { seen, changed, error: warning };
     } catch (error) {
-      // Only a tracker's answer says something about the connection; a local
-      // failure (the database, say) is recorded on the filter alone.
-      const text = error instanceof TrackerProviderError || error instanceof ConnectorDecryptError
-        ? await deps.connections.recordFailure(connection, error)
-        : connectorErrorText(error);
-      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, error: text });
+      const text = await failureText(connection, error);
+      await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error: text });
       return { seen: 0, changed: 0, error: text };
     }
   }
@@ -316,50 +396,82 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const keys = [...new Set(changes.filter((change) => !change.deleted).map((change) => change.key))].slice(0, MAX_WEBHOOK_KEYS);
     let applied = 0;
     for (const key of keys) {
-      // The payload only names the ticket: it is read again so the webhook maps
-      // it exactly as a poll would.
-      const item = await provider.getItem(deps.connections.open(connection), key);
-      if (!item) continue;
-      const result = await applyItem(connection, item);
-      if (result.changed) applied += 1;
+      try {
+        // The payload only names the ticket: it is read again so the webhook
+        // maps it exactly as a poll would. It updates bound cards only; new
+        // tickets wait for the poll, which checks the room's filter.
+        const item = await provider.getItem(deps.connections.open(connection), key);
+        if (!item) continue;
+        const result = await applyItem(connection, item);
+        if (result.changed) applied += 1;
+      } catch (error) {
+        await failureText(connection, error).catch(() => undefined);
+        if (error instanceof TrackerProviderError && error.outcome === "auth") break;
+      }
     }
     // A new ticket may match a room's filter: poll this connection's filters soon.
-    if (keys.length > 0) await releaseRoomTrackerFilterClaims(connection.id, now());
+    if (keys.length > 0) await requestRoomTrackerFilterSync(connection.id, now());
     return { applied };
   }
 
-  async function importTicketForRoom(roomId: string, matches: readonly TicketKeyMatch[]): Promise<Task | undefined> {
+  /**
+   * The ticket, only if it matches the source's filter. Jira asks the tracker
+   * with the filter's JQL; Linear compares the ticket's team and project.
+   */
+  async function fetchMatchingItem(source: RoomTrackerSource, connection: TrackerConnectionRow, key: string): Promise<ExternalItem | null> {
+    const open = deps.connections.open(connection);
+    if (source.provider === "jira") {
+      const base = jiraFilterClause(source.filter.trim() || null);
+      const jql = base ? `(${base}) AND key = "${key}"` : `key = "${key}"`;
+      const [match] = await deps.providers.jira.listItems(open, jql, { limit: 1 });
+      return match && match.key === key ? match : null;
+    }
+    const item = await deps.providers.linear.getItem(open, key);
+    return item && linearFilterAllows(source.filter, item) ? item : null;
+  }
+
+  /** Each enabled filter on an active connection for the key's provider, until one matches. */
+  async function importMatching(roomId: string, match: TicketKeyMatch): Promise<boolean> {
     const scope = await getCachedRoomTrackerScope(roomId);
-    if (scope.sources.length === 0) return undefined;
-    for (const match of matches.slice(0, MAX_AUTO_IMPORT_KEYS)) {
-      const source = scope.sources.find((candidate) => candidate.provider === match.provider);
-      if (!source) continue;
-      const missKey = `${source.connection_id}:${match.key}`;
+    for (const source of scope.sources.filter((candidate) => candidate.provider === match.provider)) {
+      const missKey = `${source.filter_id}:${match.key}`;
       const missedAt = notFound.get(missKey);
       if (missedAt !== undefined && now().getTime() - missedAt < NOT_FOUND_TTL_MS) continue;
       const connection = await activeConnection(source.connection_id);
       if (!connection) continue;
       try {
-        const item = await deps.providers[match.provider].getItem(deps.connections.open(connection), match.key);
+        const item = await fetchMatchingItem(source, connection, match.key);
         if (!item) {
           if (notFound.size > 10_000) notFound.clear();
           notFound.set(missKey, now().getTime());
           continue;
         }
-        await applyItem(connection, item, { createInRoomIds: [roomId] });
-        const [row] = await db.select().from(tasks)
-          .where(and(eq(tasks.room_id, roomId), eq(tasks.external_ref, formatExternalRef(match.provider, item.key))))
-          .limit(1) as TaskRow[];
-        if (row) return toTask(row);
+        await applyItem(connection, item, { roomIds: [roomId] });
+        return true;
       } catch (error) {
-        if (error instanceof TrackerProviderError || error instanceof ConnectorDecryptError) {
-          await deps.connections.recordFailure(connection, error).catch(() => undefined);
-        } else {
-          console.warn("Ticket auto import failed:", connectorErrorText(error));
-        }
+        await failureText(connection, error).catch(() => undefined);
       }
     }
+    return false;
+  }
+
+  async function importTicketForRoom(roomId: string, matches: readonly TicketKeyMatch[]): Promise<Task | undefined> {
+    for (const match of matches.slice(0, MAX_AUTO_IMPORT_KEYS)) {
+      if (!await importMatching(roomId, match)) continue;
+      const [row] = await db.select().from(tasks)
+        .where(and(eq(tasks.room_id, roomId), eq(tasks.external_ref, match.ref)))
+        .limit(1) as TaskRow[];
+      if (row) return toTask(row);
+    }
     return undefined;
+  }
+
+  async function refreshLinkedCard(roomId: string, externalRef: string): Promise<void> {
+    const match = parseExternalRef(externalRef);
+    if (!match) return;
+    const scope = await getCachedRoomTrackerScope(roomId);
+    if (!scope.sources.some((source) => source.provider === match.provider)) return;
+    await importMatching(roomId, match);
   }
 
   async function tick(intervalMs = trackerPollIntervalMs()) {
@@ -368,7 +480,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     return due.length;
   }
 
-  return { applyItem, syncFilter, handleWebhook, importTicketForRoom, tick };
+  return { applyItem, syncFilter, handleWebhook, importTicketForRoom, refreshLinkedCard, tick };
 }
 
 let defaultSync: TrackerSync | null | undefined;

@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS "room_tracker_filters" (
 	"created_by_account_id" text NOT NULL,
 	"last_synced_at" timestamp with time zone,
 	"sync_claimed_at" timestamp with time zone,
+	"sync_finished_at" timestamp with time zone,
+	"sync_requested_at" timestamp with time zone,
 	"last_error" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL

@@ -110,7 +110,9 @@ runs no sync and looks as before.
 
 Only a room admin can add or change a filter, and only with a connection they
 own, because sync reads the tickets with that person's credentials. Any room
-admin can remove a filter. A filter that is off or removed stops the sync;
+admin can remove a filter. A room reads each tracker through one connection:
+a second Jira (or Linear) filter on another connection is refused with
+`tracker_filter_provider_taken`. A filter that is off or removed stops the sync;
 the cards it imported stay on the board with their last ticket state.
 
 ### What sync does
@@ -125,15 +127,20 @@ the cards it imported stay on the board with their last ticket state.
   LetAgents. The ticket state is the tracker's. For example, a ticket moved
   to Done in Jira shows **Done** on the card while the card stays in
   **In progress** until the room finishes its work.
-- Ticket states belong only in rooms that import from the connection. A card
-  that names a ticket in a room without a filter gets no ticket state.
+- A ticket reaches a room only through that room's filter. A card is bound to
+  a ticket (it gets its state and the **Ticket** section) when the room's
+  filter matched the ticket. A key typed on a card never pulls in a ticket the
+  filter excludes, and a card in a room without a filter gets no ticket state.
 - A deleted ticket leaves its card alone.
 
 Sync polls each enabled filter every 2 minutes (`LETAGENTS_TRACKER_POLL_MS`,
 15 seconds to 1 hour). A poll asks for tickets changed since the previous poll
-began, less 5 minutes for clock skew. A poll reads at most 200 tickets, most
-recently updated first; narrow a larger filter. Two API processes never poll
-the same filter at once: each poll claims its filter row first.
+began, less 5 minutes for clock skew. Trackers answer newest first, 200 tickets
+a page; a full page makes the poll read the next page below the oldest ticket
+it saw, up to 1,000 tickets. Past that the oldest changes are skipped and the
+filter shows a warning: narrow the filter. Two API processes never poll the
+same filter at once: each poll claims its filter row first, and a running poll
+keeps its claim until it finishes (or for 10 minutes if its process died).
 
 ### One path for polls and webhooks
 
@@ -158,35 +165,46 @@ The URL is `/webhooks/trackers/<provider>/<connection id>`. The secret is
 derived from the server's connector key and the connection id, so nothing
 extra is stored. A webhook needs `LETAGENTS_BASE_URL` set to an https URL.
 
-- Jira deliveries must carry `X-Hub-Signature: sha256=<HMAC of the body>`.
+- Jira deliveries must carry `X-Hub-Signature: sha256=<HMAC of the body>`, and
+  the body's `timestamp` must be within 10 minutes.
 - Linear deliveries must carry `Linear-Signature` (HMAC of the body), and the
   body's `webhookTimestamp` must be within 5 minutes.
 - The server answers `202` at once. The payload only names tickets: sync reads
-  each ticket from the tracker and applies it as a poll would. It then makes
-  the connection's filters due, so a new ticket that matches a filter is
-  imported at the next tick.
+  each ticket from the tracker and updates the cards already bound to it. It
+  then asks for an early poll of the connection's filters, so a new ticket
+  that matches a filter is imported at the next tick.
 
 ### Auto import
 
 When a pull request's branch, title or closing keyword names a ticket key and
-no card in the room holds it, and the room has a filter on a connection for
-that tracker, LetAgents reads the ticket and creates its card. The pull
+no card in the room holds it, and the ticket matches the room's filter for
+that tracker, LetAgents creates its card. For Jira the server asks with the
+filter's JQL plus `key = "<KEY>"`; for Linear it compares the ticket's team and
+project with the filter's terms. A key outside the filter imports nothing, so
+a pull request cannot pull an unrelated ticket into the room. The pull
 request then attaches to that card. At most three keys are tried per event; a
 key the tracker does not know is not asked for again for 10 minutes. Room
 messages do not import tickets.
 
 ### Linking your own card
 
-When you set a ticket key on your own card and sync already imported a card
-for that ticket, the two become one, in one transaction:
+When you set a ticket key on your own card and the room's filter matches the
+ticket, sync binds your card to it right away; it gets the ticket state
+without waiting for the ticket to change.
+
+When sync already imported a card for that ticket, the two become one, in the
+same transaction as your edit:
 
 - your card keeps its title, description, owner and work state;
 - it takes the imported card's ticket state, pull requests and links, shared
   artifacts, room events and linked threads;
 - the imported card is deleted.
 
-If an agent holds a work lease on the imported card, the link is refused with
-`imported_card_busy`; finish or release that card first. A card that a person
+Only an untouched imported card is merged: status proposed, accepted or
+cancelled, no owner, and no lease ever. Otherwise the link is refused with
+`imported_card_busy`; use that card, or cancel it first. If any part of your
+edit fails, nothing is merged. The response names the removed card in
+`merged_task_id`. A card that a person
 or an agent created is never merged away (`created_by` values that start with
 `tracker:` are reserved for sync).
 

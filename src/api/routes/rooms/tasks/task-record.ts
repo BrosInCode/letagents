@@ -309,27 +309,32 @@ export function registerTaskRecordRoutes(
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;
 
-      if (deps.mergeImportedCardIntoNative && updates.external_ref && updates.external_ref !== task.external_ref) {
+      const updateOptions = {
+        boardIntentApproval,
+        workLeaseCreation: coordination.workLeaseCreation ?? null,
+        leaseFence: coordination.leaseFence ?? null,
+      };
+      const linkedRef = updates.external_ref && updates.external_ref !== task.external_ref ? updates.external_ref : null;
+      let mergedTaskId: string | null = null;
+      let updated: Awaited<ReturnType<typeof deps.updateTask>>;
+      if (linkedRef && deps.updateTaskLinkingTicket) {
         // A card sync imported for this ticket folds into this card, which
-        // keeps the key (ticket connectors PR3, native card link).
-        const merge = await deps.mergeImportedCardIntoNative({
-          room_id: project.id,
-          native_task_id: taskId,
-          external_ref: updates.external_ref,
-        });
-        if (merge.merged) delete updates.external_ref;
+        // keeps the key, in one transaction with the rest of this update.
+        const link = await deps.updateTaskLinkingTicket(
+          { room_id: project.id, task_id: taskId, external_ref: linkedRef, updates },
+          (patch, tx) => deps.updateTask(project.id, taskId, patch, updateOptions, tx),
+        );
+        updated = link.task;
+        mergedTaskId = link.merged_task_id;
+      } else {
+        updated = await deps.updateTask(project.id, taskId, updates, updateOptions);
       }
-
-      const updated = await deps.updateTask(
-        project.id,
-        taskId,
-        updates,
-        {
-          boardIntentApproval,
-          workLeaseCreation: coordination.workLeaseCreation ?? null,
-          leaseFence: coordination.leaseFence ?? null,
-        }
-      );
+      if (updated && linkedRef && !mergedTaskId && deps.refreshLinkedTicket) {
+        // Reads the tracker; the card shows its ticket state once that lands.
+        void deps.refreshLinkedTicket(project.id, linkedRef).catch(() => {
+          console.warn("Linked ticket refresh failed", { roomId: project.id, taskId });
+        });
+      }
       if (updated && updates.status && updates.status !== task.status) {
         try {
           await deps.emitTaskLifecycleStatusMessage(project.id, updated, {
@@ -351,7 +356,7 @@ export function registerTaskRecordRoutes(
         }
         // A pull request that merged before it was linked moves the task now.
         let settled = updated;
-        if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined || updates.status !== undefined) {
+        if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined || updates.status !== undefined || mergedTaskId) {
           try {
             settled = (await deps.replayStoredPullRequestMerge?.({ project, task: updated, actorLabel })) ?? updated;
           } catch (error) {
@@ -375,7 +380,8 @@ export function registerTaskRecordRoutes(
         } catch {
           console.warn("Task event delivery failed after committed update", { roomId: project.id, taskId });
         }
-        res.json({ ...taskWithDetails, room_id: project.id });
+        // merged_task_id names the imported card this link removed from the board.
+        res.json({ ...taskWithDetails, room_id: project.id, ...(mergedTaskId ? { merged_task_id: mergedTaskId } : {}) });
       } else {
         res.status(404).json({ error: "Task not found" });
       }
