@@ -390,8 +390,9 @@ export interface DesktopApi {
   /** Ticket connectors: this account's Jira and Linear connections. */
   connectors: {
     list: () => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionList>;
-    /** Opens the tracker's consent page in the browser. */
-    startOAuth: (provider: import("../../../../shared/ticket-connectors.mjs").TrackerProvider) => Promise<{ expires_at: string }>;
+    /** Opens the tracker's consent page in the browser and resolves once the app finished connecting. */
+    connectOAuth: (provider: import("../../../../shared/ticket-connectors.mjs").TrackerProvider) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    cancelOAuth: () => Promise<void>;
     saveApiToken: (input: import("../../../../shared/ticket-connectors.mjs").TrackerApiTokenInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
     test: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionTestResult>;
     update: (id: string, patch: import("../../../../shared/ticket-connectors.mjs").TrackerConnectionPatch) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;

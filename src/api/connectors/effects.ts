@@ -8,7 +8,7 @@ import type {
 import { type ConnectionService, connectorErrorText } from "./connections.js";
 import { ConnectorDecryptError } from "./crypto.js";
 import type { WorkItemProviders } from "./providers/index.js";
-import { TrackerProviderError } from "./providers/types.js";
+import { TrackerProviderError, type TrackerWriteResult } from "./providers/types.js";
 import type { TrackerConnectionStore } from "./store.js";
 
 interface TrackerEffectRequest {
@@ -79,12 +79,19 @@ export function createTrackerEffectExecutor(deps: {
     },
 
     async lookup(effect): Promise<WorkflowEffectLookupResult> {
-      const { request, row, conn } = await openFor(effect);
-      if (!row || !conn) throw new Error("The tracker connection was removed; the effect cannot be checked.");
-      const provider = deps.providers[row.provider as TrackerProvider];
-      const found = effect.kind === "tracker_transition"
-        ? await provider.findTransition(conn, request.key, request.to_status ?? "", effect.created_at)
-        : await provider.findComment(conn, request.key, effect.correlation_key);
+      const request = trackerRequest(effect);
+      let found: TrackerWriteResult | null;
+      try {
+        const { row, conn } = await openFor(effect);
+        if (!row || !conn) throw new Error("The tracker connection was removed; the effect cannot be checked.");
+        const provider = deps.providers[row.provider as TrackerProvider];
+        found = effect.kind === "tracker_transition"
+          ? await provider.findTransition(conn, request.key, request.to_status ?? "", effect.created_at)
+          : await provider.findComment(conn, request.key, effect.correlation_key);
+      } catch (error) {
+        // The broker stores this text in last_error.
+        throw new Error(connectorErrorText(error));
+      }
       return found
         ? {
             kind: "found",

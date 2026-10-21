@@ -70,6 +70,11 @@ export interface SubmitTrackerEffectInput {
   room_id: string;
   task_id: string;
   connection_id: string;
+  /**
+   * The account that owns the connection, as the caller resolved it from the
+   * room's own configuration. Never take `connection_id` from agent input.
+   */
+  connection_account_id: string;
   provider: "jira" | "linear";
   /** The ticket key, e.g. `HT-1234`. */
   key: string;
@@ -286,6 +291,7 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
         room_id: input.room_id,
         task_id: input.task_id,
         connection_id: input.connection_id,
+        connection_account_id: input.connection_account_id,
         kind: input.action.kind,
         provider: input.provider,
         idempotency_key: input.idempotency_key,

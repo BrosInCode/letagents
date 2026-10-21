@@ -20,7 +20,7 @@ export class WorkflowEffectConnectionUnavailableError extends Error {
   readonly code = "workflow_effect_connection_unavailable";
 
   constructor() {
-    super("The tracker connection for this effect does not exist or does not match the provider.");
+    super("The tracker connection for this effect does not exist, belongs to another account, or does not match the provider.");
     this.name = "WorkflowEffectConnectionUnavailableError";
   }
 }
@@ -179,9 +179,11 @@ async function insertOrLoadEffect(tx: EffectTransaction, input: {
       updated_at: now,
       completed_at: null,
     })
-    .onConflictDoNothing({
-      target: [workflow_effects.room_id, workflow_effects.idempotency_key],
-    })
+    // No conflict target: a concurrent reservation of the same key can hit the
+    // (provider, correlation_key) index before the (room_id, idempotency_key)
+    // one. The correlation key is derived from room, kind and idempotency key,
+    // so either conflict means the same logical effect; load it below.
+    .onConflictDoNothing()
     .returning();
 
   if (inserted) {
@@ -216,6 +218,12 @@ export interface ReserveTrackerWorkflowEffectInput {
   room_id: string;
   task_id: string;
   connection_id: string;
+  /**
+   * The account the caller resolved the connection from (for rules, the
+   * owner who attached it to the room). The connection must belong to it, so
+   * a connection id from elsewhere cannot write as another account.
+   */
+  connection_account_id: string;
   kind: "tracker_transition" | "tracker_comment";
   provider: "jira" | "linear";
   idempotency_key: string;
@@ -241,7 +249,11 @@ export async function reserveTrackerWorkflowEffect(
     const [connection] = await tx
       .select({ id: tracker_connections.id })
       .from(tracker_connections)
-      .where(and(eq(tracker_connections.id, input.connection_id), eq(tracker_connections.provider, input.provider)))
+      .where(and(
+        eq(tracker_connections.id, input.connection_id),
+        eq(tracker_connections.provider, input.provider),
+        eq(tracker_connections.account_id, input.connection_account_id),
+      ))
       .for("share")
       .limit(1);
     if (!connection) throw new WorkflowEffectConnectionUnavailableError();

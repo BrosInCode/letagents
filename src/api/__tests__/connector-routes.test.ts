@@ -17,7 +17,7 @@ const key = randomBytes(32).toString("hex");
 
 function memoryStore() {
   const rows = new Map<string, TrackerConnectionRow>();
-  const states = new Map<string, { account_id: string; provider: string; expires_at: string }>();
+  const states = new Map<string, { account_id: string; provider: string; loopback_port: number; expires_at: string }>();
   const store: TrackerConnectionStore = {
     async list(accountId) { return [...rows.values()].filter((row) => row.account_id === accountId); },
     async get(id) { return rows.get(id) ?? null; },
@@ -41,9 +41,11 @@ function memoryStore() {
       rows.set(values.id, row);
       return row;
     },
-    async saveCredentials(id, values) {
+    async saveCredentials(id, values, expectedIv) {
       const row = rows.get(id)!;
+      if (row.credentials_iv !== expectedIv) return false;
       rows.set(id, { ...row, credentials_ciphertext: values.ciphertext, credentials_iv: values.iv });
+      return true;
     },
     async update(id, accountId, patch) {
       const row = rows.get(id);
@@ -67,6 +69,11 @@ function memoryStore() {
       return true;
     },
     async createOAuthState(input) { states.set(input.state_hash, input); },
+    async peekOAuthState(hash, provider) {
+      const state = states.get(hash);
+      if (!state || state.provider !== provider || Date.parse(state.expires_at) <= Date.now()) return null;
+      return { loopback_port: state.loopback_port };
+    },
     async consumeOAuthState(hash, provider) {
       const state = states.get(hash);
       states.delete(hash);
@@ -117,7 +124,7 @@ async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetch
       req.authKind = "agent_session";
       req.sessionAccount = null;
     } else if (who !== "anonymous") {
-      req.authKind = who === "cookie_session" ? "session" : who === "other_account" ? "owner_token" : who;
+      req.authKind = who === "cookie_session" || who === "other_account" ? "session" : who;
       req.sessionAccount = { account_id: who === "other_account" ? "acct_2" : "acct_1", login: "emmy" } as AuthenticatedRequest["sessionAccount"];
     }
     if (who !== "cookie_session" && who !== "anonymous") req.headers.authorization = "Bearer test-token";
@@ -158,6 +165,7 @@ test("without LETAGENTS_CONNECTOR_SECRET_KEY every connector route answers 503",
       ["GET", "/account/connectors"],
       ["POST", "/account/connectors/api-token"],
       ["POST", "/account/connectors/oauth/jira/start"],
+      ["POST", "/account/connectors/oauth/jira/complete"],
       ["POST", "/account/connectors/tcon_1/test"],
       ["PATCH", "/account/connectors/tcon_1"],
       ["DELETE", "/account/connectors/tcon_1"],
@@ -170,13 +178,15 @@ test("without LETAGENTS_CONNECTOR_SECRET_KEY every connector route answers 503",
   }
 });
 
-test("only a human bearer may use connector routes", async () => {
+test("only the app's session bearer may use connector routes; agents' owner tokens may not", async () => {
   const server = await serve();
   try {
     assert.equal((await server.call("GET", "/account/connectors", undefined, "anonymous")).status, 401);
     assert.equal((await server.call("GET", "/account/connectors", undefined, "agent_session")).status, 403);
     assert.equal((await server.call("GET", "/account/connectors", undefined, "cookie_session")).status, 403);
-    assert.equal((await server.call("GET", "/account/connectors", undefined, "owner_token")).status, 200);
+    assert.equal((await server.call("GET", "/account/connectors", undefined, "owner_token")).status, 403);
+    assert.equal((await server.call("POST", "/account/connectors/api-token", { provider: "linear", api_token: "lin_api_x" }, "owner_token")).status, 403);
+    assert.equal((await server.call("PATCH", "/account/connectors/tcon_1", { jev_linking_enabled: true }, "owner_token")).status, 403);
     const listed = await server.call("GET", "/account/connectors");
     assert.equal(listed.status, 200);
     assert.deepEqual(listed.json.providers, { jira: { oauth: false, api_token: true }, linear: { oauth: false, api_token: true } });
@@ -278,7 +288,7 @@ test("a failing test marks the connection for reconnect without leaking the toke
   }
 });
 
-test("OAuth start stores only a hashed single-use state; the callback consumes it once", async () => {
+test("OAuth: the callback only forwards to the starting app's loopback port; completion needs the same account", async () => {
   const env = {
     LETAGENTS_BASE_URL: "https://letagents.example",
     LETAGENTS_LINEAR_CLIENT_ID: "linear-client",
@@ -292,12 +302,19 @@ test("OAuth start stores only a hashed single-use state; the callback consumes i
     return new Response(JSON.stringify({ access_token: "lin_oauth_access", refresh_token: "lin_refresh", expires_in: 86399 }), { status: 200 });
   }) as typeof fetch;
   const server = await serve({ env, fetchImpl });
-  try {
-    assert.equal((await server.call("POST", "/account/connectors/oauth/jira/start")).status, 409);
-    assert.equal((await server.call("POST", "/account/connectors/oauth/github/start")).status, 404);
-    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/start", undefined, "agent_session")).status, 403);
-    const started = await server.call("POST", "/account/connectors/oauth/linear/start");
+  const start = async (who: Who = "session") => {
+    const started = await server.call("POST", "/account/connectors/oauth/linear/start", { loopback_port: 49152 }, who);
     assert.equal(started.status, 200);
+    return new URL(started.json.authorize_url).searchParams.get("state")!;
+  };
+  try {
+    assert.equal((await server.call("POST", "/account/connectors/oauth/jira/start", { loopback_port: 49152 })).status, 409);
+    assert.equal((await server.call("POST", "/account/connectors/oauth/github/start", { loopback_port: 49152 })).status, 404);
+    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/start", { loopback_port: 49152 }, "agent_session")).status, 403);
+    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/start", { loopback_port: 80 })).status, 400);
+    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/start", {})).status, 400);
+
+    const started = await server.call("POST", "/account/connectors/oauth/linear/start", { loopback_port: 49152 });
     const authorize = new URL(started.json.authorize_url);
     assert.equal(authorize.origin, "https://linear.app");
     assert.equal(authorize.searchParams.get("redirect_uri"), "https://letagents.example/account/connectors/oauth/linear/callback");
@@ -306,30 +323,63 @@ test("OAuth start stores only a hashed single-use state; the callback consumes i
     assert.ok(!server.memory.states.has(state), "the raw state is not stored");
     assert.ok(server.memory.states.has(hashOAuthState(state)));
 
-    const wrongProvider = await server.call("GET", `/account/connectors/oauth/jira/callback?state=${state}&code=abc`, undefined, "anonymous");
-    assert.equal(wrongProvider.status, 400);
-    // A state is good for one attempt: the wrong-provider try used it up.
-    assert.equal(server.memory.states.size, 0);
+    // The callback connects nothing: it forwards the code to the app's loopback port.
+    const callback = await server.call("GET", `/account/connectors/oauth/linear/callback?state=${state}&code=the-code`, undefined, "anonymous");
+    assert.equal(callback.status, 302);
+    const target = new URL(callback.headers.get("location")!);
+    assert.equal(target.origin, "http://127.0.0.1:49152");
+    assert.equal(target.pathname, "/tracker-oauth/callback");
+    assert.equal(target.searchParams.get("state"), state);
+    assert.equal(target.searchParams.get("code"), "the-code");
+    assert.equal(callback.headers.get("cache-control"), "no-store");
+    assert.equal(tokenCalls.length, 0);
+    assert.equal(server.memory.rows.size, 0);
 
-    const second = await server.call("POST", "/account/connectors/oauth/linear/start");
-    const state2 = new URL(second.json.authorize_url).searchParams.get("state")!;
-    const page = await server.call("GET", `/account/connectors/oauth/linear/callback?state=${encodeURIComponent(state2)}&code=the-code`, undefined, "anonymous");
-    assert.equal(page.status, 200, page.text);
-    assert.match(page.text, /Herotel is connected/);
-    assert.equal(page.headers.get("cache-control"), "no-store");
-    assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+    const denied = await server.call("GET", `/account/connectors/oauth/linear/callback?state=${state}&error=access_denied%3Cx%3E`, undefined, "anonymous");
+    assert.equal(new URL(denied.headers.get("location")!).searchParams.get("error"), "no_code");
+    assert.equal((await server.call("GET", `/account/connectors/oauth/jira/callback?state=${state}&code=x`, undefined, "anonymous")).status, 400);
+    const unknown = await server.call("GET", "/account/connectors/oauth/linear/callback?state=%3Cscript%3E&code=x", undefined, "anonymous");
+    assert.equal(unknown.status, 400);
+    assert.ok(!unknown.text.includes("<script>"));
+
+    // The account-linking swap: another account's app cannot finish this state,
+    // and the try uses it up.
+    const swapped = await server.call("POST", "/account/connectors/oauth/linear/complete", { state, code: "the-code" }, "other_account");
+    assert.equal(swapped.status, 400);
+    assert.equal(tokenCalls.length, 0);
+    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/complete", { state, code: "the-code" })).status, 400);
+
+    const state2 = await start();
+    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/complete", { state: state2, code: "c" }, "owner_token")).status, 403);
+    const completed = await server.call("POST", "/account/connectors/oauth/linear/complete", { state: state2, code: "the-code" });
+    assert.equal(completed.status, 201, completed.text);
+    assert.equal(completed.json.connection.display_name, "Herotel");
+    assert.equal(completed.json.connection.auth_kind, "oauth");
     assert.match(tokenCalls[0], /code=the-code/);
+    assert.ok(!completed.text.includes("lin_oauth_access"));
     const [row] = server.memory.rows.values();
     assert.equal(row.account_id, "acct_1");
-    assert.equal(row.auth_kind, "oauth");
-    assert.ok(!page.text.includes("lin_oauth_access"));
-
-    const replay = await server.call("GET", `/account/connectors/oauth/linear/callback?state=${encodeURIComponent(state2)}&code=the-code`, undefined, "anonymous");
-    assert.equal(replay.status, 400);
+    assert.equal((await server.call("POST", "/account/connectors/oauth/linear/complete", { state: state2, code: "the-code" })).status, 400);
     assert.equal(tokenCalls.length, 1);
+  } finally {
+    await server.close();
+  }
+});
 
-    const xss = await server.call("GET", "/account/connectors/oauth/linear/callback?state=%3Cscript%3E&code=x", undefined, "anonymous");
-    assert.ok(!xss.text.includes("<script>"));
+test("connection attempts are rate limited per account", async () => {
+  const server = await serve();
+  try {
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      statuses.push((await server.call("POST", "/account/connectors/api-token", {
+        provider: "jira", site_url: "acme.atlassian.net", email: "emmy@example.com", api_token: "bad-token",
+      })).status);
+    }
+    assert.deepEqual(statuses, [...Array(10).fill(400), 429]);
+    // Another account has its own budget.
+    assert.equal((await server.call("POST", "/account/connectors/api-token", {
+      provider: "jira", site_url: "acme.atlassian.net", email: "emmy@example.com", api_token: "bad-token",
+    }, "other_account")).status, 400);
   } finally {
     await server.close();
   }

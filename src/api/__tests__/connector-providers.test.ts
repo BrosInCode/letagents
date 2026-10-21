@@ -59,7 +59,7 @@ function jiraConnection(credentials?: Partial<JiraCredentials>): ProviderConnect
     status_map: { ...DEFAULT_STATUS_MAPS.jira },
     tracker_user_id: "5b10ac8d82e05b22cc7d4ef5",
     credentials: { kind: "api_token", site_url: "https://acme.atlassian.net", email: "emmy@example.com", api_token: "ATATT3xFfGF0tokenvalue1234567890", ...credentials } as JiraCredentials,
-    async saveCredentials() {},
+    async saveCredentials() { return true; },
   };
 }
 
@@ -71,7 +71,7 @@ function linearConnection(credentials?: LinearCredentials): ProviderConnection<L
     status_map: { ...DEFAULT_STATUS_MAPS.linear },
     tracker_user_id: "9a3c1d2e-4f5a-4b6c-8d7e-0f1a2b3c4d5e",
     credentials: credentials ?? { kind: "api_token", api_key: "lin_api_abcdefghijklmnopqrstuvwxyz" },
-    async saveCredentials() {},
+    async saveCredentials() { return true; },
   };
 }
 
@@ -102,6 +102,83 @@ test("Jira lists assigned issues over two search pages and maps statuses", async
   assert.equal((calls[1].body as { nextPageToken: string; maxResults: number }).nextPageToken, "CAEaAggD");
   assert.equal((calls[1].body as { maxResults: number }).maxResults, 2);
   assert.match(calls[0].headers.Authorization, /^Basic /);
+});
+
+test("Jira filters cannot break out of their group", async () => {
+  const { impl, calls } = fakeFetch([at("POST", /\/search\/jql$/, { issues: [], isLast: true })]);
+  const jira = createJiraProvider({ fetchImpl: impl, env: {} });
+  for (const filter of ["x) OR (project = SECRET", "project = HT)", "summary ~ \"(\" AND (a = b", "summary ~ \"open"]) {
+    await assert.rejects(jira.listItems(jiraConnection(), filter, {}), TrackerProviderError, filter);
+  }
+  assert.equal(calls.length, 0);
+  await jira.listItems(jiraConnection(), "summary ~ \"a ) b\" AND (labels = x)", {});
+  assert.equal((calls[0].body as { jql: string }).jql, "(summary ~ \"a ) b\" AND (labels = x)) ORDER BY updated DESC");
+});
+
+test("an OAuth refresh another process already saved is reused instead of refreshing again", async () => {
+  const { impl, calls } = fakeFetch([at("GET", /\/myself$/, fixture("jira-myself"))]);
+  let refreshes = 0;
+  const jira = createJiraProvider({ fetchImpl: impl, env: {}, refresh: async () => { refreshes += 1; throw new Error("unused"); } });
+  const base = {
+    kind: "oauth" as const,
+    cloud_id: "11111111-2222-3333-4444-555555555555",
+    site_url: "https://acme.atlassian.net",
+    refresh_token: "r",
+  };
+  const conn: ProviderConnection = {
+    ...jiraConnection(),
+    id: "tcon_reload",
+    auth_kind: "oauth",
+    credentials: { ...base, access_token: "stale", expires_at: new Date(Date.now() - 1).toISOString() },
+    async saveCredentials() { return true; },
+    async reload() { return { ...base, access_token: "fresh-from-db", expires_at: new Date(Date.now() + 3_600_000).toISOString() }; },
+  };
+  await jira.whoAmI(conn);
+  assert.equal(refreshes, 0);
+  assert.equal(calls[0].headers.Authorization, "Bearer fresh-from-db");
+});
+
+test("a refresh that loses the compare-and-set uses the winner's tokens; a refused refresh waits for them", async () => {
+  const { impl, calls } = fakeFetch([at("GET", /\/myself$/, fixture("jira-myself"))]);
+  const base = {
+    kind: "oauth" as const,
+    cloud_id: "11111111-2222-3333-4444-555555555555",
+    site_url: "https://acme.atlassian.net",
+    refresh_token: "r",
+  };
+  const expired = { ...base, access_token: "stale", expires_at: new Date(Date.now() - 1).toISOString() };
+  let stored: Record<string, unknown> = expired;
+  const jira = createJiraProvider({
+    fetchImpl: impl,
+    env: {},
+    refresh: async () => {
+      // Another process refreshes first and saves.
+      stored = { ...base, access_token: "winner", expires_at: new Date(Date.now() + 3_600_000).toISOString() };
+      return { access_token: "loser", refresh_token: "r2", expires_at: new Date(Date.now() + 3_600_000).toISOString() };
+    },
+  });
+  const conn: ProviderConnection = {
+    ...jiraConnection(),
+    id: "tcon_cas",
+    auth_kind: "oauth",
+    credentials: expired,
+    async saveCredentials() { return false; },
+    async reload() { return stored as JiraCredentials; },
+  };
+  await jira.whoAmI(conn);
+  assert.equal(calls[0].headers.Authorization, "Bearer winner");
+
+  stored = expired;
+  const refused = createJiraProvider({
+    fetchImpl: impl,
+    env: {},
+    refresh: async () => {
+      setTimeout(() => { stored = { ...base, access_token: "other-process", expires_at: new Date(Date.now() + 3_600_000).toISOString() }; }, 100);
+      throw new TrackerProviderError("auth", "invalid_grant", 400);
+    },
+  });
+  await refused.whoAmI({ ...conn, id: "tcon_cas2", credentials: expired });
+  assert.equal(calls[1].headers.Authorization, "Bearer other-process");
 });
 
 test("Jira API-token requests re-check the site and use OAuth's cloud host otherwise", async () => {
@@ -151,7 +228,7 @@ test("Jira OAuth tokens near expiry are refreshed once and saved before use", as
       refresh_token: "old-refresh",
       expires_at: new Date(Date.now() + 10_000).toISOString(),
     },
-    async saveCredentials(next) { saved.push(next); },
+    async saveCredentials(next) { saved.push(next); return true; },
   };
   await Promise.all([jira.whoAmI(conn), jira.whoAmI(conn)]);
   assert.equal(refreshes, 1);

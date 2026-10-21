@@ -172,7 +172,7 @@ function connectionStore() {
   const store = {
     async get(id: string) { return rows.get(id) ?? null; },
     async setStatus(id: string, status: string, error: string | null) { statuses.push({ id, status, error }); },
-    async saveCredentials() {},
+    async saveCredentials() { return true; },
   } as unknown as TrackerConnectionStore;
   return { store, rows, statuses };
 }
@@ -212,6 +212,7 @@ function transition(overrides: Partial<SubmitTrackerEffectInput> = {}): SubmitTr
     room_id: "room_1",
     task_id: "task_7",
     connection_id: "tcon_jira",
+    connection_account_id: "acct_1",
     provider: "jira",
     key: "ht-1234",
     idempotency_key: "rule_1:delivery_1:0",

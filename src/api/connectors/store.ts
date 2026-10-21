@@ -29,13 +29,26 @@ export interface TrackerConnectionStore {
   findBySite(accountId: string, provider: TrackerProvider, siteKey: string): Promise<TrackerConnectionRow | null>;
   /** Insert, or replace the credentials of the same account's same site. */
   upsert(values: TrackerConnectionWrite): Promise<TrackerConnectionRow>;
-  saveCredentials(id: string, values: { ciphertext: string; iv: string; version: number }): Promise<void>;
+  /**
+   * Replace the credentials only if they are still the ones sealed with
+   * `expectedIv` (compare-and-set), so an older OAuth refresh can never
+   * overwrite a newer one. False when another writer won.
+   */
+  saveCredentials(id: string, values: { ciphertext: string; iv: string; version: number }, expectedIv: string): Promise<boolean>;
   update(id: string, accountId: string, patch: Partial<Pick<TrackerConnectionRow,
     "display_name" | "status_map" | "unmapped_statuses" | "jev_linking_enabled">>): Promise<TrackerConnectionRow | null>;
   setStatus(id: string, status: TrackerConnectionStatus, lastError: string | null, verified?: boolean): Promise<void>;
   addUnmapped(id: string, names: string[]): Promise<void>;
   delete(id: string, accountId: string): Promise<boolean>;
-  createOAuthState(input: { state_hash: string; account_id: string; provider: TrackerProvider; expires_at: string }): Promise<void>;
+  createOAuthState(input: {
+    state_hash: string;
+    account_id: string;
+    provider: TrackerProvider;
+    loopback_port: number;
+    expires_at: string;
+  }): Promise<void>;
+  /** The unexpired state's loopback port, without using the state up. */
+  peekOAuthState(stateHash: string, provider: TrackerProvider): Promise<{ loopback_port: number } | null>;
   /** Single use: the row is deleted on read, and only an unexpired one is returned. */
   consumeOAuthState(stateHash: string, provider: TrackerProvider): Promise<{ account_id: string } | null>;
 }
@@ -91,13 +104,16 @@ export const trackerConnectionStore: TrackerConnectionStore = {
     return row;
   },
 
-  async saveCredentials(id, values) {
-    await db.update(tracker_connections).set({
+  async saveCredentials(id, values, expectedIv) {
+    // Every encryption has a fresh IV, so the IV identifies the sealed value.
+    const rows = await db.update(tracker_connections).set({
       credentials_ciphertext: values.ciphertext,
       credentials_iv: values.iv,
       credentials_version: values.version,
       updated_at: new Date().toISOString(),
-    }).where(eq(tracker_connections.id, id));
+    }).where(and(eq(tracker_connections.id, id), eq(tracker_connections.credentials_iv, expectedIv)))
+      .returning({ id: tracker_connections.id });
+    return rows.length > 0;
   },
 
   async update(id, accountId, patch) {
@@ -145,6 +161,13 @@ export const trackerConnectionStore: TrackerConnectionStore = {
   async createOAuthState(input) {
     await db.delete(tracker_oauth_states).where(lte(tracker_oauth_states.expires_at, new Date().toISOString()));
     await db.insert(tracker_oauth_states).values({ ...input, created_at: new Date().toISOString() });
+  },
+
+  async peekOAuthState(stateHash, provider) {
+    const [row] = await db.select().from(tracker_oauth_states)
+      .where(eq(tracker_oauth_states.state_hash, stateHash)).limit(1);
+    if (!row || row.provider !== provider || Date.parse(row.expires_at) <= Date.now()) return null;
+    return { loopback_port: row.loopback_port };
   },
 
   async consumeOAuthState(stateHash, provider) {

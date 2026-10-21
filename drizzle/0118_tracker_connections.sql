@@ -2,6 +2,9 @@
 -- items, single-use OAuth states, and tracker effects in the workflow journal.
 -- Additive for older servers: they never read the new tables, and the journal
 -- keeps every existing row valid (GitHub verdicts still require a lease).
+-- Older servers would hand a tracker_* journal row to their GitHub reconciler,
+-- so no tracker effect may be created before every API instance runs this
+-- release. Nothing creates one in this release (the rules engine comes later).
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "tracker_connections" (
@@ -58,9 +61,11 @@ CREATE TABLE IF NOT EXISTS "tracker_oauth_states" (
 	"state_hash" text PRIMARY KEY NOT NULL,
 	"account_id" text NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE,
 	"provider" text NOT NULL,
+	"loopback_port" integer NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "tracker_oauth_states_provider_check" CHECK ("provider" IN ('jira', 'linear'))
+	CONSTRAINT "tracker_oauth_states_provider_check" CHECK ("provider" IN ('jira', 'linear')),
+	CONSTRAINT "tracker_oauth_states_loopback_port_check" CHECK ("loopback_port" BETWEEN 1024 AND 65535)
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "tracker_oauth_states_expires_idx" ON "tracker_oauth_states" USING btree ("expires_at");

@@ -70,6 +70,12 @@ test("connections upsert per account and site, merge unmapped statuses, and stay
   await assert.rejects(trackerConnectionStore.upsert(connectionValues(owner, "tcon_x")), /changed while it was saved/);
   assert.equal((await trackerConnectionStore.findBySite(owner, "jira", "acme.atlassian.net"))?.id, "tcon_1");
 
+  // Credentials are replaced only over the sealed value the writer read.
+  assert.equal(await trackerConnectionStore.saveCredentials("tcon_1", { ciphertext: "c3", iv: "iv3", version: 1 }, "stale-iv"), false);
+  assert.equal(await trackerConnectionStore.saveCredentials("tcon_1", { ciphertext: "c3", iv: "iv3", version: 1 }, "iv"), true);
+  assert.equal((await trackerConnectionStore.get("tcon_1"))?.credentials_ciphertext, "c3");
+  assert.equal(await trackerConnectionStore.saveCredentials("tcon_1", { ciphertext: "c4", iv: "iv4", version: 1 }, "iv"), false);
+
   await trackerConnectionStore.addUnmapped("tcon_1", ["Blocked", "QA"]);
   await trackerConnectionStore.addUnmapped("tcon_1", ["QA", "Parked"]);
   assert.deepEqual([...(await trackerConnectionStore.get("tcon_1"))!.unmapped_statuses].sort(), ["Blocked", "Parked", "QA"]);
@@ -88,13 +94,15 @@ test("connections upsert per account and site, merge unmapped statuses, and stay
 test("OAuth states are single use, provider bound and expire", { skip }, async () => {
   const owner = await account();
   const future = new Date(Date.now() + 60_000).toISOString();
-  await trackerConnectionStore.createOAuthState({ state_hash: "h1", account_id: owner, provider: "jira", expires_at: future });
+  await trackerConnectionStore.createOAuthState({ state_hash: "h1", account_id: owner, provider: "jira", loopback_port: 49152, expires_at: future });
+  assert.deepEqual(await trackerConnectionStore.peekOAuthState("h1", "jira"), { loopback_port: 49152 });
+  assert.equal(await trackerConnectionStore.peekOAuthState("h1", "linear"), null);
   assert.deepEqual(await trackerConnectionStore.consumeOAuthState("h1", "jira"), { account_id: owner });
   assert.equal(await trackerConnectionStore.consumeOAuthState("h1", "jira"), null);
-  await trackerConnectionStore.createOAuthState({ state_hash: "h2", account_id: owner, provider: "jira", expires_at: future });
+  await trackerConnectionStore.createOAuthState({ state_hash: "h2", account_id: owner, provider: "jira", loopback_port: 49152, expires_at: future });
   assert.equal(await trackerConnectionStore.consumeOAuthState("h2", "linear"), null);
   assert.equal(await trackerConnectionStore.consumeOAuthState("h2", "jira"), null, "a wrong-provider try used it up");
-  await trackerConnectionStore.createOAuthState({ state_hash: "h3", account_id: owner, provider: "jira", expires_at: new Date(Date.now() - 1).toISOString() });
+  await trackerConnectionStore.createOAuthState({ state_hash: "h3", account_id: owner, provider: "jira", loopback_port: 49152, expires_at: new Date(Date.now() - 1).toISOString() });
   assert.equal(await trackerConnectionStore.consumeOAuthState("h3", "jira"), null);
 });
 
@@ -106,6 +114,7 @@ test("the journal accepts tracker effects without a lease and still requires one
     room_id: room.id,
     task_id: "task_1",
     connection_id: "tcon_1",
+    connection_account_id: owner,
     kind: "tracker_transition",
     provider: "jira",
     idempotency_key: "rule_1:delivery_1:0",
@@ -125,6 +134,8 @@ test("the journal accepts tracker effects without a lease and still requires one
   await assert.rejects(reserve({ request_payload: { key: "HT-1234", to_status: "Done" } }), db!.WorkflowEffectIdempotencyConflictError);
   await assert.rejects(reserve({ idempotency_key: "other", connection_id: "tcon_missing" }), db!.WorkflowEffectConnectionUnavailableError);
   await assert.rejects(reserve({ idempotency_key: "other", provider: "linear" }), db!.WorkflowEffectConnectionUnavailableError);
+  const stranger = await account();
+  await assert.rejects(reserve({ idempotency_key: "other", connection_account_id: stranger }), db!.WorkflowEffectConnectionUnavailableError);
 
   await assert.rejects(client!.pool.query(`
     INSERT INTO workflow_effects (id, room_id, task_id, lease_id, kind, provider, idempotency_key, correlation_key,
@@ -176,6 +187,7 @@ test("the broker runs a tracker effect through the PostgreSQL journal: failure, 
     room_id: room.id,
     task_id: "task_1",
     connection_id: "tcon_1",
+    connection_account_id: owner,
     provider: "jira" as const,
     key: "HT-1234",
     idempotency_key: "rule_1:delivery_9:1",

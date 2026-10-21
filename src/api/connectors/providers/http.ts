@@ -61,7 +61,7 @@ export async function trackerRequest(
   if (response.status >= 300 && response.status < 400) {
     throw new TrackerProviderError("definite", `Tracker at ${url.host} answered with a redirect; redirects are not followed.`, response.status);
   }
-  const text = await readBounded(response);
+  const text = await readBounded(response, request.write === true && response.ok);
   let json: unknown = null;
   if (text) {
     try {
@@ -84,7 +84,8 @@ export async function trackerRequest(
   return { status: response.status, json };
 }
 
-async function readBounded(response: Response): Promise<string> {
+/** The body, up to a bound. Past it, an accepted write is ambiguous, not refused. */
+async function readBounded(response: Response, acceptedWrite = false): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return "";
   const chunks: Uint8Array[] = [];
@@ -95,7 +96,7 @@ async function readBounded(response: Response): Promise<string> {
     total += value.byteLength;
     if (total > MAX_RESPONSE_BYTES) {
       await reader.cancel().catch(() => undefined);
-      throw new TrackerProviderError("definite", "Tracker response was too large.");
+      throw new TrackerProviderError(acceptedWrite ? "ambiguous" : "definite", "Tracker response was too large.");
     }
     chunks.push(value);
   }

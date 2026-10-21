@@ -72,7 +72,11 @@ export const external_items = pgTable(
   }),
 );
 
-/** Single-use OAuth `state` values, stored only as a SHA-256 hash. */
+/**
+ * Single-use OAuth `state` values, stored only as a SHA-256 hash. The callback
+ * forwards the code to the starting app's loopback port; only that app, signed
+ * in as `account_id`, can finish the connection.
+ */
 export const tracker_oauth_states = pgTable(
   "tracker_oauth_states",
   {
@@ -81,11 +85,13 @@ export const tracker_oauth_states = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
     provider: text("provider").notNull(),
+    loopback_port: integer("loopback_port").notNull(),
     expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     expires_idx: index("tracker_oauth_states_expires_idx").on(table.expires_at),
     provider_check: check("tracker_oauth_states_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
+    loopback_port_check: check("tracker_oauth_states_loopback_port_check", sql`${table.loopback_port} BETWEEN 1024 AND 65535`),
   }),
 );

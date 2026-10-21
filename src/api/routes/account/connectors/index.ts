@@ -32,6 +32,10 @@ import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import { parseBearerAuthorization } from "../../../request/bearer-authorization.js";
 
 export const TRACKER_OAUTH_STATE_TTL_MS = 10 * 60_000;
+/** Where the callback sends the browser: the starting app's loopback listener. */
+export const TRACKER_OAUTH_LOOPBACK_PATH = "/tracker-oauth/callback";
+const CONNECT_ATTEMPTS_PER_WINDOW = 10;
+const CONNECT_ATTEMPT_WINDOW_MS = 10 * 60_000;
 const TEST_ITEM_LIMIT = 5;
 const MAX_SECRET_LENGTH = 4_096;
 
@@ -71,17 +75,42 @@ function boundedString(value: unknown, max: number): string | null {
 }
 
 /**
- * Connector routes act for the signed-in human only: a desktop session or an
- * owner token sent as a bearer. Agent and supervisor credentials are refused,
- * and cookie-only requests are refused so no other site can drive them.
+ * Connector routes act for the signed-in human only: the desktop app's session
+ * sent as a bearer. Owner tokens (what MCP agents carry), worker bearers and
+ * supervisor grants are refused, so no agent can add a connection, read
+ * tickets with it, or turn on Jev consent. Cookie-only requests are refused so
+ * no other site can drive these routes.
  */
 function requireAccount(req: AuthenticatedRequest, res: Response): string | null {
   const bearer = parseBearerAuthorization(req.headers.authorization).kind === "token";
-  if (!req.sessionAccount || !bearer || (req.authKind !== "owner_token" && req.authKind !== "session")) {
-    res.status(req.authKind ? 403 : 401).json({ error: "Sign in to LetAgents to manage ticket connections." });
+  if (!req.sessionAccount || !bearer || req.authKind !== "session") {
+    res.status(req.authKind ? 403 : 401).json({ error: "Sign in to the LetAgents app to manage ticket connections." });
     return null;
   }
   return req.sessionAccount.account_id;
+}
+
+/** At most `limit` attempts per key in a sliding window; in memory, per process. */
+export function createAttemptLimiter(limit: number, windowMs: number, now: () => number = Date.now) {
+  const attempts = new Map<string, number[]>();
+  return (key: string): boolean => {
+    const cutoff = now() - windowMs;
+    const recent = (attempts.get(key) ?? []).filter((at) => at > cutoff);
+    if (recent.length >= limit) {
+      attempts.set(key, recent);
+      return false;
+    }
+    recent.push(now());
+    attempts.set(key, recent);
+    if (attempts.size > 10_000) {
+      for (const [entry, times] of attempts) if (!times.some((at) => at > cutoff)) attempts.delete(entry);
+    }
+    return true;
+  };
+}
+
+function parseLoopbackPort(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1024 && value <= 65535 ? value : null;
 }
 
 function sendProviderError(res: Response, error: unknown): void {
@@ -146,6 +175,7 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
   if (!deps.cipher) {
     console.warn("LETAGENTS_CONNECTOR_SECRET_KEY is not set or invalid; ticket connector routes answer 503.");
   }
+  const allowAttempt = createAttemptLimiter(CONNECT_ATTEMPTS_PER_WINDOW, CONNECT_ATTEMPT_WINDOW_MS);
   const service: ConnectionService | null = deps.cipher
     ? createConnectionService({ store: deps.store, cipher: deps.cipher, providers: deps.providers })
     : null;
@@ -198,18 +228,36 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       res.status(409).json({ error: "OAuth for this tracker is not set up on this server. Use an API token instead." });
       return;
     }
+    const loopbackPort = parseLoopbackPort(((req.body ?? {}) as Record<string, unknown>).loopback_port);
+    if (!loopbackPort) {
+      res.status(400).json({ error: "loopback_port must be the app's local port (1024 to 65535)." });
+      return;
+    }
+    if (!allowAttempt(`oauth:${accountId}`)) {
+      res.status(429).json({ error: "Too many connection attempts. Wait a few minutes and try again." });
+      return;
+    }
     const state = randomBytes(32).toString("base64url");
     const expiresAt = new Date(now().getTime() + TRACKER_OAUTH_STATE_TTL_MS).toISOString();
-    await deps.store.createOAuthState({ state_hash: hashOAuthState(state), account_id: accountId, provider, expires_at: expiresAt });
+    await deps.store.createOAuthState({
+      state_hash: hashOAuthState(state),
+      account_id: accountId,
+      provider,
+      loopback_port: loopbackPort,
+      expires_at: expiresAt,
+    });
     const body: TrackerOAuthStart = { authorize_url: buildTrackerAuthorizeUrl(provider, config, state), expires_at: expiresAt };
     res.json(body);
   });
 
-  // The tracker redirects the user's browser here. The browser carries no
-  // LetAgents credential; the single-use state names the account.
+  // The tracker redirects the person's browser here. The browser carries no
+  // LetAgents credential and may not belong to the person who started the
+  // flow, so nothing is connected here: the code goes on to the starting app's
+  // loopback listener on this computer, and that app finishes with its own
+  // session (see /complete). A link forwarded to someone else delivers the
+  // code to their computer, where no app waits for this state.
   app.get("/account/connectors/oauth/:provider/callback", async (req: AuthenticatedRequest, res) => {
-    const connections = service;
-    if (!connections) {
+    if (!service) {
       sendCallbackPage(res, 503, "Ticket connectors are off", "This LetAgents server is not configured for ticket connectors.");
       return;
     }
@@ -219,28 +267,51 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       sendCallbackPage(res, 400, "Connection failed", "This link is not a valid tracker sign-in. Start again from LetAgents settings.");
       return;
     }
-    // Consume first: a state is good for one attempt, success or not.
-    const owner = await deps.store.consumeOAuthState(hashOAuthState(state), provider);
-    if (!owner) {
+    const pending = await deps.store.peekOAuthState(hashOAuthState(state), provider);
+    if (!pending) {
       sendCallbackPage(res, 400, "Connection failed", "This sign-in link expired or was already used. Start again from LetAgents settings.");
       return;
     }
-    if (req.query.error !== undefined) {
-      sendCallbackPage(res, 400, "Connection cancelled", "The tracker did not grant access. You can close this window.");
+    const target = new URL(`http://127.0.0.1:${pending.loopback_port}${TRACKER_OAUTH_LOOPBACK_PATH}`);
+    target.searchParams.set("state", state);
+    const code = boundedString(req.query.code, 2_048);
+    if (req.query.error !== undefined || !code) {
+      const error = typeof req.query.error === "string" && /^[a-z_]{1,64}$/.test(req.query.error) ? req.query.error : "no_code";
+      target.searchParams.set("error", error);
+    } else {
+      target.searchParams.set("code", code);
+    }
+    res.status(302)
+      .set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", Location: target.toString() })
+      .end();
+  });
+
+  app.post("/account/connectors/oauth/:provider/complete", async (req: AuthenticatedRequest, res) => {
+    const connections = ready(res);
+    if (!connections) return;
+    const accountId = requireAccount(req, res);
+    if (!accountId) return;
+    const provider = providerParam(req);
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const state = boundedString(body.state, 512);
+    const code = boundedString(body.code, 2_048);
+    if (!provider || !state || !code) {
+      res.status(400).json({ error: "The tracker sign-in is incomplete. Start again." });
       return;
     }
-    const code = boundedString(req.query.code, 2_048);
-    if (!code) {
-      sendCallbackPage(res, 400, "Connection failed", "The tracker sent no authorization code. Start again from LetAgents settings.");
+    // Consume first: a state is good for one attempt, success or not.
+    const owner = await deps.store.consumeOAuthState(hashOAuthState(state), provider);
+    if (!owner || owner.account_id !== accountId) {
+      res.status(400).json({ error: "This sign-in expired, was already used, or was started by another account. Start again." });
       return;
     }
     try {
       const { credentials, site } = await oauthCredentials(provider, code, deps);
-      const row = await connections.connect({ account_id: owner.account_id, provider, auth_kind: "oauth", credentials, site });
-      sendCallbackPage(res, 200, "Connected", `${row.display_name} is connected to LetAgents. You can close this window and return to the app.`);
+      const row = await connections.connect({ account_id: accountId, provider, auth_kind: "oauth", credentials, site });
+      res.status(201).json({ connection: toConnectionView(row) });
     } catch (error) {
-      console.error("Ticket connector OAuth callback failed:", connectorErrorText(error, [code]));
-      sendCallbackPage(res, 502, "Connection failed", "LetAgents could not finish connecting the tracker. Start again from LetAgents settings.");
+      console.error("Ticket connector OAuth completion failed:", connectorErrorText(error, [code]));
+      sendProviderError(res, error);
     }
   });
 
@@ -254,6 +325,12 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     const token = boundedString(body.api_token, MAX_SECRET_LENGTH);
     if (!provider || !token) {
       res.status(400).json({ error: "Choose a tracker and enter an API token." });
+      return;
+    }
+    // Each attempt checks a credential with the tracker: bound them, so this
+    // server cannot be used to test stolen credentials.
+    if (!allowAttempt(`token:${accountId}`)) {
+      res.status(429).json({ error: "Too many connection attempts. Wait a few minutes and try again." });
       return;
     }
     try {

@@ -8,8 +8,9 @@ and, through the workflow effect journal, move tickets and add comments.
 
 1. Open **Settings → Ticket trackers**.
 2. Choose **Add Jira** or **Add Linear**.
-3. Choose **Sign in with Jira** (or Linear) to approve access in the browser, or
-   enter an API token:
+3. Choose **Sign in with Jira** (or Linear) to approve access in the browser.
+   The app waits; when you approve, the browser returns to the app on this
+   computer and the app finishes the connection. Or enter an API token:
    - Jira: the site (`https://your-team.atlassian.net`), the Atlassian account
      email, and an API token from <https://id.atlassian.com/manage-profile/security/api-tokens>.
    - Linear: a personal API key from Linear's **Settings → Security & access**.
@@ -50,7 +51,10 @@ it never changes a ticket by itself.
 Every Jira or Linear write is a `workflow_effects` row of kind
 `tracker_transition` or `tracker_comment` (see
 [workflow-effect-journal.md](workflow-effect-journal.md)). The broker reserves
-the row with an idempotency key before it calls the tracker.
+the row with an idempotency key before it calls the tracker. The caller names
+the connection and the account it resolved it from; the journal refuses a
+connection that belongs to another account. A caller must take the connection
+from the room's own configuration, never from agent input.
 
 - A transition names its target status. The server reads the issue's available
   transitions at run time and uses the one that reaches that status. An issue
@@ -89,22 +93,42 @@ the tracker again.
 - Requests with a person's credentials go only to `api.atlassian.com`, a Jira
   Cloud site on `*.atlassian.net` (or an allowed host), or `api.linear.app`, over
   HTTPS, without following redirects.
-- The OAuth `state` is random, stored only as a hash, bound to the account and
-  tracker, valid for 10 minutes, and good for one attempt.
-- Connector routes accept only a signed-in person's bearer credential (desktop
-  session or owner token). Agent and supervisor credentials are refused.
+- OAuth finishes only in the app that started it. The app listens on a random
+  port on `127.0.0.1` and sends it with the start request. The tracker sends the
+  browser to the server's callback, which connects nothing: it forwards the
+  code to that port on the browser's own computer. The app then calls
+  `/complete` with its own session, and the server requires that the account
+  that started the sign-in is the account that finishes it. A sign-in link
+  forwarded to another person delivers the code to their computer, where no app
+  waits for it, so nobody can link someone else's tracker to their account.
+- The OAuth `state` is random (256 bits), stored only as a hash, bound to the
+  account, the tracker and the loopback port, valid for 10 minutes, and good for
+  one attempt.
+- Connector routes accept only the desktop app's session sent as a bearer.
+  Owner tokens (what MCP agents carry), worker bearers, supervisor grants and
+  cookie-only requests are refused, so an agent cannot add or remove a
+  connection, read tickets with it, or turn on Jev linking.
+- Each account has 10 connection attempts (API token or OAuth start) per 10
+  minutes, so the server cannot be used to test stolen credentials.
+- A Jira room filter must have balanced parentheses and quotes, so it cannot
+  break out of the group it is wrapped in.
+- OAuth refresh tokens rotate. A refresh first re-reads the stored credentials,
+  saves with a compare-and-set, and on a refused refresh waits briefly for
+  credentials another process saved. Two API instances can still both refresh
+  in rare timing; the loser then asks the person to reconnect.
 - Jira OAuth: one connection per Jira site. If the Atlassian account can reach
   several sites, the first one is connected.
 
 ### HTTP routes
 
-All routes except the OAuth callback need the account's bearer credential.
+All routes except the OAuth callback need the desktop app's session bearer.
 
 | Route | Purpose |
 |---|---|
 | `GET /account/connectors` | List connections, which sign-in methods the server offers, and the Jev disclosure. |
-| `POST /account/connectors/oauth/:provider/start` | Start OAuth; returns the URL to open. |
-| `GET /account/connectors/oauth/:provider/callback` | The tracker's redirect target. |
+| `POST /account/connectors/oauth/:provider/start` | Start OAuth (`loopback_port`); returns the URL to open. |
+| `GET /account/connectors/oauth/:provider/callback` | The tracker's redirect target; forwards to `http://127.0.0.1:<loopback_port>/tracker-oauth/callback`. |
+| `POST /account/connectors/oauth/:provider/complete` | Finish OAuth (`state`, `code`) as the account that started it. |
 | `POST /account/connectors/api-token` | Connect with an API token (`provider`, `api_token`; Jira also `site_url`, `email`). |
 | `POST /account/connectors/:id/test` | List up to five tickets assigned to you and record unmapped statuses. |
 | `PATCH /account/connectors/:id` | Change `display_name`, `status_map` or `jev_linking_enabled`. |

@@ -31,8 +31,13 @@ export interface ProviderConnection<C extends TrackerCredentials = TrackerCreden
   status_map: Record<string, string>;
   tracker_user_id: string | null;
   credentials: C;
-  /** Persist rotated OAuth tokens before they are used. */
-  saveCredentials(next: C): Promise<void>;
+  /**
+   * Persist rotated OAuth tokens before they are used. False when another
+   * writer saved newer credentials first; the caller then reloads.
+   */
+  saveCredentials(next: C): Promise<boolean>;
+  /** The stored credentials as they are now (another process may have refreshed them). */
+  reload?(): Promise<C>;
 }
 
 export interface ExternalItem {

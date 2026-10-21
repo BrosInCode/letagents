@@ -104,9 +104,12 @@
         <p class="settings-control-title">Add {{ trackerLabel(form) }}</p>
         <template v-if="providers?.[form]?.oauth">
           <p class="settings-control-description">Sign in with {{ trackerLabel(form) }} in your browser, then return here.</p>
-          <button class="primary-button" type="button" :disabled="busyAction === 'oauth'" @click="startOAuth(form)">
-            Sign in with {{ trackerLabel(form) }}
-          </button>
+          <div class="settings-connector-actions">
+            <button class="primary-button" type="button" :disabled="busyAction === 'oauth'" @click="startOAuth(form)">
+              {{ busyAction === "oauth" ? "Waiting for your browser" : `Sign in with ${trackerLabel(form)}` }}
+            </button>
+            <button v-if="busyAction === 'oauth'" class="ghost-button" type="button" @click="cancelOAuth">Cancel sign-in</button>
+          </div>
           <p class="settings-control-description">Or use an API token:</p>
         </template>
         <template v-if="form === 'jira'">
@@ -287,14 +290,20 @@ function saveToken() {
 
 function startOAuth(provider: TrackerProvider) {
   return run(null, "oauth", async () => {
-    await api().startOAuth(provider);
+    feedback.value = { state: "info", message: `Approve access in your browser. LetAgents finishes connecting ${trackerLabel(provider)} when you return.` };
+    const connection = await api().connectOAuth(provider);
+    replace(connection);
     closeForm();
-    feedback.value = { state: "info", message: `Finish signing in with ${trackerLabel(provider)} in your browser. This list updates when you return.` };
+    feedback.value = { state: "success", message: `${trackerLabel(provider)} connected. Use Test connection to see your tickets.` };
   });
 }
 
-// The OAuth callback finishes in the browser; refresh when the app is back.
-const onFocus = () => { if (loaded.value) void load(); };
+function cancelOAuth() {
+  void api().cancelOAuth();
+}
+
+// Another window or device may have changed the connections; refresh when the app is back.
+const onFocus = () => { if (loaded.value && !busyAction.value) void load(); };
 onMounted(() => {
   void load();
   window.addEventListener("focus", onFocus);

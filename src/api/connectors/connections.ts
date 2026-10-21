@@ -93,23 +93,35 @@ export function createConnectionService(deps: {
 
   function open(row: TrackerConnectionRow): ProviderConnection {
     const binding = { connection_id: row.id, account_id: row.account_id };
-    const credentials = cipher.decrypt({
-      ciphertext: row.credentials_ciphertext,
-      iv: row.credentials_iv,
-      version: row.credentials_version,
+    // The IV of the sealed value this connection holds: the version a save compares.
+    let sealedIv = row.credentials_iv;
+    const decrypt = (source: TrackerConnectionRow) => cipher.decrypt({
+      ciphertext: source.credentials_ciphertext,
+      iv: source.credentials_iv,
+      version: source.credentials_version,
     }, binding) as unknown as TrackerCredentials;
-    return {
+    const connection: ProviderConnection = {
       id: row.id,
       provider: row.provider as TrackerProvider,
       auth_kind: row.auth_kind as "oauth" | "api_token",
       status_map: row.status_map ?? {},
       tracker_user_id: row.tracker_user_id,
-      credentials,
+      credentials: decrypt(row),
       async saveCredentials(next) {
         const sealed = cipher.encrypt(next as unknown as Record<string, unknown>, binding);
-        await store.saveCredentials(row.id, sealed);
+        const saved = await store.saveCredentials(row.id, sealed, sealedIv);
+        if (saved) sealedIv = sealed.iv;
+        return saved;
+      },
+      async reload() {
+        const current = await store.get(row.id);
+        if (!current || current.account_id !== row.account_id) throw new TrackerConnectionNotFoundError();
+        sealedIv = current.credentials_iv;
+        connection.credentials = decrypt(current);
+        return connection.credentials;
       },
     };
+    return connection;
   }
 
   return {
@@ -125,7 +137,7 @@ export function createConnectionService(deps: {
         status_map: defaultStatusMap(input.provider),
         tracker_user_id: null,
         credentials: input.credentials,
-        async saveCredentials(next) { probe.credentials = next; },
+        async saveCredentials(next) { probe.credentials = next; return true; },
       };
       const user: TrackerUser = await provider.whoAmI(probe);
       const site = input.site ?? user.site ?? null;

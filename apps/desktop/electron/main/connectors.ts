@@ -7,6 +7,9 @@ import type {
   TrackerOAuthStart,
   TrackerProvider,
 } from "../../../../shared/ticket-connectors.mjs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import { apiFetch } from "./auth.js";
 import { openAllowedExternalUrl } from "./external-url.js";
 
@@ -34,11 +37,99 @@ export function listTrackerConnections(): Promise<TrackerConnectionList> {
   return apiFetch<TrackerConnectionList>("/account/connectors");
 }
 
-/** Start OAuth and open the tracker's consent page in the system browser. */
-export async function startTrackerOAuth(value: unknown): Promise<{ expires_at: string }> {
-  const start = await apiFetch<TrackerOAuthStart>(`/account/connectors/oauth/${provider(value)}/start`, { method: "POST" });
-  await openAllowedExternalUrl(start.authorize_url, TRACKER_AUTHORIZE_HOSTS);
-  return { expires_at: start.expires_at };
+/** The path the server's OAuth callback forwards the browser to on this computer. */
+export const TRACKER_OAUTH_LOOPBACK_PATH = "/tracker-oauth/callback";
+const OAUTH_WAIT_MS = 10 * 60_000;
+
+let activeOAuth: { cancel(): void } | null = null;
+
+function loopbackPage(title: string, detail: string): string {
+  // Fixed text only: nothing from the request is reflected.
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>`
+    + "<style>body{font:16px system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}</style>"
+    + `</head><body><h1>${title}</h1><p>${detail}</p></body></html>`;
+}
+
+function listenOnLoopback(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port));
+  });
+}
+
+/**
+ * Connect a tracker with OAuth. The browser approves access; the server's
+ * callback forwards the code to a listener on 127.0.0.1 that only this app
+ * opened, and this app finishes with its own session. A sign-in link that
+ * reaches another computer cannot connect anyone's tracker to this account.
+ */
+export async function connectTrackerWithOAuth(value: unknown): Promise<TrackerConnectionView> {
+  const trackerProvider = provider(value);
+  activeOAuth?.cancel();
+  const server = createServer();
+  const port = await listenOnLoopback(server);
+  let settle: { resolve(view: TrackerConnectionView): void; reject(error: Error): void } | null = null;
+  const result = new Promise<TrackerConnectionView>((resolve, reject) => { settle = { resolve, reject }; });
+  const finish = (outcome: TrackerConnectionView | Error) => {
+    if (!settle) return;
+    const current = settle;
+    settle = null;
+    clearTimeout(timer);
+    server.close();
+    if (activeOAuth === handle) activeOAuth = null;
+    if (outcome instanceof Error) current.reject(outcome);
+    else current.resolve(outcome);
+  };
+  const handle = { cancel: () => finish(new Error("Tracker sign-in was cancelled.")) };
+  const timer = setTimeout(() => finish(new Error("Tracker sign-in timed out. Start again.")), OAUTH_WAIT_MS);
+  activeOAuth = handle;
+
+  let expectedState: string | null = null;
+  server.on("request", (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const reply = (status: number, title: string, detail: string) => {
+      res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+      res.end(loopbackPage(title, detail));
+    };
+    if (req.method !== "GET" || url.pathname !== TRACKER_OAUTH_LOOPBACK_PATH || !expectedState
+      || url.searchParams.get("state") !== expectedState) {
+      reply(404, "Not found", "This address only finishes a tracker sign-in that the LetAgents app started.");
+      return;
+    }
+    const code = url.searchParams.get("code");
+    if (!code) {
+      reply(400, "Connection cancelled", "The tracker did not grant access. You can close this window.");
+      finish(new Error("The tracker did not grant access."));
+      return;
+    }
+    void apiFetch<{ connection: TrackerConnectionView }>(
+      `/account/connectors/oauth/${trackerProvider}/complete`,
+      json("POST", { state: expectedState, code }),
+    ).then((response) => {
+      reply(200, "Connected", "The tracker is connected to LetAgents. You can close this window and return to the app.");
+      finish(response.connection);
+    }, (error: unknown) => {
+      reply(502, "Connection failed", "LetAgents could not finish connecting the tracker. Return to the app and try again.");
+      finish(error instanceof Error ? error : new Error("Tracker sign-in failed."));
+    });
+  });
+
+  try {
+    const start = await apiFetch<TrackerOAuthStart>(
+      `/account/connectors/oauth/${trackerProvider}/start`,
+      json("POST", { loopback_port: port }),
+    );
+    expectedState = new URL(start.authorize_url).searchParams.get("state");
+    if (!expectedState) throw new Error("The server returned a sign-in link without a state.");
+    await openAllowedExternalUrl(start.authorize_url, TRACKER_AUTHORIZE_HOSTS);
+  } catch (error) {
+    finish(error instanceof Error ? error : new Error("Tracker sign-in could not start."));
+  }
+  return result;
+}
+
+export function cancelTrackerOAuth(): void {
+  activeOAuth?.cancel();
 }
 
 export async function saveTrackerApiToken(input: TrackerApiTokenInput): Promise<TrackerConnectionView> {

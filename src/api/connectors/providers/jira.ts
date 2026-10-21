@@ -30,6 +30,33 @@ export interface JiraProviderOptions {
   now?: () => Date;
 }
 
+/**
+ * A room filter's JQL, without a trailing ORDER BY. Parentheses must balance
+ * outside quoted strings, so the filter cannot close the group this provider
+ * wraps it in and widen the query past the clauses added after it.
+ */
+export function jiraFilterClause(filter: string | null): string | null {
+  const base = filter?.replace(/\border\s+by\b[\s\S]*$/i, "").trim();
+  if (!base) return null;
+  let depth = 0;
+  let quote: string | null = null;
+  for (let index = 0; index < base.length; index += 1) {
+    const char = base[index];
+    if (quote) {
+      if (char === "\\") index += 1;
+      else if (char === quote) quote = null;
+    } else if (char === "\"" || char === "'") {
+      quote = char;
+    } else if (char === "(") {
+      depth += 1;
+    } else if (char === ")" && --depth < 0) {
+      break;
+    }
+  }
+  if (depth !== 0 || quote) throw new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
+  return base;
+}
+
 export function assertJiraKey(key: string): string {
   const normalized = key.trim().toUpperCase();
   if (!ISSUE_KEY.test(normalized)) throw new TrackerProviderError("definite", `"${key.slice(0, 40)}" is not a Jira issue key.`);
@@ -164,7 +191,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     async listItems(conn, filter, opts: ListItemsOptions) {
       const limit = Math.min(Math.max(opts.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
       const clauses: string[] = [];
-      const base = filter?.replace(/\border\s+by\b[\s\S]*$/i, "").trim();
+      const base = jiraFilterClause(filter);
       if (base) clauses.push(`(${base})`);
       if (opts.assigneeMe) clauses.push("assignee = currentUser()");
       if (opts.updatedSince) {
