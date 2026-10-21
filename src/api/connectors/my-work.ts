@@ -247,11 +247,15 @@ async function readCandidates(input: {
   const conditions: SQL[] = [
     sql`${t.room_id} IN (${sql.join(input.roomIds.map((id) => sql`${id}`), sql`, `)})`,
     sql`(${viaTracker} OR ${native})`,
-    // Finished work leaves the page, unless the ticket is still open in the tracker.
-    sql`NOT (${t.status} IN ('done', 'merged', 'cancelled') AND (${t.ticket_state} IS NULL OR ${t.ticket_state} = 'done'))`,
+    // Finished work leaves the page, unless the ticket is still open in the
+    // tracker. Each branch matches one partial index (migration 0124).
+    sql`(${t.status} NOT IN ('done', 'merged', 'cancelled')
+         OR (${t.status} IN ('done', 'merged', 'cancelled') AND ${t.ticket_state} IN ('todo', 'in_progress', 'in_review')))`,
   ];
-  if (input.tracker === "native") conditions.push(sql`${t.external_ref} IS NULL`);
-  else if (input.tracker) conditions.push(sql`split_part(${t.external_ref}, ':', 1) = ${input.tracker}`);
+  // One column splits the two kinds, as the match above does: a card is a
+  // tracker card when sync bound it to a ticket, else native.
+  if (input.tracker === "native") conditions.push(sql`${t.external_item_id} IS NULL`);
+  else if (input.tracker) conditions.push(sql`${ei.provider} = ${input.tracker}`);
   if (input.cursor) {
     conditions.push(sql`(${t.updated_at}, ${t.room_id}, ${t.number}) < (${input.cursor.updated_at}::timestamptz, ${input.cursor.room_id}, ${input.cursor.number})`);
   }
@@ -361,12 +365,13 @@ async function readMentions(rows: readonly CandidateRow[]) {
   return result;
 }
 
-/** The board's PR status for each page room, a few rooms at a time. */
-async function readPullRequestStatus(roomIds: readonly string[]) {
+/** The board's PR status for the given cards of each room, a few rooms at a time. */
+async function readPullRequestStatus(numbersByRoom: ReadonlyMap<string, readonly number[]>) {
   const result = new Map<string, Map<string, TaskGitHubArtifactStatus>>();
+  const roomIds = [...numbersByRoom.keys()];
   for (let index = 0; index < roomIds.length; index += PR_STATUS_CONCURRENCY) {
     const batch = roomIds.slice(index, index + PR_STATUS_CONCURRENCY);
-    const statuses = await Promise.all(batch.map((roomId) => getTasksGitHubArtifactStatus(roomId)));
+    const statuses = await Promise.all(batch.map((roomId) => getTasksGitHubArtifactStatus(roomId, numbersByRoom.get(roomId))));
     batch.forEach((roomId, position) => result.set(roomId, statuses[position]!));
   }
   return result;
@@ -473,27 +478,38 @@ function splitRef(ref: string | null): { provider: TrackerProvider | null; key: 
 }
 
 /**
- * Room-level reads one request shares across its batches: each room's PR
- * status, review signals and open requests are read once per request.
+ * Reads one request shares across its batches. Review signals and open
+ * requests are read once per room; PR status once per card, and only for the
+ * cards being built.
  */
 interface RequestCache {
-  prStatus: Map<string, Map<string, TaskGitHubArtifactStatus>>;
+  /** Per room, per card; null for a card read with no GitHub event. */
+  prStatus: Map<string, Map<string, TaskGitHubArtifactStatus | null>>;
   reviewEvents: Map<string, ReviewSignalEvent[]>;
   openRequests: Map<string, OpenRequestSignal[]>;
 }
 
 const newRequestCache = (): RequestCache => ({ prStatus: new Map(), reviewEvents: new Map(), openRequests: new Map() });
 
-async function fillRequestCache(cache: RequestCache, roomIds: readonly string[], login: string | null): Promise<void> {
-  const missing = roomIds.filter((id) => !cache.prStatus.has(id));
-  if (!missing.length) return;
+async function fillRequestCache(cache: RequestCache, rows: readonly CandidateRow[], login: string | null): Promise<void> {
+  const newRooms = [...new Set(rows.map((row) => row.room_id))].filter((id) => !cache.reviewEvents.has(id));
+  const numbersByRoom = new Map<string, number[]>();
+  for (const row of rows) {
+    if (cache.prStatus.get(row.room_id)?.has(`task_${row.number}`)) continue;
+    numbersByRoom.set(row.room_id, [...(numbersByRoom.get(row.room_id) ?? []), row.number]);
+  }
   const [prStatus, reviewEvents, openRequests] = await Promise.all([
-    readPullRequestStatus(missing),
-    readReviewSignals(missing, login),
-    readOpenRequests(missing),
+    readPullRequestStatus(numbersByRoom),
+    readReviewSignals(newRooms, login),
+    readOpenRequests(newRooms),
   ]);
-  for (const id of missing) {
-    cache.prStatus.set(id, prStatus.get(id) ?? new Map());
+  for (const [roomId, numbers] of numbersByRoom) {
+    const room = cache.prStatus.get(roomId) ?? new Map<string, TaskGitHubArtifactStatus | null>();
+    const read = prStatus.get(roomId);
+    for (const number of numbers) room.set(`task_${number}`, read?.get(`task_${number}`) ?? null);
+    cache.prStatus.set(roomId, room);
+  }
+  for (const id of newRooms) {
     cache.reviewEvents.set(id, reviewEvents.filter((event) => event.room_id === id));
     cache.openRequests.set(id, openRequests.filter((request) => request.room_id === id));
   }
@@ -510,7 +526,7 @@ async function buildCards(
   const [presence, mentions] = await Promise.all([
     readPresence(rows),
     readMentions(rows),
-    fillRequestCache(cache, pageRoomIds, login),
+    fillRequestCache(cache, rows, login),
   ]);
   const prStatus = cache.prStatus;
   const reviewRequests = openReviewRequests(pageRoomIds.flatMap((id) => cache.reviewEvents.get(id) ?? []));
@@ -519,7 +535,7 @@ async function buildCards(
     const taskId = `task_${row.number}`;
     const ref = splitRef(row.external_ref);
     const mention = mentions.get(pageKey(row.room_id, row.number));
-    const pullRequests = pullRequestsFor(row, prStatus.get(row.room_id)?.get(taskId));
+    const pullRequests = pullRequestsFor(row, prStatus.get(row.room_id)?.get(taskId) ?? undefined);
     const ticketState = isTicketState(row.ticket_state) ? row.ticket_state : null;
     const reasons = needsMeReasons({
       room_id: row.room_id,

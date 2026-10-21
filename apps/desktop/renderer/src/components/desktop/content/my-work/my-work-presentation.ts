@@ -4,7 +4,6 @@ import type {
   MyWorkPage,
   MyWorkPullRequest,
 } from "../../../../../../../../shared/ticket-connectors.mjs";
-import type { DesktopAccountActivityState } from "../../../../../../electron/ipc-types";
 
 export type MyWorkTrackerFilter = "" | "jira" | "linear" | "native";
 
@@ -31,7 +30,8 @@ export function myWorkTrackerOptions(page: Pick<MyWorkPage, "providers"> | null)
   return [
     { id: "", label: "All trackers" },
     ...page.providers.map((provider) => ({ id: provider as MyWorkTrackerFilter, label: labels[provider] ?? provider })),
-    { id: "native", label: "No ticket" },
+    // Cards sync did not bind to a ticket, typed keys included.
+    { id: "native", label: "Not from a tracker" },
   ];
 }
 
@@ -100,18 +100,35 @@ export function myWorkCardKey(card: Pick<MyWorkCard, "room_id" | "task_id">): st
 }
 
 /**
- * Rooms whose cards changed between two account activity states. The first
- * state a room reports is not a change: My work reads everything when it opens.
+ * Rooms whose cards changed between two readings of the activity stream's
+ * stamps. A room's first stamp is not a change: My work reads everything when
+ * it opens.
  */
 export function roomsWithChangedTasks(
-  next: DesktopAccountActivityState["rooms"],
-  previous: DesktopAccountActivityState["rooms"] | undefined,
+  next: Readonly<Record<string, string | null>>,
+  previous: Readonly<Record<string, string | null>> | undefined,
 ): string[] {
   if (!previous) return [];
-  const changed: string[] = [];
-  for (const [key, room] of Object.entries(next)) {
-    const before = previous[key];
-    if (before && room.tasksChangedAt && room.tasksChangedAt !== before.tasksChangedAt) changed.push(room.roomId);
-  }
-  return changed;
+  return Object.entries(next)
+    .filter(([roomId, stamp]) => stamp && roomId in previous && previous[roomId] !== stamp)
+    .map(([roomId]) => roomId);
+}
+
+/** A change in a room that holds a loaded card is read soon; others wait longer. */
+export const MY_WORK_REFRESH_GAP_MS = 3_000;
+export const MY_WORK_OTHER_ROOM_GAP_MS = 30_000;
+
+/**
+ * How long to wait before re-reading after changes in `changedRooms`: the
+ * short gap when one of them holds a loaded card, else the long one, each
+ * counted from the previous read.
+ */
+export function myWorkRefreshDelay(
+  changedRooms: readonly string[],
+  loadedRooms: ReadonlySet<string>,
+  lastReadAt: number,
+  now: number,
+): number {
+  const gap = changedRooms.some((roomId) => loadedRooms.has(roomId)) ? MY_WORK_REFRESH_GAP_MS : MY_WORK_OTHER_ROOM_GAP_MS;
+  return Math.max(0, lastReadAt + gap - now);
 }

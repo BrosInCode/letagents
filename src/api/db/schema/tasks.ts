@@ -52,6 +52,13 @@ export const tasks = pgTable(
     room_external_ref_unique_idx: uniqueIndex("tasks_room_external_ref_unique_idx")
       .on(table.room_id, table.external_ref)
       .where(sql`${table.external_ref} IS NOT NULL`),
+    // My work: a room's unfinished cards, and finished cards whose ticket is still open.
+    room_open_updated_idx: index("tasks_room_open_updated_idx")
+      .on(table.room_id, table.updated_at.desc(), table.number.desc())
+      .where(sql`${table.status} NOT IN ('done', 'merged', 'cancelled')`),
+    room_finished_open_ticket_idx: index("tasks_room_finished_open_ticket_idx")
+      .on(table.room_id, table.updated_at.desc(), table.number.desc())
+      .where(sql`${table.status} IN ('done', 'merged', 'cancelled') AND ${table.ticket_state} IN ('todo', 'in_progress', 'in_review')`),
   })
 );
 

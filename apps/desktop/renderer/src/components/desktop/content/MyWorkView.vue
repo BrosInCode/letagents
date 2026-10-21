@@ -111,7 +111,6 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, reactive, ref, toRaw, watch } from "vue";
 import type { MyWorkCard, MyWorkPage } from "../../../../../../../shared/ticket-connectors.mjs";
-import type { DesktopAccountActivityState } from "../../../../../electron/ipc-types";
 import { desktopBridgeUpgradeMessage, desktopIpc } from "../../../ipc/index.js";
 import { useNow } from "../../../composables/useNow";
 import { reuseUnchanged } from "../../../domain/reuse-unchanged";
@@ -120,6 +119,7 @@ import {
   checkSummaryLabel,
   myWorkCardKey,
   myWorkColumns,
+  myWorkRefreshDelay,
   myWorkRoomOptions,
   myWorkTrackerOptions,
   needsMeLabel,
@@ -133,15 +133,13 @@ import {
 import { compactPerson, readableStatus, relativeTime, shortTaskId } from "./room-board/formatters";
 import { ticketRefParts, ticketStateLabel } from "./room-board/ticket-ref";
 
-/** Re-reads after card changes wait at least this long after the previous read, like Inbox's room reads. */
-const MY_WORK_REFRESH_GAP_MS = 3_000;
 const PAGE_SIZE = 50;
 
 const props = defineProps<{
-  /** The account activity stream; a room's `tasksChangedAt` moving re-reads the page. */
-  activity: DesktopAccountActivityState;
-  /** Whether the page is on screen. Changes while it is not are read when it returns. */
-  active: boolean;
+  /** Per room, when its cards last changed (account activity stream); a moved stamp re-reads the page. */
+  tasksChangedAt: Readonly<Record<string, string | null>>;
+  /** Whether the account activity stream is open. */
+  connected: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -170,8 +168,8 @@ const roomOptions = computed(() => myWorkRoomOptions(
 
 let generation = 0;
 let lastReadAt = 0;
-let staleWhileAway = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
+let timerDueAt = 0;
 
 function query(cursor: string | null, limit: number) {
   return {
@@ -218,6 +216,7 @@ async function loadMore(): Promise<void> {
     const seen = new Set(cards.value.map(myWorkCardKey));
     cards.value = [...cards.value, ...next.cards.filter((card) => !seen.has(myWorkCardKey(card)))];
     nextCursor.value = next.next_cursor;
+    error.value = "";
   } catch (cause) {
     if (current === generation) error.value = cause instanceof Error ? cause.message : "More work could not be loaded.";
   } finally {
@@ -230,25 +229,31 @@ function toggle(card: MyWorkCard): void {
   selectedKey.value = selectedKey.value === key ? null : key;
 }
 
-/** One re-read for a burst of card changes, never sooner than the gap after the last read. */
-function scheduleReload(): void {
-  if (!props.active) { staleWhileAway = true; return; }
-  if (timer) return;
-  const wait = Math.max(0, lastReadAt + MY_WORK_REFRESH_GAP_MS - Date.now());
+/**
+ * One re-read for a burst of changes: soon when a changed room holds a loaded
+ * card, else after the long gap. A sooner need moves a waiting timer earlier.
+ */
+function scheduleReload(changedRooms: readonly string[]): void {
+  const loadedRooms = new Set(cards.value.map((card) => card.room_id));
+  const wait = myWorkRefreshDelay(changedRooms, loadedRooms, lastReadAt, Date.now());
+  const dueAt = Date.now() + wait;
+  if (timer && timerDueAt <= dueAt) return;
+  if (timer) clearTimeout(timer);
+  timerDueAt = dueAt;
   timer = setTimeout(() => {
     timer = null;
-    if (!props.active) { staleWhileAway = true; return; }
     void reload();
   }, wait);
 }
 
-watch(() => props.activity.rooms, (rooms, previous) => {
-  if (roomsWithChangedTasks(rooms, previous).length) scheduleReload();
+// The page exists only while it is open, so changes are read only then.
+watch(() => props.tasksChangedAt, (stamps, previous) => {
+  const changed = roomsWithChangedTasks(stamps, previous);
+  if (changed.length) scheduleReload(changed);
 });
-// A stream that reconnects may have missed changes.
-watch(() => props.activity.connected, (connected, was) => { if (connected && was === false) scheduleReload(); });
-watch(() => props.active, (active) => {
-  if (active && staleWhileAway) { staleWhileAway = false; scheduleReload(); }
+// A stream that reconnects may have missed changes in rooms with loaded cards.
+watch(() => props.connected, (connected, was) => {
+  if (connected && was === false) scheduleReload(cards.value.map((card) => card.room_id));
 });
 watch(() => [filters.tracker, filters.roomId, filters.needsMe], () => {
   cards.value = [];

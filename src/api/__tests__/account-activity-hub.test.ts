@@ -297,11 +297,15 @@ test('a pull request, review or check run event stamps the room; other GitHub ev
   const seen: AccountRoomActivity[] = [];
   const watch = await w.hub.watch(['room-a'], activity => seen.push(activity));
   w.github.emit('github_event:updated', { projectId: 'room-a', event: { event_type: 'issue_comment' } });
+  w.github.emit('github_event:updated', { projectId: 'room-a', event: { event_type: 'check_run', action: 'created' } });
   await w.advance(10);
-  assert.equal(seen.length, 0);
+  assert.equal(seen.length, 0, 'a comment or a running check does not stamp');
   w.github.emit('github_event:updated', { projectId: 'room-a', event: { event_type: 'pull_request_review' } });
   await w.advance(10);
   assert.equal(seen.length, 1);
   assert.equal(seen[0]?.tasks_changed_at, new Date(w.now).toISOString());
+  w.github.emit('github_event:updated', { projectId: 'room-a', event: { event_type: 'check_run', action: 'completed' } });
+  await w.advance(10);
+  assert.equal(seen.length, 2, 'a finished check stamps');
   watch.close();
 });

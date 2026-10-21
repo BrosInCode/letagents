@@ -286,8 +286,8 @@
       <MyWorkView
         v-else-if="activeEntry.type === 'my-work'"
         :key="authStatus?.account?.id ?? 'local'"
-        :activity="accountActivity.state.value"
-        :active="activeEntry.type === 'my-work'"
+        :tasks-changed-at="accountActivity.tasksChangedAt.value"
+        :connected="accountActivity.connected.value"
         @open-card="openMyWorkCard"
         @open-thread="openMyWorkThread"
       />

@@ -41,7 +41,7 @@ export interface AccountActivityWatch {
 }
 
 type Watcher = { onChange: (activity: AccountRoomActivity) => void; ready: boolean };
-/** GitHub events that change a My work row's PR column or its review request. */
+/** GitHub events that change a My work row's PR column or its review request (check runs: completed only). */
 const MY_WORK_GITHUB_EVENT_TYPES = new Set(["pull_request", "pull_request_review", "check_run"]);
 
 type Pending = { working: boolean; latest: boolean; tasks?: boolean };
@@ -127,8 +127,12 @@ export class AccountActivityHub {
       if (typeof roomId === "string") this.invalidate(roomId, { working: false, latest: false, tasks: true });
     };
     const onGitHub = (payload: unknown) => {
-      const value = payload as { projectId?: unknown; event?: { event_type?: unknown } } | null;
-      if (typeof value?.projectId === "string" && MY_WORK_GITHUB_EVENT_TYPES.has(String(value.event?.event_type))) {
+      const value = payload as { projectId?: unknown; event?: { event_type?: unknown; action?: unknown } } | null;
+      const type = String(value?.event?.event_type);
+      // A check run changes the PR column only when it finishes; queued and
+      // in-progress updates during CI would stamp the room many times a minute.
+      if (type === "check_run" && value?.event?.action !== "completed") return;
+      if (typeof value?.projectId === "string" && MY_WORK_GITHUB_EVENT_TYPES.has(type)) {
         this.invalidate(value.projectId, { working: false, latest: false, tasks: true });
       }
     };

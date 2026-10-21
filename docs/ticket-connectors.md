@@ -325,8 +325,9 @@ part of this feature.
 
 ### Filters
 
-- **Tracker**: Jira, Linear, or **No ticket** (cards that name no ticket).
-  Shown only when you have a tracker connection.
+- **Tracker**: Jira, Linear, or **Not from a tracker** (cards that sync did
+  not bind to a ticket, including cards with a typed key). Shown only when you
+  have a tracker connection.
 - **Room**: one room.
 - **Needs me**: rows that need you.
 
@@ -347,13 +348,17 @@ bare key matches a card of either tracker.
 ### How the page stays current
 
 The page re-reads its cards when a card changes or is removed in one of your
-rooms, or when a pull request, review or check run event arrives there. The
+rooms, or when a pull request or review event, or a finished check run,
+arrives there. The
 server's account activity stream (`/account/activity/stream`, the stream the
 sidebar already uses) now carries `tasks_changed_at` per room: on
 `task:updated`, `task:removed` or such a GitHub event the server stamps the
-room with no database read and sends the room's frame. The page then reads again, at most once every
-3 seconds, and only while it is open; a change while it is closed is read when
-it opens. A dropped and reopened stream also triggers one read. The page does
+room with no database read and sends the room's frame. The page then reads
+again: 3 seconds after its previous read when the changed room holds a card on
+the page, else 30 seconds after it. It reads only while it is open (it reads
+everything when it opens), and once after a dropped stream reopens. The
+desktop app keeps these stamps apart from the sidebar's room activity, so a
+card change does not redraw the sidebar. The page does
 not poll. A new or answered room request does not stamp the room, so its
 **Needs me** flag shows on the next read or **Refresh**.
 
@@ -384,12 +389,15 @@ state, draft, merged, `review_summary`, `check_summary`), `needs_me`,
 `updated_at`, newest first; the cursor keeps the database's full precision.
 
 Each page costs a bounded set of queries: one for the cards (through the
-`tasks` room index, over at most the account's rooms), then, for the page's
+partial indexes of migration `0124_my_work_task_indexes`, which hold a room's
+unfinished cards and its finished cards whose ticket is still open, so the
+done cards of a busy board are never read), then, for the page's
 cards and rooms only, agent presence, linked-thread counts, the board's PR
-status (`getTasksGitHubArtifactStatus`, a few rooms at a time), the newest 500
-review events about you, and the newest 500 open room requests. Each room's PR
-status, review events and requests are read once per request, however many
-batches it reads. No migration was needed.
+status (`getTasksGitHubArtifactStatus`, narrowed to the page's cards, a few
+rooms at a time), the newest 500
+review events about you, and the newest 500 open room requests. Each card's PR
+status and each room's review events and requests are read once per request,
+however many batches it reads.
 
 ### Tests
 

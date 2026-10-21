@@ -224,3 +224,29 @@ test("finished work leaves the page unless its ticket is still open", options, a
   const page = await myWork!.listMyWork({ accountId: me.id, login: me.login });
   assert.deepEqual(page.cards.map((entry) => entry.task_id), [open]);
 });
+
+test("a private repo room the account cannot read is left out, through the real access check", options, async () => {
+  const me = await account("outsider");
+  const repoRoomId = `github.com/my-work-test/${unique("private").toLowerCase()}`;
+  const { room: repoRoom } = await db!.getOrCreateCanonicalRoom(repoRoomId);
+  await client!.db.insert(schema!.project_admins).values({ project_id: repoRoom.id, account_id: me.id, assigned_at: new Date().toISOString() });
+  const openRoom = await room("open", me.id);
+  const hidden = await card(repoRoom.id, "In the private repo", { updatedMinute: 2, assignee: me.login });
+  const shown = await card(openRoom, "In a plain room", { updatedMinute: 1, assignee: me.login });
+
+  // GitHub does not show the repository to an anonymous caller, and the
+  // account holds no GitHub token: the access check does not allow it.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const target = String(input instanceof Request ? input.url : input);
+    if (target.includes("api.github.com")) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+    return realFetch(input);
+  }) as typeof fetch;
+  try {
+    const page = await myWork!.listMyWork({ accountId: me.id, login: me.login });
+    assert.deepEqual(page.cards.map((entry) => `${entry.room_id}/${entry.task_id}`), [`${openRoom}/${shown}`]);
+    assert.ok(!page.cards.some((entry) => entry.task_id === hidden && entry.room_id === repoRoom.id));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

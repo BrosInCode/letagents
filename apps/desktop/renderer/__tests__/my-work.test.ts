@@ -11,7 +11,10 @@ import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import type { MyWorkCard, MyWorkPage } from "../../../../shared/ticket-connectors.mjs";
 import {
   checkSummaryLabel,
+  MY_WORK_OTHER_ROOM_GAP_MS,
+  MY_WORK_REFRESH_GAP_MS,
   myWorkColumns,
+  myWorkRefreshDelay,
   myWorkTrackerOptions,
   primaryPullRequest,
   reviewSummaryLabel,
@@ -73,11 +76,20 @@ test("PR summaries read in plain words; an open PR is the row's PR", () => {
 });
 
 test("only a moved tasksChangedAt asks for a re-read", () => {
-  const room = (tasksChangedAt: string | null) => ({ roomId: "r1", latestMessageId: null, latestMessageAt: null, working: [], tasksChangedAt });
-  assert.deepEqual(roomsWithChangedTasks({ r1: room("t1") }, undefined), []);
-  assert.deepEqual(roomsWithChangedTasks({ r1: room("t1") }, { r1: room(null) }), ["r1"]);
-  assert.deepEqual(roomsWithChangedTasks({ r1: room("t1") }, { r1: room("t1") }), []);
-  assert.deepEqual(roomsWithChangedTasks({ r1: { ...room("t1"), latestMessageId: "msg_2" } }, { r1: room("t1") }), [], "a new message is not a card change");
+  assert.deepEqual(roomsWithChangedTasks({ r1: "t1" }, undefined), []);
+  assert.deepEqual(roomsWithChangedTasks({ r1: "t1" }, { r1: null }), ["r1"]);
+  assert.deepEqual(roomsWithChangedTasks({ r1: "t1" }, { r1: "t1" }), []);
+  assert.deepEqual(roomsWithChangedTasks({ r1: "t1", r2: "t2" }, { r1: "t1" }), [], "a room's first stamp is not a change");
+});
+
+test("a change in a room with a loaded card is read soon; other rooms wait the long gap", () => {
+  const loaded = new Set(["r1"]);
+  const lastReadAt = 1_000_000;
+  assert.equal(myWorkRefreshDelay(["r1"], loaded, lastReadAt, lastReadAt + 1_000), MY_WORK_REFRESH_GAP_MS - 1_000);
+  assert.equal(myWorkRefreshDelay(["r2"], loaded, lastReadAt, lastReadAt + 1_000), MY_WORK_OTHER_ROOM_GAP_MS - 1_000);
+  assert.equal(myWorkRefreshDelay(["r2", "r1"], loaded, lastReadAt, lastReadAt + 1_000), MY_WORK_REFRESH_GAP_MS - 1_000);
+  assert.equal(myWorkRefreshDelay(["r2"], loaded, lastReadAt, lastReadAt + 60_000), 0, "a gap already past reads at once");
+  assert.equal(MY_WORK_OTHER_ROOM_GAP_MS, 30_000);
 });
 
 test("room search: a typed ticket key names its card", () => {
@@ -243,7 +255,7 @@ async function mountMyWork(): Promise<{ root: HostNode; unmount: () => void }> {
   await attachClientRender(MyWorkView, "components/desktop/content/MyWorkView.vue");
   const root = hostNode("root");
   const app = testRenderer.createApp(defineComponent({
-    setup: () => () => h(MyWorkView, { activity: { connected: true, rooms: {} }, active: true }),
+    setup: () => () => h(MyWorkView, { tasksChangedAt: {}, connected: true }),
   }));
   app.provide(ssrContextKey, { modules: new Set<string>() });
   app.mount(root);
