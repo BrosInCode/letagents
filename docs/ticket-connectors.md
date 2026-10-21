@@ -489,15 +489,22 @@ name to a transition at run time, as for any tracker write. A `comment` template
 8. For each match the engine records a `tracker_rule_runs` row, unique per rule and webhook delivery. When the same
    delivery reaches a second room, that room finds the row and writes nothing: one write per event. A rule also runs
    at most once per ticket, event type and action in 10 minutes, so a burst of failing checks or a close-and-reopen
-   loop writes once.
+   loop writes once. Claims for one rule and ticket take an advisory lock, so deliveries that arrive together
+   cannot all pass this check.
 9. Before the webhook answers, the engine reserves one `tracker_transition` or `tracker_comment` journal row per
    action, with the idempotency key `${rule.id}:${deliveryId}:${action.index}`. A crash after this point leaves
    pending rows that the journal sweep reconciles, not a lost write.
-10. After the webhook answers, the broker runs the writes in order and stops at the first one that does not
-   succeed. The run row then holds the effect ids and the outcome, read from the journal rows as they are:
-   `succeeded`, `pending` (the journal still reconciles), `failed`, `quarantined` or `error` (for example the
-   connection was removed). The audit shows a fixed sentence for each outcome; the provider's error text stays
-   in the journal row, which only the server reads.
+10. After the webhook answers, the broker runs the writes in order. When one does not succeed, the later ones are
+   failed for good before any tracker call, so the journal sweep never runs a later action without the ones
+   before it (a failed transition may still be retried by the journal; its comment is not). The run row holds the
+   effect ids; the audit reads the outcome from the journal rows as they are now: `succeeded`, `pending` (the
+   journal still reconciles), `failed`, `quarantined` or `error` (for example the connection was removed). The
+   audit shows a fixed sentence for each outcome; the provider's error text stays in the journal row, which only
+   the server reads.
+
+A process that stops after step 9 and before step 10 leaves pending journal rows. The sweep reconciles them as for
+any tracker effect: a transition is checked in the ticket's history and created again if missing; a comment that was
+never sent stays ambiguous (shown as pending) and is not sent twice.
 
 A redelivered webhook is a duplicate to the projection and reaches no rule. A delivery the route retries after a
 failure reaches the rules again: the run row and the journal give back the earlier rows, so nothing new is reserved
@@ -523,7 +530,8 @@ only for events from people with access to the repository, by GitHub's `author_a
 | `pull_request_review` | The reviewer is `OWNER`, `MEMBER` or `COLLABORATOR`. |
 | `check_run` | The check ran for a branch in the repository itself (GitHub lists no pull request for a fork's branch). |
 
-`approvalsAtLeast` counts only reviewers with that access, across the event's room and the card's room.
+`approvalsAtLeast` counts only reviewers with that access, across the event's room and the card's room. Reviews
+stored before this change carry no association and do not count.
 
 ### Comment text
 

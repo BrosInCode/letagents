@@ -170,9 +170,10 @@ test("facts come from the event and the stored row", () => {
   assert.equal(trackerRuleFacts({ ...pullRequestOpened, kind: "push" } as unknown as RepoRoomEvent, { event_type: "push" }, null), null);
 });
 
-function engineHarness(rules: LoadedTrackerRule[], bound = true) {
+function engineHarness(rules: LoadedTrackerRule[], bound = true, failFirst = false) {
   const submitted: string[] = [];
   const driven: string[] = [];
+  const abandoned: string[] = [];
   const deps: TrackerRuleEngineDeps = {
     store: {
       forRoom: async () => rules,
@@ -190,13 +191,17 @@ function engineHarness(rules: LoadedTrackerRule[], bound = true) {
     },
     drive: async (reserved) => {
       driven.push(reserved.effect.id);
-      return { ...reserved.effect, state: "succeeded" };
+      return { ...reserved.effect, state: failFirst && driven.length === 1 ? "failed" : "succeeded" };
+    },
+    abandon: async (reserved) => {
+      abandoned.push(reserved.effect.id);
+      return { ...reserved.effect, state: "failed" };
     },
     getEffect: async (id) => ({ id, state: "succeeded", quarantined_at: null }) as WorkflowEffectLike,
     schedule: (work) => { pending.push(work()); },
   };
   const pending: Array<Promise<void>> = [];
-  return { engine: createTrackerRuleEngine(deps), submitted, driven, settle: () => Promise.all(pending) };
+  return { engine: createTrackerRuleEngine(deps), submitted, driven, abandoned, settle: () => Promise.all(pending) };
 }
 type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["drive"]>>;
 
@@ -283,4 +288,24 @@ test("a card that sync never bound to the ticket runs no rule", async () => {
   });
   assert.deepEqual(result.runs, []);
   assert.deepEqual(harness.submitted, []);
+});
+
+test("when an action does not succeed, the later ones are failed before any tracker call", async () => {
+  const harness = engineHarness([loadedRule], true, true);
+  await harness.engine.runForRepoEvent({
+    deliveryId: "d-4",
+    storedEvent: { event_type: "pull_request", base_ref: "main" },
+    eventRoomId: "room",
+    roomEvent: pullRequestOpened,
+    task: { id: "task_1", room_id: "room", external_ref: "jira:HT-1234", pr_url: null },
+  });
+  await harness.settle();
+  assert.deepEqual(harness.driven, ["effect_1"]);
+  assert.deepEqual(harness.abandoned, ["effect_2"]);
+});
+
+test("a cut comment never ends in half an escape", () => {
+  const body = renderTrackerRuleTemplate(`${"a".repeat(15_997)}{{pr_title}}`, { pr_title: "**" }, "linear");
+  assert.ok(body.length < 16_000);
+  assert.equal(/\\*$/.exec(body)![0].length % 2, 0);
 });

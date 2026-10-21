@@ -67,5 +67,7 @@ export function renderTrackerRuleTemplate(
   });
   if (rendered.length <= TRACKER_COMMENT_MAX_LENGTH) return rendered;
   // Never end on half an escape ("\\") or half a surrogate pair.
-  return Array.from(rendered.slice(0, TRACKER_COMMENT_MAX_LENGTH - 1)).join("").replace(/(?<!\\)\\$/, "").replace(/[\ud800-\udbff]$/, "");
+  const cutText = Array.from(rendered.slice(0, TRACKER_COMMENT_MAX_LENGTH - 1)).join("").replace(/[\ud800-\udbff]$/, "");
+  const trailing = /\\*$/.exec(cutText)![0].length;
+  return trailing % 2 === 1 ? cutText.slice(0, -1) : cutText;
 }

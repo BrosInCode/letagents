@@ -227,33 +227,39 @@ export const trackerRuleStore = {
     now = new Date(),
   ): Promise<{ run: TrackerRuleRunRow | null; claimed: boolean }> {
     const sameDelivery = and(eq(tracker_rule_runs.rule_id, input.rule_id!), eq(tracker_rule_runs.delivery_id, input.delivery_id));
-    const [earlier] = await db.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
-    if (earlier) return { run: earlier, claimed: earlier.room_id === input.room_id && earlier.task_id === input.task_id };
-    const [recent] = await db.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
-      .where(and(
-        eq(tracker_rule_runs.rule_id, input.rule_id!),
-        eq(tracker_rule_runs.external_ref, input.external_ref),
-        eq(tracker_rule_runs.event_type, input.event_type),
-        eq(tracker_rule_runs.event_action, input.event_action),
-        gt(tracker_rule_runs.created_at, new Date(now.getTime() - TRACKER_RULE_RUN_DEBOUNCE_MS).toISOString()),
-      ))
-      .limit(1);
-    if (recent) return { run: null, claimed: false };
-    const at = now.toISOString();
-    const [inserted] = await db.insert(tracker_rule_runs).values({
-      ...input,
-      id: `trun_${randomUUID()}`,
-      effect_ids: [],
-      outcome: "pending",
-      detail: null,
-      created_at: at,
-      updated_at: at,
-    }).onConflictDoNothing({ target: [tracker_rule_runs.rule_id, tracker_rule_runs.delivery_id] }).returning();
-    if (inserted) return { run: inserted, claimed: true };
-    // A concurrent claim of the same delivery won.
-    const [existing] = await db.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
-    if (!existing) throw new Error("The rule run conflict row could not be loaded.");
-    return { run: existing, claimed: existing.room_id === input.room_id && existing.task_id === input.task_id };
+    const owns = (run: TrackerRuleRunRow) => run.room_id === input.room_id && run.task_id === input.task_id;
+    return db.transaction(async (tx) => {
+      // One claim at a time per rule and ticket, so a burst of deliveries
+      // (check runs finish together) cannot all pass the debounce check.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`tracker_rule_run:${input.rule_id}:${input.external_ref}`}))`);
+      const [earlier] = await tx.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
+      if (earlier) return { run: earlier, claimed: owns(earlier) };
+      const [recent] = await tx.select({ id: tracker_rule_runs.id }).from(tracker_rule_runs)
+        .where(and(
+          eq(tracker_rule_runs.rule_id, input.rule_id!),
+          eq(tracker_rule_runs.external_ref, input.external_ref),
+          eq(tracker_rule_runs.event_type, input.event_type),
+          eq(tracker_rule_runs.event_action, input.event_action),
+          gt(tracker_rule_runs.created_at, new Date(now.getTime() - TRACKER_RULE_RUN_DEBOUNCE_MS).toISOString()),
+        ))
+        .limit(1);
+      if (recent) return { run: null, claimed: false };
+      const at = now.toISOString();
+      const [inserted] = await tx.insert(tracker_rule_runs).values({
+        ...input,
+        id: `trun_${randomUUID()}`,
+        effect_ids: [],
+        outcome: "pending",
+        detail: null,
+        created_at: at,
+        updated_at: at,
+      }).onConflictDoNothing({ target: [tracker_rule_runs.rule_id, tracker_rule_runs.delivery_id] }).returning();
+      if (inserted) return { run: inserted, claimed: true };
+      // The same delivery for another ticket of this rule was claimed meanwhile.
+      const [existing] = await tx.select().from(tracker_rule_runs).where(sameDelivery).limit(1);
+      if (!existing) throw new Error("The rule run conflict row could not be loaded.");
+      return { run: existing, claimed: owns(existing) };
+    });
   },
 
   async finishRun(id: string, input: { effect_ids: string[]; outcome: TrackerRuleRunOutcome; detail: string | null }): Promise<void> {

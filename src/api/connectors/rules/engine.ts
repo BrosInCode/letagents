@@ -44,6 +44,8 @@ export interface TrackerRuleEngineDeps {
   reserve(input: SubmitTrackerEffectInput): Promise<ReserveResult>;
   /** The broker's `driveTrackerEffect`. */
   drive(reserved: ReserveResult): Promise<WorkflowEffect>;
+  /** The broker's `abandonTrackerEffect`: a reserved write that will not run fails before any tracker call. */
+  abandon(reserved: ReserveResult, reason: string): Promise<WorkflowEffect>;
   getEffect(id: string): Promise<WorkflowEffect | null>;
   /**
    * Runs the tracker calls after the webhook answers: one can take up to
@@ -316,12 +318,24 @@ export function createTrackerRuleEngine(deps: TrackerRuleEngineDeps) {
             outcome: failed ? "error" : "pending",
             detail: OUTCOME_DETAIL[failed ? "error" : "pending"],
           });
-          if (failed && reserved.length === 0) continue;
+          if (failed) {
+            // A later reservation failed: run none of this rule's writes.
+            for (const entry of reserved) await deps.abandon(entry, "A later action of this rule could not be reserved; none was run.");
+            await settle(run.id, effectIds, true);
+            continue;
+          }
           deps.schedule(async () => {
-            // In order, and stop at the first write that did not succeed.
+            // In order. After a write that did not succeed, the later ones are
+            // failed for good before any tracker call, so the journal sweep
+            // never runs a later action without the ones before it.
+            let stopped = false;
             for (const entry of reserved) {
+              if (stopped) {
+                await deps.abandon(entry, "An earlier action of this rule did not succeed; this one was not run.");
+                continue;
+              }
               const effect = await deps.drive(entry);
-              if (effect.state !== "succeeded") break;
+              if (effect.state !== "succeeded") stopped = true;
             }
             await settle(run.id, effectIds, failed);
           });
@@ -411,6 +425,7 @@ export async function getDefaultTrackerRuleEngine(): Promise<ReturnType<typeof c
     countApprovals: countPullRequestApprovals,
     reserve: (input) => workflowEffectBroker.reserveTrackerEffect(input),
     drive: (reserved) => workflowEffectBroker.driveTrackerEffect(reserved),
+    abandon: (reserved, reason) => workflowEffectBroker.abandonTrackerEffect(reserved, reason),
     getEffect: (id) => workflowEffectBroker.getEffect(id),
     schedule: (work) => {
       void work().catch((error) => console.warn("[ticket-connectors] tracker rule write failed:", errorText(error)));

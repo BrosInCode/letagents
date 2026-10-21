@@ -36,16 +36,18 @@ const unique = (label: string) => `${label}-${Date.now()}-${++sequence}`;
 /** A tracker executor that records each write instead of calling Jira. */
 function fakeTracker() {
   const created: Array<{ kind: string; payload: Record<string, unknown>; correlation_key: string }> = [];
+  const refuse = new Set<string>();
   const executor: WorkflowEffectExecutor = {
     async create(effect: WorkflowEffect) {
       created.push({ kind: effect.kind, payload: effect.request_payload, correlation_key: effect.correlation_key });
+      if (refuse.has(effect.kind)) return { kind: "definite_failure", error: "Jira has no transition to In Review." };
       return { kind: "succeeded", external_id: `jira-${created.length}`, external_url: null, response_payload: null };
     },
     async lookup() {
       return { kind: "not_found" };
     },
   };
-  return { created, executor };
+  return { created, executor, refuse };
 }
 
 async function bindTicket(connectionId: string, roomId: string, taskId: string, key = "HT-1234"): Promise<string> {
@@ -114,6 +116,7 @@ async function setup(label: string) {
     countApprovals: engineModule!.countPullRequestApprovals,
     reserve: (input) => broker.reserveTrackerEffect(input),
     drive: (reserved) => broker.driveTrackerEffect(reserved),
+    abandon: (reserved, reason) => broker.abandonTrackerEffect(reserved, reason),
     getEffect: (id) => broker.getEffect(id),
     schedule: (work) => { pending.push(work()); },
   });
@@ -353,4 +356,19 @@ test("a rule runs once per ticket and event within the debounce window", options
   await deliver(context, unique("delivery"), openedPayload(PR_BASE + 100));
   assert.equal(context.tracker.created.length, 2, "the second opened PR within the window writes nothing");
   assert.equal((await runRows(context.room.id)).length, 1);
+});
+
+test("a refused transition fails the comment after it before any tracker call", options, async () => {
+  const context = await setup("sequence");
+  await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
+  context.tracker.refuse.add("tracker_transition");
+  await deliver(context, unique("delivery"), openedPayload(PR_BASE + 101));
+  assert.deepEqual(context.tracker.created.map((entry) => entry.kind), ["tracker_transition"]);
+  const effects = await client!.pool.query(
+    "SELECT kind, state, attempt_count, max_attempts, processing_token FROM workflow_effects WHERE room_id = $1 ORDER BY kind DESC", [context.room.id]);
+  const comment = effects.rows.find((row) => row.kind === "tracker_comment");
+  assert.equal(comment.state, "failed");
+  assert.equal(comment.attempt_count, comment.max_attempts, "the sweep never retries it");
+  const audit = await governance!.listBoardGovernanceAudit(context.room.id);
+  assert.equal(audit.find((entry) => entry.kind === "tracker_rule_run")?.metadata?.outcome, "failed");
 });

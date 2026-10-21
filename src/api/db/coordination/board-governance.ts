@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
 import { db } from "../client.js";
-import { board_intents, board_manager_assignments, room_agent_sessions, tracker_rule_runs } from "../schema.js";
+import { board_intents, board_manager_assignments, room_agent_sessions, tracker_rule_runs, workflow_effects } from "../schema.js";
 import { toBoardIntent, toBoardManagerAssignment, toCoordinationEvent } from "../mappers.js";
 import type {
   BoardGovernanceAuditEntry,
@@ -183,13 +183,32 @@ export async function listBoardGovernanceAudit(
     });
   }
 
+  // A run's outcome follows its journal rows, which the sweep keeps settling
+  // after the run was recorded.
+  const effectIds = [...new Set(ruleRunRows.flatMap((run) => Array.isArray(run.effect_ids) ? run.effect_ids : []))];
+  const effectStates = new Map(
+    (effectIds.length === 0 ? [] : await db
+      .select({ id: workflow_effects.id, state: workflow_effects.state, quarantined_at: workflow_effects.quarantined_at })
+      .from(workflow_effects)
+      .where(inArray(workflow_effects.id, effectIds)))
+      .map((effect) => [effect.id, effect]),
+  );
+  const ruleRunOutcome = (run: (typeof ruleRunRows)[number]): string => {
+    const effects = (Array.isArray(run.effect_ids) ? run.effect_ids : []).map((id) => effectStates.get(id));
+    if (run.outcome === "error" || effects.length === 0 || effects.some((effect) => !effect)) return run.outcome;
+    if (effects.some((effect) => effect!.quarantined_at)) return "quarantined";
+    if (effects.some((effect) => effect!.state === "failed")) return "failed";
+    return effects.every((effect) => effect!.state === "succeeded") ? "succeeded" : "pending";
+  };
+
   for (const run of ruleRunRows) {
+    const outcome = ruleRunOutcome(run);
     entries.push({
       id: run.id,
       kind: "tracker_rule_run",
       event_type: "tracker_rule_run",
       actor_label: `Rule: ${run.rule_name}`,
-      reason: run.detail,
+      reason: outcome === run.outcome ? run.detail : null,
       created_at: run.created_at,
       metadata: {
         rule_id: run.rule_id,
@@ -200,7 +219,7 @@ export async function listBoardGovernanceAudit(
         event_type: run.event_type,
         event_action: run.event_action,
         event_url: run.event_url,
-        outcome: run.outcome,
+        outcome,
         effect_ids: run.effect_ids,
       },
     });
