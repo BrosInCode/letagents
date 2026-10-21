@@ -62,6 +62,7 @@ export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStal
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
 export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, recordRebindAttestation, LeaseFenceStaleError, isRebindAttestationCause, isUuidShapedExecutionId, REBIND_ATTESTATION_CAUSES } from "./db/coordination.js";
 export {
+  WorkflowEffectConnectionUnavailableError,
   WorkflowEffectIdempotencyConflictError,
   WorkflowEffectLeaseStaleError,
   claimAmbiguousWorkflowEffect,
@@ -74,6 +75,7 @@ export {
   markWorkflowEffectSucceeded,
   pruneSettledWorkflowEffects,
   releaseWorkflowEffectLookup,
+  reserveTrackerWorkflowEffect,
   reserveWorkflowEffect,
   journalApprovalSettlesRequestedChanges,
   workflowEffectCorrelationKey,
