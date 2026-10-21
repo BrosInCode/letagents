@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,6 +18,8 @@ const pool = dbm?.pool;
 const options = { skip: !url, concurrency: false };
 // Built at runtime so the source never holds a key-shaped string (same as secret-firewall.test.ts).
 const FAKE_STRIPE_LIVE = "sk_live_" + "x".repeat(24);
+const SERVER_SECRET_FILE = path.join(mkdtempSync(path.join(tmpdir(), "ask-server-")), "secret.txt");
+const workspaceDir = (askId: string) => path.join(tmpdir(), "letagents-ask-workspaces", askId);
 if (url) {
   test.beforeEach(async () => {
     rmSync(path.join(tmpdir(), "letagents-ask-workspaces"), { recursive: true, force: true });
@@ -36,6 +38,9 @@ function makeRepo() {
   mkdirSync(path.join(work, "src"));
   writeFileSync(path.join(work, "src", "auth.ts"), "export function login() {\n  return 'todo: fix auth';\n}\n");
   writeFileSync(path.join(work, ".env"), `API_KEY=${FAKE_STRIPE_LIVE}\n`);
+  // A link committed in the repo that points at a file on the server.
+  writeFileSync(SERVER_SECRET_FILE, "SERVER-SECRET-123\n");
+  symlinkSync(SERVER_SECRET_FILE, path.join(work, "src", "leak.txt"));
   git("add", "-A"); git("commit", "-q", "-m", "init");
   mkdirSync(path.join(gitBase, "acme"), { recursive: true });
   execFileSync("git", ["clone", "-q", "--bare", work, path.join(gitBase, "acme", "app.git")]);
@@ -54,7 +59,7 @@ async function activeAsk() {
 test("the agent lists, reads and searches the asker's code, never secrets, and every read is recorded", options, async () => {
   const ask = await activeAsk();
   const files = await ws!.listFiles(ask, "");
-  assert.deepEqual(files, ["src/auth.ts"]);
+  assert.deepEqual(files, ["src/auth.ts", "src/leak.txt"]);
   assert.match((await ws!.readRepoFile(ask, "src/auth.ts")).content, /todo: fix auth/);
   await assert.rejects(ws!.readRepoFile(ask, ".env"), /may hold secrets/);
   await assert.rejects(ws!.readRepoFile(ask, "../../etc/passwd"), /inside the repo/);
@@ -96,4 +101,42 @@ test("the agent's ask is found from its own grant and only while running", optio
   assert.equal((await asks!.askForWorker(worker.session_id))?.id, ask.id);
   await pool!.query("UPDATE agent_asks SET state='ended' WHERE id=$1", [ask.id]);
   assert.equal(await asks!.askForWorker(worker.session_id), null);
+});
+
+test("a link in the repo never reads a file on the server", options, async () => {
+  const ask = await activeAsk();
+  // Cloned without symlinks, the link is a plain file that holds only its target's path.
+  const read = await ws!.readRepoFile(ask, "src/leak.txt");
+  assert.ok(!read.content.includes("SERVER-SECRET-123"));
+  // A link that appears in the copy later is refused too.
+  symlinkSync(SERVER_SECRET_FILE, path.join(workspaceDir(ask.id), "src", "late-link.txt"));
+  await assert.rejects(ws!.readRepoFile(ask, "src/late-link.txt"), /doesn't exist/);
+});
+
+test("concurrent first calls share one clone and all succeed", options, async () => {
+  const ask = await activeAsk();
+  const [files, read, hits] = await Promise.all([
+    ws!.listFiles(ask, ""), ws!.readRepoFile(ask, "src/auth.ts"), ws!.searchRepo(ask, "fix auth"),
+  ]);
+  assert.ok(files.includes("src/auth.ts"));
+  assert.match(read.content, /todo: fix auth/);
+  assert.equal(hits.length, 1);
+});
+
+test("the installation token reaches git through its environment, never its arguments", () => {
+  assert.ok(ws, "workspace module loaded");
+  const env = ws!.gitAuthEnv("ghs_secret");
+  assert.equal(env.GIT_CONFIG_KEY_0, "http.extraHeader");
+  assert.equal(env.GIT_CONFIG_VALUE_0, `Authorization: Basic ${Buffer.from("x-access-token:ghs_secret").toString("base64")}`);
+  assert.equal(ws!.gitAuthEnv(null).GIT_CONFIG_COUNT, undefined);
+});
+
+test("cleanup removes copies whose gift isn't running and keeps the rest", options, async () => {
+  const ask = await activeAsk();
+  await ws!.listFiles(ask, "");
+  const stray = workspaceDir("ask_stray-copy");
+  mkdirSync(stray, { recursive: true });
+  await ws!.pruneWorkspaces(async id => id === ask.id);
+  assert.equal(existsSync(stray), false);
+  assert.equal(existsSync(path.join(workspaceDir(ask.id), ".git")), true);
 });

@@ -9,7 +9,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -60,19 +60,47 @@ async function repoAccess(roomId: string): Promise<RepoAccess> {
 
 function dirFor(askId: string) { return path.join(ROOT, askId.replace(/[^A-Za-z0-9_-]/g, "")); }
 
+/**
+ * The installation token goes to git through its environment config, never on
+ * the command line, where any process on the server could read it.
+ */
+export function gitAuthEnv(token: string | null): NodeJS.ProcessEnv {
+  const env = materializerGitEnv();
+  if (!token) return env;
+  return {
+    ...env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  };
+}
+
+/** One clone per ask at a time: concurrent first calls share it instead of racing. */
+const cloning = new Map<string, Promise<string>>();
+
 /** Clone once per server, lazily; a lost temp folder is simply recreated. */
-async function checkout(ask: AgentAsk): Promise<string> {
+function checkout(ask: AgentAsk): Promise<string> {
   const dir = dirFor(ask.id);
-  if (existsSync(path.join(dir, ".git"))) return dir;
+  if (existsSync(path.join(dir, ".git"))) return Promise.resolve(dir);
+  let pending = cloning.get(ask.id);
+  if (!pending) {
+    pending = cloneInto(ask, dir).finally(() => cloning.delete(ask.id));
+    cloning.set(ask.id, pending);
+  }
+  return pending;
+}
+
+async function cloneInto(ask: AgentAsk, dir: string): Promise<string> {
   const access = await repoAccess(ask.room_id);
   await mkdir(ROOT, { recursive: true, mode: 0o700 });
-  await rm(dir, { recursive: true, force: true });
-  const auth = access.token ? ["-c", `http.extraHeader=Authorization: Basic ${Buffer.from(`x-access-token:${access.token}`).toString("base64")}`] : [];
+  // Clone beside the final folder and rename it in, so no reader sees a half-written tree.
+  const staging = `${dir}.cloning-${randomUUID()}`;
   try {
-    await run("git", [...auth, "clone", "--depth", "1", "--single-branch", "--branch", access.baseBranch, "--no-tags",
-      `${gitBase()}/${access.fullName}.git`, dir], { env: materializerGitEnv(), timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
-  } catch {
+    // core.symlinks=false: a link in the repo arrives as a plain file holding its target, never a path out of the copy.
+    await run("git", ["-c", "core.symlinks=false", "clone", "--depth", "1", "--single-branch", "--branch", access.baseBranch, "--no-tags",
+      `${gitBase()}/${access.fullName}.git`, staging], { env: gitAuthEnv(access.token), timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
     await rm(dir, { recursive: true, force: true });
+    await rename(staging, dir);
+  } catch {
+    await rm(staging, { recursive: true, force: true });
     throw new AskWorkspaceError("clone_failed", access.token
       ? "LetAgents couldn't copy this repo right now. Try again in a minute."
       : "LetAgents can't see this repo. Ask the room owner to connect the LetAgents GitHub App.");
@@ -113,10 +141,15 @@ export async function readRepoFile(ask: AgentAsk, requested: unknown): Promise<{
   if (isPathBlocked(file)) { await record(ask.id, "file", file, true); throw new AskWorkspaceError("blocked", "That file may hold secrets, so it isn't shared."); }
   const dir = await checkout(ask);
   const full = path.join(dir, file);
-  const info = await stat(full).catch(() => null);
+  // Never follow a link, and never leave the copy, whatever the repo contains.
+  const link = await lstat(full).catch(() => null);
+  const real = link && !link.isSymbolicLink() ? await realpath(full).catch(() => null) : null;
+  const root = await realpath(dir);
+  if (!real || !real.startsWith(`${root}${path.sep}`)) throw new AskWorkspaceError("not_found", "That file doesn't exist.", 404);
+  const info = await stat(real).catch(() => null);
   if (!info?.isFile()) throw new AskWorkspaceError("not_found", "That file doesn't exist.", 404);
   if (info.size > MAX_FILE_BYTES) throw new AskWorkspaceError("too_large", "That file is too large to share (over 256 KB).");
-  const scan = scanFile(file, await readFile(full, "utf8"));
+  const scan = scanFile(file, await readFile(real, "utf8"));
   await record(ask.id, "file", file, scan.verdict === "blocked");
   if (scan.verdict === "blocked" || scan.content === null) throw new AskWorkspaceError("blocked", "That file may hold secrets, so it isn't shared.");
   return { path: file, content: scan.content, redacted: scan.verdict === "redacted" };
@@ -199,6 +232,26 @@ export async function decideProposal(ask: AgentAsk, proposalId: string, approve:
     const [failed] = await db.update(agent_ask_proposals).set({ state: "failed", error: "GitHub didn't accept the change. Check that the LetAgents GitHub App can write to this repo, then ask the agent to propose it again." })
       .where(eq(agent_ask_proposals.id, proposal.id)).returning();
     return failed ?? proposal;
+  }
+}
+
+/**
+ * Remove every server copy whose gift is no longer running: copies left by
+ * another replica, a restart, or a crash mid-clone (D48). Runs on the sweep.
+ */
+export async function pruneWorkspaces(isRunning: (askId: string) => Promise<boolean>, now = Date.now()): Promise<void> {
+  const entries = await readdir(ROOT, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const full = path.join(ROOT, entry.name);
+    if (entry.name.includes(".cloning-")) {
+      // A clone in progress is left alone; one abandoned for over an hour is removed.
+      const info = await stat(full).catch(() => null);
+      if (info && now - info.mtimeMs > 60 * 60_000) await rm(full, { recursive: true, force: true }).catch(() => undefined);
+      continue;
+    }
+    if (cloning.has(entry.name) || await isRunning(entry.name).catch(() => true)) continue;
+    await rm(full, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

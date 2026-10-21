@@ -1,6 +1,6 @@
 import { app } from "electron";
 
-import { askLinkRendererReady, clearHeldAskLink, holdAskLink } from "./ask-link-inbox.js";
+import { askLinkRendererGone, askLinkRendererReady, clearHeldAskLink, holdAskLink } from "./ask-link-inbox.js";
 import { createWindow, emitToMainWindow, focusMainWindow, hasOpenWindows } from "./window.js";
 
 const TOKEN = /^[A-Za-z0-9_-]{20,64}$/;
@@ -18,7 +18,8 @@ export function parseAskLink(url: string): string | null {
 function deliver(token: string): void {
   holdAskLink(token);
   if (!app.isReady()) return;
-  if (!hasOpenWindows()) createWindow();
+  // A fresh window's renderer takes the link when it loads; emitting now would be lost.
+  if (!hasOpenWindows()) { askLinkRendererGone(); createWindow(); }
   focusMainWindow();
   if (askLinkRendererReady()) { emitToMainWindow("desktop:asks:open-link", token); clearHeldAskLink(); }
 }

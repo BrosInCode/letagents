@@ -144,9 +144,10 @@ async function give() {
 
 async function cantHelp() {
   if (!props.token || busy.value) return;
-  busy.value = true;
-  await desktopIpc.asks?.cantHelp(props.token).catch(() => undefined);
+  busy.value = true; error.value = null;
+  const result = await desktopIpc.asks?.cantHelp(props.token).catch(() => null);
   busy.value = false;
+  if (!result?.ok) { error.value = result && !result.ok ? result.error : "Couldn't reach LetAgents. Check your connection and try again."; return; }
   close();
 }
 

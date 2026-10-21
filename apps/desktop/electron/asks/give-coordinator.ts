@@ -182,10 +182,11 @@ export class AskGiveCoordinator {
     }
   }
 
-  /** "Can't right now": tell the asker and leave the link open. */
+  /** "Can't right now": tell the asker and leave the link open. A link someone else holds can't be answered. */
   async cantHelp(token: string): Promise<void> {
-    await this.api.claim(token).catch(() => undefined);
-    await this.api.release(token, true);
+    await this.api.claim(token);
+    const released = await this.api.release(token, true);
+    if (released.ok !== true) throw new AskGiveError("This request has already changed. Open the link again to see where it is.");
   }
 
   startWatching(): void {
@@ -215,7 +216,8 @@ export class AskGiveCoordinator {
 
   private async checkGift(gift: Gift): Promise<void> {
     const preview = await this.api.preview(gift.token).catch(() => null);
-    if (preview && FINISHED.has(preview.ask.state)) return this.finish(gift);
+    // Finished, or no longer this giver's: a declined substitute's link can reopen and be given by someone else.
+    if (preview && (FINISHED.has(preview.ask.state) || preview.ask.is_giver === false)) return this.finish(gift);
     const usage = await this.readUsage(gift.entryId, gift.roomId);
     if (usage?.account.windows.some(window => window.usedPercent >= 100)) {
       await this.api.end(gift.token, "provider_limit").catch(() => undefined);

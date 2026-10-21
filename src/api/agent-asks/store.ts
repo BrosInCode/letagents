@@ -8,10 +8,10 @@ import {
   revokeSupervisorHostGrant,
 } from "../db.js";
 import { db } from "../db/client.js";
-import { accounts, agent_asks, room_agent_sessions, supervisor_host_grants } from "../db/schema.js";
+import { accounts, agent_asks, room_agent_sessions, rooms, supervisor_host_grants } from "../db/schema.js";
 import { hashToken } from "../db/utils.js";
 import { emitProjectMessage } from "../server/events.js";
-import { removeWorkspace } from "./workspace.js";
+import { pruneWorkspaces, removeWorkspace } from "./workspace.js";
 import {
   ASK_CLAIM_TTL_MS, ASK_HOLD_TTL_MS, ASK_LINK_TTL_MS, ASK_LIVE_STATES, ASK_OFFLINE_AFTER_MS, ASK_OPEN_LIMIT,
   ASK_PAUSE_TTL_MS, ASK_ROOM_TEXT, isExactMatch, type AgentAskEndReason, type AgentAskState,
@@ -298,6 +298,21 @@ export async function sweepAgentAsks(): Promise<void> {
   const holds = await db.select().from(agent_asks)
     .where(and(eq(agent_asks.state, "on_hold"), lte(agent_asks.hold_expires_at, stamp))).limit(50);
   for (const ask of holds) await declineSubstitute(ask);
+
+  // A deleted room takes its asks with it: open links are cancelled, running gifts end (M13).
+  const live = await db.select().from(agent_asks).where(inArray(agent_asks.state, [...ASK_LIVE_STATES])).limit(500);
+  const roomIds = [...new Set(live.map(ask => ask.room_id))];
+  const present = new Set(roomIds.length
+    ? (await db.select({ id: rooms.id }).from(rooms).where(inArray(rooms.id, roomIds))).map(row => row.id) : []);
+  for (const ask of live.filter(row => !present.has(row.room_id))) {
+    if (ask.state === "open" || ask.state === "claimed") await cancelAsk(ask);
+    else await endAsk(ask, "room_deleted");
+  }
+
+  await pruneWorkspaces(async askId => {
+    const [row] = await db.select({ state: agent_asks.state }).from(agent_asks).where(eq(agent_asks.id, askId)).limit(1);
+    return row ? ["on_hold", "active", "paused"].includes(row.state) : false;
+  });
 
   const running = await db.select().from(agent_asks)
     .where(inArray(agent_asks.state, ["active", "paused"])).orderBy(agent_asks.updated_at).limit(200);

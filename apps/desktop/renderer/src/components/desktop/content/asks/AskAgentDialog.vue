@@ -105,6 +105,8 @@ const busy = ref(false);
 const error = ref<string | null>(null);
 const created = ref<{ link: string } | null>(null);
 const copied = ref(false);
+/** A new room made by a failed attempt is reused on retry instead of making another. */
+const createdRoomId = ref<string | null>(null);
 
 /** Rooms with their focus rooms nested underneath (D20). */
 const roomOptions = computed(() => props.rooms.filter(room => !room.archived).flatMap(room => [
@@ -117,7 +119,7 @@ function pickAmount(value: number | null) { amount.value = value; customOpen.val
 watch(() => props.open, async open => {
   if (!open) return;
   created.value = null; error.value = null; note.value = ""; amount.value = null; customOpen.value = false;
-  customText.value = ""; newRoomName.value = ""; copied.value = false;
+  customText.value = ""; newRoomName.value = ""; copied.value = false; createdRoomId.value = null;
   roomChoice.value = props.roomIdentifier ?? roomOptions.value[0]?.value ?? "__new__";
   const result = await desktopIpc.asks?.listModels();
   if (!result) { error.value = desktopBridgeUpgradeMessage(); return; }
@@ -137,9 +139,12 @@ async function submit() {
   try {
     let roomId = roomChoice.value;
     if (roomId === "__new__") {
-      const room = await desktopIpc.room.createInviteRoom();
-      roomId = room.roomIdentifier;
-      if (newRoomName.value.trim()) await desktopIpc.room.rename?.(roomId, newRoomName.value.trim()).catch(() => undefined);
+      if (!createdRoomId.value) {
+        const room = await desktopIpc.room.createInviteRoom();
+        createdRoomId.value = room.roomIdentifier;
+        if (newRoomName.value.trim()) await desktopIpc.room.rename?.(room.roomIdentifier, newRoomName.value.trim()).catch(() => undefined);
+      }
+      roomId = createdRoomId.value;
     }
     const result = await desktopIpc.asks?.create({ roomId, providerId: model.providerId, model: model.model, amountPercent: chosenAmount, note: note.value });
     if (!result) { error.value = desktopBridgeUpgradeMessage(); return; }

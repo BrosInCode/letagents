@@ -8,6 +8,8 @@ let rendererReady = false;
 
 export function holdAskLink(token: string): void { pendingToken = token; }
 export function askLinkRendererReady(): boolean { return rendererReady; }
+/** A new window's renderer hasn't loaded yet: hold links for it to take. */
+export function askLinkRendererGone(): void { rendererReady = false; }
 export function clearHeldAskLink(): void { pendingToken = null; }
 
 /** The renderer takes a link that arrived before it loaded, once. */

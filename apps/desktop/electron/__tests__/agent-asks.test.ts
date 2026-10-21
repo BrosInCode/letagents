@@ -43,14 +43,14 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { readyFails?: boolean; usedPercent?: number } = {}) {
+function fakes(overrides: { readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
   const calls: string[] = [];
   const api = {
-    claim: async () => { calls.push("claim"); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
-    release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return {}; },
+    claim: async () => { calls.push("claim"); if (overrides.claimFails) throw new Error("Someone is adding this agent right now."); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
+    release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return overrides.release ?? { ok: true }; },
     launchAuthority: async () => { calls.push("authority"); return { room_id: "room", grant: { supervisor_grant: "t", grant_id: "g", expires_at: "2099-01-01T00:00:00Z" } }; },
     joined: async () => { calls.push("joined"); return { id: "ask_1", state: "active" }; },
-    preview: async () => ({ ask: { state: "active" }, unavailable: null }), end: async () => ({}),
+    preview: async () => ({ ask: { state: "active", is_giver: true, ...overrides.preview }, unavailable: null }), end: async () => ({}),
   };
   const entry = { id: giftEntryId("ask_1"), desiredState: "running", agentSessionId: "s", agentSessionBindingState: "active", readyReachedAt: "now", observedState: "running" };
   let stopped = false;
@@ -128,4 +128,35 @@ test("given agents have their own guest list; the rental marketplace stays Curso
   assert.throws(() => profiles.assertGuestSafePermissionProfile("codex", "full_access"), /can't be given/);
   assert.equal(profiles.isGivenAgentEntryId(giftEntryId("ask_1")), true);
   assert.equal(profiles.isGivenAgentEntryId("supervised_rental_0123456789abcdef"), false);
+});
+
+test("the watcher stops a gift whose ask was given to someone else", async () => {
+  const { coordinator, calls } = fakes({ preview: { state: "active", is_giver: false } });
+  await coordinator.give(give);
+  coordinator.stopWatching();
+  calls.length = 0;
+  await coordinator.watchOnce();
+  assert.ok(calls.includes("purge"), "the local agent is stopped and removed");
+});
+
+test("\"Can't right now\" reports when it could not tell the asker", async () => {
+  const taken = fakes({ claimFails: true });
+  await assert.rejects(taken.coordinator.cantHelp(TOKEN), /adding this agent right now/);
+  assert.deepEqual(taken.calls, ["claim"]);
+  const changed = fakes({ release: { ok: false } });
+  await assert.rejects(changed.coordinator.cantHelp(TOKEN), /already changed/);
+  const ok = fakes();
+  await ok.coordinator.cantHelp(TOKEN);
+  assert.deepEqual(ok.calls, ["claim", "release:true"]);
+});
+
+test("a link that arrives while a new window loads is held for its renderer", async () => {
+  const inbox = await import("../main/ask-link-inbox.js");
+  assert.equal(inbox.takePendingAskLink(), null);
+  assert.equal(inbox.askLinkRendererReady(), true);
+  inbox.askLinkRendererGone();
+  assert.equal(inbox.askLinkRendererReady(), false);
+  inbox.holdAskLink(TOKEN);
+  assert.equal(inbox.takePendingAskLink(), TOKEN, "the new renderer takes it once it loads");
+  assert.equal(inbox.takePendingAskLink(), null);
 });

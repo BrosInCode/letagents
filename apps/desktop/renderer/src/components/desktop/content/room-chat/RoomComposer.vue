@@ -122,7 +122,7 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <div class="desktop-composer-input-row">
-      <span class="desktop-composer-add-wrap" style="position: relative; display: inline-flex;" data-testid="desktop-composer-add-agent">
+      <span ref="addMenuWrap" class="desktop-composer-add-wrap" style="position: relative; display: inline-flex;" data-testid="desktop-composer-add-agent">
         <button
           class="desktop-composer-add-agent"
           type="button"
@@ -293,6 +293,25 @@ const props = defineProps<{
 
 const selectedGif = ref<RoomGif | null>(null);
 const addMenuOpen = ref(false);
+const addMenuWrap = ref<HTMLElement | null>(null);
+// The "+" menu closes on a click anywhere else or on Escape, wherever focus is.
+function closeAddMenuOnOutsidePointer(event: PointerEvent) {
+  if (addMenuWrap.value && !addMenuWrap.value.contains(event.target as Node)) addMenuOpen.value = false;
+}
+function closeAddMenuOnEscape(event: KeyboardEvent) {
+  if (event.key === "Escape") addMenuOpen.value = false;
+}
+watch(addMenuOpen, open => {
+  if (typeof document === "undefined") return;
+  const method = open ? "addEventListener" : "removeEventListener";
+  document[method]("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true);
+  document[method]("keydown", closeAddMenuOnEscape as EventListener, true);
+});
+onBeforeUnmount(() => {
+  if (typeof document === "undefined") return;
+  document.removeEventListener("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true);
+  document.removeEventListener("keydown", closeAddMenuOnEscape as EventListener, true);
+});
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];

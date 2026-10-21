@@ -152,3 +152,17 @@ test("a cancelled or expired link can't be claimed", options, async () => {
   assert.equal((await asks!.getAskByToken(token))?.state, "cancelled");
   assert.equal(await asks!.claimAsk(await fresh(row.id), s.john.id), null);
 });
+
+test("deleting the room cancels its open links and ends its running gifts", options, async () => {
+  const s = await seed();
+  const open = await ask(s);
+  const running = await ask(s);
+  const { grant } = await launch(s, running.row);
+  await pool!.query("DELETE FROM rooms WHERE id=$1", [s.room.id]);
+  await asks!.sweepAgentAsks();
+  assert.equal((await fresh(open.row.id)).state, "cancelled");
+  const ended = await fresh(running.row.id);
+  assert.equal(ended.state, "ended");
+  assert.equal(ended.ended_reason, "room_deleted");
+  assert.equal(await grantRevoked(grant.grant_id), true);
+});
