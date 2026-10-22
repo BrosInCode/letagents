@@ -12,6 +12,7 @@ export async function getDesktopMyWork(query?: DesktopMyWorkQuery): Promise<MyWo
   if (typeof query?.tracker === "string" && TRACKERS.has(query.tracker)) params.set("tracker", query.tracker);
   if (typeof query?.roomId === "string" && query.roomId.trim()) params.set("room", query.roomId.trim());
   if (query?.needsMe === true) params.set("needs_me", "true");
+  if (query?.includeCompleted === true) params.set("include_completed", "true");
   const search = params.toString();
   return apiFetch<MyWorkPage>(`/account/my-work${search ? `?${search}` : ""}`);
 }

@@ -219,10 +219,25 @@ test("finished work leaves the page unless its ticket is still open", options, a
   const conn = await connection(me.id, unique("acme.atlassian.net"), "u-fin");
   const roomId = await room("finished", me.id);
   const open = await card(roomId, "Merged, ticket open", { updatedMinute: 1, ref: "jira:HT-20", item: { connectionId: conn, assigneeId: "u-fin", ticketState: "in_review" }, status: "merged" });
-  await card(roomId, "Done everywhere", { updatedMinute: 2, ref: "jira:HT-21", item: { connectionId: conn, assigneeId: "u-fin", ticketState: "done" }, status: "done" });
-  await card(roomId, "Cancelled native", { updatedMinute: 3, assignee: me.login, status: "cancelled" });
+  const done = await card(roomId, "Done everywhere", { updatedMinute: 2, ref: "jira:HT-21", item: { connectionId: conn, assigneeId: "u-fin", ticketState: "done" }, status: "done" });
+  const cancelled = await card(roomId, "Cancelled native", { updatedMinute: 3, assignee: me.login, status: "cancelled" });
   const page = await myWork!.listMyWork({ accountId: me.id, login: me.login });
   assert.deepEqual(page.cards.map((entry) => entry.task_id), [open]);
+  assert.deepEqual((await myWork!.listMyWork({ accountId: me.id, login: me.login, includeCompleted: false })).cards.map((entry) => entry.task_id), [open]);
+
+  // Opting in keeps the same ownership and room fences, and pages at the same bound.
+  await card(roomId, "Someone else's completed work", { updatedMinute: 4, assignee: "someone-else", status: "done" });
+  const query = { accountId: me.id, login: me.login, includeCompleted: true, limit: 2 };
+  const first = await myWork!.listMyWork(query);
+  assert.deepEqual(first.cards.map((entry) => entry.task_id), [cancelled, done]);
+  assert.ok(first.next_cursor);
+  const second = await myWork!.listMyWork({ ...query, cursor: first.next_cursor });
+  assert.deepEqual(second.cards.map((entry) => entry.task_id), [open]);
+  assert.equal(second.next_cursor, null);
+  const native = await myWork!.listMyWork({ ...query, tracker: "native", roomId });
+  assert.deepEqual(native.cards.map((entry) => entry.task_id), [cancelled]);
+  const denied = await myWork!.listMyWork(query, { canReadRoom: async () => false });
+  assert.deepEqual(denied.cards, []);
 });
 
 test("a private repo room the account cannot read is left out, through the real access check", options, async () => {

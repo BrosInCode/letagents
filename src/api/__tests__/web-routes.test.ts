@@ -48,6 +48,31 @@ test("registerWebRoutes preserves route registration order", (t) => {
     { method: "use", path: "<static>" },
     { method: "get", path: "/" },
     { method: "get", path: "/docs" },
+    { method: "get", path: ["/messages", "/my-work"] },
+    { method: "get", path: /^\/ask\/[A-Za-z0-9_-]{20,64}$/ },
     { method: "get", path: "/app" },
   ]);
+});
+
+
+test("My work direct navigation and sign-in return load the same SPA as Messages", async (t) => {
+  const { default: express } = await import("express");
+  const app = express();
+  // Exercise the real route handlers without depending on a concurrent Vite build
+  // or Express dotfile restrictions on hidden worktree paths.
+  app.use((_req, res, next) => {
+    res.sendFile = ((_path: string) => res.status(200).send("Vue SPA")) as typeof res.sendFile;
+    next();
+  });
+  registerWebRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address() as { port: number };
+  const base = `http://127.0.0.1:${address.port}`;
+  const messages = await fetch(`${base}/messages`);
+  const work = await fetch(`${base}/my-work`);
+  assert.equal(work.status, messages.status);
+  assert.notEqual(work.status, 404);
+  assert.equal(await work.text(), await messages.text());
 });

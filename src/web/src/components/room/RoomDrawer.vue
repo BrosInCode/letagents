@@ -4,6 +4,8 @@
     <aside :class="['drawer', { open }]" :inert="!open">
       <DrawerBrand @close="emit('close')" />
 
+      <RouterLink class="drawer-work-link" to="/my-work" @click="emit('close')">My work <span aria-hidden="true">→</span></RouterLink>
+
       <ThemeToggle :is-dark="isDark" @toggle="toggleTheme" />
 
       <SharePanel
@@ -56,6 +58,7 @@
 
 <script setup lang="ts">
 import { computed, ref, toRef, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
 import { messageDisplayText } from './chat-message/formatting'
@@ -148,3 +151,8 @@ watch(() => props.open, (isOpen) => {
 </script>
 
 <style src="./room-drawer/RoomDrawer.css"></style>
+
+<style scoped>
+.drawer-work-link { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; margin: 12px 0; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); font-size: 13px; text-decoration: none; }
+.drawer-work-link:hover { background: var(--accent-hover); }
+</style>

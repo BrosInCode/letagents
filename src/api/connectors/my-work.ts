@@ -60,6 +60,8 @@ export interface MyWorkQuery {
   tracker?: MyWorkTrackerFilter | null;
   roomId?: string | null;
   needsMe?: boolean;
+  /** Opt in to finished work; the default remains active work and unfinished tickets. */
+  includeCompleted?: boolean;
 }
 
 export class MyWorkInputError extends Error {}
@@ -225,6 +227,7 @@ async function readCandidates(input: {
   tracker: MyWorkTrackerFilter | null;
   cursor: Cursor | null;
   limit: number;
+  includeCompleted: boolean;
 }): Promise<CandidateRow[]> {
   const t = tasks;
   const ei = external_items;
@@ -249,11 +252,11 @@ async function readCandidates(input: {
   const conditions: SQL[] = [
     sql`${t.room_id} IN (${sql.join(input.roomIds.map((id) => sql`${id}`), sql`, `)})`,
     sql`(${viaTracker} OR ${native})`,
-    // Finished work leaves the page, unless the ticket is still open in the
-    // tracker. Each branch matches one partial index (migration 0124).
-    sql`(${t.status} NOT IN ('done', 'merged', 'cancelled')
-         OR (${t.status} IN ('done', 'merged', 'cancelled') AND ${t.ticket_state} IN ('todo', 'in_progress', 'in_review')))`,
   ];
+  // Existing callers omit finished work unless the ticket is still open.
+  // The My work UI opts in to history without changing ownership or paging.
+  if (!input.includeCompleted) conditions.push(sql`(${t.status} NOT IN ('done', 'merged', 'cancelled')
+    OR (${t.status} IN ('done', 'merged', 'cancelled') AND ${t.ticket_state} IN ('todo', 'in_progress', 'in_review')))`);
   // One column splits the two kinds, as the match above does: a card is a
   // tracker card when sync bound it to a ticket, else native.
   if (input.tracker === "native") conditions.push(sql`${t.external_item_id} IS NULL`);
@@ -659,6 +662,7 @@ export async function listMyWork(query: MyWorkQuery, overrides: Partial<MyWorkDe
       roomIds,
       connections,
       tracker: query.tracker ?? null,
+      includeCompleted: query.includeCompleted === true,
       cursor,
       limit: batchSize + 1,
     });

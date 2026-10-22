@@ -83,6 +83,8 @@ export interface DesktopMyWorkQuery {
   /** The server's room id. */
   roomId?: string | null;
   needsMe?: boolean;
+  /** Include finished work alongside active work; omitted by legacy callers. */
+  includeCompleted?: boolean;
 }
 
 /** A room ticket filter to save or test. */

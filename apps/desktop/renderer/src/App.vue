@@ -290,6 +290,7 @@
         :connected="accountActivity.connected.value"
         @open-card="openMyWorkCard"
         @open-thread="openMyWorkThread"
+        @open-trackers="openTicketTrackersSurface"
       />
 
       <RentMarketplaceView
@@ -494,7 +495,7 @@ const {
 } = Object.assign(app, useAppRentalActions(app));
 const {
   isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
-  settingsPaneForActiveEntry, openSettingsSurface, openUpdatesSurface, startSidebarResize,
+  settingsPaneForActiveEntry, openSettingsSurface, openTicketTrackersSurface, openUpdatesSurface, startSidebarResize,
   handleSidebarResizeKeydown, setAllProjectsCollapsed, handleSidebarParentRoomReorder,
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));
