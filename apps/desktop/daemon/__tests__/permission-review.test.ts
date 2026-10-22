@@ -130,9 +130,11 @@ test("a path written for Windows is read against the project, whichever separato
     [windows, "cat 'C:\\work\\repo\\\\x'", true], [windows, "cat 'C:\\work\\repo\\.\\x'", true], [windows, "cat 'C:\\work\\repo\\.git\\config'", true],
     [windows, "cat 'C:\\work\\repo\\.GIT\\config'", true], [windows, "cat 'C:\\work\\repo\\.env'", true], [windows, "cat 'C:\\work\\repo\\.ssh\\id_rsa'", true],
     [windows, "cat 'src\\.env'", true], [windows, "cat 'src\\.git\\config'", true],
-    // Windows drops the dots and spaces at the end of a name, so these climb or name the history store. Three dots are a plain name.
+    // Windows drops the dots and spaces at the end of a name, so such a name may climb, or hold history or credentials. Three dots are a plain name.
     [windows, "ls 'C:\\work\\repo\\.. '", true], [windows, "ls 'C:\\work\\repo\\. '", true], [windows, "cat 'C:\\work\\repo\\...\\x'", false], [windows, "cat '.. \\x'", true],
-    [windows, "cat 'C:\\work\\repo\\.git.\\config'", true], [windows, "cat '.git \\config'", true], [windows, "cat 'C:\\work\\repo\\x. '", false],
+    [windows, "cat 'C:\\work\\repo\\.git.\\config'", true], [windows, "cat '.git \\config'", true], [windows, "cat 'C:\\work\\repo\\x. '", true], [windows, "cat 'x. \\y'", true],
+    [windows, "cat 'C:\\work\\repo\\.env '", true], [windows, "cat 'C:\\work\\repo\\.env .'", true], [windows, "cat 'src\\.env '", true], [windows, "ls 'C:\\work\\repo\\.ssh '", true],
+    [windows, "cat 'key.pem '", true], [windows, "cat 'C:\\work\\repo\\.'", false], [windows, "cat 'x.y'", false],
     // `=`, `:` and `,` may be part of a folder's name: `C:/work/repo,other` is a sibling of the project.
     [windows, "cat C:/work/repo,other/x", true], [windows, "cat C:/work/repo=other/x", true], [windows, "cat C:/work/repo/x,y", false],
     // cmd.exe puts a variable's value in place of `%NAME%`.
@@ -148,7 +150,9 @@ test("a path written for Windows is read against the project, whichever separato
     [project, "grep -rn 'y: string' src", false], [project, "git log -1 --format=x:%s", false], [project, "git log --author=a:b", false], [project, "cat C:x", false],
     [project, "git log --format=%h%s", false], [project, "cat /Users/dev/shop-api/a:/Users/dev/shop-api/b", false], [project, "cat /Users/dev/shop-api/x,y", false],
     // A sibling folder whose name holds `:`, `=` or `,` is not the project and a relative name.
-    [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true], [project, "cat '/Users/dev/shop-api/.. '", true],
+    [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true],
+    // On POSIX a name that ends in a dot or a space is that name.
+    [project, "cat '/Users/dev/shop-api/.. '", false], [project, "cat './. '", false], [project, "cat 'x.env '", false],
   ];
   for (const [root, command, needs] of cases) {
     assert.equal(commandNeedsPerson(command, root), needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);

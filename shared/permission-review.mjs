@@ -83,20 +83,13 @@ function absolutePath(text) {
 }
 
 /**
- * A part of a path as Windows opens it, in lower case: it drops the dots and
- * spaces at the end of a name, so `.git.` is the history store.
+ * True when Windows opens a name as another name: it drops the dots and
+ * spaces at the end, so `.. ` climbs and `.env ` holds credentials. Such a
+ * name is not compared with anything. `.` stands, and three dots or more
+ * alone are a plain name (`go test ./...`).
  */
-function bareName(part) {
-  return part.replace(/[. ]+$/, "").toLowerCase();
-}
-
-/**
- * True when a part names no folder of its own: it is empty, `.`, `..`, or one
- * of these with dots and spaces after it, which Windows drops, so `.. `
- * climbs. Three dots or more alone are a plain name (`go test ./...`).
- */
-function noName(part) {
-  return /^[. ]*$/.test(part) && !/^\.{3,}$/.test(part);
+function openedAsAnotherName(part) {
+  return /[. ]$/.test(part) && part !== "." && !/^\.{3,}$/.test(part);
 }
 
 /**
@@ -111,7 +104,7 @@ function placeInProject(text, project) {
   const root = absolutePath(project);
   if (!path || !root || path.root === null || path.root !== root.root) return null;
   const parts = path.parts.length > 1 && path.parts.at(-1) === "" ? path.parts.slice(0, -1) : path.parts;
-  if (parts.some((part) => part === "") || parts.slice(0, -1).some(noName) || (noName(parts.at(-1)) && parts.at(-1) !== ".")) return null;
+  if (parts.some((part) => part === "") || parts.slice(0, -1).some((part) => part === ".")) return null;
   if (parts.length < root.parts.length || root.parts.some((part, index) => parts[index] !== part)) return null;
   return parts.length === root.parts.length ? "self" : "inside";
 }
@@ -128,9 +121,8 @@ function normalizedProject(project) {
   const trimmed = project.replace(/[\\/]+$/, "");
   const path = absolutePath(trimmed);
   // A root alone (`/`, `C:\`, `\\server\share`) is not a project: everything would be inside it.
-  // On Windows a name that ends in a dot or a space is opened as another name, so it is not compared.
   return path && path.root !== null && path.parts.length > 0
-    && path.parts.every((part) => !noName(part) && (!onWindows(project) || !/[. ]$/.test(part))) ? trimmed : null;
+    && path.parts.every((part) => part && part !== "." && part !== ".." && !(onWindows(project) && openedAsAnotherName(part))) ? trimmed : null;
 }
 
 /** The text inside a quote that starts at `index`, and where the quote ends, or null. */
@@ -249,7 +241,7 @@ function staysInProject(value, project) {
   for (const { piece, start } of pathPieces(value, windows)) {
     if (piece.startsWith("~")) return false;
     const parts = piece.split(PATH_SEPARATOR);
-    if (parts.some((part) => (noName(part) && part !== "." && part !== "") || bareName(part) === ".git")) return false;
+    if (parts.some((part) => part === ".." || part.toLowerCase() === ".git" || (windows && openedAsAnotherName(part)))) return false;
     // Absolute in any form: `/x`, `\x`, `C:\x`, `C:/x`, `C:x`, `\\server\share\x`, `//server/share/x`. The piece must be
     // inside the project, and so must the rest of the word from it on: `=`, `:` and `,` may be part of a folder's name,
     // and `/project:other/x` is a sibling folder, not the project and a relative name.
