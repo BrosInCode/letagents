@@ -133,6 +133,8 @@ export type ManifestAdministrationPolicies = {
     reasoningEffort: ProviderReasoningEffort;
     permissionProfileId: string | null;
     configurationRevision: number;
+    /** The entry's own id: a guest's saved options are derived as its launch will derive them. */
+    supervisorEntryId?: string;
   }, currentTrustedLaunchPolicy: unknown): ProviderConfigurationSnapshot;
   permissionProfilesForProvider(provider: string): unknown;
   sanitizeActivity(event: DaemonActivityEvent): DaemonActivityEvent;
@@ -505,6 +507,7 @@ export class ManifestAdministrationCoordinator {
       if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("The agent's saved launch settings cannot be read.");
       // Checked as the next start will derive it, so a choice that could not launch is refused here.
       this.options.policies.deriveProviderConfiguration({
+        supervisorEntryId: input.entryId,
         provider: current.provider,
         model: current.model,
         reasoningEffort: current.reasoning_effort ?? null,
@@ -600,6 +603,7 @@ export class ManifestAdministrationCoordinator {
         currentConfiguration.provider_launch_policy,
       );
       const normalized = this.options.policies.deriveProviderConfiguration({
+        supervisorEntryId: input.entryId,
         provider: currentConfiguration.provider,
         model: model === null ? null : (model as string).trim(),
         reasoningEffort: effort as ProviderReasoningEffort,
@@ -614,6 +618,7 @@ export class ManifestAdministrationCoordinator {
       let before: string | null = null;
       try {
         before = this.options.policies.deriveProviderConfiguration({
+          supervisorEntryId: input.entryId,
           provider: currentConfiguration.provider,
           model: null,
           reasoningEffort: null,
