@@ -251,9 +251,10 @@ export async function captureWorkspaceTree(workspace, identity, deadline = undef
         await rm(scratch, { recursive: true, force: true });
     }
 }
-export async function releaseWorkspaceTree(workspace, identity) {
+/** `timeout` is shorter when the settle's deadline has already passed: the release must not extend it. */
+export async function releaseWorkspaceTree(workspace, identity, timeout = GIT_TIMEOUT_MS) {
     try {
-        await git(workspace, ['update-ref', '-d', reviewRef(identity)], AbortSignal.timeout(GIT_TIMEOUT_MS));
+        await git(workspace, ['update-ref', '-d', reviewRef(identity)], AbortSignal.timeout(timeout));
     }
     catch { /* Retain on failure, never jeopardize provider work. */ }
 }
@@ -442,6 +443,6 @@ export async function captureWorkspacePair(workspace, startingRevision, baseline
             review: { version: 1, workspace: full, contribution: changes } };
     }
     finally {
-        await releaseWorkspaceTree(workspace, `${identity}:settled`);
+        await releaseWorkspaceTree(workspace, `${identity}:settled`, deadline.aborted ? 5_000 : GIT_TIMEOUT_MS);
     }
 }
