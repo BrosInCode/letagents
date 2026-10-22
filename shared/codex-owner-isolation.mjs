@@ -2,7 +2,7 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, parse } from "node:path";
 
-import { spawnCodex } from "./codex-executable.mjs";
+import { spawnCodex, terminateCodexProcessTree } from "./codex-executable.mjs";
 
 // A Codex app-server that LetAgents launches works for a room, not as the
 // owner, yet it shares the owner's CODEX_HOME so Codex sign-in keeps working.
@@ -123,6 +123,8 @@ export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TI
     });
     const stop = () => {
       try { if (group && child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ }
+      // On Windows the child is a shim wrapper; taskkill ends the native Codex below it too.
+      terminateCodexProcessTree(child.pid);
       child.kill("SIGKILL");
     };
     let stdout = "";

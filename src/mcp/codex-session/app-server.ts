@@ -1,6 +1,6 @@
 import { createServer } from "net";
 
-import { spawnCodex } from "../../../shared/codex-executable.mjs";
+import { spawnCodex, terminateCodexProcessTree } from "../../../shared/codex-executable.mjs";
 import { codexOwnerIsolationOverrides } from "../../../shared/codex-owner-isolation.mjs";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -104,6 +104,8 @@ export async function launchAppServer(
 }
 
 export function terminateSpawnedProcess(pid: number): void {
+  // On Windows the pid is a shim wrapper; its whole tree must go.
+  if (terminateCodexProcessTree(pid)) return;
   try {
     if (process.platform !== "win32") {
       process.kill(-pid, "SIGTERM");

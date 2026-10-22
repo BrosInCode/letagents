@@ -11,6 +11,7 @@ import {
   quoteCmdBatchArgument,
   resolveCodexExecutable,
   spawnCodex,
+  terminateCodexProcessTree,
 } from "../../../shared/codex-executable.mjs";
 
 /** The text npm's cmd-shim writes for a `#!/usr/bin/env node` bin, byte for byte. */
@@ -38,6 +39,8 @@ function npmShim(relativeScript: string, shebangArgs = ""): string {
 }
 
 const CODEX_SCRIPT = "node_modules\\@openai\\codex\\bin\\codex.js";
+/** True when the shim's last line has the node-shim shape (the only other guard is the _prog check). */
+const SHIM_LAUNCH_LINE_MATCHES = (shim: string) => parseNodeShim(SHIM, shim.replace(/_prog=[^"]*"/g, '_prog=node"'), { execPath: NODE, exists: () => false }) !== null;
 const SHIM = "C:\\Users\\Ada\\AppData\\Roaming\\npm\\codex.cmd";
 const NODE = "C:\\Program Files\\nodejs\\node.exe";
 const TRICKY_ARGS = [
@@ -108,8 +111,13 @@ test("older npm shim shapes are recognised too", () => {
 });
 
 test("a shim that does not run node is not treated as one", () => {
-  const python = npmShim("node_modules\\tool\\main.py").replace('SET "_prog=node"', 'SET "_prog=python"');
+  // The launch line alone looks like node's; the _prog lines say otherwise.
+  const python = npmShim("node_modules\\tool\\main.js")
+    .replace('SET "_prog=node"', 'SET "_prog=python"')
+    .replace('SET "_prog=%dp0%\\node.exe"', 'SET "_prog=%dp0%\\python.exe"');
+  assert.equal(SHIM_LAUNCH_LINE_MATCHES(python), true);
   assert.equal(parseNodeShim(SHIM, python, { execPath: NODE, exists: () => false }), null);
+  assert.equal(parseNodeShim(SHIM, npmShim("node_modules\\tool\\main.py"), { execPath: NODE, exists: () => false }), null);
   assert.equal(parseNodeShim(SHIM, "@ECHO off\r\n@codex-real.exe %*\r\n", { execPath: NODE, exists: () => false }), null);
 });
 
@@ -122,9 +130,10 @@ test("another batch file runs through cmd.exe with every argument quoted", () =>
   });
   assert.deepEqual(launch, {
     file: "C:\\WINDOWS\\system32\\cmd.exe",
+    argv0: '"C:\\WINDOWS\\system32\\cmd.exe"',
     args: [
       "/d", "/s", "/c",
-      '""C:\\Tools\\my codex\\codex.bat" "app-server" "--listen" "ws://127.0.0.1:1" "100%%cd:~,% ^sure & done" "end\\\\""',
+      '""C:\\Tools\\my codex\\codex.bat" "app-server" "--listen" "ws://127.0.0.1:1" "100%%cd:~0,0% ^sure & done" "end\\\\""',
     ],
     windowsVerbatimArguments: true,
   });
@@ -132,14 +141,15 @@ test("another batch file runs through cmd.exe with every argument quoted", () =>
   const unreadable = codexLaunchCommand(bat, [], { platform: "win32", env: {}, readFile: () => { throw new Error("EACCES"); } });
   assert.deepEqual(unreadable.args, ["/d", "/s", "/c", '""C:\\Tools\\my codex\\codex.bat""']);
   assert.equal(unreadable.file, "cmd.exe");
+  assert.equal(unreadable.argv0, '"cmd.exe"');
 });
 
 test("cmd.exe quoting covers spaces, percent, caret and backslashes, and refuses quotes and line breaks", () => {
   assert.equal(quoteCmdBatchArgument("plain"), '"plain"');
   assert.equal(quoteCmdBatchArgument(""), '""');
   assert.equal(quoteCmdBatchArgument("a b\tc"), '"a b\tc"');
-  assert.equal(quoteCmdBatchArgument("50%"), '"50%%cd:~,%"');
-  assert.equal(quoteCmdBatchArgument("%PATH%"), '"%%cd:~,%PATH%%cd:~,%"');
+  assert.equal(quoteCmdBatchArgument("50%"), '"50%%cd:~0,0%"');
+  assert.equal(quoteCmdBatchArgument("%PATH%"), '"%%cd:~0,0%PATH%%cd:~0,0%"');
   assert.equal(quoteCmdBatchArgument("a^b^^c"), '"a^b^^c"');
   assert.equal(quoteCmdBatchArgument("C:\\a\\b"), '"C:\\a\\b"');
   assert.equal(quoteCmdBatchArgument("C:\\a\\b\\"), '"C:\\a\\b\\\\"');
@@ -149,8 +159,21 @@ test("cmd.exe quoting covers spaces, percent, caret and backslashes, and refuses
   assert.throws(() => quoteCmdBatchArgument("one\r"), /line break/);
 });
 
-test("Windows resolution walks PATH with PATHEXT and finds codex.cmd", () => {
-  const present = new Set(["C:\\Users\\Ada\\AppData\\Roaming\\npm\\codex.cmd"]);
+test("on Windows a stop ends the process tree with taskkill; elsewhere it does nothing", () => {
+  const calls: Array<[string, string[]]> = [];
+  const runSync = (file: string, args: string[]) => { calls.push([file, args]); return { error: undefined }; };
+  assert.equal(terminateCodexProcessTree(4321, { platform: "win32", runSync }), true);
+  assert.deepEqual(calls, [["taskkill", ["/pid", "4321", "/T", "/F"]]]);
+  assert.equal(terminateCodexProcessTree(4321, { platform: "win32", runSync: () => ({ error: new Error("ENOENT") }) }), false);
+  assert.equal(terminateCodexProcessTree(4321, { platform: "darwin", runSync }), false);
+  assert.equal(terminateCodexProcessTree(null, { platform: "win32", runSync }), false);
+  assert.equal(calls.length, 1);
+});
+
+test("Windows resolution walks PATH with PATHEXT and finds codex.cmd, not npm's extensionless sh script", () => {
+  // npm's cmd-shim writes codex (sh), codex.cmd and codex.ps1 side by side.
+  const npm = "C:\\Users\\Ada\\AppData\\Roaming\\npm";
+  const present = new Set([`${npm}\\codex`, `${npm}\\codex.cmd`, `${npm}\\codex.ps1`]);
   const resolved = resolveCodexExecutable({
     platform: "win32",
     env: { PATH: "C:\\WINDOWS\\system32;C:\\Users\\Ada\\AppData\\Roaming\\npm", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
@@ -176,7 +199,7 @@ function printArgsFixture(): { directory: string; script: string } {
 }
 
 function runToArgv(executable: string, args: string[]): string[] {
-  const output = spawnSync("node", ["--input-type=module", "-e", [
+  const output = spawnSync(process.execPath, ["--input-type=module", "-e", [
     'import { spawnCodex } from "./shared/codex-executable.mjs";',
     "const child = spawnCodex(process.argv[1], process.argv.slice(2), { stdio: ['ignore', 'pipe', 'inherit'] });",
     "let out = ''; child.stdout.on('data', (c) => { out += c; });",
@@ -201,7 +224,8 @@ test("on Windows, spawnCodex runs another batch file through cmd.exe with argume
   const { directory, script } = printArgsFixture();
   try {
     const bat = join(directory, "codex.bat");
-    writeFileSync(bat, `@node ${script} %*\r\n`);
+    // Not a shim: a plain batch file that hands its arguments to a script.
+    writeFileSync(bat, `@"${process.execPath}" "${script}" %*\r\n`);
     const args = ["app-server", "-c", "features.plugins=false", "two words", "100% ^sure & done | not <that> (yet)", "x\\", ""];
     assert.deepEqual(runToArgv(bat, args), args);
   } finally {

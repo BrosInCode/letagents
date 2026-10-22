@@ -1,4 +1,4 @@
-import type { ChildProcess, SpawnOptions } from "node:child_process";
+import type { ChildProcess, SpawnOptions, SpawnSyncReturns } from "node:child_process";
 
 export interface CodexExecutableResolutionOptions {
   env?: NodeJS.ProcessEnv;
@@ -24,6 +24,7 @@ export interface CodexLaunchCommandOptions {
 export interface CodexLaunchCommand {
   file: string;
   args: string[];
+  argv0?: string;
   windowsVerbatimArguments?: true;
 }
 
@@ -38,4 +39,17 @@ export function codexLaunchCommand(
   args: readonly string[],
   options?: CodexLaunchCommandOptions,
 ): CodexLaunchCommand;
-export function spawnCodex(executable: string, args: readonly string[], spawnOptions?: SpawnOptions): ChildProcess;
+export function spawnCodex(
+  executable: string,
+  args: readonly string[],
+  spawnOptions?: SpawnOptions,
+  launchOptions?: CodexLaunchCommandOptions,
+): ChildProcess;
+/** On Windows ends the process tree below `pid` with taskkill and returns true; elsewhere does nothing and returns false. */
+export function terminateCodexProcessTree(
+  pid: number | null | undefined,
+  options?: {
+    platform?: NodeJS.Platform;
+    runSync?: (file: string, args: string[]) => Pick<SpawnSyncReturns<Buffer>, "error"> | undefined;
+  },
+): boolean;

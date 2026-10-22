@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -11,10 +11,11 @@ function pathFor(platform) {
   return platform === "win32" ? path.win32 : path.posix;
 }
 
+// On Windows access(X_OK) only checks that the path exists, so a file is required too.
 function isExecutableFile(filePath) {
   try {
     accessSync(filePath, fsConstants.X_OK);
-    return true;
+    return statSync(filePath).isFile();
   } catch {
     return false;
   }
@@ -22,11 +23,13 @@ function isExecutableFile(filePath) {
 
 function executableNames(platform, env) {
   if (platform !== "win32") return ["codex"];
+  // Only names with a PATHEXT extension, as cmd.exe resolves them: npm writes
+  // an extensionless `codex` sh script beside `codex.cmd`, which must not win.
   const extensions = (env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
     .split(";")
     .map((extension) => extension.trim().toLowerCase())
     .filter(Boolean);
-  return ["codex", ...extensions.map((extension) => `codex${extension}`)];
+  return extensions.map((extension) => `codex${extension}`);
 }
 
 function resolveFromPath(env, platform, isExecutable) {
@@ -121,6 +124,9 @@ export function parseNodeShim(shimPath, shimText, options = {}) {
   };
 }
 
+/** `%` for a cmd.exe command line: expands back to one `%` (see quoteCmdBatchArgument). */
+const CMD_PERCENT = "%%cd:~0,0%";
+
 const NO_CMD_SAFE_QUOTE = "LetAgents cannot pass an argument that contains a double quote through cmd.exe to a batch file, "
   + "because cmd.exe reads the quote as the end of the argument. Install Codex with npm, or point LETAGENTS_CODEX_BIN at codex.exe.";
 
@@ -130,9 +136,10 @@ const NO_CMD_SAFE_QUOTE = "LetAgents cannot pass an argument that contains a dou
  * cmd.exe expands `%NAME%` before it reads quotes, and the batch file parses
  * its `%*` a second time, so the only characters that stay literal through
  * both passes are those inside double quotes. Every argument is therefore
- * quoted. A `%` becomes `%%cd:~,%`: the first `%` has no closing name and
- * stays, and `%cd:~,%` is an empty slice of the always-set CD variable, so
- * the command line expands it back to one `%` and the batch file gets `%`.
+ * quoted. A `%` becomes `%%cd:~0,0%`: the first `%` has no closing name and
+ * stays, and `%cd:~0,0%` is a zero-length slice of the always-set CD
+ * variable, so the command line expands it back to one `%` and the batch
+ * file gets `%`.
  * A double quote inside an argument would end the quoted span for cmd.exe
  * and cannot be escaped on both passes, so it is refused. Node's C runtime
  * reads backslashes before the closing quote as escapes, so those double.
@@ -142,7 +149,7 @@ export function quoteCmdBatchArgument(argument) {
     throw new Error("LetAgents cannot pass an argument with a line break through cmd.exe to a batch file.");
   }
   if (argument.includes('"')) throw new Error(NO_CMD_SAFE_QUOTE);
-  const body = argument.replace(/%/g, "%%cd:~,%");
+  const body = argument.replace(/%/g, CMD_PERCENT);
   const trailingBackslashes = /\\+$/.exec(body)?.[0] ?? "";
   return `"${body}${trailingBackslashes}"`;
 }
@@ -173,20 +180,43 @@ export function codexLaunchCommand(executable, args, options = {}) {
   if (shim) return { file: shim.file, args: [...shim.args, ...args] };
 
   const env = options.env ?? process.env;
+  const comSpec = env.ComSpec?.trim() || "cmd.exe";
   const line = [executable, ...args].map(quoteCmdBatchArgument).join(" ");
   return {
-    file: env.ComSpec?.trim() || "cmd.exe",
+    file: comSpec,
+    // Verbatim arguments are joined as given, so argv[0] is quoted here.
+    argv0: `"${comSpec}"`,
     args: ["/d", "/s", "/c", `"${line}"`],
     windowsVerbatimArguments: true,
   };
 }
 
-/** `spawn` for Codex: resolves batch files on Windows and never opens a console window. */
-export function spawnCodex(executable, args, spawnOptions = {}) {
-  const launch = codexLaunchCommand(executable, args);
+/**
+ * `spawn` for Codex: resolves batch files on Windows and never opens a
+ * console window. `launchOptions` are those of `codexLaunchCommand`; in
+ * Electron pass `execPath` of a real Node (or set ELECTRON_RUN_AS_NODE), as
+ * `process.execPath` there is Electron itself.
+ */
+export function spawnCodex(executable, args, spawnOptions = {}, launchOptions = {}) {
+  const launch = codexLaunchCommand(executable, args, launchOptions);
   return spawn(launch.file, launch.args, {
     ...spawnOptions,
     windowsHide: true,
+    ...(launch.argv0 ? { argv0: launch.argv0 } : {}),
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
+}
+
+/**
+ * Stops a Codex process and what it started. On Windows the spawned pid is
+ * the shim's node.exe or cmd.exe and killing it alone leaves the native
+ * Codex running, so the whole tree is ended with taskkill. Elsewhere the
+ * caller's own group or pid signal is used. Returns true when taskkill ran.
+ */
+export function terminateCodexProcessTree(pid, options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32" || !pid) return false;
+  const run = options.runSync ?? ((file, args) => spawnSync(file, args, { stdio: "ignore", windowsHide: true }));
+  const result = run("taskkill", ["/pid", String(pid), "/T", "/F"]);
+  return !result?.error;
 }
