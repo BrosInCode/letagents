@@ -296,13 +296,22 @@ test("the authorization endpoint never redirects to an unregistered URI and requ
     [{ ...base, resource: `${baseUrl}/mcp-other` }, "invalid_target"],
   ] as const) {
     const response = await fetch(authorizeUrl(params as Record<string, string | undefined>), { headers: { cookie: COOKIE_A }, redirect: "manual" });
-    assert.equal(response.status, 303, JSON.stringify(params));
-    const location = new URL(response.headers.get("location")!);
-    assert.equal(location.origin + location.pathname, REDIRECT);
-    assert.equal(location.searchParams.get("error"), error);
-    assert.equal(location.searchParams.get("state"), "xyz");
-    assert.equal(location.searchParams.get("iss"), baseUrl);
+    assert.equal(response.status, 400, JSON.stringify(params));
+    assert.equal(response.headers.get("location"), null, "a request error never redirects (no open redirect)");
+    assert.ok((await response.text()).includes(`(${error})`));
   }
+  const selfRedirect = await register({ redirect_uris: [`${baseUrl}/somewhere`] });
+  assert.equal(selfRedirect.status, 400, "a redirect URI on this server could leak a code");
+  assert.equal(selfRedirect.body.error, "invalid_redirect_uri");
+});
+
+test("rate limits key on the proxy's address, not a client-chosen header", { skip }, async () => {
+  const oauth = await import("../routes/mcp/oauth.js");
+  const req = (remoteAddress: string, forwarded?: string) =>
+    ({ socket: { remoteAddress }, headers: forwarded ? { "x-forwarded-for": forwarded } : {} }) as never;
+  assert.equal(oauth.rateLimitKey(req("203.0.113.9", "1.1.1.1")), "203.0.113.9", "a direct client cannot pick its key");
+  assert.equal(oauth.rateLimitKey(req("127.0.0.1", "1.1.1.1, 198.51.100.7")), "198.51.100.7", "the proxy's own entry counts");
+  assert.equal(oauth.rateLimitKey(req("::ffff:10.0.0.2")), "::ffff:10.0.0.2");
 });
 
 test("a signed-out person goes through GitHub sign-in and comes back to the consent page", { skip }, async () => {

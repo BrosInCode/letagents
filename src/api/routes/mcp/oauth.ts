@@ -87,9 +87,22 @@ function sweepSoon(): void {
   });
 }
 
-function clientKey(req: Request): string {
-  const forwarded = req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"]?.toString().split(",")[0];
-  return String(forwarded ?? req.socket.remoteAddress ?? "unknown").trim().slice(0, 200);
+function isProxyAddress(address: string): boolean {
+  const ip = address.replace(/^::ffff:/, "");
+  return ip === "::1" || /^127\./.test(ip) || /^10\./.test(ip) || /^192\.168\./.test(ip)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(ip) || /^f[cd][0-9a-f]{2}:/i.test(ip);
+}
+
+/**
+ * The rate-limit key. A client can send any X-Forwarded-For value, so only
+ * the last entry counts (the address the reverse proxy itself appended), and
+ * only when the connection comes from a local proxy.
+ */
+export function rateLimitKey(req: Pick<Request, "headers" | "socket">): string {
+  const socketAddress = req.socket.remoteAddress ?? "unknown";
+  const forwarded = req.headers["x-forwarded-for"]?.toString().split(",").map((part) => part.trim()).filter(Boolean);
+  const address = isProxyAddress(socketAddress) && forwarded?.length ? forwarded[forwarded.length - 1]! : socketAddress;
+  return address.slice(0, 200);
 }
 
 function noStore(res: Response): void {
@@ -225,6 +238,15 @@ export function validateRegistration(body: unknown): RegistrationResult {
   };
 }
 
+/** A redirect URI on this server's own origin could leak a code through a LetAgents page. */
+function sameOriginAsIssuer(uri: string, urls: McpOAuthUrls): boolean {
+  try {
+    return new URL(uri).origin === new URL(urls.issuer).origin;
+  } catch {
+    return true;
+  }
+}
+
 /** Requested scopes reduced to what this server grants; unknown scopes are ignored (RFC 6749 section 3.3). */
 function grantedScope(): string {
   return MCP_OAUTH_SCOPE;
@@ -328,11 +350,13 @@ function consentPage(res: Response, input: {
   const redirect = new URL(input.redirectUri);
   const name = input.client.client_name ?? "An unnamed app";
   sendPage(res, 200, "Connect to LetAgents", `
-<h1>${escapeHtml(name)} wants to connect to your LetAgents account</h1>
+<h1>Connect <code>${escapeHtml(redirect.host)}</code> to your LetAgents account?</h1>
 <p>Signed in as <strong>@${escapeHtml(input.login)}</strong>.</p>
-<p class="warn">LetAgents did not check this app. The app chose its own name. Approve only if you started this connection.</p>
+<p>The app calls itself <strong>&ldquo;${escapeHtml(name)}&rdquo;</strong>. LetAgents did not check this name;
+any app can choose it. The address below is what identifies the app.</p>
 <p>After you approve, LetAgents sends you back to <strong><code>${escapeHtml(redirect.host)}</code></strong>
 (<code>${escapeHtml(input.redirectUri)}</code>).</p>
+<p class="warn">Approve only if you started this connection from that app just now.</p>
 <p>The app gets the same access as a LetAgents owner token, on the remote MCP endpoint only:</p>
 <ul><li>Join your rooms, read and send messages, and act on tasks as you.</li>
 <li>Access stays until you disconnect it in LetAgents settings, or after 30 days without use.</li></ul>
@@ -377,13 +401,18 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
 
   app.post(MCP_OAUTH_PATHS.register, async (req: Request, res: Response) => {
     sweepSoon();
-    if (!allowRegister(clientKey(req)) || !allowRegisterGlobal("all")) {
+    if (!allowRegister(rateLimitKey(req)) || !allowRegisterGlobal("all")) {
       oauthError(res, 429, "slow_down", "Too many client registrations. Try again later.");
       return;
     }
     const result = validateRegistration(req.body);
     if (!result.ok) {
       oauthError(res, 400, result.error, result.description);
+      return;
+    }
+    const urls = mcpOAuthUrls();
+    if (result.client.redirect_uris.some((uri) => sameOriginAsIssuer(uri, urls))) {
+      oauthError(res, 400, "invalid_redirect_uri", "A redirect URI may not be on this server.");
       return;
     }
     const clientSecret = result.client.token_endpoint_auth_method === "none" ? null : randomSecret();
@@ -408,7 +437,7 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
   });
 
   app.get(MCP_OAUTH_PATHS.authorize, async (req: Request, res: Response) => {
-    if (!allowAuthorize(clientKey(req))) {
+    if (!allowAuthorize(rateLimitKey(req))) {
       errorPage(res, 429, "Too many sign-in attempts. Wait a minute and try again.");
       return;
     }
@@ -426,9 +455,15 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
       errorPage(res, 400, "The app asked to return to an address it did not register.");
       return;
     }
+    if (sameOriginAsIssuer(redirectUri, urls)) {
+      errorPage(res, 400, "The app asked to return to a LetAgents page.");
+      return;
+    }
     const state = stringParam(query, "state");
-    const fail = (error: string, description: string) =>
-      redirectToClient(res, redirectUri, { error, error_description: description, state, iss: urls.issuer });
+    // Anyone may register a client with any https redirect URI, so a request
+    // error shows a page here instead of redirecting: an unapproved
+    // authorization link must not work as an open redirect (RFC 9700 4.11.2).
+    const fail = (error: string, description: string) => errorPage(res, 400, `${description} (${error})`);
     if (state !== undefined && state.length > MAX_STATE_LENGTH) {
       fail("invalid_request", "state is too long.");
       return;
@@ -535,7 +570,7 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
 
   app.post(MCP_OAUTH_PATHS.token, form, async (req: Request, res: Response) => {
     sweepSoon();
-    if (!allowToken(clientKey(req))) {
+    if (!allowToken(rateLimitKey(req))) {
       oauthError(res, 429, "slow_down", "Too many token requests. Slow down.");
       return;
     }
@@ -624,7 +659,7 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
   });
 
   app.post(MCP_OAUTH_PATHS.revoke, form, async (req: Request, res: Response) => {
-    if (!allowToken(clientKey(req))) {
+    if (!allowToken(rateLimitKey(req))) {
       oauthError(res, 429, "slow_down", "Too many requests. Slow down.");
       return;
     }
@@ -645,6 +680,23 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
     noStore(res);
     res.status(200).json({});
   });
+
+  // An unexpected failure (database, body parser) on the token endpoints
+  // answers in OAuth JSON without details, not with Express's HTML page.
+  app.use(["/oauth/token", "/oauth/revoke", "/oauth/register"],
+    (error: unknown, _req: Request, res: Response, next: (error?: unknown) => void) => {
+      if (res.headersSent) {
+        next(error);
+        return;
+      }
+      const status = (error as { status?: unknown })?.status;
+      if (typeof status === "number" && status >= 400 && status < 500) {
+        oauthError(res, 400, "invalid_request", "The request body could not be read.");
+        return;
+      }
+      console.warn("MCP OAuth endpoint failed:", error instanceof Error ? error.name : "unknown error");
+      oauthError(res, 500, "server_error", "The authorization server failed. Try again.");
+    });
 
   // Account settings: list and disconnect apps. Browser or desktop session only.
   app.get("/account/mcp-connections", async (req: AuthenticatedRequest, res: Response) => {
