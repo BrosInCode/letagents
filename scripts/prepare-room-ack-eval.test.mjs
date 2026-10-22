@@ -84,6 +84,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   const gate = "${{ always() && inputs.purpose != 'room-ack-evaluation' }}";
   const staging = "github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'";
   const conditions = {
+    "dependency-audit": checks,
     "build-checks": checks,
     "desktop-tests": checks,
     build: gate,
