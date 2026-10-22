@@ -597,3 +597,56 @@ test("failed tracker disconnect remains visible in the original live detail", as
   assert.equal(detail.vm.feedback.value, "Disconnect refused");
   assert.equal(page.vm.trackers.value.length, 1);
 });
+
+test("save then edit keeps unsaved mapping changes across a same-ID refresh", async (t) => {
+  const transport = api();
+  const { vm, props } = await mount(t, Details, {
+    connection: tracker("selected"),
+    api: transport.trackers,
+    disclosure: "Consent",
+  });
+  vm.mapping.value[0].state = "in_review";
+  await vm.saveMap();
+  vm.mapping.value[0].state = "done";
+  props.connection = {
+    ...tracker("selected"),
+    status_map: { Open: "in_review" },
+    unmapped_statuses: ["Waiting"],
+  };
+  await settle();
+  assert.deepEqual(
+    vm.mapping.value.map((row: any) => [row.name, row.state]),
+    [
+      ["Open", "done"],
+      ["Waiting", "in_progress"],
+    ],
+  );
+});
+
+test("clean refresh then edit keeps the draft separate from the saved mapping snapshot", async (t) => {
+  const { vm, props } = await mount(t, Details, {
+    connection: tracker("selected"),
+    api: api().trackers,
+    disclosure: "Consent",
+  });
+  props.connection = {
+    ...tracker("selected"),
+    status_map: { Open: "in_review" },
+  };
+  await settle();
+  assert.equal(vm.mapping.value[0].state, "in_review");
+  vm.mapping.value[0].state = "done";
+  props.connection = {
+    ...tracker("selected"),
+    status_map: { Open: "in_review" },
+    unmapped_statuses: ["Waiting"],
+  };
+  await settle();
+  assert.deepEqual(
+    vm.mapping.value.map((row: any) => [row.name, row.state]),
+    [
+      ["Open", "done"],
+      ["Waiting", "in_progress"],
+    ],
+  );
+});

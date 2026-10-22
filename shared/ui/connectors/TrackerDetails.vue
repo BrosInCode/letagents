@@ -294,7 +294,7 @@ watch(
         ...fresh.filter((row) => !known.has(row.name.toLowerCase())),
       );
     }
-    savedMapping = fresh;
+    savedMapping = fresh.map((row) => ({ ...row }));
     if (changedConnection) {
       testItems.value = null;
       webhook.value = null;
@@ -345,7 +345,7 @@ const saveMap = () =>
     });
     if (!live) return;
     savedMapping = statusMapRows(connection);
-    mapping.value = savedMapping;
+    mapping.value = savedMapping.map((row) => ({ ...row }));
     emit("updated", connection);
     feedback.value = "Ticket status mapping saved.";
   });
