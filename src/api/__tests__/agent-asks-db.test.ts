@@ -206,3 +206,13 @@ test("a substitute's grant waits for the asker until accepted", options, async (
   await asks!.acceptSubstitute(joined);
   assert.equal(await asks!.isGrantWaitingForAsker(grant.grant_id), false);
 });
+
+test('receiver avatar belongs to the exact owner account despite duplicate display names', options, async () => {
+  const s = await seed();
+  await core!.upsertAccount({ provider: 'github', provider_user_id: '1', login: 'sam', display_name: 'Same name', avatar_url: 'https://avatars.githubusercontent.com/u/1' });
+  await core!.upsertAccount({ provider: 'github', provider_user_id: '2', login: 'john', display_name: 'Same name', avatar_url: 'https://avatars.githubusercontent.com/u/2' });
+  const created = await ask(s);
+  assert.equal(await asks!.personAvatarUrl(created.row.asker_account_id), 'https://avatars.githubusercontent.com/u/1');
+  assert.equal(await asks!.personAvatarUrl(s.john.id), 'https://avatars.githubusercontent.com/u/2');
+  assert.equal(await asks!.personAvatarUrl(s.ada.id), null);
+});

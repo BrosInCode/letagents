@@ -26,6 +26,7 @@ function harness(ask: Record<string, unknown> | null = row(), extra: Record<stri
     release: async () => row(),
     authority: async (_a: any, input: any) => { calls.push(["authority", input]); if (extra.authority) return { ask: row({ state: "claimed" }), grant: { grant_id: "g" } }; throw new Error(String(extra.authorityError ?? "ask_not_claimed")); }, joined: async () => row({ state: "active" }),
     accept: async () => row({ state: "active" }), decline: async () => row(), end: async (_a: any, reason: string) => { calls.push(["end", reason]); return row({ state: "ended" }); },
+    avatar: async (id: string) => { calls.push(["avatar", id]); return "https://avatars.githubusercontent.com/u/1"; },
     name: async (id: string | null) => id === "sam" ? "Sam" : "John", isAdmin: async () => false, room: async () => ({ display_name: "feat-auth" }),
     forWorker: async (sessionId: string) => sessionId === "given" ? ask : null,
     canWrite: async () => extra.canWrite !== false,
@@ -79,8 +80,12 @@ test("anonymous previews hide the note and room; signed-in previews show them", 
   const anon = await h.request("get", `/agent-asks/link/${TOKEN}`, {}, null);
   assert.equal(anon.body.ask.asker, "Sam");
   assert.equal(anon.body.ask.note, undefined);
+  assert.equal(anon.body.ask.asker_avatar_url, undefined);
+  assert.deepEqual(h.calls, []);
   const signed = await h.request("get", `/agent-asks/link/${TOKEN}`);
   assert.equal(signed.body.ask.note, "auth fix");
+  assert.equal(signed.body.ask.asker_avatar_url, "https://avatars.githubusercontent.com/u/1");
+  assert.deepEqual(h.calls, [["avatar", "sam"]]);
   assert.equal(signed.body.ask.room_display_name, "feat-auth");
 });
 
@@ -97,7 +102,7 @@ test("unusable links tell the giver exactly why", async () => {
   }
   const ok = harness();
   assert.equal((await ok.request("post", `/agent-asks/link/${TOKEN}/claim`)).code, 200);
-  assert.deepEqual(ok.calls, [["claim", "john"]]);
+  assert.deepEqual(ok.calls, [["claim", "john"], ["avatar", "sam"]]);
 });
 
 test("store errors become plain sentences", async () => {

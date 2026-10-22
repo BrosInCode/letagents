@@ -17,10 +17,4 @@ export function askLinkFor(askId: string): string | null {
   return read()[askId] ?? null;
 }
 
-export const AMOUNT_CHOICES = [5, 10, 20, 50] as const;
-
-/** A whole percentage from 1 to `max`, or null when the text isn't one. */
-export function parseCustomAmount(text: string, max = 100): number | null {
-  const value = Number(text.trim().replace(/%$/, ""));
-  return Number.isInteger(value) && value >= 1 && value <= max ? value : null;
-}
+export { AMOUNT_CHOICES, parseCustomAmount } from "../../../../../../../../shared/ui/give-agent/types";
