@@ -8,6 +8,8 @@ export interface DesktopAgentAsk {
   id: string;
   state: DesktopAgentAskState;
   asker: string;
+  /** Authenticated receiver account image; absent on anonymous previews. */
+  asker_avatar_url?: string | null;
   provider_id: string;
   model: string | null;
   model_label: string;
