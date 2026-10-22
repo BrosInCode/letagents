@@ -2,7 +2,7 @@
   <div class="web-messages">
     <header class="web-messages-nav">
       <RouterLink to="/">LetAgents</RouterLink><span>Messages</span
-      ><RouterLink to="/">Back to home</RouterLink>
+      ><RouterLink to="/my-work">My work</RouterLink><RouterLink to="/">Back to home</RouterLink>
     </header>
     <PrivateMessages
       v-if="isSignedIn && user?.id"

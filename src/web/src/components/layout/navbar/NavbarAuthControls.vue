@@ -6,6 +6,7 @@
     </button>
   </template>
   <template v-else>
+    <RouterLink class="nav-btn nav-btn-ghost nav-btn-sm" to="/my-work" @click="emit('close')">My work</RouterLink>
     <RouterLink class="nav-btn nav-btn-ghost nav-btn-sm" to="/messages" @click="emit('close')">Messages</RouterLink>
     <NavbarUserBadge :user="auth.user.value" :mobile="mobile" />
     <button :class="signOutClasses" type="button" @click="signOut">

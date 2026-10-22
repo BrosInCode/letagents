@@ -61,6 +61,11 @@ export function useAppSidebarLayout(context: unknown) {
     app.activeEntry.value = settingsEntry;
   }
 
+  function openTicketTrackersSurface(): void {
+    requestedSettingsPane.value = "account:connectors";
+    app.activeEntry.value = settingsEntry;
+  }
+
   function openUpdatesSurface(): void {
     requestedSettingsPane.value = "system:updates";
     app.activeEntry.value = settingsEntry;
@@ -137,7 +142,7 @@ export function useAppSidebarLayout(context: unknown) {
   }
   return {
     isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
-    settingsPaneForActiveEntry, openSettingsSurface, openUpdatesSurface, startSidebarResize,
+    settingsPaneForActiveEntry, openSettingsSurface, openTicketTrackersSurface, openUpdatesSurface, startSidebarResize,
     handleSidebarResizeKeydown, setSidebarWidth, setAllProjectsCollapsed,
     handleSidebarParentRoomReorder, handleSidebarChildRoomReorder,
   };

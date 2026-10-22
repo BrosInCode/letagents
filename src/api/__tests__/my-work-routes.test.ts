@@ -56,10 +56,24 @@ test("query parameters reach the reader as the account's own query", async () =>
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), EMPTY);
     assert.deepEqual(seen[0], {
-      accountId: "acct-1", login: "Emmy", cursor: "abc", limit: 20, tracker: "jira", roomId: "room-1", needsMe: true,
+      accountId: "acct-1", login: "Emmy", cursor: "abc", limit: 20, tracker: "jira", roomId: "room-1", needsMe: true, includeCompleted: false,
     });
     assert.equal((await server.get("/account/my-work?tracker=github")).status, 400);
     assert.equal((await server.get("/account/my-work?limit=many")).status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+test("completed work requires an explicit opt-in, with the same account query", async () => {
+  const seen: MyWorkQuery[] = [];
+  const server = await serve("session", async (query) => { seen.push(query); return EMPTY; });
+  try {
+    for (const [search, expected] of [["", false], ["?include_completed=false", false], ["?include_completed=true", true], ["?include_completed=1", false], ["?include_completed=true&include_completed=false", false]] as const) {
+      assert.equal((await server.get(`/account/my-work${search}`)).status, 200);
+      assert.equal(seen.at(-1)?.includeCompleted, expected, search || "default");
+      assert.equal(seen.at(-1)?.accountId, "acct-1");
+    }
   } finally {
     await server.close();
   }

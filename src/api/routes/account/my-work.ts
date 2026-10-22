@@ -30,7 +30,8 @@ function queryString(value: unknown): string | null {
  * `GET /account/my-work`: the cards across the account's rooms that are its
  * work (ticket connectors PR4). Same auth as the account activity stream: the
  * desktop session or an owner token. Query: `cursor`, `limit` (1–100),
- * `tracker` (`jira`, `linear` or `native`), `room`, `needs_me=true`.
+ * `tracker` (`jira`, `linear` or `native`), `room`, `needs_me=true`,
+ * `include_completed=true` (opt-in finished work).
  */
 export function registerMyWorkRoute(app: Express, deps: MyWorkRouteDeps = defaultDeps): void {
   const needsMeLimiter = createAttemptLimiter(NEEDS_ME_PER_HOUR, 60 * 60_000);
@@ -98,6 +99,7 @@ export function registerMyWorkRoute(app: Express, deps: MyWorkRouteDeps = defaul
         tracker: tracker as MyWorkTrackerFilter | null,
         roomId: queryString(req.query.room),
         needsMe: String(req.query.needs_me ?? "").toLowerCase() === "true",
+        includeCompleted: queryString(req.query.include_completed)?.toLowerCase() === "true",
       });
       res.json(page);
     } catch (error) {
