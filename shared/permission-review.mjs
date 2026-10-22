@@ -467,9 +467,11 @@ const PROGRAMS = {
     const paths = separator < 0 ? [] : args.slice(separator + 1);
     const words = GIT_VERBS.has(verb) ? readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) : null;
     // A pathspec that starts with `:` carries an instruction (`:(top)x`, `:/x`, `:!x`), and `:(top)` reads from
-    // the repository's top folder, which may be above the project. An option's value (`-e ':x'`) is not a pathspec.
-    return words !== null && words.every((word) => !word.startsWith(":"))
-      && paths.every((path) => !path.startsWith("-") && !path.startsWith(":") && staysInProject(path, project));
+    // the repository's top folder, which may be above the project. One with `*`, `?` or `[` is matched by Git
+    // itself, so `.[e]nv` names `.env`. An option's value (`-e ':x'`, `-e 'a.*'`) is neither.
+    const pathspec = (word) => !word.startsWith(":") && !/[*?[]/.test(word);
+    return words !== null && words.every(pathspec)
+      && paths.every((path) => !path.startsWith("-") && pathspec(path) && staysInProject(path, project));
   },
   npm: ([verb, ...rest], project) => {
     if (verb === "ls" || verb === "list") return rest.every((arg) => /^(?:--depth=\d+|--all|-a|--json|--long|-l)$/.test(arg));

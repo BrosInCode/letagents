@@ -169,6 +169,9 @@ test("a path written for Windows is read against the project, whichever separato
     // A Git pathspec that starts with `:` carries an instruction: `:(top)` reads from the repository's top, which may be above the project.
     [project, "git grep -l -e x ':(top)README.md'", true], [project, "git grep -e x -- ':(top)x'", true], [project, "git log -- ':/x'", true], [project, "git grep -e x ':!x'", true],
     [project, "git grep -e x -- ':(glob)src/*.ts'", true], [project, "git show 'HEAD:(top)x'", false], [project, "git show :README.md", true],
+    // A pathspec with `*`, `?` or `[` is matched by Git itself, so `.[e]nv` names `.env`. A pattern given to `-e` is not a pathspec.
+    [project, "git grep -e . -- '.[e]nv'", true], [project, "git grep -l -e . '.[e]nv'", true], [project, "git log -- '*'", true], [project, "git ls-files '?.env'", true],
+    [project, "git grep -e 'a.*b' src", false], [project, "git grep -e '.[e]nv' src", false], [project, "git log --grep='x*'", false],
     // A pattern, a delimiter, or a format that starts with `:` is not a pathspec.
     [project, "grep -rn ':' src", false], [project, "rg -e ':foo' src", false], [project, "sort -t : x", false], [project, "git grep -e ':' src", false],
     [project, "git log --grep=':x'", false], [project, "git log --format=':%h'", false], [project, "git log -L :func:file", false], [project, "find . -name ':x'", false],
