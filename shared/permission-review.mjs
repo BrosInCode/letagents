@@ -239,9 +239,8 @@ function pathPieces(value, windows) {
 
 /** True when the text names nothing outside the project and nothing that holds credentials or history. */
 function staysInProject(value, project) {
-  // `@file` makes several programs read their arguments from the file. A Git pathspec that starts with `:`
-  // carries an instruction (`:(top)x`, `:/x`, `:!x`), and `:(top)` reads from the repository's top folder.
-  if (value.includes("://") || /(?:^|[=:,])@/.test(value) || value.startsWith(":") || CREDENTIAL.test(value)) return false;
+  // `@file` makes several programs read their arguments from the file.
+  if (value.includes("://") || /(?:^|[=:,])@/.test(value) || CREDENTIAL.test(value)) return false;
   const windows = onWindows(project);
   // A project written with `/` alone is on a system where `\` separates nothing, and a path written with one is not read there.
   if (!windows && value.includes("\\")) return false;
@@ -464,8 +463,11 @@ const PROGRAMS = {
     const separator = args.indexOf("--");
     const before = separator < 0 ? args : args.slice(0, separator);
     const paths = separator < 0 ? [] : args.slice(separator + 1);
-    return GIT_VERBS.has(verb) && readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) !== null
-      && paths.every((path) => !path.startsWith("-") && staysInProject(path, project));
+    const words = GIT_VERBS.has(verb) ? readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) : null;
+    // A pathspec that starts with `:` carries an instruction (`:(top)x`, `:/x`, `:!x`), and `:(top)` reads from
+    // the repository's top folder, which may be above the project. An option's value (`-e ':x'`) is not a pathspec.
+    return words !== null && words.every((word) => !word.startsWith(":"))
+      && paths.every((path) => !path.startsWith("-") && !path.startsWith(":") && staysInProject(path, project));
   },
   npm: ([verb, ...rest], project) => {
     if (verb === "ls" || verb === "list") return rest.every((arg) => /^(?:--depth=\d+|--all|-a|--json|--long|-l)$/.test(arg));
