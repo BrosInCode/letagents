@@ -43,7 +43,7 @@ const DOUBLE_QUOTED = /^[\x20\x23\x25-\x5b\x5d-\x5f\x61-\x7e]*$/;
 /** Joining or discarding an output stream names no file a command could overwrite. */
 const STREAM = /^(?:2>&1|[12]?>>? ?\/dev\/null)(?=[ \t\n;|&]|$)/;
 
-const CREDENTIAL = /(?:^|[/\\=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/\\._-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
+const CREDENTIAL = /(?:^|[/\\=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/\\._=:,-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
 
 /** A script, target, or file named for an action that ships, removes, or reaches production. */
 const CONSEQUENTIAL_NAME = /deploy|release|publish|rollback|destroy|teardown|wipe|purge|drop|nuke|erase|delete|remove|reset|clean|clear|uninstall|install|migrat|seed|prod|backup|restore|upload|email|notify|charge|refund|invoice|payment|(?:^|[^a-z])(?:env|db|sync|ship|push|rm)(?:$|[^a-z])/i;
@@ -118,6 +118,8 @@ function normalizedProject(project) {
   if (!isText(project, PERMISSION_REVIEW_MAX_PROJECT_CHARS) || !/^[\x21-\x7e]+$/.test(project)) return null;
   // `\x` names a folder on whichever drive is current, and a POSIX folder's name may hold a `\`: neither is read.
   if (!absolutePath(project) || (!onWindows(project) && project.includes("\\"))) return null;
+  // A share is written with one separator throughout: `//x/y/z\` could also be a POSIX folder whose name ends in `\`.
+  if (onWindows(project) && !/^[A-Za-z]:/.test(project) && project.includes("/") && project.includes("\\")) return null;
   const trimmed = project.replace(/[\\/]+$/, "");
   const path = absolutePath(trimmed);
   // A root alone (`/`, `C:\`, `\\server\share`) is not a project: everything would be inside it.
@@ -236,8 +238,6 @@ function staysInProject(value, project) {
   const windows = onWindows(project);
   // A project written with `/` alone is on a system where `\` separates nothing, and a path written with one is not read there.
   if (!windows && value.includes("\\")) return false;
-  // On Windows, cmd.exe puts a variable's value in place of `%NAME%`, and that value may name any folder.
-  if (windows && /%[^%]*%/.test(value)) return false;
   for (const { piece, start } of pathPieces(value, windows)) {
     if (piece.startsWith("~")) return false;
     const parts = piece.split(PATH_SEPARATOR);
@@ -507,6 +507,17 @@ function simpleCommandAllowed({ words, fed }, project) {
 }
 
 /**
+ * The simple commands of a command run in the project, or null when they are
+ * not read. On Windows, cmd.exe puts a variable's value in place of `%NAME%`
+ * in any word, quoted or not, and that value may say anything.
+ */
+function readProjectCommands(command, project) {
+  const commands = readCommands(command);
+  if (commands && onWindows(project) && commands.some((simple) => simple.words.some((word) => /%[^%]*%/.test(word.value)))) return null;
+  return commands;
+}
+
+/**
  * True when a person must decide. It means only that these rules cannot read
  * the command, not that the command is harmful.
  */
@@ -515,7 +526,7 @@ export function commandNeedsPerson(command, project) {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return true;
     const root = normalizedProject(project);
     if (!root) return true;
-    const commands = readCommands(command);
+    const commands = readProjectCommands(command, root);
     return !commands || !commands.every((simple) => simpleCommandAllowed(simple, root));
   } catch {
     return true;
@@ -657,7 +668,7 @@ export function commandOnlyReads(command, project) {
   try {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return false;
     const root = normalizedProject(project);
-    const commands = root ? readCommands(command) : null;
+    const commands = root ? readProjectCommands(command, root) : null;
     return commands !== null && commands.every((simple) => (simpleCommandAllowed(simple, root) && !RUNS_CODE.has(simple.words[0].value))
       || (!simple.words[0].quoted && simple.words[0].value === "gh" && githubRead(simple.words.slice(1).map((word) => word.value), root)));
   } catch {
@@ -687,7 +698,7 @@ export function routineCommandReview(command, project, context) {
   try {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return null;
     const root = normalizedProject(project);
-    const commands = root ? readCommands(command) : null;
+    const commands = root ? readProjectCommands(command, root) : null;
     if (!commands) return null;
     const own = (branch) => typeof branch === "string" && context.ownBranch(branch) === true;
     const base = typeof context.defaultBranch === "string" && isRef(context.defaultBranch) ? context.defaultBranch : null;

@@ -137,8 +137,12 @@ test("a path written for Windows is read against the project, whichever separato
     [windows, "cat 'key.pem '", true], [windows, "cat 'C:\\work\\repo\\.'", false], [windows, "cat 'x.y'", false],
     // `=`, `:` and `,` may be part of a folder's name: `C:/work/repo,other` is a sibling of the project.
     [windows, "cat C:/work/repo,other/x", true], [windows, "cat C:/work/repo=other/x", true], [windows, "cat C:/work/repo/x,y", false],
-    // cmd.exe puts a variable's value in place of `%NAME%`.
+    // cmd.exe puts a variable's value in place of `%NAME%`, in any word of any program.
     [windows, "cat %USERPROFILE%/x", true], [windows, "ls %APPDATA%", true], [windows, "git log --format=%h", false], [windows, "git log --format=%h%s", true],
+    [windows, "echo %AWS_SECRET_ACCESS_KEY%", true], [windows, "date +%X%", true], [windows, "echo '%X%'", true], [windows, "echo \"%X%\"", true], [windows, "echo 100%", false],
+    // A stream of a file (`file::$DATA` is the file itself) is not another file.
+    [windows, "cat 'C:/work/repo/.npmrc::$DATA'", true], [windows, "cat '.env:x'", true], [windows, "cat '.ssh=x'", true], [windows, "cat 'C:\\work\\repo\\.git::$INDEX_ALLOCATION'", true],
+    [windows, "cat 'C:\\work\\repo\\x\\..:y'", true],
     // A project on a share.
     [share, "cat '\\\\nas\\share\\repo\\x'", false], [share, "cat //nas/share/repo/x", false], [share, "ls '\\\\nas\\share\\repo'", false],
     [share, "cat '\\\\nas\\share\\other\\x'", true], [share, "cat '\\\\nas\\other\\repo\\x'", true], [share, "cat '\\\\nas\\share'", true], [share, "cat 'C:\\work\\repo\\x'", true],
@@ -152,7 +156,7 @@ test("a path written for Windows is read against the project, whichever separato
     // A sibling folder whose name holds `:`, `=` or `,` is not the project and a relative name.
     [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true],
     // On POSIX a name that ends in a dot or a space is that name.
-    [project, "cat '/Users/dev/shop-api/.. '", false], [project, "cat './. '", false], [project, "cat 'x.env '", false],
+    [project, "cat '/Users/dev/shop-api/.. '", false], [project, "cat './. '", false], [project, "cat 'x.env '", false], [project, "echo %X%", false],
   ];
   for (const [root, command, needs] of cases) {
     assert.equal(commandNeedsPerson(command, root), needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
@@ -160,7 +164,7 @@ test("a path written for Windows is read against the project, whichever separato
   }
   // A drive, a share, or a folder on whichever drive is current is not a project.
   for (const root of ["C:\\", "C:", "C:/", "C:work", "\\\\nas\\share", "\\\\nas\\share\\", "//nas", "//nas/share", "\\work\\repo", "C:\\work\\..\\repo", "C:\\work\\\\repo",
-    "C:\\work\\repo.", "C:\\work\\repo\\.. ", "/tmp/repo\\", "/tmp/repo\\/"]) {
+    "C:\\work\\repo.", "C:\\work\\repo\\.. ", "/tmp/repo\\", "/tmp/repo\\/", "//tmp/repo/sub\\", "\\\\nas\\share/repo", "//nas/share/repo\\x"]) {
     assert.equal(commandNeedsPerson("ls", root), true, root);
   }
   assert.deepEqual(buildPermissionReviewRequest({ commands: ["ls"], project: "C:\\work\\repo\\" })?.state, { commands: ["ls"], project: "C:\\work\\repo" });
