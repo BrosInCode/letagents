@@ -20,7 +20,7 @@ test("the rename is retried on the Windows sharing-violation codes with growing 
   for (const code of ["EPERM", "EBUSY", "EACCES"]) {
     const { rename, calls } = failing(code, 3);
     const waits: number[] = [];
-    renameWithRetry(rename, "state.tmp", "state.json", { sleep: (ms) => waits.push(ms) });
+    renameWithRetry(rename, "state.tmp", "state.json", { sleep: (ms) => waits.push(ms), platform: "win32" });
     assert.equal(calls.length, 4, code);
     assert.deepEqual(calls[0], ["state.tmp", "state.json"]);
     assert.deepEqual(waits, RENAME_RETRY_DELAYS_MS.slice(0, 3));
@@ -30,7 +30,7 @@ test("the rename is retried on the Windows sharing-violation codes with growing 
 test("the rename is bounded: ten attempts and under a second of waiting, then the error is rethrown", () => {
   const { rename, calls } = failing("EBUSY", Number.POSITIVE_INFINITY);
   const waits: number[] = [];
-  assert.throws(() => renameWithRetry(rename, "a", "b", { sleep: (ms) => waits.push(ms) }), { code: "EBUSY" });
+  assert.throws(() => renameWithRetry(rename, "a", "b", { sleep: (ms) => waits.push(ms), platform: "win32" }), { code: "EBUSY" });
   assert.equal(calls.length, 10);
   assert.deepEqual(waits, [...RENAME_RETRY_DELAYS_MS]);
   assert.ok(waits.reduce((sum, ms) => sum + ms, 0) <= 1_000);
@@ -39,10 +39,18 @@ test("the rename is bounded: ten attempts and under a second of waiting, then th
 
 test("other rename errors are thrown at once", () => {
   const { rename, calls } = failing("ENOENT", 1);
-  assert.throws(() => renameWithRetry(rename, "a", "b", { sleep: () => assert.fail("no wait") }), { code: "ENOENT" });
+  assert.throws(() => renameWithRetry(rename, "a", "b", { sleep: () => assert.fail("no wait"), platform: "win32" }), { code: "ENOENT" });
   assert.equal(calls.length, 1);
   const plain = () => { throw new Error("no code"); };
-  assert.throws(() => renameWithRetry(plain, "a", "b", { sleep: () => assert.fail("no wait") }), /no code/);
+  assert.throws(() => renameWithRetry(plain, "a", "b", { sleep: () => assert.fail("no wait"), platform: "win32" }), /no code/);
+});
+
+test("off Windows the sharing-violation codes are lasting permission errors and are not retried", () => {
+  for (const platform of ["darwin", "linux"] as const) {
+    const { rename, calls } = failing("EPERM", 1);
+    assert.throws(() => renameWithRetry(rename, "a", "b", { sleep: () => assert.fail("no wait"), platform }), { code: "EPERM" });
+    assert.equal(calls.length, 1, platform);
+  }
 });
 
 test("the state file keeps its private mode and no temp file is left", () => {

@@ -12,6 +12,7 @@ import {
   resolveCodexExecutable,
   spawnCodex,
   terminateCodexProcessTree,
+  windowsSystemExecutable,
 } from "../../../shared/codex-executable.mjs";
 
 /** The text npm's cmd-shim writes for a `#!/usr/bin/env node` bin, byte for byte. */
@@ -132,16 +133,21 @@ test("another batch file runs through cmd.exe with every argument quoted", () =>
     file: "C:\\WINDOWS\\system32\\cmd.exe",
     argv0: '"C:\\WINDOWS\\system32\\cmd.exe"',
     args: [
-      "/d", "/s", "/c",
+      "/d", "/v:off", "/s", "/c",
       '""C:\\Tools\\my codex\\codex.bat" "app-server" "--listen" "ws://127.0.0.1:1" "100%%cd:~0,0% ^sure & done" "end\\\\""',
     ],
     windowsVerbatimArguments: true,
   });
-  // A batch file that cannot be read is still run as one.
-  const unreadable = codexLaunchCommand(bat, [], { platform: "win32", env: {}, readFile: () => { throw new Error("EACCES"); } });
-  assert.deepEqual(unreadable.args, ["/d", "/s", "/c", '""C:\\Tools\\my codex\\codex.bat""']);
-  assert.equal(unreadable.file, "cmd.exe");
-  assert.equal(unreadable.argv0, '"cmd.exe"');
+  // A batch file that cannot be read is still run as one. Without ComSpec,
+  // cmd.exe comes from the system folder, never from the current directory.
+  const unreadable = codexLaunchCommand(bat, [], {
+    platform: "win32", env: { SystemRoot: "D:\\WINDOWS" }, readFile: () => { throw new Error("EACCES"); },
+  });
+  assert.deepEqual(unreadable.args, ["/d", "/v:off", "/s", "/c", '""C:\\Tools\\my codex\\codex.bat""']);
+  assert.equal(unreadable.file, "D:\\WINDOWS\\System32\\cmd.exe");
+  assert.equal(unreadable.argv0, '"D:\\WINDOWS\\System32\\cmd.exe"');
+  assert.equal(codexLaunchCommand(bat, [], { platform: "win32", env: {}, readFile: () => "" }).file,
+    "C:\\Windows\\System32\\cmd.exe");
 });
 
 test("cmd.exe quoting covers spaces, percent, caret and backslashes, and refuses quotes and line breaks", () => {
@@ -151,6 +157,8 @@ test("cmd.exe quoting covers spaces, percent, caret and backslashes, and refuses
   assert.equal(quoteCmdBatchArgument("50%"), '"50%%cd:~0,0%"');
   assert.equal(quoteCmdBatchArgument("%PATH%"), '"%%cd:~0,0%PATH%%cd:~0,0%"');
   assert.equal(quoteCmdBatchArgument("a^b^^c"), '"a^b^^c"');
+  // `!` is literal because the launch passes /v:off.
+  assert.equal(quoteCmdBatchArgument("x!PATH!y"), '"x!PATH!y"');
   assert.equal(quoteCmdBatchArgument("C:\\a\\b"), '"C:\\a\\b"');
   assert.equal(quoteCmdBatchArgument("C:\\a\\b\\"), '"C:\\a\\b\\\\"');
   assert.equal(quoteCmdBatchArgument("x\\\\"), '"x\\\\\\\\"');
@@ -159,14 +167,18 @@ test("cmd.exe quoting covers spaces, percent, caret and backslashes, and refuses
   assert.throws(() => quoteCmdBatchArgument("one\r"), /line break/);
 });
 
-test("on Windows a stop ends the process tree with taskkill; elsewhere it does nothing", () => {
+test("on Windows a stop ends the process tree with the system taskkill; elsewhere it does nothing", () => {
   const calls: Array<[string, string[]]> = [];
   const runSync = (file: string, args: string[]) => { calls.push([file, args]); return { error: undefined }; };
-  assert.equal(terminateCodexProcessTree(4321, { platform: "win32", runSync }), true);
-  assert.deepEqual(calls, [["taskkill", ["/pid", "4321", "/T", "/F"]]]);
+  const env = { SystemRoot: "C:\\WINDOWS" };
+  assert.equal(terminateCodexProcessTree(4321, { platform: "win32", runSync, env }), true);
+  assert.deepEqual(calls, [["C:\\WINDOWS\\System32\\taskkill.exe", ["/pid", "4321", "/T", "/F"]]]);
+  assert.equal(windowsSystemExecutable("taskkill.exe", { windir: "E:\\Win" }), "E:\\Win\\System32\\taskkill.exe");
+  assert.equal(windowsSystemExecutable("taskkill.exe", {}), "C:\\Windows\\System32\\taskkill.exe");
   assert.equal(terminateCodexProcessTree(4321, { platform: "win32", runSync: () => ({ error: new Error("ENOENT") }) }), false);
   assert.equal(terminateCodexProcessTree(4321, { platform: "darwin", runSync }), false);
   assert.equal(terminateCodexProcessTree(null, { platform: "win32", runSync }), false);
+  assert.equal(terminateCodexProcessTree(Number.NaN, { platform: "win32", runSync }), false);
   assert.equal(calls.length, 1);
 });
 
@@ -181,6 +193,13 @@ test("Windows resolution walks PATH with PATHEXT and finds codex.cmd, not npm's 
     isExecutable: (filePath) => present.has(filePath),
   });
   assert.equal(resolved, "C:\\Users\\Ada\\AppData\\Roaming\\npm\\codex.cmd");
+  // Directory order beats extension order, as in cmd.exe: an earlier codex.cmd wins over a later codex.exe.
+  assert.equal(resolveCodexExecutable({
+    platform: "win32",
+    env: { PATH: `${npm};C:\\Codex`, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+    homeDirectory: "C:\\Users\\Ada",
+    isExecutable: (filePath) => present.has(filePath) || filePath === "C:\\Codex\\codex.exe",
+  }), `${npm}\\codex.cmd`);
   assert.equal(resolveCodexExecutable({
     platform: "win32", env: { PATH: "C:\\nowhere" }, homeDirectory: "C:\\Users\\Ada", isExecutable: () => false,
   }), "codex");

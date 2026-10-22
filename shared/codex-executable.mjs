@@ -127,6 +127,16 @@ export function parseNodeShim(shimPath, shimText, options = {}) {
 /** `%` for a cmd.exe command line: expands back to one `%` (see quoteCmdBatchArgument). */
 const CMD_PERCENT = "%%cd:~0,0%";
 
+/**
+ * A Windows system program by absolute path. A bare name would be searched
+ * in the current directory first, which is the user's repository, so a file
+ * named taskkill.exe or cmd.exe in a clone must never be what runs.
+ */
+export function windowsSystemExecutable(name, env = process.env) {
+  const systemRoot = env.SystemRoot?.trim() || env.windir?.trim() || "C:\\Windows";
+  return path.win32.join(systemRoot, "System32", name);
+}
+
 const NO_CMD_SAFE_QUOTE = "LetAgents cannot pass an argument that contains a double quote through cmd.exe to a batch file, "
   + "because cmd.exe reads the quote as the end of the argument. Install Codex with npm, or point LETAGENTS_CODEX_BIN at codex.exe.";
 
@@ -180,13 +190,15 @@ export function codexLaunchCommand(executable, args, options = {}) {
   if (shim) return { file: shim.file, args: [...shim.args, ...args] };
 
   const env = options.env ?? process.env;
-  const comSpec = env.ComSpec?.trim() || "cmd.exe";
+  const comSpec = env.ComSpec?.trim() || windowsSystemExecutable("cmd.exe", env);
   const line = [executable, ...args].map(quoteCmdBatchArgument).join(" ");
   return {
     file: comSpec,
     // Verbatim arguments are joined as given, so argv[0] is quoted here.
     argv0: `"${comSpec}"`,
-    args: ["/d", "/s", "/c", `"${line}"`],
+    // /d: no AutoRun; /v:off: no delayed `!NAME!` expansion, whatever the
+    // registry says; /s: strip exactly the outer quotes of the /c string.
+    args: ["/d", "/v:off", "/s", "/c", `"${line}"`],
     windowsVerbatimArguments: true,
   };
 }
@@ -217,6 +229,6 @@ export function terminateCodexProcessTree(pid, options = {}) {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32" || !pid) return false;
   const run = options.runSync ?? ((file, args) => spawnSync(file, args, { stdio: "ignore", windowsHide: true }));
-  const result = run("taskkill", ["/pid", String(pid), "/T", "/F"]);
+  const result = run(windowsSystemExecutable("taskkill.exe", options.env ?? process.env), ["/pid", String(pid), "/T", "/F"]);
   return !result?.error;
 }

@@ -1,7 +1,9 @@
 // On Windows, replacing a file fails with EPERM, EBUSY or EACCES while another
 // process (Defender, an indexer, a reader) briefly holds it open. Those errors
 // clear in milliseconds, so the rename is tried again a bounded number of
-// times before the error is rethrown. Any other error is thrown at once.
+// times before the error is rethrown. Any other error, and any error on
+// another platform (where these codes mean a lasting permission problem), is
+// thrown at once, so POSIX behaviour is unchanged.
 
 export const RENAME_RETRY_CODES: ReadonlySet<string> = new Set(["EPERM", "EBUSY", "EACCES"]);
 /** Waits between attempts: 10 attempts, 970 ms of waiting at most. */
@@ -16,7 +18,8 @@ export function sleepSync(ms: number): void {
 
 export type RenameFn = (from: string, to: string) => void;
 
-export function isRetryableRenameError(error: unknown): boolean {
+export function isRetryableRenameError(error: unknown, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "win32") return false;
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return typeof code === "string" && RENAME_RETRY_CODES.has(code);
 }
@@ -25,16 +28,17 @@ export function renameWithRetry(
   rename: RenameFn,
   from: string,
   to: string,
-  options: { sleep?: (ms: number) => void; delaysMs?: readonly number[] } = {},
+  options: { sleep?: (ms: number) => void; delaysMs?: readonly number[]; platform?: NodeJS.Platform } = {},
 ): void {
   const sleep = options.sleep ?? sleepSync;
   const delaysMs = options.delaysMs ?? RENAME_RETRY_DELAYS_MS;
+  const platform = options.platform ?? process.platform;
   for (let attempt = 0; ; attempt += 1) {
     try {
       rename(from, to);
       return;
     } catch (error) {
-      if (!isRetryableRenameError(error) || attempt >= delaysMs.length) throw error;
+      if (!isRetryableRenameError(error, platform) || attempt >= delaysMs.length) throw error;
       sleep(delaysMs[attempt]);
     }
   }

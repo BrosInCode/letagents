@@ -34,6 +34,8 @@ export function parseNodeShim(
   options?: Pick<CodexLaunchCommandOptions, "execPath" | "exists">,
 ): { file: string; args: string[] } | null;
 export function quoteCmdBatchArgument(argument: string): string;
+/** `<SystemRoot>\System32\<name>`, never a bare name that the current directory could shadow. */
+export function windowsSystemExecutable(name: string, env?: NodeJS.ProcessEnv): string;
 export function codexLaunchCommand(
   executable: string,
   args: readonly string[],
@@ -50,6 +52,7 @@ export function terminateCodexProcessTree(
   pid: number | null | undefined,
   options?: {
     platform?: NodeJS.Platform;
+    env?: NodeJS.ProcessEnv;
     runSync?: (file: string, args: string[]) => Pick<SpawnSyncReturns<Buffer>, "error"> | undefined;
   },
 ): boolean;
