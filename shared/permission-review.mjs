@@ -20,6 +20,12 @@
  * answer, a timeout) means "ask a person". Nothing here ever denies a command
  * or decides that a command is dangerous: it only declines to decide.
  *
+ * The rules read a command as a POSIX shell does: its quoting, its
+ * operators, and its `/dev/null`. On a Windows project they also refuse
+ * what cmd.exe would read differently (`%NAME%`, operators inside single
+ * quotes, `/dev/null`), but they do not read cmd.exe's own grammar. An
+ * agent that runs its commands through cmd.exe must not be decided here.
+ *
  * Pure: no I/O, no clock, no environment.
  */
 
@@ -43,7 +49,7 @@ const DOUBLE_QUOTED = /^[\x20\x23\x25-\x5b\x5d-\x5f\x61-\x7e]*$/;
 /** Joining or discarding an output stream names no file a command could overwrite. */
 const STREAM = /^(?:2>&1|[12]?>>? ?\/dev\/null)(?=[ \t\n;|&]|$)/;
 
-const CREDENTIAL = /(?:^|[/=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/._-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
+const CREDENTIAL = /(?:^|[/\\=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/\\._=:,-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
 
 /** A script, target, or file named for an action that ships, removes, or reaches production. */
 const CONSEQUENTIAL_NAME = /deploy|release|publish|rollback|destroy|teardown|wipe|purge|drop|nuke|erase|delete|remove|reset|clean|clear|uninstall|install|migrat|seed|prod|backup|restore|upload|email|notify|charge|refund|invoice|payment|(?:^|[^a-z])(?:env|db|sync|ship|push|rm)(?:$|[^a-z])/i;
@@ -52,11 +58,81 @@ function isText(value, max) {
   return typeof value === "string" && value.length > 0 && value.length <= max;
 }
 
+/**
+ * Both `/` and `\` split a path. Windows reads either, and a POSIX shell
+ * never passes a `\` through unquoted, so reading both everywhere costs
+ * nothing and lets no part hide behind the other separator.
+ */
+export const PATH_SEPARATOR = /[\\/]/;
+
+/**
+ * Where an absolute path starts, and its parts, or null when the text is
+ * relative. The root is `/` for a POSIX path or one that starts with a
+ * separator alone, the drive in lower case followed by `/` for `C:\x` or
+ * `C:/x`, and `//server/share` for a network share written either way. A
+ * drive with no separator after it (`C:x`) names a folder the shell remembers
+ * for that drive, so it is absolute but has no root this file can read.
+ * Parts keep their case: how a file system folds it is not known here.
+ */
+function absolutePath(text) {
+  const drive = /^([A-Za-z]):/.exec(text);
+  if (drive) {
+    const rest = text.slice(2);
+    if (!PATH_SEPARATOR.test(rest.charAt(0))) return { root: null, parts: [] };
+    return { root: `${drive[1].toLowerCase()}:/`, parts: rest.slice(1).split(PATH_SEPARATOR) };
+  }
+  if (!PATH_SEPARATOR.test(text.charAt(0))) return null;
+  if (!PATH_SEPARATOR.test(text.charAt(1))) return { root: "/", parts: text.slice(1).split(PATH_SEPARATOR) };
+  const [server, share, ...parts] = text.slice(2).split(PATH_SEPARATOR);
+  // `//x` alone is read as a share without a name. Nothing is inside it.
+  return server && share ? { root: `//${server}/${share}`, parts } : { root: null, parts: [] };
+}
+
+/**
+ * True when Windows opens a name as another name: it drops the dots and
+ * spaces at the end, so `.. ` climbs and `.env ` holds credentials. Such a
+ * name is not compared with anything. `.` stands, and three dots or more
+ * alone are a plain name (`go test ./...`).
+ */
+function openedAsAnotherName(part) {
+  return /[. ]$/.test(part) && part !== "." && !/^\.{3,}$/.test(part);
+}
+
+/**
+ * Where an absolute path is against the project: the project itself, inside
+ * it, or null when it is elsewhere or not read. A path with another root (a
+ * different drive, a different share, a POSIX root against a drive) is
+ * elsewhere, whatever its parts say. An empty part or `.` inside the path is
+ * not read; one separator at the end is.
+ */
+function placeInProject(text, project) {
+  const path = absolutePath(text);
+  const root = absolutePath(project);
+  if (!path || !root || path.root === null || path.root !== root.root) return null;
+  // On a POSIX project `\` is part of a name, so `/a\b` is not `/a/b`.
+  if (root.root === "/" && text.includes("\\")) return null;
+  const parts = path.parts.length > 1 && path.parts.at(-1) === "" ? path.parts.slice(0, -1) : path.parts;
+  if (parts.some((part) => part === "") || parts.slice(0, -1).some((part) => part === ".")) return null;
+  if (parts.length < root.parts.length || root.parts.some((part, index) => parts[index] !== part)) return null;
+  return parts.length === root.parts.length ? "self" : "inside";
+}
+
+/** True when the project is on a Windows drive or share, where `\` separates and `C:x` names a folder. */
+function onWindows(project) {
+  return absolutePath(project)?.root !== "/";
+}
+
 function normalizedProject(project) {
   if (!isText(project, PERMISSION_REVIEW_MAX_PROJECT_CHARS) || !/^[\x21-\x7e]+$/.test(project)) return null;
-  const trimmed = project.replace(/\/+$/, "");
-  return trimmed.startsWith("/") && trimmed.length > 1
-    && trimmed.split("/").slice(1).every((part) => part && part !== "." && part !== "..") ? trimmed : null;
+  // `\x` names a folder on whichever drive is current, and a POSIX folder's name may hold a `\`: neither is read.
+  if (!absolutePath(project) || (!onWindows(project) && project.includes("\\"))) return null;
+  // A share is written with one separator throughout: `//x/y/z\` could also be a POSIX folder whose name ends in `\`.
+  if (onWindows(project) && !/^[A-Za-z]:/.test(project) && project.includes("/") && project.includes("\\")) return null;
+  const trimmed = project.replace(/[\\/]+$/, "");
+  const path = absolutePath(trimmed);
+  // A root alone (`/`, `C:\`, `\\server\share`) is not a project: everything would be inside it.
+  return path && path.root !== null && path.parts.length > 0
+    && path.parts.every((part) => part && part !== "." && part !== ".." && !(onWindows(project) && openedAsAnotherName(part))) ? trimmed : null;
 }
 
 /** The text inside a quote that starts at `index`, and where the quote ends, or null. */
@@ -140,19 +216,45 @@ function readCommands(command) {
   return commands.length > 0 ? commands : null;
 }
 
+/**
+ * The pieces of a word that may each name a path, with where each starts:
+ * `a=b`, `a:b` and `a,b` are read as two. The colon after a drive letter is
+ * part of the path, not a break, when a separator follows it (`C:\x`, `C:/x`)
+ * and, on a Windows project, always (`C:x` names a folder on that drive). On
+ * a POSIX project `x:y` stays two pieces, as `grep 'key: value'` writes it.
+ */
+function pathPieces(value, windows) {
+  const pieces = [];
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === ":" && index === start + 1 && /[A-Za-z]/.test(value[start])
+      && (windows || PATH_SEPARATOR.test(value.charAt(index + 1)))) continue;
+    if (char === "=" || char === ":" || char === ",") {
+      pieces.push({ piece: value.slice(start, index), start });
+      start = index + 1;
+    }
+  }
+  pieces.push({ piece: value.slice(start), start });
+  return pieces;
+}
+
 /** True when the text names nothing outside the project and nothing that holds credentials or history. */
 function staysInProject(value, project) {
   // `@file` makes several programs read their arguments from the file.
   if (value.includes("://") || /(?:^|[=:,])@/.test(value) || CREDENTIAL.test(value)) return false;
-  for (const piece of value.split(/[=:,]/)) {
+  const windows = onWindows(project);
+  // A project written with `/` alone is on a system where `\` separates nothing, and a path written with one is not read there.
+  if (!windows && value.includes("\\")) return false;
+  for (const { piece, start } of pathPieces(value, windows)) {
     if (piece.startsWith("~")) return false;
-    const parts = piece.split("/");
-    if (parts.some((part) => part === ".." || part.toLowerCase() === ".git")) return false;
-    if (piece.startsWith("/")) {
-      const path = piece.replace(/\/+$/, "") || "/";
-      if (parts.slice(1, -1).some((part) => part === "" || part === ".")) return false;
-      if (path !== project && !path.startsWith(`${project}/`)) return false;
-    }
+    const parts = piece.split(PATH_SEPARATOR);
+    if (parts.some((part) => part === ".." || part.toLowerCase() === ".git" || (windows && openedAsAnotherName(part)))) return false;
+    // Absolute in any form: `/x`, `\x`, `C:\x`, `C:/x`, `C:x`, `\\server\share\x`, `//server/share/x`. The piece must be
+    // inside the project, and so must the rest of the word from it on: `=`, `:` and `,` may be part of a folder's name,
+    // and `/project:other/x` is a sibling folder, not the project and a relative name.
+    if (/^(?:[\\/]|[A-Za-z]:)/.test(piece)
+      && (placeInProject(piece, project) === null || placeInProject(value.slice(start), project) === null)) return false;
   }
   return true;
 }
@@ -356,15 +458,20 @@ const PROGRAMS = {
   },
   git: ([verb, ...args], project) => {
     // `-C` naming the project itself runs Git where it runs anyway. Any other folder may be another repository, with hooks of its own.
-    if (verb === "-C") return args[0]?.replace(/\/+$/, "") === project && PROGRAMS.git(args.slice(1), project);
+    if (verb === "-C") return typeof args[0] === "string" && placeInProject(args[0], project) === "self" && PROGRAMS.git(args.slice(1), project);
     if (verb === "branch") return args.every((arg) => /^(?:--show-current|--list|--all|--remotes|-a|-r|-l|-v|-vv)$/.test(arg));
     if (verb === "tag") return args.every((arg) => /^(?:--list|-l)$/.test(arg));
     // One `--` may separate revisions from paths. What follows it is a path.
     const separator = args.indexOf("--");
     const before = separator < 0 ? args : args.slice(0, separator);
     const paths = separator < 0 ? [] : args.slice(separator + 1);
-    return GIT_VERBS.has(verb) && readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) !== null
-      && paths.every((path) => !path.startsWith("-") && staysInProject(path, project));
+    const words = GIT_VERBS.has(verb) ? readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) : null;
+    // A pathspec that starts with `:` carries an instruction (`:(top)x`, `:/x`, `:!x`), and `:(top)` reads from
+    // the repository's top folder, which may be above the project. One with `*`, `?` or `[` is matched by Git
+    // itself, so `.[e]nv` names `.env`. An option's value (`-e ':x'`, `-e 'a.*'`) is neither.
+    const pathspec = (word) => !word.startsWith(":") && !/[*?[]/.test(word);
+    return words !== null && words.every(pathspec)
+      && paths.every((path) => !path.startsWith("-") && pathspec(path) && staysInProject(path, project));
   },
   npm: ([verb, ...rest], project) => {
     if (verb === "ls" || verb === "list") return rest.every((arg) => /^(?:--depth=\d+|--all|-a|--json|--long|-l)$/.test(arg));
@@ -413,6 +520,22 @@ function simpleCommandAllowed({ words, fed }, project) {
 }
 
 /**
+ * The simple commands of a command run in the project, or null when they are
+ * not read. On Windows, cmd.exe reads the whole line before any word: it puts
+ * a variable's value in place of `%NAME%` wherever the two signs are, even
+ * across words and quotes; single quotes quote nothing, so `&`, `|`, `<`,
+ * `>`, `^`, `!` and `"` inside them act; and `/dev/null` is a file on the
+ * current drive. None of these is read on a Windows project.
+ */
+function readProjectCommands(command, project) {
+  const commands = readCommands(command);
+  if (!commands || !onWindows(project)) return commands;
+  if (/%[^%]*%/.test(command) || command.includes("/dev/null")) return null;
+  // Every word: a quoted value joined to its option (`--format='a & b'`) is read as one plain word.
+  return commands.some((simple) => simple.words.some((word) => /[&|<>^!"]/.test(word.value))) ? null : commands;
+}
+
+/**
  * True when a person must decide. It means only that these rules cannot read
  * the command, not that the command is harmful.
  */
@@ -421,7 +544,7 @@ export function commandNeedsPerson(command, project) {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return true;
     const root = normalizedProject(project);
     if (!root) return true;
-    const commands = readCommands(command);
+    const commands = readProjectCommands(command, root);
     return !commands || !commands.every((simple) => simpleCommandAllowed(simple, root));
   } catch {
     return true;
@@ -563,7 +686,7 @@ export function commandOnlyReads(command, project) {
   try {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return false;
     const root = normalizedProject(project);
-    const commands = root ? readCommands(command) : null;
+    const commands = root ? readProjectCommands(command, root) : null;
     return commands !== null && commands.every((simple) => (simpleCommandAllowed(simple, root) && !RUNS_CODE.has(simple.words[0].value))
       || (!simple.words[0].quoted && simple.words[0].value === "gh" && githubRead(simple.words.slice(1).map((word) => word.value), root)));
   } catch {
@@ -593,7 +716,7 @@ export function routineCommandReview(command, project, context) {
   try {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return null;
     const root = normalizedProject(project);
-    const commands = root ? readCommands(command) : null;
+    const commands = root ? readProjectCommands(command, root) : null;
     if (!commands) return null;
     const own = (branch) => typeof branch === "string" && context.ownBranch(branch) === true;
     const base = typeof context.defaultBranch === "string" && isRef(context.defaultBranch) ? context.defaultBranch : null;
