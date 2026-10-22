@@ -655,7 +655,7 @@ test("desktop-tests runs every desktop suite, with electron shards of one total"
   const electronFiles = desktopScripts["test:electron"].match(/^npm run test:electron:files -- (\S+)$/)?.[1];
   assert.ok(electronFiles, "test:electron must pass one file pattern to test:electron:files");
   assert.ok(
-    testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" ${electronFiles} > `),
+    testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/electron-test-weights.json ${electronFiles} > `),
     `the electron shards must select from ${electronFiles}, as test:electron does`,
   );
   assert.ok(shards.length > 0, "desktop-tests must run the electron suite");
