@@ -5,8 +5,8 @@
     :connected="connected"
     @open-card="(room, task) => emit('open-card', room, task)"
     @open-thread="(room, thread) => emit('open-thread', room, thread)"
-    @open-trackers="emit('open-trackers')"
-  />
+    ><template #navigation><slot name="navigation" /></template
+  ></MyWork>
 </template>
 <script setup lang="ts">
 import MyWork from "../../../../../../../shared/ui/my-work/MyWork.vue";
@@ -19,7 +19,6 @@ defineProps<{
 const emit = defineEmits<{
   "open-card": [roomId: string, taskId: string];
   "open-thread": [roomId: string, threadRootId: string];
-  "open-trackers": [];
 }>();
 const askNeedsMe = desktopIpc.room?.askMyWorkNeedsMe;
 const api: MyWorkApi = {

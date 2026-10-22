@@ -7,7 +7,7 @@
     />
 
     <main class="settings-content" data-testid="settings-content">
-      <header class="settings-content-header">
+      <header v-if="!isConnectorsPane" class="settings-content-header">
         <div>
           <p class="sidebar-label">{{ activePaneBreadcrumb }}</p>
           <h1>{{ activePaneTitle }}</h1>
@@ -21,15 +21,28 @@
           @click="refresh"
         >
           <RefreshCw aria-hidden="true" />
-          <span>{{ busy || diagnosticsPane?.busy ? "Refreshing" : "Refresh" }}</span>
+          <span>{{
+            busy || diagnosticsPane?.busy ? "Refreshing" : "Refresh"
+          }}</span>
         </button>
       </header>
 
-      <nav v-if="subsections.length" class="settings-subsections" aria-label="Settings pages">
-        <button v-for="item in subsections" :key="item.id" type="button"
-          :data-active="activeSubsection === item.id" :aria-current="activeSubsection === item.id ? 'page' : undefined"
+      <nav
+        v-if="subsections.length && !isConnectorsPane"
+        class="settings-subsections"
+        aria-label="Settings pages"
+      >
+        <button
+          v-for="item in subsections"
+          :key="item.id"
+          type="button"
+          :data-active="activeSubsection === item.id"
+          :aria-current="activeSubsection === item.id ? 'page' : undefined"
           :data-testid="`settings-subsection-${item.id}`"
-          @click="selectPane(item.id)">{{ item.title }}</button>
+          @click="selectPane(item.id)"
+        >
+          {{ item.title }}
+        </button>
       </nav>
 
       <SettingsProfilePane
@@ -46,15 +59,34 @@
       />
 
       <template v-else-if="isConnectorsPane">
-        <SettingsConnectorsList :mcp-install-state="mcpInstallState" @open="selectPane" />
-        <SettingsConnectorsPane v-if="activePane === 'account:connectors'" />
-        <SettingsMcpPane
-          v-else-if="activePane === 'account:connectors-agents'"
-          :mcp-install-state="mcpInstallState"
-          @connect="selectPane('account:connectors-setup')"
+        <ConnectorsPage
+          v-if="activePane !== 'account:connectors-setup'"
+          :key="authStatus?.account?.id ?? 'signed-out'"
+          ref="connectorsPage"
+          :api="connectorsApi"
+          :agent-targets="mcpInstallState.targets"
+          desktop
+          :remote-url="remoteConnectorUrl(appInfo?.apiUrl)"
+          :initial-tab="
+            activePane === 'account:connectors-agents'
+              ? 'agent'
+              : activePane === 'account:connectors-remote'
+                ? 'remote'
+                : 'all'
+          "
+          @setup-agent="openAgentSetup"
+          @refresh-agents="$emit('refresh')"
         />
+        <button
+          v-else
+          class="ghost-button"
+          type="button"
+          @click="selectPane('account:connectors-agents')"
+        >
+          ← Connectors
+        </button>
         <SettingsSetupPane
-          v-else-if="activePane === 'account:connectors-setup'"
+          v-if="activePane === 'account:connectors-setup'"
           :mcp-install-state="mcpInstallState"
           :selected-mcp-target-ids="selectedMcpTargetIds"
           :mcp-wizard-step="mcpWizardStep"
@@ -67,9 +99,11 @@
           @continue-mcp="$emit('continue-mcp')"
           @back-mcp="$emit('back-mcp')"
           @install-mcp-targets="$emit('install-mcp-targets')"
-          @finish-mcp="$emit('finish-mcp')"
+          @finish-mcp="
+            $emit('finish-mcp');
+            selectPane('account:connectors-agents');
+          "
         />
-        <SettingsRemoteMcpPane v-else :api-url="appInfo?.apiUrl ?? null" />
       </template>
       <SettingsStoragePane
         v-else-if="isStoragePane"
@@ -106,7 +140,9 @@
         :app-agent-settings="appAgentSettings"
         @save-app-agent-settings="$emit('save-app-agent-settings', $event)"
       />
-      <SettingsSupervisorGrantPane v-else-if="activePane === 'system:supervisor'" />
+      <SettingsSupervisorGrantPane
+        v-else-if="activePane === 'system:supervisor'"
+      />
 
       <SettingsRuntimePane
         v-else-if="activePane === 'system:runtime'"
@@ -158,12 +194,8 @@ import type {
 } from "../../../../../electron/ipc-types";
 import SettingsAgentsPane from "../settings/panes/SettingsAgentsPane.vue";
 import SettingsAppAgentPane from "../settings/panes/SettingsAppAgentPane.vue";
-import SettingsConnectorsList from "../settings/panes/SettingsConnectorsList.vue";
-import SettingsConnectorsPane from "../settings/panes/SettingsConnectorsPane.vue";
 import SettingsDiagnosticsPane from "../settings/panes/SettingsDiagnosticsPane.vue";
-import SettingsMcpPane from "../settings/panes/SettingsMcpPane.vue";
 import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";
-import SettingsRemoteMcpPane from "../settings/panes/SettingsRemoteMcpPane.vue";
 import SettingsRentingPane from "../settings/panes/SettingsRentingPane.vue";
 import SettingsRoomsPane from "../settings/panes/SettingsRoomsPane.vue";
 import SettingsRuntimePane from "../settings/panes/SettingsRuntimePane.vue";
@@ -172,8 +204,13 @@ import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
 import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
 import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGrantPane.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
-import { loadRemoteSignIns, loadTrackerConnections } from "../settings/connectors-store";
-import type { LegacySettingsPaneId, SettingsFeedback, SettingsPaneId } from "../settings/types";
+import ConnectorsPage from "../../../../../../../shared/ui/connectors/ConnectorsPage.vue";
+import { remoteConnectorUrl } from "../settings/connectors";
+import type {
+  LegacySettingsPaneId,
+  SettingsFeedback,
+  SettingsPaneId,
+} from "../settings/types";
 import {
   resolveSettingsPane,
   settingsNavGroups,
@@ -240,42 +277,77 @@ const emit = defineEmits<{
 }>();
 
 const activePane = ref<SettingsPaneId>(resolveSettingsPane(props.initialPane));
-const diagnosticsPane = ref<{ refresh: () => Promise<void>; busy: boolean } | null>(null);
+const diagnosticsPane = ref<{
+  refresh: () => Promise<void>;
+  busy: boolean;
+} | null>(null);
 
 const activeSection = computed(() => settingsSectionFor(activePane.value));
-const subsections = computed(() => visibleSettingsSubsections(activeSection.value));
-const activeSubsection = computed(() => settingsSubsectionFor(activePane.value));
-const isConnectorsPane = computed(() => activeSection.value === "account:connectors");
+const subsections = computed(() =>
+  visibleSettingsSubsections(activeSection.value),
+);
+const activeSubsection = computed(() =>
+  settingsSubsectionFor(activePane.value),
+);
+const isConnectorsPane = computed(
+  () => activeSection.value === "account:connectors",
+);
 
 const isRoomPane = computed(() => activePane.value.startsWith("rooms:"));
 const isStoragePane = computed(() => activePane.value.startsWith("storage:"));
 
-const activePaneItem = computed(() =>
-  settingsNavGroups.flatMap((group) => group.items).find((item) => item.id === activeSection.value) || settingsNavGroups[0].items[0],
+const activePaneItem = computed(
+  () =>
+    settingsNavGroups
+      .flatMap((group) => group.items)
+      .find((item) => item.id === activeSection.value) ||
+    settingsNavGroups[0].items[0],
 );
 
 const activePaneBreadcrumb = computed(() => {
-  const group = settingsNavGroups.find((navGroup) => navGroup.items.some((item) => item.id === activeSection.value));
+  const group = settingsNavGroups.find((navGroup) =>
+    navGroup.items.some((item) => item.id === activeSection.value),
+  );
   return `Settings / ${group?.label || "Storage"}`;
 });
 
 const activePaneTitle = computed(() => activePaneItem.value.title);
 const activePaneDescription = computed(() => {
-  if (activePane.value === "rooms:defaults") return "Manage active, pinned, and joined rooms.";
-  if (activePane.value === "rooms:left") return "Restore rooms you previously left.";
-  if (activePane.value === "storage:chat") return "Choose where room messages are stored.";
-  if (activePane.value === "rooms:danger") return "Review actions that remove access or delete rooms you created.";
-  if (activePane.value === "system:app-agent") return "Configure the app assistant and see what it can do in the app.";
-  return (settingsSubsections[activeSection.value] ?? []).find(item => item.id === activePane.value)?.description
-    ?? activePaneItem.value.description;
+  if (activePane.value === "rooms:defaults")
+    return "Manage active, pinned, and joined rooms.";
+  if (activePane.value === "rooms:left")
+    return "Restore rooms you previously left.";
+  if (activePane.value === "storage:chat")
+    return "Choose where room messages are stored.";
+  if (activePane.value === "rooms:danger")
+    return "Review actions that remove access or delete rooms you created.";
+  if (activePane.value === "system:app-agent")
+    return "Configure the app assistant and see what it can do in the app.";
+  return (
+    (settingsSubsections[activeSection.value] ?? []).find(
+      (item) => item.id === activePane.value,
+    )?.description ?? activePaneItem.value.description
+  );
 });
 
 watch(
   () => props.initialPane,
   (nextPane) => {
     activePane.value = resolveSettingsPane(nextPane);
-  }
+  },
 );
+
+const connectorsPage = ref<InstanceType<typeof ConnectorsPage>>();
+const connectorsApi = {
+  trackers: window.letagentsDesktop.connectors,
+  remote: window.letagentsDesktop.mcpConnections,
+};
+function openAgentSetup(id: DesktopMcpInstallTargetId) {
+  emit("back-mcp");
+  emit("clear-mcp-target-selection");
+  emit("select-mcp-target", id);
+  selectPane("account:connectors-setup");
+}
 
 function refresh(): void {
   if (activePane.value === "system:diagnostics") {
@@ -283,8 +355,7 @@ function refresh(): void {
     return;
   }
   if (isConnectorsPane.value) {
-    void loadTrackerConnections();
-    void loadRemoteSignIns();
+    void connectorsPage.value?.refresh();
   }
   emit("refresh");
 }

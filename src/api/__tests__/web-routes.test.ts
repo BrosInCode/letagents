@@ -48,14 +48,14 @@ test("registerWebRoutes preserves route registration order", (t) => {
     { method: "use", path: "<static>" },
     { method: "get", path: "/" },
     { method: "get", path: "/docs" },
-    { method: "get", path: ["/messages", "/my-work"] },
+    { method: "get", path: ["/messages", "/my-work", "/connectors"] },
     { method: "get", path: /^\/ask\/[A-Za-z0-9_-]{20,64}$/ },
     { method: "get", path: "/app" },
   ]);
 });
 
 
-test("My work direct navigation and sign-in return load the same SPA as Messages", async (t) => {
+test("My Work and Connectors direct navigation and sign-in return load the same SPA as Messages", async (t) => {
   const { default: express } = await import("express");
   const app = express();
   // Exercise the real route handlers without depending on a concurrent Vite build
@@ -71,6 +71,10 @@ test("My work direct navigation and sign-in return load the same SPA as Messages
   const address = server.address() as { port: number };
   const base = `http://127.0.0.1:${address.port}`;
   const messages = await fetch(`${base}/messages`);
+  const connectors = await fetch(`${base}/connectors`);
+  assert.equal(connectors.status, messages.status);
+  assert.notEqual(connectors.status, 404);
+  assert.equal(await connectors.text(), await messages.clone().text());
   const work = await fetch(`${base}/my-work`);
   assert.equal(work.status, messages.status);
   assert.notEqual(work.status, 404);

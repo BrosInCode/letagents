@@ -5,6 +5,7 @@
       type="button"
       class="work-filter-trigger"
       :popovertarget="id"
+      :disabled="disabled"
       :aria-label="`${label}: ${selected?.label || modelValue}`"
       aria-haspopup="listbox"
       :aria-expanded="opened"
@@ -12,8 +13,7 @@
       @keydown.down.prevent="show"
       @keydown.up.prevent="show"
     >
-      <slot name="icon" /><span>{{ selected?.label || modelValue }}</span
-      ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <slot name="trigger" :option="selected"><slot name="icon" /><span>{{ selected?.label || modelValue }}</span></slot><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <path d="m4 6 4 4 4-4" />
       </svg>
     </button>
@@ -46,10 +46,11 @@
           role="option"
           class="work-menu-option"
           :aria-selected="option.id === modelValue"
+          :disabled="option.disabled"
           :tabindex="index === focusIndex ? 0 : -1"
           @click="choose(option.id)"
         >
-          <span class="work-option-mark" aria-hidden="true">{{
+          <slot name="option" :option="option"><span class="work-option-mark" aria-hidden="true">{{
             option.mark || (option.id ? option.label.slice(0, 2) : "≡")
           }}</span
           ><span class="work-option-label">{{ option.label }}</span
@@ -57,7 +58,7 @@
             v-if="option.count !== undefined"
             class="work-option-count"
             aria-hidden="true"
-            >{{ option.count }}</span
+            >{{ option.count }}</span></slot
           ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path v-if="option.id === modelValue" d="m3 8 3 3 7-7" />
           </svg>
@@ -80,7 +81,10 @@ const props = withDefaults(
       label: string;
       mark?: string;
       count?: number;
+      disabled?: boolean;
     }[];
+    disabled?: boolean;
+    matchTriggerWidth?: boolean;
     searchable?: boolean;
     searchPlaceholder?: string;
   }>(),
@@ -110,6 +114,7 @@ function position() {
     popup = menu.value,
     edge = 12,
     gap = 7;
+  if (props.matchTriggerWidth) popup.style.width = `${box.width}px`;
   popup.style.maxHeight = `${Math.max(0, window.innerHeight - 2 * edge)}px`;
   const below = window.innerHeight - box.bottom - gap - edge,
     above = box.top - gap - edge;
@@ -123,13 +128,14 @@ function reposition(event: Event) {
     position();
 }
 function show() {
-  menu.value?.showPopover();
+  if (!props.disabled) menu.value?.showPopover();
 }
 function close(restore = false) {
   menu.value?.hidePopover();
   if (restore) trigger.value?.focus({ preventScroll: true });
 }
 function choose(value: string) {
+  if (props.disabled || props.options.find(option => option.id === value)?.disabled) return;
   emit("update:modelValue", value);
   close(true);
 }
@@ -141,12 +147,12 @@ async function toggled(event: Event) {
   query.value = "";
   focusIndex.value = Math.max(
     0,
-    props.options.findIndex((option) => option.id === props.modelValue),
+    props.options.findIndex((option) => option.id === props.modelValue && !option.disabled),
   );
   await nextTick();
   position();
   (
-    input.value || menu.value?.querySelector<HTMLElement>('[tabindex="0"]')
+    input.value || menu.value?.querySelector<HTMLElement>('[role="option"]:not(:disabled)[tabindex="0"]') || menu.value?.querySelector<HTMLElement>('[role="option"]:not(:disabled)') || trigger.value
   )?.focus({ preventScroll: true });
   window.addEventListener("resize", position);
   window.addEventListener("scroll", reposition, true);
@@ -168,7 +174,8 @@ function keydown(event: KeyboardEvent) {
   }
   if (event.key === "Enter" && event.target === input.value) {
     event.preventDefault();
-    if (visible.value[0]) choose(visible.value[0].id);
+    const first = visible.value.find(option => !option.disabled);
+    if (first) choose(first.id);
     return;
   }
   if (
@@ -179,11 +186,11 @@ function keydown(event: KeyboardEvent) {
     return;
   event.preventDefault();
   const options = [
-    ...(menu.value?.querySelectorAll<HTMLElement>('[role="option"]') || []),
+    ...(menu.value?.querySelectorAll<HTMLElement>('[role="option"]:not(:disabled)') || []),
   ];
   if (!options.length) return;
   const current = options.indexOf(document.activeElement as HTMLElement);
-  focusIndex.value =
+  const nextIndex =
     event.key === "Home"
       ? 0
       : event.key === "End"
@@ -194,9 +201,12 @@ function keydown(event: KeyboardEvent) {
             : 0
           : (current + (event.key === "ArrowUp" ? -1 : 1) + options.length) %
             options.length;
-  options[focusIndex.value]?.focus({ preventScroll: true });
-  options[focusIndex.value]?.scrollIntoView({ block: "nearest" });
+  const target = options[nextIndex];
+  focusIndex.value = [...(menu.value?.querySelectorAll<HTMLElement>('[role="option"]') || [])].indexOf(target);
+  target?.focus({ preventScroll: true });
+  target?.scrollIntoView({ block: "nearest" });
 }
+watch(() => props.disabled, disabled => { if (disabled) close(); });
 watch(visible, async () => {
   focusIndex.value = Math.max(
     0,
@@ -242,6 +252,7 @@ onBeforeUnmount(() => {
   stroke: currentColor;
   stroke-width: 1.5;
 }
+.work-filter-trigger:disabled,.work-menu-option:disabled { opacity: .5; cursor: default; }
 .work-filter-trigger:hover,
 .work-filter-trigger[aria-expanded="true"] {
   color: var(--text, #eee);
