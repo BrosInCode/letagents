@@ -1,7 +1,7 @@
 import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
-import { registerAskLinks } from "./main/ask-links.js";
+import { claimDesktopInstance, registerAskLinks } from "./main/ask-links.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
@@ -26,92 +26,98 @@ import { stopActiveRentalProviderHostManager } from "./rental/provider-host-mana
 import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
 
 configureDesktopSmokeEnvironment();
-prepareDesktopNotifications();
-registerAskLinks();
+// Off macOS a link starts a second instance: it hands the link to the running app and exits before starting anything.
+if (claimDesktopInstance()) startDesktopApp();
+else app.exit(0);
 
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: attachmentProtocolScheme,
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      stream: true,
+function startDesktopApp(): void {
+  prepareDesktopNotifications();
+  registerAskLinks();
+
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: attachmentProtocolScheme,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        stream: true,
+      },
     },
-  },
-]);
+  ]);
 
-const startRentalServices = registerDesktopIpcHandlers();
-setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDaemonClient.syncExecutionDelegations(roomId); });
+  const startRentalServices = registerDesktopIpcHandlers();
+  setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDaemonClient.syncExecutionDelegations(roomId); });
 
-app.once("ready", async (_event, launchInfo) => {
-  prepareDesktopNotificationLaunch(launchInfo);
-  const startupPreparation = (async () => {
-    await startDesktopShellEnvironmentHydration().catch((error) => {
-      console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    });
-  })();
-  const backgroundStartup = (async () => {
-    if (process.platform === "darwin") {
-      // Register startup before opening the window, including its prerequisites,
-      // so passive readers can wait for the same readiness operation.
-      await supervisorDaemonClient.ensureRunning(startupPreparation).catch((error) => {
-        console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  app.once("ready", async (_event, launchInfo) => {
+    prepareDesktopNotificationLaunch(launchInfo);
+    const startupPreparation = (async () => {
+      await startDesktopShellEnvironmentHydration().catch((error) => {
+        console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
       });
-      // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
-      // intentionally non-fatal to Electron: the paused/blocked daemon entry is
-      // truthful and recovery remains available after sign-in/host authority.
-      if (!await supervisorDaemonClient.isMaintenanceHeld()) await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
-        console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    } else {
-      await startupPreparation;
+    })();
+    const backgroundStartup = (async () => {
+      if (process.platform === "darwin") {
+        // Register startup before opening the window, including its prerequisites,
+        // so passive readers can wait for the same readiness operation.
+        await supervisorDaemonClient.ensureRunning(startupPreparation).catch((error) => {
+          console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
+        // intentionally non-fatal to Electron: the paused/blocked daemon entry is
+        // truthful and recovery remains available after sign-in/host authority.
+        if (!await supervisorDaemonClient.isMaintenanceHeld()) await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
+          console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      } else {
+        await startupPreparation;
+      }
+    })();
+    // Rental recovery restores local deadlines promptly, then joins the startup
+    // operation already registered by the application above.
+    startRentalServices();
+    if (process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE === "1") {
+      await backgroundStartup;
+      const status = await supervisorDaemonClient.ensureRunning();
+      console.log(`LETAGENTS_PACKAGED_SUPERVISOR_READY ${JSON.stringify(status)}`);
+      app.exit(0);
+      return;
     }
-  })();
-  // Rental recovery restores local deadlines promptly, then joins the startup
-  // operation already registered by the application above.
-  startRentalServices();
-  if (process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE === "1") {
-    await backgroundStartup;
-    const status = await supervisorDaemonClient.ensureRunning();
-    console.log(`LETAGENTS_PACKAGED_SUPERVISOR_READY ${JSON.stringify(status)}`);
-    app.exit(0);
-    return;
-  }
-  protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
-  seedDesktopSmokeState();
-  app.setName("LetAgents");
-  if (process.platform === "darwin" && !app.isPackaged) {
-    app.dock?.setIcon(join(workspaceRoot, "brand", "letagents-app-icon.png"));
-  }
-  configureApplicationMenu();
-  createWindow();
-  void backgroundStartup;
-  initializeDesktopUpdates();
-  await initializeDesktopNotifications().catch((error) => {
-    console.warn(`Desktop notification setup unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
+    seedDesktopSmokeState();
+    app.setName("LetAgents");
+    if (process.platform === "darwin" && !app.isPackaged) {
+      app.dock?.setIcon(join(workspaceRoot, "brand", "letagents-app-icon.png"));
+    }
+    configureApplicationMenu();
+    createWindow();
+    void backgroundStartup;
+    initializeDesktopUpdates();
+    await initializeDesktopNotifications().catch((error) => {
+      console.warn(`Desktop notification setup unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    app.on("activate", () => {
+      if (!hasOpenWindows()) createWindow();
+      focusMainWindow();
+    });
   });
 
-  app.on("activate", () => {
-    if (!hasOpenWindows()) createWindow();
-    focusMainWindow();
+  autoUpdater.on("before-quit-for-update", allowMainWindowQuit);
+
+  app.on("before-quit", () => {
+    allowMainWindowQuit();
+    setDesktopNotificationBadgeCount(0);
+    stopDesktopUpdates();
+    void stopDesktopRoomStream();
+    void stopActiveRentalProviderHostManager();
+    void stopActiveRentalProviderEventPoller();
   });
-});
 
-autoUpdater.on("before-quit-for-update", allowMainWindowQuit);
-
-app.on("before-quit", () => {
-  allowMainWindowQuit();
-  setDesktopNotificationBadgeCount(0);
-  stopDesktopUpdates();
-  void stopDesktopRoomStream();
-  void stopActiveRentalProviderHostManager();
-  void stopActiveRentalProviderEventPoller();
-});
-
-app.on("window-all-closed", () => {
-  void stopDesktopRoomStream();
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
+  app.on("window-all-closed", () => {
+    void stopDesktopRoomStream();
+    if (process.platform !== "darwin") {
+      app.quit();
+    }
+  });
+}

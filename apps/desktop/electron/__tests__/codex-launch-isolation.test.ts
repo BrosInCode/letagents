@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
@@ -32,6 +33,7 @@ const {
   codexPersonalSkillFiles,
   codexSkillDisableOverride,
   listCodexMcpServerNames,
+  runCodexMcpList,
 } = await import("../../../../shared/codex-owner-isolation.mjs");
 const {
   codexAppServerEnvironment,
@@ -215,6 +217,28 @@ test("Codex override builders disable named skills and every MCP server but LetA
     "features.memories=false",
     "notify=[]",
   ]);
+});
+
+test("a timed-out MCP list stops Codex's native process, not just its npm wrapper", { skip: process.platform === "win32" && "no process groups" }, async (t) => {
+  const folder = mkdtempSync(join(tmpdir(), "codex-mcp-list-shim-"));
+  const pids = join(folder, "pids");
+  const shim = join(folder, "codex");
+  // Like npm's wrapper: the native process shares its output and outlives a signal to the wrapper.
+  writeFileSync(shim, `#!/usr/bin/env node
+const native = require("node:child_process").spawn("sleep", ["300"], { stdio: "inherit" });
+require("node:fs").writeFileSync(${JSON.stringify(pids)}, String(native.pid));
+native.on("exit", code => process.exit(code ?? 1));
+`);
+  chmodSync(shim, 0o755);
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  t.after(() => {
+    try { const pid = Number(readFileSync(pids, "utf8")); if (alive(pid)) process.kill(pid, "SIGKILL"); } catch { /* never started */ }
+    rmSync(folder, { recursive: true, force: true });
+  });
+  await assert.rejects(runCodexMcpList(shim, ["mcp", "list", "--json"], { env: process.env }, 1_000));
+  const native = Number(readFileSync(pids, "utf8"));
+  for (let i = 0; i < 50 && alive(native); i += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(alive(native), false, "the native process was stopped with its wrapper");
 });
 
 test("the MCP server list fails closed when Codex cannot produce it", async () => {

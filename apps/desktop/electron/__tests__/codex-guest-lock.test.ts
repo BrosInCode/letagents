@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,29 +29,39 @@ test("the lock fails closed when the probe sees a local tool or sees nothing", a
   assert.equal(await codexGuestToolsLocked("/fake/codex-i", {}, null, seen([])), false);
 });
 
-test("the probe leaves no Codex process behind when an npm wrapper exits first", { skip: process.platform === "win32" && "no process groups" }, async () => {
+/** A fake npm-installed `codex`: a Node wrapper that starts the "native" process and records its pid. */
+function fakeNpmCodex(t: { after(fn: () => void): void }, wrapperWaits: boolean) {
   const folder = mkdtempSync(join(tmpdir(), "codex-shim-"));
   const pids = join(folder, "pids");
   const shim = join(folder, "codex");
-  // Like npm's wrapper: start the "native" process, then exit without waiting for it.
   writeFileSync(shim, `#!/usr/bin/env node
 const { spawn } = require("node:child_process");
-if (process.argv[2] === "exec") {
-  const native = spawn("sleep", ["300"], { stdio: "ignore" });
-  require("node:fs").appendFileSync(${JSON.stringify(pids)}, native.pid + "\\n");
-  native.unref();
-}
-if (process.argv[2] === "mcp") process.stdout.write("[]");
-process.exit(0);
+if (process.argv[2] === "mcp") { process.stdout.write("[]"); process.exit(0); }
+const native = spawn("sleep", ["300"], { stdio: "ignore" });
+require("node:fs").appendFileSync(${JSON.stringify(pids)}, native.pid + "\\n");
+${wrapperWaits ? 'native.on("exit", () => process.exit(0));' : "native.unref(); process.exit(0);"}
 `);
   chmodSync(shim, 0o755);
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-  assert.equal(await probeCodexGuestTools(shim, { ...process.env, CODEX_HOME: folder }, null), null);
-  const started = readFileSync(pids, "utf8").trim().split("\n").map(Number);
-  assert.equal(started.length, 1);
-  for (let i = 0; i < 50 && alive(started[0]!); i += 1) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(alive(started[0]!), false, "the native process was stopped with its wrapper");
-});
+  const started = () => { try { return readFileSync(pids, "utf8").trim().split("\n").filter(Boolean).map(Number); } catch { return []; } };
+  t.after(() => {
+    for (const pid of started()) if (alive(pid)) process.kill(pid, "SIGKILL");
+    rmSync(folder, { recursive: true, force: true });
+  });
+  // HOME and CODEX_HOME point inside the folder, so nothing from the real home is read.
+  return { shim, env: { ...process.env, HOME: folder, CODEX_HOME: folder }, started, alive };
+}
+
+for (const [name, wrapperWaits] of [["the npm wrapper exits first", false], ["the probe times out", true]] as const) {
+  test(`the probe leaves no Codex process behind when ${name}`, { skip: process.platform === "win32" && "no process groups" }, async t => {
+    const fake = fakeNpmCodex(t, wrapperWaits);
+    assert.equal(await probeCodexGuestTools(fake.shim, fake.env, null, 1_000), null);
+    const [native] = fake.started();
+    assert.ok(native, "the native process started");
+    for (let i = 0; i < 50 && fake.alive(native); i += 1) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(fake.alive(native), false, "the native process was stopped with its wrapper");
+  });
+}
 
 let codexBin: string | null = null;
 try { codexBin = execFileSync("/usr/bin/which", ["codex"], { encoding: "utf8" }).trim() || null; } catch { codexBin = null; }

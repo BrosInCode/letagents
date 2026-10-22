@@ -91,7 +91,7 @@ function collect(list: unknown, prefix = ""): { names: string[]; text: string } 
  * would offer. Codex sends them to a fake model server on loopback, which
  * answers with an error, so no model is called and no quota is used.
  */
-export async function probeCodexGuestTools(codexBin: string, env: NodeJS.ProcessEnv, model: string | null = null): Promise<CodexGuestProbe | null> {
+export async function probeCodexGuestTools(codexBin: string, env: NodeJS.ProcessEnv, model: string | null = null, timeoutMs = PROBE_TIMEOUT_MS): Promise<CodexGuestProbe | null> {
   let seen: CodexGuestProbe | null = null;
   const server = http.createServer((req, res) => {
     // Only a real model request counts: POST /v1/responses carrying a tool list.
@@ -127,7 +127,7 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
       ], { env: { ...env, LETAGENTS_PROBE_KEY: "probe" }, stdio: ["ignore", "ignore", "ignore"], detached: process.platform !== "win32" });
       // An npm-installed `codex` is a Node wrapper around the native binary: stop the whole group, not just the wrapper.
       const stopGroup = () => { try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ } };
-      const timer = setTimeout(() => { stopGroup(); child.kill("SIGKILL"); }, PROBE_TIMEOUT_MS);
+      const timer = setTimeout(() => { stopGroup(); child.kill("SIGKILL"); }, timeoutMs);
       // The wrapper can exit while the native binary keeps running: end what is left of its group.
       child.on("exit", () => { clearTimeout(timer); stopGroup(); resolve(); });
       child.on("error", () => { clearTimeout(timer); resolve(); });

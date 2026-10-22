@@ -60,9 +60,16 @@ export function registerAskLinks(): void {
     const token = parseAskLink(url);
     if (token) deliver(token);
   });
-  // macOS keeps one instance and sends open-url. Elsewhere a link starts a second instance, which hands it over and quits.
-  if (process.platform === "darwin") return;
-  if (!app.requestSingleInstanceLock()) { app.quit(); return; }
+}
+
+/**
+ * macOS keeps one instance and sends open-url. Elsewhere a link starts a second
+ * instance: only the first runs the app, and a later one must exit before
+ * starting anything, its link handed over through second-instance.
+ */
+export function claimDesktopInstance(): boolean {
+  if (process.platform === "darwin") return true;
+  if (!app.requestSingleInstanceLock()) return false;
   app.on("second-instance", (_event, argv) => {
     const token = askLinkFromArgv(argv);
     if (token) deliver(token);
@@ -70,4 +77,5 @@ export function registerAskLinks(): void {
   });
   const launched = askLinkFromArgv(process.argv);
   if (launched) deliver(launched);
+  return true;
 }
