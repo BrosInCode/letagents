@@ -2,7 +2,7 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { isAgentBranch } from "../../../shared/agent-branch.mjs";
-import { commandOnlyReads, partsAreInCommand, PERMISSION_REVIEW_MAX_COMMANDS, routineCommandReview } from "../../../shared/permission-review.mjs";
+import { commandOnlyReads, partsAreInCommand, PATH_SEPARATOR, PERMISSION_REVIEW_MAX_COMMANDS, routineCommandReview } from "../../../shared/permission-review.mjs";
 import type { ClaudeNativePermissionRequest, OpenCodeNativePermissionRequest } from "../shared/provider-permissions.js";
 import { executionApprovalProjectionPathsAreSafe } from "./execution-approval-projection-policy.js";
 import { resolveWorkspaceRelativePath } from "./execution-approval-projection.js";
@@ -50,7 +50,8 @@ function plainName(part: string): boolean {
  * the agent's work, and a check that runs them runs what the agent wrote.
  */
 function changesWhatRuns(path: string): boolean {
-  const parts = path.toLowerCase().split("/");
+  // The same separators the command rules read, so no name hides behind the other one.
+  const parts = path.toLowerCase().split(PATH_SEPARATOR);
   const name = parts.at(-1)!;
   return parts.some((part) => !plainName(part)
       // A name that starts with a dot is a setting by convention: an agent's

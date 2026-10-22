@@ -5,17 +5,35 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { WORKSPACE_FILE_LIMIT, WORKSPACE_PATCH_LIMIT, parseWorkspaceChangeSummary } from './workspace-change-summary.mjs';
 const execute = promisify(execFile);
+/**
+ * How long one Git command may run. 5 s was enough on macOS, but on Windows every file
+ * Git opens can wait for Defender's real-time scan, and a cold `hash-object` or `diff`
+ * over a 64 MiB tree then takes well over 5 s. 30 s covers that and still ends a hung
+ * Git. The deadlines below bound a whole capture, so one slow command delays a turn's
+ * capture, never the daemon or the MCP server.
+ */
+export const GIT_TIMEOUT_MS = 30_000;
+/** The budget for one tree capture (all its Git commands and file reads together). */
+export const WORKSPACE_CAPTURE_TIMEOUT_MS = 40_000;
+/**
+ * The budget for a settled turn: the settled tree, the base-update question and the
+ * three comparisons together. The MCP capture worker is cut off at 120 s; this leaves it
+ * room to encode the review. The daemon waits for the same work before it ACKs a turn.
+ */
+export const WORKSPACE_SETTLE_TIMEOUT_MS = 100_000;
 // Replace refs are off: with them the workspace could put another tree in the place of the
 // one a comparison starts from, and the comparison would show nothing.
-async function git(cwd, args, limit = 4 * 1024 * 1024) {
+async function run(cwd, args, limit = 4 * 1024 * 1024, signal) {
     const result = await execute('git', ['--no-optional-locks', ...args], {
-        cwd, encoding: 'utf8', timeout: 5_000, maxBuffer: limit,
+        cwd, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: limit, signal,
         env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
     });
     return result.stdout;
 }
-/** Reads the actual provider workspace; never stages, commits, or changes its index. */
-export async function captureWorkspaceChanges(workspace, startingRevision, settledTree, fullReview = false) {
+/** Reads the actual provider workspace; never stages, commits, or changes its index.
+ * `deadline` ends every Git command of this comparison at once; without it each has GIT_TIMEOUT_MS. */
+export async function captureWorkspaceChanges(workspace, startingRevision, settledTree, fullReview = false, deadline = undefined) {
+    const git = (cwd, args, limit) => run(cwd, args, limit, deadline);
     const patchLimit = fullReview ? 128 * 1024 * 1024 : WORKSPACE_PATCH_LIMIT;
     const fileLimit = fullReview ? 10_000 : WORKSPACE_FILE_LIMIT;
     const empty = (state) => ({
