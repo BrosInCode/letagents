@@ -15,6 +15,12 @@ export interface AccountRoomActivity {
   latest_message_id: string | null;
   latest_message_at: string | null;
   working: AccountWorkingAgent[];
+  /**
+   * When a card in the room, or a pull request, review or check run in it,
+   * last changed, as this server saw it; null until one does. My work re-reads
+   * its cards when this moves.
+   */
+  tasks_changed_at: string | null;
 }
 
 export interface WorkingPresence {
@@ -35,7 +41,10 @@ export interface AccountActivityWatch {
 }
 
 type Watcher = { onChange: (activity: AccountRoomActivity) => void; ready: boolean };
-type Pending = { working: boolean; latest: boolean };
+/** GitHub events that change a My work row's PR column or its review request (check runs: completed only). */
+const MY_WORK_GITHUB_EVENT_TYPES = new Set(["pull_request", "pull_request_review", "check_run"]);
+
+type Pending = { working: boolean; latest: boolean; tasks?: boolean };
 
 export interface AccountActivityHubOptions {
   /** Changes are gathered this long, so a burst in one room reads the database once. */
@@ -56,6 +65,8 @@ export interface AccountActivityHubOptions {
  * - An agent starting or stopping work arrives as a presence change (a
  *   database trigger, delivered at commit) and re-reads that room's workers.
  * - A new message re-reads that room's latest visible message.
+ * - A card changing or being removed, or a pull request, review or check run
+ *   event, stamps the room's `tasks_changed_at`, with no database read.
  * - An agent that stops sending heartbeats cannot announce it; the one timer
  *   per room, set for when its first working agent would go quiet, covers that.
  *
@@ -99,7 +110,7 @@ export class AccountActivityHub {
     this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer as NodeJS.Timeout));
   }
 
-  attach(sources: { presence: EventEmitter; messages: EventEmitter }): void {
+  attach(sources: { presence: EventEmitter; messages: EventEmitter; tasks?: EventEmitter; github?: EventEmitter }): void {
     this.detach?.();
     const onPresence = (roomId: unknown) => {
       if (typeof roomId === "string") this.invalidate(roomId, { working: true, latest: false });
@@ -111,13 +122,33 @@ export class AccountActivityHub {
       const roomId = (payload as { projectId?: unknown } | null)?.projectId;
       if (typeof roomId === "string") this.invalidate(roomId, { working: false, latest: true });
     };
+    const onTask = (payload: unknown) => {
+      const roomId = (payload as { projectId?: unknown } | null)?.projectId;
+      if (typeof roomId === "string") this.invalidate(roomId, { working: false, latest: false, tasks: true });
+    };
+    const onGitHub = (payload: unknown) => {
+      const value = payload as { projectId?: unknown; event?: { event_type?: unknown; action?: unknown } } | null;
+      const type = String(value?.event?.event_type);
+      // A check run changes the PR column only when it finishes; queued and
+      // in-progress updates during CI would stamp the room many times a minute.
+      if (type === "check_run" && value?.event?.action !== "completed") return;
+      if (typeof value?.projectId === "string" && MY_WORK_GITHUB_EVENT_TYPES.has(type)) {
+        this.invalidate(value.projectId, { working: false, latest: false, tasks: true });
+      }
+    };
     sources.presence.on(PRESENCE_CHANGED, onPresence);
     sources.presence.on(PRESENCE_RESYNC, onResync);
     sources.messages.on("message:created", onMessage);
+    sources.tasks?.on("task:updated", onTask);
+    sources.tasks?.on("task:removed", onTask);
+    sources.github?.on("github_event:updated", onGitHub);
     this.detach = () => {
       sources.presence.off(PRESENCE_CHANGED, onPresence);
       sources.presence.off(PRESENCE_RESYNC, onResync);
       sources.messages.off("message:created", onMessage);
+      sources.tasks?.off("task:updated", onTask);
+      sources.tasks?.off("task:removed", onTask);
+      sources.github?.off("github_event:updated", onGitHub);
     };
   }
 
@@ -236,7 +267,8 @@ export class AccountActivityHub {
     this.pending = new Map();
     const working = [...batch].filter(([id, part]) => part.working && this.watchers.has(id)).map(([id]) => id);
     const latest = [...batch].filter(([id, part]) => part.latest && this.watchers.has(id)).map(([id]) => id);
-    if (!working.length && !latest.length) return;
+    const changedTasks = [...batch].filter(([id, part]) => part.tasks && this.watchers.has(id)).map(([id]) => id);
+    if (!working.length && !latest.length && !changedTasks.length) return;
     let loadedWorking: Map<string, WorkingPresence>;
     let loadedLatest: Awaited<ReturnType<AccountActivityLoaders["loadLatest"]>>;
     try {
@@ -248,21 +280,24 @@ export class AccountActivityHub {
       // Keep what was last shown and read again after a pause: an agent that
       // started working sends no further change until it stops.
       console.error("[account activity] could not read room activity", error);
+      // Task stamps need no read, so they wait with the rest and keep their order.
       for (const [id, parts] of batch) if (this.watchers.has(id)) mergeInto(this.pending, id, parts);
       if (this.pending.size) this.armFlush(this.retryMs, true);
       this.retryMs = Math.min(this.retryMs * 2, this.maxRetryMs);
       return;
     }
     this.retryMs = this.firstRetryMs;
-    for (const id of new Set([...working, ...latest])) {
+    const stampedAt = new Date(this.now()).toISOString();
+    for (const id of new Set([...working, ...latest, ...changedTasks])) {
       if (!this.watchers.has(id)) continue;
       const previous = this.current.get(id);
       if (!previous) {
         // The room's first snapshot is still loading; watch() reads again.
-        mergeInto(this.missed, id, { working: working.includes(id), latest: latest.includes(id) });
+        mergeInto(this.missed, id, { working: working.includes(id), latest: latest.includes(id), tasks: changedTasks.includes(id) });
         continue;
       }
       const next: AccountRoomActivity = { ...previous };
+      if (changedTasks.includes(id)) next.tasks_changed_at = stampedAt;
       if (working.includes(id)) {
         const presence = loadedWorking.get(id);
         next.working = presence?.agents ?? [];
@@ -297,6 +332,8 @@ export class AccountActivityHub {
         latest_message_id: latest.get(id)?.latest_message_id ?? null,
         latest_message_at: latest.get(id)?.latest_message_at ?? null,
         working: presence?.agents ?? [],
+        // A stamp is kept in memory only; a new watcher of a watched room keeps it.
+        tasks_changed_at: this.current.get(id)?.tasks_changed_at ?? null,
       });
     }
     return result;
@@ -326,14 +363,16 @@ export class AccountActivityHub {
 }
 
 function mergeInto(target: Map<string, Pending>, roomId: string, parts: Pending): void {
-  const pending = target.get(roomId) ?? { working: false, latest: false };
+  const pending = target.get(roomId) ?? { working: false, latest: false, tasks: false };
   pending.working ||= parts.working;
   pending.latest ||= parts.latest;
+  pending.tasks ||= parts.tasks ?? false;
   target.set(roomId, pending);
 }
 
 function sameActivity(a: AccountRoomActivity, b: AccountRoomActivity): boolean {
   return a.latest_message_id === b.latest_message_id
+    && a.tasks_changed_at === b.tasks_changed_at
     && a.latest_message_at === b.latest_message_at
     && a.working.length === b.working.length
     && a.working.every((agent, index) =>

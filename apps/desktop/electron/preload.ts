@@ -166,6 +166,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-task-mentions", roomIdentifier, taskId),
     getTaskTicket: (roomIdentifier: string, taskId: string) =>
       ipcRenderer.invoke("desktop:room:get-task-ticket", roomIdentifier, taskId),
+    getMyWork: (query) => ipcRenderer.invoke("desktop:room:my-work", query ?? {}),
     listTrackerFilters: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:list-tracker-filters", roomIdentifier),
     saveTrackerFilter: (roomIdentifier: string, input) =>
@@ -360,6 +361,15 @@ const api: DesktopApi = {
     update: (id, patch) => ipcRenderer.invoke("desktop:connectors:update", id, patch),
     remove: (id) => ipcRenderer.invoke("desktop:connectors:remove", id),
     webhook: (id) => ipcRenderer.invoke("desktop:connectors:webhook", id),
+    rules: {
+      list: (id) => ipcRenderer.invoke("desktop:connectors:rules:list", id),
+      create: (id, input) => ipcRenderer.invoke("desktop:connectors:rules:create", id, input),
+      update: (id, ruleId, input) => ipcRenderer.invoke("desktop:connectors:rules:update", id, ruleId, input),
+      setEnabled: (id, ruleId, enabled) => ipcRenderer.invoke("desktop:connectors:rules:set-enabled", id, ruleId, enabled),
+      versions: (id, ruleId) => ipcRenderer.invoke("desktop:connectors:rules:versions", id, ruleId),
+      rollback: (id, ruleId, version) => ipcRenderer.invoke("desktop:connectors:rules:rollback", id, ruleId, version),
+      remove: (id, ruleId) => ipcRenderer.invoke("desktop:connectors:rules:remove", id, ruleId),
+    },
   },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),

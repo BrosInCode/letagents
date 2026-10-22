@@ -1,4 +1,4 @@
-import { and, desc, eq, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import { TRACKER_SYNC_EVENT_TYPE } from "../../../../shared/ticket-connectors.mjs";
 
@@ -17,9 +17,16 @@ const FAILED_CHECK_CONCLUSIONS = new Set([
 ]);
 const DECISIVE_REVIEW_STATES = new Set(["approved", "changes_requested", "dismissed"]);
 
+/**
+ * The newest 500 GitHub events of the room's cards, folded into each card's
+ * PR, check and review status. `taskNumbers` narrows the read to those cards
+ * (My work asks only for the cards on its page).
+ */
 export async function getTasksGitHubArtifactStatus(
-  roomId: string
+  roomId: string,
+  taskNumbers?: readonly number[],
 ): Promise<Map<string, TaskGitHubArtifactStatus>> {
+  if (taskNumbers && !taskNumbers.length) return new Map();
   const queryResults = await db
     .select({
       event: github_room_events,
@@ -30,6 +37,7 @@ export async function getTasksGitHubArtifactStatus(
       tasks,
       and(
         eq(tasks.room_id, roomId),
+        taskNumbers ? inArray(tasks.number, [...taskNumbers]) : undefined,
         or(
           eq(github_room_events.linked_task_id, sql`'task_' || ${tasks.number}`),
           eq(github_room_events.github_object_url, tasks.pr_url),

@@ -196,24 +196,14 @@
       </template>
     </section>
 
-    <section v-if="ticket" class="desktop-task-detail-section" aria-label="Linked threads">
-      <h4>Linked threads</h4>
-      <p v-if="mentionsError" class="desktop-task-detail-muted">{{ mentionsError }}</p>
-      <p v-else-if="mentionsLoading && !mentions.length" class="desktop-task-detail-muted">Loading threads...</p>
-      <p v-else-if="!mentions.length" class="desktop-task-detail-muted">No room message names {{ ticket.key }} yet.</p>
-      <div v-else class="desktop-task-detail-list">
-        <button
-          v-for="mention in mentions"
-          :key="mention.messageId"
-          type="button"
-          class="desktop-task-detail-link desktop-task-mention"
-          @click="emit('open-thread', mention.threadRootId)"
-        >
-          <small>{{ compactPerson(mention.sender) || mention.sender }} · {{ relativeTime(mention.timestamp, now) }}</small>
-          <span>{{ mention.text }}</span>
-        </button>
-      </div>
-    </section>
+    <TaskLinkedThreads
+      v-if="ticket"
+      :room-identifier="roomIdentifier"
+      :task-id="task.id"
+      :ticket-key="ticket.key"
+      :revision="task.updatedAt"
+      @open-thread="emit('open-thread', $event)"
+    />
 
     <section v-if="actions.length" class="desktop-task-detail-section">
       <h4>Actions</h4>
@@ -238,7 +228,8 @@
 import { computed, ref, watch } from "vue";
 import { Pencil } from '@lucide/vue';
 import MarkdownBlock from '../formatting/MarkdownBlock.vue';
-import type { DesktopAgentPresence, DesktopTaskMention, DesktopTaskSummary, DesktopTaskTicket } from "../../../../../../electron/ipc-types";
+import TaskLinkedThreads from './TaskLinkedThreads.vue';
+import type { DesktopAgentPresence, DesktopTaskSummary, DesktopTaskTicket } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
@@ -281,36 +272,6 @@ const emit = defineEmits<{
 }>();
 
 const ticket = computed(() => ticketRefParts(props.task.externalRef));
-const mentions = ref<DesktopTaskMention[]>([]);
-const mentionsLoading = ref(false);
-const mentionsError = ref<string | null>(null);
-let mentionsRequest = 0;
-
-// Only cards that name a ticket ask for threads, so other cards make no call.
-watch(
-  () => [props.roomIdentifier, props.task.id, props.task.externalRef, props.task.updatedAt] as const,
-  async ([roomIdentifier, taskId, externalRef]) => {
-    const request = ++mentionsRequest;
-    if (!roomIdentifier || !externalRef) {
-      mentions.value = [];
-      mentionsError.value = null;
-      return;
-    }
-    mentionsLoading.value = true;
-    try {
-      const next = await desktopIpc.room.getTaskMentions(roomIdentifier, taskId);
-      if (request !== mentionsRequest) return;
-      mentions.value = next;
-      mentionsError.value = null;
-    } catch {
-      if (request !== mentionsRequest) return;
-      mentionsError.value = "Linked threads could not be loaded.";
-    } finally {
-      if (request === mentionsRequest) mentionsLoading.value = false;
-    }
-  },
-  { immediate: true },
-);
 
 const ticketState = computed(() => ticketStateLabel(props.task.ticketState));
 const ticketDetails = ref<DesktopTaskTicket | null>(null);
@@ -388,24 +349,3 @@ function onReviewerChange(event: Event): void {
   emit("update:selected-reviewer", (event.target as HTMLSelectElement).value);
 }
 </script>
-
-<style scoped>
-.desktop-task-provider-chip {
-  padding: 1px 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 16px;
-}
-.desktop-task-ticket-state {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--surface-muted, rgba(127, 127, 127, 0.14));
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 16px;
-}
-.desktop-task-mention { width: 100%; border: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
-.desktop-task-mention span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-</style>

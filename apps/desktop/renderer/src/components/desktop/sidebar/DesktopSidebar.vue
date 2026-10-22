@@ -212,6 +212,9 @@
             {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
           </span>
         </button>
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'my-work'" data-testid="sidebar-my-work" @click="$emit('open-my-work')">
+          <span class="cta-plus" aria-hidden="true"><ListTodo /></span><span>My work</span>
+        </button>
         <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
           <span class="cta-plus" aria-hidden="true"><MessageSquare /></span><span>Messages</span><span v-if="messagesUnread" class="sidebar-rent-count" :aria-label="`${messagesUnread} unread messages`">{{ messagesUnread > 99 ? '99+' : messagesUnread }}</span>
         </button>
@@ -647,6 +650,7 @@ import {
   Inbox,
   House,
   ListChecks,
+  ListTodo,
   MessageSquare,
   Pencil,
   Pin,
@@ -735,6 +739,7 @@ const emit = defineEmits<{
   "open-rent": [];
   "open-needs-you": [];
   "open-messages": [];
+  "open-my-work": [];
   "open-updates": [];
   "open-settings": [];
   "connect-account": [];

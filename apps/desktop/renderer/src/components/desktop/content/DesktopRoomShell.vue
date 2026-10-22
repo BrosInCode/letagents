@@ -45,6 +45,8 @@
       :storage-feedback="storageFeedback"
       :search-summary="searchSummary"
       :search-results-count="searchResults.length" @show-search-result="revealRoomMessage"
+      :ticket-match="searchTicketMatch"
+      @open-ticket-card="openSearchTicketCard"
       @copy-room-link="copyRoomLink"
       @open-rules="openRules"
       @toggle-sound="toggleSound"
@@ -319,7 +321,7 @@
 
 <script setup lang="ts">
 import { GitBranch } from "@lucide/vue";
-import { nextTick, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import AddAgentModal from "./AddAgentModal.vue";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
@@ -329,6 +331,7 @@ import PersonActionsHost from "./PersonActionsHost.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import { canManageRoomBoard } from "./room-board/board-presentation";
+import { taskForTicketQuery, ticketRefParts } from "./room-board/ticket-ref";
 import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
@@ -417,6 +420,17 @@ const {
   timelineMessages, sendRoomMessage, discardAttachment, loadOlderMessages, searchOpen, searchQuery,
   searchResults, activeSearchMessageId, searchSummary, closeSearch, moveSearch,
 } = Object.assign(app, useRoomShellConversation(app));
+
+// Typing a ticket key in room search offers its card; Enter opens it on the board.
+const searchTicketMatch = computed(() => {
+  const task = taskForTicketQuery(props.tasks, searchQuery.value);
+  const key = ticketRefParts(task?.externalRef)?.key;
+  return task && key ? { taskId: task.id, key } : null;
+});
+function openSearchTicketCard(taskId: string): void {
+  closeSearch();
+  openBoardTask(taskId);
+}
 
 const {
   selectedReasoningSessionId, selectedReasoningSessionForInspector, openReasoningInspector,

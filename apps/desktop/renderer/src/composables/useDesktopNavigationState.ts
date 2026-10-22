@@ -8,7 +8,7 @@ import type {
   RepoStatus,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../components/desktop/types";
-import { rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
+import { myWorkEntry, rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import { projectRoomName } from "../domain/project-room-name";
 import { repositoryRoomName } from "../../../../../shared/project-room-name.mjs";
@@ -293,6 +293,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   const collapsedProjects = ref<Record<string, boolean>>({});
 
   function findSidebarEntryById(entryId: string): SidebarEntry | null {
+    if (entryId === myWorkEntry.id) return myWorkEntry;
     if (entryId === "messages") return { id: "messages", type: "messages", title: "Messages", description: "Private conversations", sectionLabel: "LetAgents" };
     if (entryId === pinnedRoom.value.id) return pinnedRoom.value;
     if (entryId === currentParentRoom.value.id) return currentParentRoom.value;

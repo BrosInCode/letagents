@@ -93,6 +93,7 @@
           @open-rent="openRentMarketplace"
           @open-needs-you="openNeedsYou"
           @open-messages="openMessages"
+          @open-my-work="openMyWork"
           @open-updates="openUpdatesSurface"
           @open-settings="openSettingsSurface"
           @connect-account="openAccountAuthFlow"
@@ -282,6 +283,15 @@
 
       <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" @refresh="refreshNeedsYou" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
 
+      <MyWorkView
+        v-else-if="activeEntry.type === 'my-work'"
+        :key="authStatus?.account?.id ?? 'local'"
+        :tasks-changed-at="accountActivity.tasksChangedAt.value"
+        :connected="accountActivity.connected.value"
+        @open-card="openMyWorkCard"
+        @open-thread="openMyWorkThread"
+      />
+
       <RentMarketplaceView
         v-else-if="activeEntry.type === 'marketplace'"
         :rooms="settingsAccountRooms"
@@ -432,6 +442,7 @@ import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardin
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
+import MyWorkView from "./components/desktop/content/MyWorkView.vue";
 import { desktopIpc } from "./ipc/index.js";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
@@ -476,6 +487,7 @@ const {
 } = Object.assign(app, useAppState());
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
+  openMyWork, openMyWorkCard, openMyWorkThread,
 } = Object.assign(app, useAppInboxActions(app));
 const {
   openRentMarketplace, openRentalRequestInbox,
@@ -521,7 +533,7 @@ const {
 
 Object.assign(app, useAppAccountScope(app));
 
-Object.assign(app, useAppAccountActivityFeed(app));
+const { accountActivity } = Object.assign(app, useAppAccountActivityFeed(app));
 
 const {
   needsYouData, needsYouLoading, needsYouError, mergeInboxThreads, agentAttentionItems,

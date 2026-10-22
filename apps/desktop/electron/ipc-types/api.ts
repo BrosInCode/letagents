@@ -128,6 +128,7 @@ import type {
   DesktopTaskLeaseActionInput,
   DesktopTaskMention,
   DesktopTaskTicket,
+  DesktopMyWorkQuery,
   DesktopTrackerFilterInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
@@ -260,6 +261,8 @@ export interface DesktopApi {
     ) => Promise<DesktopTaskMutationResult>;
     getTaskMentions: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskMention[]>;
     getTaskTicket: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskTicket | null>;
+    /** Cards that are the account's work across its rooms. Optional so a newer renderer degrades on an older main process. */
+    getMyWork?: (query?: DesktopMyWorkQuery) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkPage>;
     /** Room ticket filters (ticket connectors). Local rooms have none. */
     listTrackerFilters: (roomIdentifier: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
     saveTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
@@ -426,6 +429,18 @@ export interface DesktopApi {
     remove: (id: string) => Promise<void>;
     /** The webhook URL and signing secret to paste into the tracker. */
     webhook: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerWebhookSetup>;
+    /** Rules: a repo event that matches moves or comments on the ticket. */
+    rules: {
+      list: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleList>;
+      create: (id: string, input: import("../../../../shared/ticket-connectors.mjs").TrackerRuleInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      /** Saves a new version. */
+      update: (id: string, ruleId: string, input: import("../../../../shared/ticket-connectors.mjs").TrackerRuleInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      setEnabled: (id: string, ruleId: string, enabled: boolean) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      versions: (id: string, ruleId: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleVersionView[]>;
+      /** Saves an earlier version's content as the newest version. */
+      rollback: (id: string, ruleId: string, version: number) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      remove: (id: string, ruleId: string) => Promise<void>;
+    };
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;

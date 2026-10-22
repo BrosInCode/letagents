@@ -261,6 +261,152 @@ node --import tsx --test src/api/__tests__/tracker-webhooks.test.ts src/api/__te
 TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-sync-db.test.ts
 ```
 
+## My work
+
+**My work** is one page for "what is up with my tickets". It lists, across
+your rooms, every card that is your work, newest change first, with its ticket
+state, its agent work and its pull request in one row.
+
+### Which cards are listed
+
+1. A card bound to a synced ticket is listed when the ticket's assignee is
+   your tracker user. LetAgents compares the ticket's assignee with the
+   `tracker_user_id` of your own connection to the same tracker site, so a
+   ticket imported through a teammate's connection still counts. A ticket
+   assigned to the same id on another site does not.
+2. A card bound to no ticket (a native card) is listed when it is assigned to
+   your GitHub login, or to an agent you own (an agent whose room session you
+   started).
+3. A card bound to a ticket counts only through the ticket. Assigning it to
+   yourself on the board does not add it.
+4. Finished cards leave the list: a card whose work state is done, merged or
+   cancelled is listed only while its ticket is still open in the tracker.
+
+The rooms are the rooms of your room list (`/account/rooms`, at most 100 rooms
+and their focus rooms). Archived rooms are not read. Before a room's cards are
+shown, the server checks that you may still read the room (the cached access
+decision that room notifications use); a private Git Room you lost access to is
+left out.
+
+### What each row shows
+
+| Column | Content |
+|---|---|
+| Ticket | The tracker chip and key (or the card id), the title, and the room. |
+| Ticket state | The tracker's state (To do, In progress, In review, Done). |
+| Agent work | The card's work state, the assigned agent, and its last status line. The number of room messages that name the ticket, and when the newest was sent. |
+| PR | The card's pull request: number and state, review summary, check summary. |
+
+Select a row to open the **ticket detail** under it, in three columns:
+**Ticket** (tracker status, assignee, a link to the ticket), **Agent work**
+(work state, owner, last seen, the agent's status line, **Open card**, and the
+card's linked threads, the same list as the board's card details) and **PR**
+(every pull request on the card, with links to GitHub). Selecting a thread
+opens it in its room.
+
+### Needs me
+
+A row with a dot needs you. In this part the flag uses only signals that
+already exist:
+
+1. **Your review is requested**: the newest GitHub event about you on one of
+   the card's open pull requests is a review request. A review you submitted
+   later, or a removed request, clears it. A new request sets it again.
+2. **A request waits for you**: an open room request (a Needs-you record that
+   nobody answered, closed or archived) names the card's key or card id, in
+   any case, or was asked from a message that names the card's ticket. A
+   request is not addressed to one person, so in a room with several people
+   it shows for each of them.
+3. **Ticket is done, PR still open**: the tracker says the ticket is done
+   while one of the card's pull requests is open or a draft.
+
+The **Needs me** filter lists only such rows. Jev-based "needs me" is a later
+part of this feature.
+
+### Filters
+
+- **Tracker**: Jira, Linear, or **Not from a tracker** (cards that sync did
+  not bind to a ticket, including cards with a typed key). Shown only when you
+  have a tracker connection.
+- **Room**: one room.
+- **Needs me**: rows that need you.
+
+### Without a tracker connection
+
+With no tracker connection, the page lists the native cards assigned to you
+or your agents. The **Ticket state** column and the tracker filter are hidden,
+and the page says where to connect a tracker. The server never reads tracker
+data for such an account.
+
+### Room search
+
+Type a ticket key in a room's search (`HT-1234`, `jira:HT-1234` or
+`linear:ENG-12`, in any case). When a card in the room holds that key, the
+search bar shows **Open HT-1234**, and Enter opens the card on the board. A
+bare key matches a card of either tracker.
+
+### How the page stays current
+
+The page re-reads its cards when a card changes or is removed in one of your
+rooms, or when a pull request or review event, or a finished check run,
+arrives there. The
+server's account activity stream (`/account/activity/stream`, the stream the
+sidebar already uses) now carries `tasks_changed_at` per room: on
+`task:updated`, `task:removed` or such a GitHub event the server stamps the
+room with no database read and sends the room's frame. The page then reads
+again: 3 seconds after its previous read when the changed room holds a card on
+the page, else 30 seconds after it. It reads only while it is open (it reads
+everything when it opens), and once after a dropped stream reopens. The
+desktop app keeps these stamps apart from the sidebar's room activity, so a
+card change does not redraw the sidebar. The page does
+not poll. A new or answered room request does not stamp the room, so its
+**Needs me** flag shows on the next read or **Refresh**.
+
+### HTTP route
+
+`GET /account/my-work` needs the desktop app's session or an owner token.
+
+| Query | Meaning |
+|---|---|
+| `limit` | Cards per page, 1 to 100 (default 50). |
+| `cursor` | The `next_cursor` of the previous page. |
+| `tracker` | `jira`, `linear` or `native`. |
+| `room` | One room id. |
+| `needs_me` | `true` lists only rows that need you. |
+
+A request reads at most 500 candidate cards. With `needs_me` a page can come
+back short, or empty, with a `next_cursor`: the next page continues after the
+last card read.
+
+The answer is `{ cards, next_cursor, has_connections, providers }`. Each card
+has `task_id`, `room_id`, `room_name`, `title`, `external_ref`, `key`,
+`provider`, `ticket_state`, `ticket_status`, `ticket_url`,
+`ticket_assignee_label`, `work_state`, `assigned_via` (`tracker` or `native`),
+`agent` (label, display name, presence status, `status_text`, last heartbeat),
+`threads` (`count`, `last_activity_at`), `pull_requests` (URL, number, title,
+state, draft, merged, `review_summary`, `check_summary`), `needs_me`,
+`needs_me_reasons` and `updated_at`. Pages are ordered by the card's
+`updated_at`, newest first; the cursor keeps the database's full precision.
+
+Each page costs a bounded set of queries: one for the cards (through the
+partial indexes of migration `0124_my_work_task_indexes`, which hold a room's
+unfinished cards and its finished cards whose ticket is still open, so the
+done cards of a busy board are never read), then, for the page's
+cards and rooms only, agent presence, linked-thread counts, the board's PR
+status (`getTasksGitHubArtifactStatus`, narrowed to the page's cards, a few
+rooms at a time), the newest 500
+review events about you, and the newest 500 open room requests. Each card's PR
+status and each room's review events and requests are read once per request,
+however many batches it reads.
+
+### Tests
+
+```bash
+node --import tsx --test src/api/__tests__/my-work-routes.test.ts src/api/__tests__/account-activity-hub.test.ts
+TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/my-work-db.test.ts
+cd apps/desktop && HOME=<scratch folder> node --import tsx --test renderer/__tests__/my-work.test.ts
+```
+
 ## Connections and providers
 
 An account connects Jira or Linear once, in the desktop app under
@@ -420,6 +566,197 @@ TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurren
 
 Provider tests answer from fixtures in `src/api/__tests__/fixtures/connectors`
 and fail on any request they do not expect, so CI makes no live tracker call.
+
+## Rules (PR event moves the ticket)
+
+A rule belongs to one connection. It names a repo event (the trigger) and one to five tracker actions. When a
+pull request, review or check matches, LetAgents moves the ticket, comments on it, or both. A rule is an approval
+the connection's owner gives in advance: nobody touches the tracker by hand, and every write still goes through the
+workflow effect journal.
+
+### Write a rule
+
+Open Settings, Ticket trackers, then the connection's **Rules** section, and press **Add rule**.
+
+1. Give the rule a name.
+2. Choose the rooms: every room that imports with this connection, or one of them.
+3. Under **When**, choose the event and the action, then any of the optional fields below.
+4. Under **Then**, add a status change, a comment, or both.
+5. Press **Save rule**.
+
+| Trigger field | Events | Matches when |
+|---|---|---|
+| `event` | all | `pull_request`, `pull_request_review` or `check_run`. |
+| `action` | all | The webhook action: `opened`, `reopened`, `ready_for_review`, `converted_to_draft`, `synchronize`, `closed`; `submitted`, `dismissed`; `completed`. |
+| `merged` | `pull_request` `closed` | The pull request merged (`true`) or closed without a merge (`false`). |
+| `draft` | `pull_request` | The pull request is a draft (`true`) or not (`false`). |
+| `baseBranch` | `pull_request`, `pull_request_review` | The base branch is exactly this name. |
+| `reviewState` | `pull_request_review` | `approved`, `changes_requested`, `commented` or `dismissed`. |
+| `approvalsAtLeast` | `pull_request_review` | At least this many reviewers' latest review approves (comment-only reviews do not count). |
+| `conclusion` | `check_run` | `success`, `failure`, `neutral`, `cancelled`, `skipped`, `timed_out`, `action_required` or `stale`. |
+
+A field that is not set matches anything. A field that the event cannot know (for example a base branch on a check
+run) is refused when you save. The server validates the whole rule strictly: unknown fields, wrong types, more than
+one status change, and unknown template variables are refused with a message.
+
+Example: "PR opened, not draft: In Review and a comment".
+
+```json
+{
+  "name": "Opened: In Review",
+  "room_id": null,
+  "trigger": { "event": "pull_request", "action": "opened", "draft": false },
+  "actions": [
+    { "kind": "transition", "toStatus": "In Review" },
+    { "kind": "comment", "template": "PR {{pr_number}} by {{author}}: {{pr_url}}" }
+  ]
+}
+```
+
+A `transition` names the tracker's status by name (`In Review`), not the board column. The provider resolves the
+name to a transition at run time, as for any tracker write. A `comment` template may use `{{pr_url}}`,
+`{{pr_number}}`, `{{pr_title}}`, `{{author}}`, `{{branch}}`, `{{base_branch}}`, `{{repo}}` and `{{reviewer}}`.
+
+### When a rule runs
+
+1. A webhook for a pull request, review or check reaches the room-event projection.
+2. The projection resolves the event to a card and accepts the link. The rule engine runs only when the card has an
+   `external_ref` and the link is confirmed: the resolver matched the pull request or review by the ticket key (in
+   the branch, title or body, or a pull request the key linked before), or the check ran for a pull request that
+   the key linked to the card. A work lease, a `pr_url` set by hand, or another artifact is not enough. A card that
+   a lock or another branch's lease protects runs no rule. (PR6 adds a human-confirmed Jev link here.)
+3. The engine finds the room's enabled filter for the card's tracker. The filter's author must own the connection,
+   and the connection must be active. A room without such a filter runs nothing more (invariant 1).
+4. The engine loads the connection's enabled rules for the room (rules for every room, and rules for this room).
+   With no rule, it stops.
+5. The card must be bound to the ticket by sync: its `external_item_id` names this connection's cached item for the
+   card's key. Sync binds a card only in a room whose filter matched the ticket. So a key that a room member or an
+   agent typed onto a card cannot aim the owner's rules at another ticket the owner's credentials can reach.
+6. The pure matcher (`src/api/connectors/rules/matcher.ts`) returns every rule that matches, oldest first.
+7. For each match the engine records a `tracker_rule_runs` row, unique per rule, webhook delivery and ticket. When
+   the same delivery reaches a second room for the same ticket, that room finds the row and writes nothing: one
+   write per event. A rule that matched but will not write gets a `skipped` row with a reason, shown in the audit:
+   `untrusted_actor` (see "Who can fire a rule"), `owner_not_admin` (the filter's author is no longer an admin of
+   the room), or `debounced` (the rule already ran for this ticket, event type and action in the last 10 minutes,
+   so a burst of failing checks or a close-and-reopen loop writes once). One skipped row per reason is kept in
+   that window. Claims for one rule and ticket take an advisory lock, so deliveries that arrive together cannot all
+   pass these checks.
+8. Before the webhook answers, the engine reserves the journal row for the first action, with the idempotency key
+   `${rule.id}:${deliveryId}:${external_ref}:${action.index}`. A crash after this point leaves a pending row that
+   the journal sweep reconciles, not a lost write.
+9. After the webhook answers, the broker runs that write. Each next action is reserved and run only after the one
+   before it succeeded, so no action runs without the ones before it. When a write failed but may be retried
+   (for example the tracker answered 503), or its outcome is unknown, the run waits: the journal sweep retries or
+   checks the write, and the rule run sweep that follows it (`advancePendingRuns`, every liveness tick) continues
+   the run once it succeeded. A write with no attempts left, or one held for a person, ends the run; later actions
+   are never reserved. The sweep also starts a run that has no journal row yet (the process stopped right after
+   the claim). Each tick takes at most 10 pending runs, least recently visited first, and marks them visited, so
+   runs that wait on a slow write never starve a ready one. It runs 3 at a time and holds the liveness tick for
+   at most 20 seconds; writes still running then go on in the background and are not taken again until they
+   finish. A run still pending after 7 days ends as `error` with the reason `stalled`, shown in the audit.
+10. The run's outcome is `succeeded`, `failed`, `quarantined`, `error` (the connection was removed or changed),
+   `skipped`, or `pending`. While a run is pending, the audit shows its current journal row, so a write the sweep is
+   still retrying reads `failed` until it lands. The audit shows a fixed sentence for each reason; the provider's
+   error text stays in the journal row, which only the server reads.
+
+A redelivered webhook is a duplicate to the projection and reaches no rule. A delivery the route retries after a
+failure reaches the rules again: the run row and the journal give back the earlier rows, the run continues where
+it stands, and nothing new is reserved for a write that succeeded. A retry uses the actions the first attempt
+planned, so a rule edited in between does not change them.
+
+A comment interrupted by a crash before the tracker answered stays ambiguous in the journal (shown as pending): the
+journal never sends a comment twice.
+
+**No loops (invariant 4).** Rules fire on repo events only. Tracker sync writes `tracker_ticket` events tagged
+`metadata.source = "tracker_sync"`; the engine refuses any event that `isTrackerSyncEvent` flags before the
+matcher runs, and those events never go through the repo-event projection. So a transition that a rule made, and
+that sync later reads back, cannot start a rule.
+
+Stored merge replays and the unapplied-merge repair do not run rules: only a live webhook does. A merge that the
+repair applies late therefore does not move the ticket (a known gap; the ticket can be moved by hand).
+
+### Who can fire a rule
+
+Anyone can open a pull request on a public repository and put a ticket key in its title or branch. So a rule fires
+only for events from people with access to the repository, by GitHub's `author_association`:
+
+| Event | Fires when |
+|---|---|
+| `pull_request` | The author is `OWNER`, `MEMBER` or `COLLABORATOR`, or the pull request merged (a merge needs write access). |
+| `pull_request_review` | The reviewer is `OWNER`, `MEMBER` or `COLLABORATOR`. |
+| `check_run` | The check ran for a pull request from a branch in the repository itself (GitHub lists none for a fork's branch). |
+
+`approvalsAtLeast` counts only reviewers with that access, across the event's room and the card's room. Reviews
+stored before this change carry no association and do not count.
+
+### Comment text
+
+The template is the owner's text and is kept as written. Every variable comes from GitHub, so each value is added as
+plain text: line breaks, control characters and bidi overrides become spaces, and a value is cut at 300
+characters. For Linear,
+which renders Markdown, the value's Markdown characters are escaped and an `@` cannot mention anyone. For Jira, the
+comment is sent as plain text nodes. `{{pr_url}}` is added only when it is exactly
+`https://github.com/<the event's repository>/pull/<number>`; otherwise it is empty. A value cannot add a
+placeholder: the template is filled in one pass.
+
+### History and rollback
+
+Each save is a new version; the earlier ones stay in `tracker_rule_versions`. **History** lists them, and **Roll back
+to this** saves an old version's content as the newest version, after the same validation as any save. Turning a
+rule on or off is not a new version. Deleting a rule keeps its runs in the audit (the run keeps the rule's name).
+
+### Audit
+
+Each run shows in the board's governance panel, Audit section, as `Rule "<name>" ran` with the event, the card and
+its ticket, and the outcome. The journal row behind each write is in `workflow_effects` (`effect_ids` on the run).
+
+### Who may write rules
+
+Rules write to the tracker with the connection's credentials, so only the connection's owner, signed in to the
+desktop app, may list, create, change, switch, roll back or delete them. The routes use the same gate as the
+connection routes: owner tokens (what agents carry) are refused. Another account's connection or rule answers
+`404`. A rule limited to one room must name a room that already imports with the connection.
+
+### Rule drafting (PR6 extension point)
+
+PR6 adds `POST /account/connectors/:id/rules/draft`, which turns a sentence into rule JSON. The editor in
+`SettingsConnectorRules.vue` has a `draft` slot and an exposed `applyDraft(rule)`, which fill the form from a
+`TrackerRuleInput`; the person still presses Save, and the draft goes through the same validation.
+
+### HTTP routes
+
+All under the desktop app's session bearer, for a connection the account owns.
+
+| Route | Purpose |
+|---|---|
+| `GET /account/connectors/:id/rules` | The rules and the rooms that import with the connection. |
+| `POST /account/connectors/:id/rules` | Create a rule (at most 50 per connection, counted under a lock). |
+| `PUT /account/connectors/:id/rules/:ruleId` | Save a new version. |
+| `POST /account/connectors/:id/rules/:ruleId/enabled` | `{ "enabled": true }` or `false`. |
+| `GET /account/connectors/:id/rules/:ruleId/versions` | Version history, newest first. |
+| `POST /account/connectors/:id/rules/:ruleId/rollback` | `{ "version": 2 }`: that content becomes the newest version. |
+| `DELETE /account/connectors/:id/rules/:ruleId` | Delete the rule. |
+
+### Tables
+
+Migration `0123_tracker_rules`: `tracker_rules`, `tracker_rule_versions` (unique per rule and version), and
+`tracker_rule_runs` (unique per rule, delivery and ticket; indexed by room and time, by rule, ticket and time for
+the debounce, and by update time for pending runs).
+
+### Tests
+
+- `src/api/__tests__/tracker-rules.test.ts`: matcher table tests for every trigger field, strict validation,
+  template escaping, and the engine's idempotency keys.
+- `src/api/__tests__/tracker-rules-db.test.ts` (needs `TEST_DB_URL`): a PR opened from `HT-1234-x` with the rule
+  above reserves two effects and calls the tracker once for each; a redelivery and a retried delivery reserve
+  nothing; a disabled or non-matching rule never fires; a `tracker_ticket` event never triggers a rule; two rooms
+  write once; a filter its owner did not set writes nothing; an outside author (recorded as skipped) and an unbound
+  card write nothing; the debounce; a transition refused once is retried by the sweep and the comment then posts;
+  a transition refused until no attempts are left ends the run without the comment; a `pr_url` set by hand with a
+  work lease runs no rule; an owner who lost room admin is skipped; pending runs rotate so 51 waiting runs do not
+  starve a ready one; a run pending for 8 days ends as stalled; versions and rollback.
+- `src/api/__tests__/tracker-rule-routes.test.ts`: owner-only access, versions, rollback, strict validation.
+- `apps/desktop/renderer/__tests__/settings-connector-rules.test.ts`: the editor and the audit text.
 
 ## Remote MCP endpoint
 

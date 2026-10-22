@@ -5,6 +5,8 @@ export interface DesktopAccountRoomActivity {
   latestMessageAt: string | null;
   /** Agents working in the room right now. */
   working: Array<{ displayName: string }>;
+  /** When a card in the room last changed, as the server saw it; null until one does. */
+  tasksChangedAt?: string | null;
 }
 
 export interface DesktopAccountActivityState {

@@ -137,3 +137,138 @@ export interface TrackerWebhookSetup {
   url: string;
   secret: string;
 }
+
+export type TrackerRuleEvent = "pull_request" | "pull_request_review" | "check_run";
+export declare const TRACKER_RULE_EVENTS: readonly TrackerRuleEvent[];
+export declare const TRACKER_RULE_EVENT_ACTIONS: Readonly<Record<TrackerRuleEvent, readonly string[]>>;
+export declare const TRACKER_RULE_REVIEW_STATES: readonly string[];
+export declare const TRACKER_RULE_CHECK_CONCLUSIONS: readonly string[];
+export type TrackerRuleTemplateVariable =
+  | "pr_url" | "pr_number" | "pr_title" | "author" | "branch" | "base_branch" | "repo" | "reviewer";
+export declare const TRACKER_RULE_TEMPLATE_VARIABLES: readonly TrackerRuleTemplateVariable[];
+export declare const TRACKER_RULE_NAME_MAX_LENGTH: number;
+export declare const TRACKER_RULE_MAX_ACTIONS: number;
+export declare const TRACKER_RULE_TEMPLATE_MAX_LENGTH: number;
+export declare const TRACKER_RULE_BRANCH_MAX_LENGTH: number;
+export declare const TRACKER_RULE_MAX_APPROVALS: number;
+export declare const TRACKER_RULES_PER_CONNECTION_MAX: number;
+
+/** When a rule fires. Every field that is set must match; unset fields match anything. */
+export interface TrackerRuleTrigger {
+  event: TrackerRuleEvent;
+  /** The webhook action, e.g. `opened`, `closed`, `submitted`, `completed`. */
+  action: string;
+  /** pull_request only. */
+  merged?: boolean;
+  /** pull_request only. */
+  draft?: boolean;
+  /** The pull request's base branch, exact match. Not for check_run. */
+  baseBranch?: string;
+  /** pull_request_review only. */
+  reviewState?: string;
+  /** pull_request_review only: reviewers whose latest review approves, counted with this event. */
+  approvalsAtLeast?: number;
+  /** check_run only. */
+  conclusion?: string;
+}
+
+export type TrackerRuleAction =
+  | { kind: "transition"; toStatus: string }
+  | { kind: "comment"; template: string };
+
+/** What the editor sends to create or change a rule. */
+export interface TrackerRuleInput {
+  name: string;
+  /** Null: every room that imports tickets with this connection. */
+  room_id: string | null;
+  enabled?: boolean;
+  trigger: TrackerRuleTrigger;
+  actions: TrackerRuleAction[];
+}
+
+export interface TrackerRuleView {
+  id: string;
+  connection_id: string;
+  room_id: string | null;
+  name: string;
+  enabled: boolean;
+  trigger: TrackerRuleTrigger;
+  actions: TrackerRuleAction[];
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TrackerRuleVersionView {
+  version: number;
+  name: string;
+  room_id: string | null;
+  trigger: TrackerRuleTrigger;
+  actions: TrackerRuleAction[];
+  created_at: string;
+}
+
+export interface TrackerRuleList {
+  rules: TrackerRuleView[];
+  /** Rooms that import tickets with this connection: the rooms a rule can be limited to. */
+  rooms: string[];
+}
+
+/** Why a My work card needs the account (PR4). Only signals that already exist. */
+export type MyWorkNeedsMeReason = "review_requested" | "human_request" | "ticket_done_pr_open";
+
+/** One pull request on a My work card. Summaries come from the card's GitHub events. */
+export interface MyWorkPullRequest {
+  url: string;
+  number: string | null;
+  title: string | null;
+  state: string | null;
+  draft: boolean | null;
+  merged: boolean | null;
+  review_summary: { total: number; approved: number; changes_requested: number } | null;
+  check_summary: { total: number; success: number; failure: number; pending: number } | null;
+}
+
+/** One card on `GET /account/my-work`. */
+export interface MyWorkCard {
+  task_id: string;
+  room_id: string;
+  room_name: string;
+  title: string;
+  /** `provider:KEY`, or null for a card that names no ticket. */
+  external_ref: string | null;
+  key: string | null;
+  provider: TrackerProvider | null;
+  /** Owned by the tracker; null when no room filter synced the ticket. */
+  ticket_state: TicketState | null;
+  ticket_status: string | null;
+  ticket_url: string | null;
+  ticket_assignee_label: string | null;
+  /** The card's LetAgents work state. */
+  work_state: string;
+  /** `tracker`: the ticket is assigned to you. `native`: the card is assigned to you or your agent. */
+  assigned_via: "tracker" | "native";
+  agent: {
+    label: string;
+    agent_key: string | null;
+    display_name: string | null;
+    status: string | null;
+    status_text: string | null;
+    last_heartbeat_at: string | null;
+  } | null;
+  threads: { count: number; last_activity_at: string | null };
+  pull_requests: MyWorkPullRequest[];
+  needs_me: boolean;
+  needs_me_reasons: MyWorkNeedsMeReason[];
+  updated_at: string;
+}
+
+export interface MyWorkPage {
+  cards: MyWorkCard[];
+  /** Pass back as `cursor` for the next page; null on the last page. */
+  next_cursor: string | null;
+  /** False in zero-connector mode: the page lists native cards and hides ticket state. */
+  has_connections: boolean;
+  /** The trackers the account has connected. */
+  providers: TrackerProvider[];
+}

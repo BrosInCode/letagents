@@ -199,14 +199,40 @@ export function denyIntentReason(value: string): string | null {
   return value.trim() || null;
 }
 
+const TRACKER_RULE_OUTCOMES: Record<string, string> = {
+  pending: "writing to the tracker",
+  succeeded: "done",
+  failed: "failed",
+  quarantined: "held for a person",
+  error: "not written",
+  skipped: "skipped",
+};
+
+function auditMetadataText(entry: DesktopBoardGovernanceAuditEntry, key: string): string | null {
+  const value = entry.metadata?.[key];
+  return typeof value === "string" && value ? value : null;
+}
+
 export function readableAuditEvent(entry: DesktopBoardGovernanceAuditEntry): string {
+  if (entry.kind === "tracker_rule_run") {
+    return `Rule "${auditMetadataText(entry, "rule_name") ?? "rule"}" ran`;
+  }
   return entry.eventType === "board_intent_task_created"
     ? "Task created"
     : entry.eventType.replaceAll("_", " ");
 }
 
+/** A tracker rule run: the repo event, the card and its ticket, and the outcome. */
 export function auditResultText(entry: DesktopBoardGovernanceAuditEntry): string | null {
   const taskId = entry.metadata?.task_id;
+  if (entry.kind === "tracker_rule_run") {
+    const event = [auditMetadataText(entry, "event_type")?.replaceAll("_", " "), auditMetadataText(entry, "event_action")]
+      .filter(Boolean).join(" ");
+    const card = [typeof taskId === "string" ? taskId : null, auditMetadataText(entry, "external_ref")]
+      .filter(Boolean).join(" · ");
+    const outcome = auditMetadataText(entry, "outcome");
+    return `On ${event || "a repo event"} for ${card || "a card"}: ${TRACKER_RULE_OUTCOMES[outcome ?? ""] ?? outcome ?? "unknown"}.`;
+  }
   return entry.eventType === "board_intent_task_created" && typeof taskId === "string"
     ? `Created ${taskId}`
     : null;

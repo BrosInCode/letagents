@@ -2,8 +2,8 @@ import { spawnSync } from "node:child_process";
 import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
 
-// CI runs `npm ci` through this script so one dropped registry connection does
-// not fail a whole job. npm retries a reset that happens before a response,
+// CI runs `npm ci` and `npm audit signatures` through this script so one
+// dropped registry connection does not fail a whole job. npm retries a reset that happens before a response,
 // but not one that happens while a tarball streams in; that surfaces as
 // `npm error network read ECONNRESET` and exit code 152 (npm exits with the
 // errno, -104, which wraps to 152).
