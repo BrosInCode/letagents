@@ -4969,6 +4969,23 @@ test("purge proves preconditions and deletes local agent rows atomically without
     await inbox.transition(cancelled.inbox_item_id, "blocked", { last_error: "safe pre-turn cancellation" });
     assert.equal((await inbox.skipBlocked(cancelled.inbox_item_id)).state, "cancelled_by_user",
       "a retained user-cancelled receipt is terminal purge history, not live work");
+    const blocked = await inbox.enqueueCorrection({
+      agent_id: stopped.id, room_id: stopped.room_id, source_message_id: "purge-pre-dispatch-failure",
+      source_message: { text: "never dispatched" }, activation: { decision: "activate" },
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) await inbox.transition(blocked.inbox_item_id, "pending");
+      await inbox.transition(blocked.inbox_item_id, "dispatching");
+      await inbox.recordRetryFailure(blocked.inbox_item_id, {
+        domain: "pre_dispatch", error: "Cursor could not prove the live account identity.",
+      });
+    }
+    assert.equal((await inbox.get(blocked.inbox_item_id))?.state, "blocked");
+    assert.equal((await inbox.get(blocked.inbox_item_id))?.attempt_count, 0);
+    await inbox.enqueueCorrection({
+      agent_id: stopped.id, room_id: stopped.room_id, source_message_id: "purge-queued-behind-blocked",
+      source_message: { text: "queued behind the blocked message" }, activation: { decision: "activate" },
+    });
     await inbox.close();
     const beforePurge = new DatabaseSync(env.databasePath);
     assert.equal(Number((beforePurge.prepare("SELECT last_sequence FROM turn_control_sequence_watermarks WHERE agent_id=?").get(stopped.id) as { last_sequence: number }).last_sequence), 1);
@@ -5025,6 +5042,75 @@ test("purge proves preconditions and deletes local agent rows atomically without
     await inbox.close().catch(() => undefined);
     await store.close().catch(() => undefined);
     await env.cleanup();
+  }
+});
+
+test("purge rechecks inbox dispatch and recovery evidence at preparation and commit", async (t) => {
+  for (const scenario of [
+    { state: "retryable", allowed: true },
+    { state: "dispatching" },
+    { state: "awaiting_result" },
+    { state: "result_recovery" },
+    { state: "publishing" },
+    { state: "blocked", attempts: 1 },
+    { state: "blocked", turn: "started-turn" },
+    { state: "pending", outcome: '{"kind":"reply","text":"saved answer"}' },
+    { state: "blocked", recovery: true },
+  ] as const) {
+    await t.test(JSON.stringify(scenario), async () => {
+      const env = await fixture();
+      const store = new ManifestStore(env.databasePath);
+      const inbox = new SupervisedAgentInboxStore(env.databasePath);
+      const stopped: DaemonManifestEntry = {
+        ...entry, desired_state: "stopped", observed_state: "stopped", condition: "none",
+        workspace_path: null, work_attempt_id: null, provider_ref: null, turn_control: null, last_worker_binding: null,
+      };
+      try {
+        await store.write(0, [stopped]);
+        const item = await inbox.enqueueCorrection({
+          agent_id: stopped.id, room_id: stopped.room_id, source_message_id: "purge-inbox-evidence",
+          source_message: { text: "queued" }, activation: { decision: "activate" },
+        });
+        const operation = { operationId: "purge_evidence", agentId: stopped.id, daemonGeneration: 1 };
+        const preparation = {
+          ...operation, requestId: operation.operationId, externalRevokeRequired: false,
+          workerSessionAttestation: "not_required" as const, agentSessionId: null,
+        };
+        const database = new DatabaseSync(env.databasePath);
+        try {
+          database.prepare("UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=? WHERE inbox_item_id=?")
+            .run(scenario.state, "attempts" in scenario ? scenario.attempts : 0,
+              "turn" in scenario ? scenario.turn : null, "outcome" in scenario ? scenario.outcome : null, item.inbox_item_id);
+          if ("recovery" in scenario) {
+            database.prepare("UPDATE supervised_agent_inbox SET state='dispatching' WHERE inbox_item_id=?").run(item.inbox_item_id);
+            await inbox.normalizeStartupRecovery(stopped.id);
+          }
+          if ("allowed" in scenario) {
+            await store.preparePurge(1, preparation);
+            await store.commitPurge(1, operation);
+            assert.equal(await store.getEntry(stopped.id), undefined);
+            assert.equal(await inbox.get(item.inbox_item_id), null);
+            return;
+          }
+          await assert.rejects(() => store.preparePurge(1, preparation), /durable.*blocker/);
+          assert.equal(await store.getPurge(operation.operationId), null);
+          // A terminal receipt permits preparation; restoring the unresolved
+          // evidence afterwards must still veto the final deletion transaction.
+          database.prepare("UPDATE supervised_agent_inbox SET state='cancelled_by_user' WHERE inbox_item_id=?").run(item.inbox_item_id);
+          await store.preparePurge(1, preparation);
+          database.prepare("UPDATE supervised_agent_inbox SET state=? WHERE inbox_item_id=?").run(scenario.state, item.inbox_item_id);
+          await assert.rejects(() => store.commitPurge(1, operation), /durable.*blocker/);
+          assert.equal((await store.load()).generation, 1);
+          assert.ok(await store.getEntry(stopped.id));
+          assert.equal((await inbox.get(item.inbox_item_id))?.state, scenario.state);
+          assert.equal((await store.getPurge(operation.operationId))?.phase, "local_commit");
+        } finally { database.close(); }
+      } finally {
+        await inbox.close();
+        await store.close();
+        await env.cleanup();
+      }
+    });
   }
 });
 
