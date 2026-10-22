@@ -102,12 +102,14 @@ test("GitHub keys match only repositories the room's filter names", () => {
   assert.deepEqual(detectTicketKeys("github", "acme/api#5", { githubRepos: [...repos, "acme/api"] }), ["acme/api#5"]);
 });
 
-test("a bare #123 names the pull request's repository, or the only filtered one", () => {
+test("a bare #123 names the pull request's repository, or in a message the only filtered one", () => {
   const two = ["brosincode/letagents", "acme/api"];
   assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: two }), [], "two repositories and no default: ambiguous");
   assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: two, githubDefaultRepo: "Acme/API" }), ["acme/api#12"]);
-  assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: ["brosincode/letagents"], githubDefaultRepo: "acme/api" }),
-    ["brosincode/letagents#12"], "a default outside the filter is ignored");
+  assert.deepEqual(detectTicketKeys("github", "Revert #12", { githubRepos: ["brosincode/letagents"], githubDefaultRepo: "acme/api" }),
+    [], "a pull request in acme/api means acme/api#12, never the filtered repository's #12");
+  assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: ["brosincode/letagents"] }), ["brosincode/letagents#12"],
+    "a room message names the only filtered repository");
   assert.equal(repositoryOfPullRequestUrl("https://github.com/BrosInCode/letagents/pull/1729"), "brosincode/letagents");
   assert.equal(repositoryOfPullRequestUrl("https://example.com/x/y/pull/1"), null);
 });

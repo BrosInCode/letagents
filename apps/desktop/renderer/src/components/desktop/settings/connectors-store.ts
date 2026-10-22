@@ -33,11 +33,27 @@ export const remoteSignInsState = reactive({
 
 let trackerLoad: Promise<void> | null = null;
 let remoteLoad: Promise<void> | null = null;
+// Bumped by every change a pane makes. A load that started before a change
+// drops its answer, so a slow reload never brings back a removed connection.
+let trackerVersion = 0;
+let remoteVersion = 0;
+
+/** Call when a pane changes the tracker list itself (connect, update, remove). */
+export function trackerConnectionsChanged(): void {
+  trackerVersion += 1;
+}
+
+/** Call when a pane changes the remote sign-in list itself (disconnect). */
+export function remoteSignInsChanged(): void {
+  remoteVersion += 1;
+}
 
 export function loadTrackerConnections(): Promise<void> {
   trackerLoad ??= (async () => {
+    const version = trackerVersion;
     try {
       const list = await window.letagentsDesktop.connectors.list();
+      if (version !== trackerVersion) return;
       trackerConnectionsState.notConfigured = list.not_configured === true;
       trackerConnectionsState.connections = list.connections;
       trackerConnectionsState.providers = list.providers;
@@ -55,8 +71,11 @@ export function loadTrackerConnections(): Promise<void> {
 
 export function loadRemoteSignIns(): Promise<void> {
   remoteLoad ??= (async () => {
+    const version = remoteVersion;
     try {
-      remoteSignInsState.connections = (await window.letagentsDesktop.mcpConnections.list()).connections;
+      const connections = (await window.letagentsDesktop.mcpConnections.list()).connections;
+      if (version !== remoteVersion) return;
+      remoteSignInsState.connections = connections;
       remoteSignInsState.error = null;
     } catch (error) {
       remoteSignInsState.error = safeUserVisibleErrorDetail(error, "Connected apps are not available. Sign in, then try again.");

@@ -28,9 +28,10 @@ export interface KeyDetectorOptions {
   /** Repositories (`owner/repo`) the room's GitHub Issues filter names. */
   githubRepos?: readonly string[];
   /**
-   * The repository a bare `#123` names, e.g. the pull request's own. Used only
-   * when `githubRepos` holds it; without one, a bare number names the only
-   * repository in `githubRepos`, and nothing when there are several.
+   * The repository a bare `#123` names, e.g. the pull request's own. A bare
+   * number matches only when `githubRepos` holds it. Without one (a room
+   * message), a bare number names the only repository in `githubRepos`, and
+   * nothing when there are several.
    */
   githubDefaultRepo?: string | null;
 }
@@ -108,7 +109,11 @@ export function createGitHubKeyDetector(
   const known = new Set(repos.map(normalizeGitHubRepo).filter((repo): repo is string => Boolean(repo)));
   if (known.size === 0) return () => [];
   const preferred = defaultRepo ? normalizeGitHubRepo(defaultRepo) : null;
-  const bareRepo = preferred && known.has(preferred) ? preferred : known.size === 1 ? [...known][0]! : null;
+  // With a pull request's repository, a bare number means that repository or
+  // nothing: "#57" in acme/app never names acme/tracker#57.
+  const bareRepo = preferred
+    ? known.has(preferred) ? preferred : null
+    : known.size === 1 ? [...known][0]! : null;
   return (text) => {
     if (!text) return [];
     const keys: string[] = [];

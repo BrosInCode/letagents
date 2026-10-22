@@ -622,7 +622,11 @@ where the App is installed, and choose **Connect**. The server:
 
 1. finds the App installation that holds that repository (the server's own
    record, kept current by the App's `installation` webhooks);
-2. checks with GitHub that your GitHub login can read that repository;
+2. checks that your GitHub login is the GitHub id you signed in with, and that
+   you have your own access to that repository (a collaborator or an
+   organization member with access, `GET /repos/{owner}/{repo}/collaborators/{login}`
+   answers 204). Public read alone is not enough, so a person outside the
+   organization cannot attach to its installation;
 3. stores a connection whose site is the installation (`installation:<id>`)
    and whose sealed "credentials" are only `{ kind: "github_app",
    installation_id, login }`, with `auth_kind` `github_app`.
@@ -637,7 +641,13 @@ repositories to import.
    GitHub.
 2. The connection's GitHub login can read the repository
    (`GET /repos/{owner}/{repo}/collaborators/{login}/permission` is not `none`).
-   The answer is kept for 5 minutes (a refusal for 1 minute).
+   The answer is kept for 5 minutes (a refusal for 1 minute). The answer must
+   be about the GitHub id that connected, so a renamed login that someone else
+   takes later reads nothing.
+
+"Not installed" and "cannot read" give the same text, so the answer never tells
+whether a private repository exists. Test connection and the room filter test
+are rate limited for GitHub Issues (they spend the organization's App budget).
 
 The token for each read is minted for the installation with
 `repositories: [<that repository>]` and `permissions: { issues: read,

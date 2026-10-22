@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 
 import { createGitHubAppJwt } from "../../github/app-client.js";
 import { getGitHubAppConfig } from "../../github/config.js";
@@ -47,6 +47,18 @@ const READ_PERMISSIONS = { issues: "read", metadata: "read" } as const;
 /** The status of a read LetAgents itself refused (repository outside the installation, or not readable by the login). */
 export const ACCESS_REFUSED = 403;
 
+/**
+ * LetAgents itself refused the read: the repository is not in the
+ * connection's installation, or the login cannot read it. One text for both,
+ * so the answer never tells whether a private repository exists.
+ */
+export class GitHubAccessRefusedError extends TrackerProviderError {
+  constructor(login: string, repo: string) {
+    super("definite", `LetAgents cannot read ${repo} for ${login} through its GitHub App. Check that the App is installed on it and that you can open it on GitHub.`, ACCESS_REFUSED);
+    this.name = "GitHubAccessRefusedError";
+  }
+}
+
 export const GITHUB_STATUS_OPEN = "Open";
 export const GITHUB_STATUS_OPEN_ASSIGNED = "Open (assigned)";
 export const GITHUB_STATUS_CLOSED = "Closed";
@@ -55,8 +67,8 @@ export const GITHUB_STATUS_CLOSED = "Closed";
 export interface GitHubAppDirectory {
   /** The App's id and private key, or null when the server has no GitHub App. */
   appCredentials(): Promise<{ appId: string; privateKey: string } | null>;
-  /** The active installation that holds `owner/repo`, or null. */
-  repositoryInstallation(repo: string): Promise<{ installation_id: string } | null>;
+  /** The active installation that holds `owner/repo` (any case), and the name as GitHub spells it; or null. */
+  repositoryInstallation(repo: string): Promise<{ installation_id: string; full_name?: string } | null>;
   /** An installation that is neither suspended nor removed, or null. */
   installation(installationId: string): Promise<{ installation_id: string; target_login: string } | null>;
 }
@@ -79,7 +91,10 @@ export const defaultGitHubAppDirectory: GitHubAppDirectory = {
     const { db, github_app_installations, github_app_repositories } = await appTables();
     // Stored names keep GitHub's case; keys are lower case. The table holds
     // one row per repository the App can see, so the scan is small.
-    const [row] = await db.select({ installation_id: github_app_repositories.installation_id })
+    const [row] = await db.select({
+      installation_id: github_app_repositories.installation_id,
+      full_name: github_app_repositories.full_name,
+    })
       .from(github_app_repositories)
       .innerJoin(github_app_installations, eq(github_app_installations.installation_id, github_app_repositories.installation_id))
       .where(and(
@@ -88,6 +103,7 @@ export const defaultGitHubAppDirectory: GitHubAppDirectory = {
         isNull(github_app_installations.suspended_at),
         isNull(github_app_installations.uninstalled_at),
       ))
+      .orderBy(desc(github_app_repositories.updated_at))
       .limit(1);
     return row ?? null;
   },
@@ -164,8 +180,10 @@ export function parseGitHubIssuesWebhook(payload: unknown): ExternalItemChange[]
 }
 
 export interface GitHubIssuesProvider extends WorkItemProvider {
-  /** Throws a "definite" TrackerProviderError unless the connection may read `repo`. */
-  assertReadable(conn: ProviderConnection, repo: string): Promise<void>;
+  /** Throws GitHubAccessRefusedError unless the connection may read `repo`. */
+  assertReadable(conn: ProviderConnection, repo: string): Promise<string>;
+  /** As assertReadable, and the login must have its own access, not only public read. */
+  assertMember(conn: ProviderConnection, repo: string): Promise<void>;
 }
 
 function credentialsOf(conn: ProviderConnection): GitHubAppCredentials {
@@ -237,24 +255,31 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
     });
   }
 
-  /** Throws unless the repository is in the connection's installation and its login can read it. */
-  async function assertReadable(conn: ProviderConnection, repo: string): Promise<void> {
+  /**
+   * Throws unless the repository is in the connection's installation and its
+   * login can read it. Returns the repository name as GitHub spells it, for
+   * the token's `repositories` scope.
+   */
+  async function assertReadable(conn: ProviderConnection, repo: string): Promise<string> {
     const { installation_id: installationId, login } = credentialsOf(conn);
     const name = normalizeGitHubRepo(repo);
     if (!name) throw new TrackerProviderError("definite", `"${repo.slice(0, 60)}" is not owner/repo.`);
     const holder = await directory.repositoryInstallation(name);
-    if (!holder || holder.installation_id !== installationId) {
-      throw new TrackerProviderError("definite", `The LetAgents GitHub App for this connection is not installed on ${name}.`, ACCESS_REFUSED);
-    }
+    if (!holder || holder.installation_id !== installationId) throw new GitHubAccessRefusedError(login, name);
+    const repoName = (holder.full_name ?? name).split("/")[1]!;
     const cacheKey = `${installationId}:${login.toLowerCase()}:${name}`;
     const cached = access.get(cacheKey);
     let allowed = cached && cached.until > now().getTime() ? cached.allowed : null;
     if (allowed === null) {
-      const token = await mintToken(installationId, name.split("/")[1]!);
+      const token = await mintToken(installationId, repoName);
       try {
-        const response = await get(token, `/repos/${name}/collaborators/${encodeURIComponent(login)}/permission`);
-        const permission = asString(asRecord(response.json).permission);
-        allowed = Boolean(permission && permission !== "none");
+        const response = asRecord((await get(token, `/repos/${name}/collaborators/${encodeURIComponent(login)}/permission`)).json);
+        const permission = asString(response.permission);
+        // The answer must be about the person who connected: a renamed login
+        // that someone else took later has another GitHub id.
+        const userId = asRecord(response.user).id;
+        const samePerson = !conn.tracker_user_id || userId === undefined || String(userId) === conn.tracker_user_id;
+        allowed = Boolean(permission && permission !== "none" && samePerson);
       } catch (error) {
         // 404: GitHub does not know this login for the repository.
         if (!(error instanceof TrackerProviderError && error.status === 404)) throw error;
@@ -262,7 +287,28 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
       }
       bounded(access).set(cacheKey, { allowed, until: now().getTime() + (allowed ? ACCESS_ALLOW_TTL_MS : ACCESS_DENY_TTL_MS) });
     }
-    if (!allowed) throw new TrackerProviderError("definite", `${login} cannot read ${name} on GitHub, so LetAgents does not read it for them.`, ACCESS_REFUSED);
+    if (!allowed) throw new GitHubAccessRefusedError(login, name);
+    return repoName;
+  }
+
+  /**
+   * Whether the login has its own access to the repository (a collaborator,
+   * or an organization member with access), not only the read access every
+   * GitHub user has to a public repository. Connecting needs this, so an
+   * outsider cannot attach to an organization's installation.
+   */
+  async function assertMember(conn: ProviderConnection, repo: string): Promise<void> {
+    const repoName = await assertReadable(conn, repo);
+    const { installation_id: installationId, login } = credentialsOf(conn);
+    const name = normalizeGitHubRepo(repo)!;
+    const token = await mintToken(installationId, repoName);
+    try {
+      // 204 for a collaborator (direct, team or organization access); 404 otherwise.
+      await get(token, `/repos/${name}/collaborators/${encodeURIComponent(login)}`);
+    } catch (error) {
+      if (error instanceof TrackerProviderError && error.status === 404) throw new GitHubAccessRefusedError(login, name);
+      throw error;
+    }
   }
 
   function toItem(conn: ProviderConnection, repo: string, issue: unknown): ExternalItem | null {
@@ -301,9 +347,9 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
     opts: ListItemsOptions,
     limit: number,
   ): Promise<ExternalItem[]> {
-    await assertReadable(conn, repo);
+    const repoName = await assertReadable(conn, repo);
     const { installation_id: installationId, login } = credentialsOf(conn);
-    const token = await mintToken(installationId, repo.split("/")[1]!);
+    const token = await mintToken(installationId, repoName);
     const before = opts.updatedBefore ? Date.parse(opts.updatedBefore) : null;
     const items: ExternalItem[] = [];
     for (let page = 1; page <= MAX_PAGES_PER_REPO && items.length < limit; page += 1) {
@@ -348,7 +394,7 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
       try {
         await assertReadable(conn, name);
       } catch (error) {
-        if (error instanceof TrackerProviderError && error.outcome === "definite") continue;
+        if (error instanceof GitHubAccessRefusedError) continue;
         throw error;
       }
       const item = toItem(conn, name, issue);
@@ -362,6 +408,7 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
   return {
     name: "github",
     assertReadable,
+    assertMember,
 
     async whoAmI(conn): Promise<TrackerUser> {
       const { installation_id: installationId, login } = credentialsOf(conn);
@@ -401,15 +448,15 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
     async getItem(conn, key) {
       const parsed = parseGitHubIssueKey(key);
       if (!parsed) throw new TrackerProviderError("definite", `"${key.slice(0, 60)}" is not a GitHub issue key (owner/repo#123).`);
-      await assertReadable(conn, parsed.repo);
+      const repoName = await assertReadable(conn, parsed.repo);
       const { installation_id: installationId } = credentialsOf(conn);
-      const token = await mintToken(installationId, parsed.repo.split("/")[1]!);
+      const token = await mintToken(installationId, repoName);
       try {
         const response = await get(token, `/repos/${parsed.repo}/issues/${parsed.number}`);
         return toItem(conn, parsed.repo, response.json);
       } catch (error) {
-        // 404: no such issue; 410: deleted or transferred.
-        if (error instanceof TrackerProviderError && (error.status === 404 || error.status === 410)) return null;
+        // 404: no such issue; 410: deleted; 301: transferred to another repository.
+        if (error instanceof TrackerProviderError && (error.status === 404 || error.status === 410 || error.status === 301)) return null;
         throw error;
       }
     },

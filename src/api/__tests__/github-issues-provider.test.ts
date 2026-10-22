@@ -11,6 +11,7 @@ const { applyGitHubIssuesEvent } = await import("../connectors/github-issues-eve
 import {
   ACCESS_REFUSED,
   createGitHubIssuesProvider,
+  GitHubAccessRefusedError,
   githubFilterAllows,
   type GitHubAppDirectory,
   parseGitHubFilter,
@@ -153,9 +154,9 @@ test("a repository outside the connection's installation is refused before any G
   for (const filter of ["other-org/app", "someone/unknown"]) {
     await assert.rejects(provider.listItems(connection(), filter, {}), (error: unknown) =>
       error instanceof TrackerProviderError && error.outcome === "definite" && error.status === ACCESS_REFUSED
-      && /not installed on/.test(error.message));
+      && /cannot read .* through its GitHub App/.test(error.message));
   }
-  await assert.rejects(provider.getItem(connection(), "other-org/app#1"), /not installed on/);
+  await assert.rejects(provider.getItem(connection(), "other-org/app#1"), /cannot read other-org\/app/);
   assert.equal(fetch.calls.length, 0, "no token is minted for a repository of another installation");
 });
 
@@ -163,7 +164,7 @@ test("a login that cannot read the repository on GitHub gets nothing, even thoug
   const fetch = fakeFetch([mint, permission("github-permission-none")]);
   const provider = createGitHubIssuesProvider({ fetchImpl: fetch.impl, directory: directory(), now });
   await assert.rejects(provider.listItems(connection(), "brosincode/secret-roadmap", {}), (error: unknown) =>
-    error instanceof TrackerProviderError && error.status === ACCESS_REFUSED && /cannot read brosincode\/secret-roadmap/.test(error.message));
+    error instanceof GitHubAccessRefusedError && error.status === ACCESS_REFUSED && /cannot read brosincode\/secret-roadmap/.test(error.message));
   await assert.rejects(provider.getItem(connection(), "brosincode/secret-roadmap#7"), /cannot read/);
   assert.ok(!fetch.calls.some((call) => call.url.pathname.includes("/issues")), "no issue is read");
   assert.equal(fetch.calls.filter((call) => call.url.pathname.endsWith("/permission")).length, 1, "the refusal is cached briefly");
@@ -281,4 +282,37 @@ test("a GitHub App issues event goes to the same webhook path for each connectio
     sync: { async handleWebhook() { throw new Error("not called"); } },
     async connectionsForInstallation() { return rows; },
   }), 0);
+});
+
+test("the token scope uses GitHub's spelling of the repository; a moved issue is no item", async () => {
+  const fetch = fakeFetch([
+    mint,
+    permission("github-permission-read"),
+    (call) => call.url.pathname === "/repos/acme/myrepo/issues/5" ? { status: 301, json: { message: "Moved Permanently" } } : undefined,
+  ]);
+  const provider = createGitHubIssuesProvider({
+    fetchImpl: fetch.impl,
+    directory: directory({ async repositoryInstallation(repo) { return repo === "acme/myrepo" ? { installation_id: INSTALLATION, full_name: "Acme/MyRepo" } : null; } }),
+    now,
+  });
+  assert.equal(await provider.getItem(connection(), "acme/myrepo#5"), null);
+  const minted = fetch.calls.find((call) => call.url.pathname.endsWith("/access_tokens"))!;
+  assert.deepEqual(minted.body?.repositories, ["MyRepo"]);
+});
+
+test("a permission answer about another GitHub user (a renamed login taken by someone else) is a refusal", async () => {
+  const other = { ...(fixture("github-permission-read") as Record<string, unknown>), user: { login: "EmmyMay", id: 777 } };
+  const fetch = fakeFetch([mint, (call) => call.url.pathname.endsWith("/permission") ? { json: other } : undefined]);
+  const provider = createGitHubIssuesProvider({ fetchImpl: fetch.impl, directory: directory(), now });
+  await assert.rejects(provider.listItems(connection(), "brosincode/letagents", {}), GitHubAccessRefusedError);
+});
+
+test("connecting needs the person's own access to the repository, not only public read", async () => {
+  const collaborator = (status: number): Route => (call) =>
+    call.url.pathname === "/repos/brosincode/letagents/collaborators/EmmyMay" ? { status, json: status === 204 ? undefined : fixture("github-not-found") } : undefined;
+  const member = createGitHubIssuesProvider({ fetchImpl: fakeFetch([mint, permission("github-permission-read"), collaborator(204)]).impl, directory: directory(), now });
+  await member.assertMember(connection(), "brosincode/letagents");
+  const outsider = createGitHubIssuesProvider({ fetchImpl: fakeFetch([mint, permission("github-permission-read"), collaborator(404)]).impl, directory: directory(), now });
+  await assert.rejects(outsider.assertMember(connection(), "brosincode/letagents"), GitHubAccessRefusedError,
+    "public read is enough to read a filtered repository, not to attach to the installation");
 });

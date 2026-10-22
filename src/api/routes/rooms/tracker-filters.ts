@@ -29,7 +29,7 @@ import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnecti
 import type { Project } from "../../db.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
-import { requireAccount } from "../account/connectors/index.js";
+import { createAttemptLimiter, requireAccount } from "../account/connectors/index.js";
 import type { RoomMetadataRouteDeps } from "./metadata.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
 
@@ -67,6 +67,8 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
       providers,
     };
   })();
+
+  const allowGitHubTest = createAttemptLimiter(20, 10 * 60_000);
 
   async function room(req: AuthenticatedRequest, res: Response): Promise<Project | null> {
     const raw = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
@@ -253,6 +255,12 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
     const provider = connection.provider as TrackerProvider;
     const filter = readFilter(res, provider, body.filter);
     if (filter === null) return;
+    // A GitHub Issues test reads up to 10 repositories with the organization's App budget.
+    if (provider === "github" && !allowGitHubTest(accountId)) {
+      res.status(429).json({ error: "Too many filter tests. Wait a few minutes and try again." });
+      return;
+    }
+    if (!await readableRepos(res, connection, filter)) return;
     let result: RoomTrackerFilterTestResult;
     try {
       const items = await connectors.providers[provider].listItems(connectors.service.open(connection), filter || null, {

@@ -52,7 +52,7 @@
 import { computed, ref } from "vue";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import { remoteConnectorUrl } from "../connectors";
-import { remoteSignInsState as state } from "../connectors-store";
+import { remoteSignInsChanged, remoteSignInsState as state } from "../connectors-store";
 import SettingsRow from "../SettingsRow.vue";
 import type { SettingsFeedback } from "../types";
 
@@ -92,6 +92,7 @@ async function disconnect(connection: RemoteMcpConnectionView) {
   feedback.value = null;
   try {
     await api().disconnect(connection.id);
+    remoteSignInsChanged();
     state.connections = state.connections.filter((entry) => entry.id !== connection.id);
     feedback.value = { state: "success", message: `${connection.client_name ?? "The app"} is disconnected.` };
   } catch (error) {

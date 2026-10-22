@@ -30,7 +30,7 @@ import {
   trackerOAuthMissingBaseUrl,
 } from "../../../connectors/oauth.js";
 import { normalizeGitHubRepo } from "../../../connectors/key-detectors.js";
-import { ACCESS_REFUSED, defaultGitHubAppDirectory, type GitHubAppDirectory } from "../../../connectors/providers/github.js";
+import { defaultGitHubAppDirectory, GitHubAccessRefusedError, type GitHubAppDirectory } from "../../../connectors/providers/github.js";
 import { createWorkItemProviders, type WorkItemProviders } from "../../../connectors/providers/index.js";
 import { TrackerProviderError, type TrackerCredentials } from "../../../connectors/providers/types.js";
 import { isAtlassianCloudId, normalizeJiraSiteUrl, TrackerSiteUrlError } from "../../../connectors/site-url.js";
@@ -132,7 +132,7 @@ function parseLoopbackPort(value: unknown): number | null {
 function sendProviderError(res: Response, error: unknown): void {
   if (error instanceof TrackerSiteUrlError) {
     res.status(400).json({ error: error.message });
-  } else if (error instanceof TrackerProviderError && error.status === ACCESS_REFUSED && error.outcome === "definite") {
+  } else if (error instanceof GitHubAccessRefusedError) {
     res.status(403).json({ error: error.message });
   } else if (error instanceof TrackerProviderError && error.outcome === "auth") {
     res.status(400).json({ error: "The tracker refused these credentials. Check them and try again." });
@@ -437,20 +437,29 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     try {
       const holder = await githubDirectory.repositoryInstallation(repo);
       if (!holder) {
-        res.status(404).json({ error: `The LetAgents GitHub App is not installed on ${repo}. Install it on the repository, then try again.` });
-        return;
+        // The same text as "cannot read": the answer never tells whether a private repository exists.
+        throw new GitHubAccessRefusedError(account.login, repo);
       }
       const credentials = { kind: "github_app" as const, installation_id: holder.installation_id, login: account.login };
-      // The same check every read makes, before anything is stored.
-      await deps.providers.github.assertReadable({
+      const probe = {
         id: "probe_github",
-        provider: "github",
-        auth_kind: "github_app",
+        provider: "github" as const,
+        auth_kind: "github_app" as const,
         status_map: {},
-        tracker_user_id: null,
+        tracker_user_id: null as string | null,
         credentials,
         async saveCredentials() { return true; },
-      }, repo);
+      };
+      // The GitHub login is the person who signed in, by GitHub id, not only by name.
+      const user = await deps.providers.github.whoAmI(probe);
+      if (!account.provider_user_id || user.id !== String(account.provider_user_id)) {
+        res.status(409).json({ error: "Your GitHub login changed since you signed in. Sign out of LetAgents, sign in again, then connect." });
+        return;
+      }
+      probe.tracker_user_id = user.id;
+      // Every read checks the repository; connecting also needs the person's own
+      // access (not only public read), so an outsider cannot attach to an installation.
+      await deps.providers.github.assertMember(probe, repo);
       const row = await connections.connect({ account_id: accountId, provider: "github", auth_kind: "github_app", credentials, site: null });
       res.status(201).json({ connection: toConnectionView(row) });
     } catch (error) {
@@ -465,6 +474,11 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     if (!accountId) return;
     const row = await ownedRow(req, res, accountId);
     if (!row) return;
+    // GitHub Issues spends the organization's App budget (the search API is 30 a minute).
+    if (row.provider === "github" && !allowAttempt(`github-test:${accountId}`)) {
+      res.status(429).json({ error: "Too many tests. Wait a few minutes and try again." });
+      return;
+    }
     let result: TrackerConnectionTestResult;
     try {
       const conn = connections.open(row);

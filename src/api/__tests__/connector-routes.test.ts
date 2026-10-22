@@ -12,6 +12,7 @@ const { TrackerProviderError } = await import("../connectors/providers/types.js"
 import type { TrackerConnectionRow, TrackerConnectionStore } from "../connectors/store.js";
 import type { WorkItemProvider } from "../connectors/providers/types.js";
 import type { GitHubIssuesProvider } from "../connectors/providers/github.js";
+const { GitHubAccessRefusedError } = await import("../connectors/providers/github.js");
 import { CONNECTORS_NOT_CONFIGURED_MESSAGE } from "../../../shared/ticket-connectors.mjs";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 
@@ -124,7 +125,11 @@ function githubProvider(): GitHubIssuesProvider {
       return { id: "31524469", label: credentials.login, site: { key: `installation:${credentials.installation_id}`, url: "https://github.com/acme", name: "acme" } };
     },
     async assertReadable(conn, repo) {
-      if (repo !== "acme/api") throw new TrackerProviderError("definite", `${(conn.credentials as { login: string }).login} cannot read ${repo} on GitHub.`, 403);
+      if (repo !== "acme/api") throw new GitHubAccessRefusedError((conn.credentials as { login: string }).login, repo);
+      return "api";
+    },
+    async assertMember(conn, repo) {
+      await this.assertReadable(conn, repo);
     },
   };
 }
@@ -142,7 +147,7 @@ async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetch
       req.sessionAccount = null;
     } else if (who !== "anonymous") {
       req.authKind = who === "cookie_session" || who === "other_account" ? "session" : who;
-      req.sessionAccount = { account_id: who === "other_account" ? "acct_2" : "acct_1", login: "emmy", provider: "github" } as AuthenticatedRequest["sessionAccount"];
+      req.sessionAccount = { account_id: who === "other_account" ? "acct_2" : "acct_1", login: "emmy", provider: "github", provider_user_id: who === "other_account" ? "999" : "31524469" } as AuthenticatedRequest["sessionAccount"];
     }
     if (who !== "cookie_session" && who !== "anonymous") req.headers.authorization = "Bearer test-token";
     next();
@@ -466,10 +471,13 @@ test("GitHub Issues connects the App installation of a repository the person can
   const server = await serve();
   try {
     const unknown = await server.call("POST", "/account/connectors/github-app", { repository: "other/repo" });
-    assert.equal(unknown.status, 404);
-    assert.match(unknown.json.error, /not installed on other\/repo/);
     const unreadable = await server.call("POST", "/account/connectors/github-app", { repository: "acme/secret" });
     assert.equal(unreadable.status, 403, "the App can read it, the person cannot: no connection");
+    assert.equal(unknown.status, 403);
+    assert.equal(unknown.json.error.replace("other/repo", "R"), unreadable.json.error.replace("acme/secret", "R"),
+      "one text for 'not installed' and 'cannot read': no probe for private repository names");
+    const renamed = await server.call("POST", "/account/connectors/github-app", { repository: "acme/api" }, "other_account");
+    assert.equal(renamed.status, 409, "the GitHub id behind the login must be the signed-in person's");
     assert.equal(server.memory.rows.size, 0);
     assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "not a repo" })).status, 400);
     assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "acme/api" }, "owner_token")).status, 403);

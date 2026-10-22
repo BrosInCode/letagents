@@ -201,7 +201,7 @@ import {
   trackerLabel,
   type StatusMapRow,
 } from "../connectors";
-import { trackerConnectionsState as state } from "../connectors-store";
+import { trackerConnectionsChanged, trackerConnectionsState as state } from "../connectors-store";
 import type { SettingsFeedback } from "../types";
 
 // The Connectors list loads these; this pane shows and changes them.
@@ -233,6 +233,7 @@ function connectionDescription(connection: TrackerConnectionView): string {
 }
 
 function replace(connection: TrackerConnectionView) {
+  trackerConnectionsChanged();
   const index = state.connections.findIndex((entry) => entry.id === connection.id);
   if (index >= 0) state.connections.splice(index, 1, connection);
   else state.connections.push(connection);
@@ -289,6 +290,7 @@ function remove(connection: TrackerConnectionView) {
   confirmRemoveId.value = null;
   return run(connection.id, "update", async () => {
     await api().remove(connection.id);
+    trackerConnectionsChanged();
     state.connections = state.connections.filter((entry) => entry.id !== connection.id);
     feedback.value = { state: "success", message: `${trackerLabel(connection.provider)} connection removed.` };
   });
