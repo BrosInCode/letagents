@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, parse } from "node:path";
@@ -32,6 +32,7 @@ export const LETAGENTS_MCP_SERVER_NAME = "letagents";
 // `codex mcp list` checks OAuth for HTTP servers, which can take seconds when
 // one is unreachable. A launch waits this long at most, then fails.
 const MCP_LIST_TIMEOUT_MS = 10_000;
+const MCP_LIST_MAX_OUTPUT = 4 * 1024 * 1024;
 // Codex finds a SKILL.md at most six directories below a skill root.
 const MAX_SKILL_DEPTH = 6;
 const MAX_SKILL_FILES = 1_000;
@@ -106,20 +107,47 @@ export function codexMcpServerDisableOverride(serverNames) {
   return `mcp_servers={ ${names.map((name) => `${JSON.stringify(name)} = { enabled = false }`).join(", ")} }`;
 }
 
-export function runCodexMcpList(codexBin, args, options) {
+export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const child = execFile(codexBin, args, {
+    // An npm-installed `codex` is a Node wrapper around the native binary, and a
+    // timeout must stop both: run it in its own process group (execFile ignores
+    // `detached`, so spawn) and stop the whole group.
+    const group = process.platform !== "win32";
+    const child = spawn(codexBin, args, {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       env: options.env,
-      encoding: "utf8",
-      timeout: MCP_LIST_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-      maxBuffer: 4 * 1024 * 1024,
-    }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(String(stdout));
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: group,
     });
-    child.stdin?.end();
+    const stop = () => {
+      try { if (group && child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ }
+      child.kill("SIGKILL");
+    };
+    let stdout = "";
+    let stderr = "";
+    let failure = null;
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > MCP_LIST_MAX_OUTPUT) {
+        failure ??= Object.assign(new Error("codex mcp list printed too much output"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+        stop();
+      }
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { if (stderr.length < MCP_LIST_MAX_OUTPUT) stderr += chunk; });
+    // Errors keep execFile's shape (`killed`, `code`, `signal`), which callers read.
+    const timer = setTimeout(() => {
+      failure ??= Object.assign(new Error(`codex mcp list timed out after ${timeoutMs} ms`), { killed: true, signal: "SIGKILL" });
+      stop();
+    }, timeoutMs);
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (failure) reject(failure);
+      else if (code !== 0) {
+        reject(Object.assign(new Error(`codex mcp list exited with ${signal ?? code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`), { code, signal }));
+      }
+      else resolve(stdout);
+    });
   });
 }
 
