@@ -305,6 +305,50 @@ test("the authorization endpoint never redirects to an unregistered URI and requ
   assert.equal(selfRedirect.body.error, "invalid_redirect_uri");
 });
 
+test("a loopback redirect URI may use any port; https and paths match exactly", { skip }, async () => {
+  const client = await register({ redirect_uris: ["http://127.0.0.1/callback", "http://[::1]:8080/cb", "https://app.example/cb"] });
+  const { verifier, challenge } = pkce();
+  const presented = "http://127.0.0.1:49152/callback";
+  const { location } = await consent(authorizeUrl({ response_type: "code", client_id: client.body.client_id,
+    redirect_uri: presented, code_challenge: challenge, code_challenge_method: "S256" }));
+  assert.equal(location.origin + location.pathname, presented, "the code goes to the port the client asked for");
+  const exchanged = await tokenRequest({ grant_type: "authorization_code", code: location.searchParams.get("code")!,
+    redirect_uri: presented, code_verifier: verifier, client_id: client.body.client_id });
+  assert.equal(exchanged.status, 200, JSON.stringify(exchanged.body));
+  for (const uri of ["http://127.0.0.1:49152/other", "http://127.0.0.1:1/callback?x=1", "http://[::1]:9/cb", "https://app.example:8443/cb",
+    "http://127.0.0.2/callback", "http://[::1]:9/cb/"]) {
+    if (uri === "http://[::1]:9/cb") {
+      const ok = await fetch(authorizeUrl({ response_type: "code", client_id: client.body.client_id, redirect_uri: uri,
+        code_challenge: challenge, code_challenge_method: "S256" }), { headers: { cookie: COOKIE_A }, redirect: "manual" });
+      assert.equal(ok.status, 200, "[::1] with another port is allowed");
+      continue;
+    }
+    const response = await fetch(authorizeUrl({ response_type: "code", client_id: client.body.client_id, redirect_uri: uri,
+      code_challenge: challenge, code_challenge_method: "S256" }), { headers: { cookie: COOKIE_A }, redirect: "manual" });
+    assert.equal(response.status, 400, uri);
+  }
+});
+
+test("an expired authorization code and an expired grant are refused", { skip }, async () => {
+  const client = await register();
+  const { verifier, challenge } = pkce();
+  const { location } = await consent(authorizeUrl({ response_type: "code", client_id: client.body.client_id,
+    redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" }));
+  const code = location.searchParams.get("code")!;
+  await dbClient!.pool.query("UPDATE mcp_oauth_authorizations SET expires_at = now() - interval '1 second' WHERE code_hash IS NOT NULL AND consumed_at IS NULL");
+  const expiredCode = await tokenRequest({ grant_type: "authorization_code", code, redirect_uri: REDIRECT,
+    code_verifier: verifier, client_id: client.body.client_id });
+  assert.equal(expiredCode.body.error, "invalid_grant");
+
+  const issued = await issueTokens();
+  await dbClient!.pool.query("UPDATE mcp_oauth_grants SET expires_at = now() - interval '1 second' WHERE client_id = $1", [issued.clientId]);
+  await dbClient!.pool.query(`UPDATE mcp_oauth_tokens SET expires_at = now() - interval '1 second'
+    WHERE kind = 'refresh' AND grant_id IN (SELECT grant_id FROM mcp_oauth_grants WHERE client_id = $1)`, [issued.clientId]);
+  const refresh = await tokenRequest({ grant_type: "refresh_token", refresh_token: issued.refresh_token, client_id: issued.clientId });
+  assert.equal(refresh.body.error, "invalid_grant");
+  assert.equal((await initialize(issued.access_token)).status, 401, "an expired grant's access token stops too");
+});
+
 test("rate limits key on the proxy's address, not a client-chosen header", { skip }, async () => {
   const oauth = await import("../routes/mcp/oauth.js");
   const req = (remoteAddress: string, forwarded?: string) =>
@@ -342,11 +386,16 @@ test("the consent decision refuses cross-site posts, other accounts and replays"
     body: new URLSearchParams({ consent: token, decision: "approve" }).toString(),
   });
   assert.equal((await post({ cookie: COOKIE_A, Origin: "https://evil.example" })).status, 403);
+  assert.equal((await post({ cookie: COOKIE_A, Origin: "null" })).status, 403, "Origin null alone is refused");
+  assert.equal((await post({ cookie: COOKIE_A, Origin: "null", "Sec-Fetch-Site": "cross-site" })).status, 403);
   assert.equal((await post({ cookie: COOKIE_A, "Sec-Fetch-Site": "cross-site" })).status, 403);
   assert.equal((await post({ Origin: baseUrl })).status, 400, "no session cookie");
   assert.equal((await post({ cookie: COOKIE_B, Origin: baseUrl })).status, 400, "another account cannot approve it");
-  assert.equal((await post({ cookie: COOKIE_A, Origin: baseUrl })).status, 303);
+  assert.equal((await post({ cookie: COOKIE_A, Origin: "null", "Sec-Fetch-Site": "same-origin" })).status, 303,
+    "a browser that sends Origin null passes with its own Sec-Fetch-Site: same-origin");
   assert.equal((await post({ cookie: COOKIE_A, Origin: baseUrl })).status, 400, "a consent is decided once");
+  const page = await fetch(url, { headers: { cookie: COOKIE_A } });
+  assert.equal(page.headers.get("referrer-policy"), "same-origin", "keeps the real Origin on the Approve POST");
 });
 
 test("the token endpoint checks the verifier, redirect URI, resource and client", { skip }, async () => {

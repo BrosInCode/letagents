@@ -96,7 +96,9 @@ function isProxyAddress(address: string): boolean {
 /**
  * The rate-limit key. A client can send any X-Forwarded-For value, so only
  * the last entry counts (the address the reverse proxy itself appended), and
- * only when the connection comes from a local proxy.
+ * only when the connection comes from a local proxy. This assumes exactly one
+ * proxy (nginx) in front of the API; with a second proxy (for example a CDN)
+ * every client behind it shares that proxy's key.
  */
 export function rateLimitKey(req: Pick<Request, "headers" | "socket">): string {
   const socketAddress = req.socket.remoteAddress ?? "unknown";
@@ -238,6 +240,28 @@ export function validateRegistration(body: unknown): RegistrationResult {
   };
 }
 
+const LOOPBACK_IP_HOSTS = new Set(["127.0.0.1", "[::1]", "localhost"]);
+
+/**
+ * Exact match, except that a loopback redirect URI may use any port (RFC 8252
+ * section 7.3, OAuth 2.1): native clients listen on a port the OS picks.
+ * Scheme, host, path and query must still be identical.
+ */
+export function redirectUriMatches(registered: string, presented: string): boolean {
+  if (registered === presented) return true;
+  let a: URL;
+  let b: URL;
+  try {
+    a = new URL(registered);
+    b = new URL(presented);
+  } catch {
+    return false;
+  }
+  if (a.protocol !== "http:" || b.protocol !== "http:" || !LOOPBACK_IP_HOSTS.has(a.hostname)) return false;
+  if (b.hash || presented.includes("#") || b.username || b.password) return false;
+  return a.hostname === b.hostname && a.pathname === b.pathname && a.search === b.search;
+}
+
 /** A redirect URI on this server's own origin could leak a code through a LetAgents page. */
 function sameOriginAsIssuer(uri: string, urls: McpOAuthUrls): boolean {
   try {
@@ -315,11 +339,12 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 }
 
-function sendPage(res: Response, status: number, title: string, body: string): void {
+function sendPage(res: Response, status: number, title: string, body: string,
+  referrerPolicy: "no-referrer" | "same-origin" = "no-referrer"): void {
   noStore(res);
   res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
   res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Referrer-Policy", referrerPolicy);
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.status(status).type("html").send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title>
@@ -364,7 +389,11 @@ any app can choose it. The address below is what identifies the app.</p>
 <input type="hidden" name="consent" value="${escapeHtml(input.consentToken)}">
 <div class="actions"><button class="primary" type="submit" name="decision" value="approve">Approve</button>
 <button type="submit" name="decision" value="deny">Cancel</button></div>
-</form>`);
+</form>`,
+  // Under no-referrer, browsers send "Origin: null" on the form POST (Fetch
+  // spec); same-origin keeps the real Origin for the CSRF check and still
+  // sends no Referer to the app's redirect URI.
+  "same-origin");
 }
 
 function redirectToClient(res: Response, redirectUri: string, params: Record<string, string | null | undefined>): void {
@@ -429,6 +458,8 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
       client_name: client.client_name ?? undefined,
       redirect_uris: client.redirect_uris,
       token_endpoint_auth_method: client.token_endpoint_auth_method,
+      // Every client may refresh: the server returns the grant types it allows
+      // (RFC 7591 section 3.2.1), and short access tokens need refresh.
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       application_type: client.application_type,
@@ -451,7 +482,7 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
       errorPage(res, 400, "The app is not registered with LetAgents. Remove the connector and add it again.");
       return;
     }
-    if (!redirectUri || !client.redirect_uris.includes(redirectUri)) {
+    if (!redirectUri || !client.redirect_uris.some((registered) => redirectUriMatches(registered, redirectUri))) {
       errorPage(res, 400, "The app asked to return to an address it did not register.");
       return;
     }
@@ -529,8 +560,12 @@ export function registerMcpOAuthRoutes(app: Express, deps: McpOAuthRouteDeps = {
     const urls = mcpOAuthUrls();
     // CSRF: the consent token is secret and bound to the account, the session
     // cookie is SameSite=Lax, and a browser's Origin must be this server.
+    // "Origin: null" (privacy settings, extensions) passes only together with
+    // the browser's own Sec-Fetch-Site: same-origin, which pages cannot forge.
     const origin = req.headers.origin;
-    if (origin !== undefined && origin !== new URL(urls.issuer).origin) {
+    const fetchSiteHeader = req.headers["sec-fetch-site"];
+    const nullOriginSameSite = origin === "null" && fetchSiteHeader === "same-origin";
+    if (origin !== undefined && origin !== new URL(urls.issuer).origin && !nullOriginSameSite) {
       errorPage(res, 403, "This approval did not come from the LetAgents page.");
       return;
     }
