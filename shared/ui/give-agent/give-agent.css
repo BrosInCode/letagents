@@ -74,6 +74,7 @@
 .give-result-avatar .chat-avatar { width: 58px; height: 58px; }
 .give-result-avatar .chat-avatar img { width: 46px; height: 46px; }
 .give-result-avatar > span { position: absolute; bottom: -5px; right: -7px; border: 3px solid var(--give-bg); border-radius: 50%; background: var(--give-green); color: var(--give-bg); width: 25px; height: 25px; }
+.give-result h3:focus { outline: none; }
 .give-result h3 { font-size: 23px; letter-spacing: -.6px; }
 .give-result p { max-width: 340px; margin: 11px auto 0; font-size: 13px; line-height: 1.7; color: var(--give-muted); }
 .give-result-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--give-muted); padding: 15px; background: var(--give-inset); border: 1px solid var(--give-line); border-radius: 8px; margin-top: 28px; }

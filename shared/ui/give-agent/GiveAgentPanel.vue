@@ -21,7 +21,7 @@
     </div>
     <div v-else-if="done" class="give-body give-result" role="status">
       <div class="give-result-avatar"><ChatAvatar :name="current?.model.label || request.model_label" :provider="current?.model.providerId || request.provider_id" agent /><span>✓</span></div>
-      <h3>{{ offered ? 'Offer sent' : 'Agent added' }}</h3><p>{{ done }}</p>
+      <h3 ref="resultHeading" tabindex="-1">{{ offered ? 'Offer sent' : 'Agent added' }}</h3><p>{{ done }}</p>
       <div class="give-result-summary"><span>{{ current?.model.label || request.model_label }}</span><span>{{ amount }}% of your usage limit</span></div>
     </div>
     <div v-else class="give-body" :aria-busy="Boolean(busy)">
@@ -66,6 +66,8 @@ const props = withDefaults(defineProps<{
   busy?: 'give' | 'decline' | null; done?: string | null; offered?: boolean; handoff?: boolean; retryGive?: boolean;
 }>(), { options: () => [], selected: null, initialAmount: 10, headingId: 'give-agent-title', busy: null });
 const emit = defineEmits<{ 'update:selected': [key: string]; give: [amount: number]; decline: []; close: []; retry: []; }>();
+const resultHeading = ref<HTMLElement>();
+watch(() => props.done, async done => { if (done) { await nextTick(); resultHeading.value?.focus({ preventScroll: true }); } });
 const preset = ref(10), custom = ref(false), customText = ref('10'), customInput = ref<HTMLInputElement>();
 const amount = computed(() => custom.value ? parseCustomAmount(customText.value) : preset.value);
 const current = computed(() => props.options.find(option => option.key === props.selected));

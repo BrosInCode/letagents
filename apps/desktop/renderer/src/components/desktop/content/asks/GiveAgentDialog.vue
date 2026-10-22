@@ -1,5 +1,5 @@
 <template>
-  <DesktopDialogShell :open="Boolean(token)" panel-class="give-agent-dialog" aria-labelledby="agent-give-title" :show-close="false" :close-disabled="Boolean(busy)" initial-focus="#agent-give-title" test-id="agent-give-dialog" @close="close">
+  <DesktopDialogShell :open="Boolean(token)" panel-class="give-agent-dialog" backdrop-class="desktop-task-modal-backdrop give-agent-backdrop" aria-labelledby="agent-give-title" :show-close="false" :close-disabled="Boolean(busy)" initial-focus="#agent-give-title" test-id="agent-give-dialog" @close="close">
     <GiveAgentPanel :key="token || ''" v-model:selected="selected" :request="ask" :options="options" :initial-amount="initialAmount" heading-id="agent-give-title" :loading="loading" :unavailable="unavailable?.error" :error="error" :busy="busy" :done="done" :offered="offered" :retry-give="giveFailed" @give="give" @decline="cantHelp" @close="close" @retry="load">
       <template #close><button type="button" class="give-close" aria-label="Close request" :disabled="Boolean(busy)" @click="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button></template>
     </GiveAgentPanel>
@@ -107,6 +107,10 @@ function close() { if (!busy.value) emit("close"); }
 </script>
 
 <style>
-.give-agent-dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); display: flex; min-height: 0; outline: none; box-shadow: 0 32px 100px #0006; border-radius: 17px; }
-@media (max-width:480px) { .give-agent-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 24px); } }
+.desktop-task-modal-backdrop.give-agent-backdrop { grid-template-columns: minmax(0, 1fr); padding: 24px 16px; place-items: center; }
+.give-agent-dialog { width: min(600px, 100%); max-height: calc(100dvh - 48px); display: flex; min-width: 0; min-height: 0; outline: none; box-shadow: 0 32px 100px #0006; border-radius: 17px; }
+@media (max-width:480px) {
+  .desktop-task-modal-backdrop.give-agent-backdrop { padding: 16px; }
+  .give-agent-dialog { max-height: calc(100dvh - 32px); }
+}
 </style>

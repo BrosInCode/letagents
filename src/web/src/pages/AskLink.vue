@@ -10,11 +10,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useAuth } from '@/composables/useAuth'
 import { MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
 import GiveAgentPanel from '../../../../shared/ui/give-agent/GiveAgentPanel.vue'
 import type { GiveAgentRequest } from '../../../../shared/ui/give-agent/types'
 
+const { isSignedIn, user, hasCheckedSession, checkSession } = useAuth()
+const accountId = computed(() => isSignedIn.value ? user.value?.id ?? null : null)
+onMounted(() => { if (!hasCheckedSession.value) void checkSession() })
 const props = defineProps<{ token: string }>()
 const loading = ref(true)
 const ask = ref<GiveAgentRequest | null>(null)
@@ -24,12 +28,12 @@ const release = MAC_DESKTOP_BETA
 const appLink = computed(() => `letagents://ask/${encodeURIComponent(props.token)}`)
 let generation = 0
 onBeforeUnmount(() => { generation++ })
-watch(() => props.token, () => { void load() }, { immediate: true })
+watch([() => props.token, accountId], () => { void load() }, { immediate: true, flush: 'sync' })
 async function load() {
-  const version = ++generation
+  const version = ++generation, viewer = accountId.value
   loading.value = true; ask.value = null; unavailable.value = null; error.value = null
   try {
-    const response = await fetch(`/agent-asks/link/${encodeURIComponent(props.token)}`, { credentials: 'same-origin' })
+    const response = await fetch(`/agent-asks/link/${encodeURIComponent(props.token)}`, { credentials: viewer ? 'same-origin' : 'omit' })
     const body = await response.json().catch(() => null)
     if (version !== generation) return
     if (!response.ok) {
@@ -38,7 +42,11 @@ async function load() {
       return
     }
     if (!body?.ask) { error.value = 'Couldn’t open this request. Try again.'; return }
-    ask.value = body.ask
+    // A logout can precede cookie removal; never retain signed-in details in an anonymous preview.
+    ask.value = viewer ? body.ask : {
+      id: body.ask.id, asker: body.ask.asker, provider_id: body.ask.provider_id,
+      model_label: body.ask.model_label, amount_percent: body.ask.amount_percent,
+    }
     unavailable.value = body.unavailable?.error ?? null
   } catch {
     if (version === generation) error.value = "Couldn't reach LetAgents. Check your connection and try again."
