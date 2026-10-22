@@ -14,6 +14,7 @@
 <script setup lang="ts">
 defineProps<{ name: string }>();
 const paths: Record<string, string> = {
+  refresh: "M3 10a9 9 0 1 1 1 8 M3 4v6h6",
   work: "M3 4h4v4H3z M11 6h10 M3 14l2 2 3-4 M11 14h10 M3 21h4 M11 21h10",
   folder: "M3 7V5h7l2 3h9v11H3Z",
   search: "M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0 M16 16l5 5",

@@ -33,8 +33,8 @@ export function ruleActionOptions(event: TrackerRuleEvent): Array<{ value: strin
   return TRACKER_RULE_EVENT_ACTIONS[event].map((value) => ({ value, label: ACTION_LABELS[value] ?? value }));
 }
 
-export const reviewStateOptions = TRACKER_RULE_REVIEW_STATES.map((value) => ({ value, label: value.replaceAll("_", " ") }));
-export const checkConclusionOptions = TRACKER_RULE_CHECK_CONCLUSIONS.map((value) => ({ value, label: value.replaceAll("_", " ") }));
+export const reviewStateOptions = TRACKER_RULE_REVIEW_STATES.map((value) => ({ value, label: value.split("_").join(" ") }));
+export const checkConclusionOptions = TRACKER_RULE_CHECK_CONCLUSIONS.map((value) => ({ value, label: value.split("_").join(" ") }));
 export const templateVariableHint = TRACKER_RULE_TEMPLATE_VARIABLES.map((name) => `{{${name}}}`).join(" ");
 
 /** "" means "any". */
@@ -147,9 +147,9 @@ export function ruleSummary(rule: Pick<TrackerRuleView | TrackerRuleVersionView,
   if (trigger.merged !== undefined) parts.push(trigger.merged ? "merged" : "not merged");
   if (trigger.draft !== undefined) parts.push(trigger.draft ? "draft" : "not draft");
   if (trigger.baseBranch) parts.push(`into ${trigger.baseBranch}`);
-  if (trigger.reviewState) parts.push(trigger.reviewState.replaceAll("_", " "));
+  if (trigger.reviewState) parts.push(trigger.reviewState.split("_").join(" "));
   if (trigger.approvalsAtLeast !== undefined) parts.push(`${trigger.approvalsAtLeast}+ approvals`);
-  if (trigger.conclusion) parts.push(trigger.conclusion.replaceAll("_", " "));
+  if (trigger.conclusion) parts.push(trigger.conclusion.split("_").join(" "));
   const actions = rule.actions.map((action) => action.kind === "transition" ? `move to ${action.toStatus}` : "comment");
   return `${parts.join(", ")} → ${actions.join(", ")}`;
 }

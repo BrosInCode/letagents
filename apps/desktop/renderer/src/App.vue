@@ -134,9 +134,9 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" data-testid="desktop-main">
+    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" :data-my-work-entry="activeEntry.type === 'my-work'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && !isSettingsSurface"
+        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && activeEntry.type !== 'my-work' && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
@@ -290,8 +290,13 @@
         :connected="accountActivity.connected.value"
         @open-card="openMyWorkCard"
         @open-thread="openMyWorkThread"
-        @open-trackers="openTicketTrackersSurface"
-      />
+      >
+        <template v-if="sidebarMode === 'hidden'" #navigation>
+          <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
+            <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1Z" /><path d="M12.5 3.5v13" /><path d="m7.5 7.5 2.5 2.5-2.5 2.5" /></svg>
+          </button>
+        </template>
+      </MyWorkView>
 
       <RentMarketplaceView
         v-else-if="activeEntry.type === 'marketplace'"
@@ -495,7 +500,7 @@ const {
 } = Object.assign(app, useAppRentalActions(app));
 const {
   isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
-  settingsPaneForActiveEntry, openSettingsSurface, openTicketTrackersSurface, openUpdatesSurface, startSidebarResize,
+  settingsPaneForActiveEntry, openSettingsSurface, openUpdatesSurface, startSidebarResize,
   handleSidebarResizeKeydown, setAllProjectsCollapsed, handleSidebarParentRoomReorder,
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));

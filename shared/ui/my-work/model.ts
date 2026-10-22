@@ -166,31 +166,26 @@ export type WorkView = "all" | "attention" | "active" | "done";
 export const workGroups: {
   id: WorkGroup;
   label: string;
-  caption: string;
   icon: string;
 }[] = [
   {
     id: "attention",
     label: "Needs you",
-    caption: "A review, answer, or decision",
     icon: "review",
   },
   {
     id: "active",
     label: "In progress",
-    caption: "Moving forward with your agents",
     icon: "progress",
   },
   {
     id: "queue",
     label: "Up next",
-    caption: "Assigned and ready to start",
     icon: "queue",
   },
   {
     id: "done",
-    label: "Recently completed",
-    caption: "Wrapped up across your rooms",
+    label: "Completed",
     icon: "check",
   },
 ];
