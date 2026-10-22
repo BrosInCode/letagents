@@ -17,12 +17,13 @@ export interface RoomJevConnection {
 }
 
 /**
- * The room's enabled filter whose connection has the Jev switch on, is
- * active, and belongs to the person who set the filter. Null means no Jev
- * call at all (invariant 7). With `provider`, only that tracker's filter.
+ * The room's enabled filters whose connection has the Jev switch on, is
+ * active, and belongs to the person who set the filter, oldest first (a room
+ * has at most one per tracker). Empty means no Jev call at all (invariant 7).
+ * With `provider`, only that tracker's filter.
  */
-export async function findRoomJevConnection(roomId: string, provider?: TrackerProvider): Promise<RoomJevConnection | null> {
-  const [row] = await db.select({
+export async function findRoomJevConnections(roomId: string, provider?: TrackerProvider): Promise<RoomJevConnection[]> {
+  const rows = await db.select({
     connection_id: tracker_connections.id,
     account_id: tracker_connections.account_id,
     provider: tracker_connections.provider,
@@ -37,9 +38,21 @@ export async function findRoomJevConnection(roomId: string, provider?: TrackerPr
       eq(room_tracker_filters.created_by_account_id, tracker_connections.account_id),
       ...(provider ? [eq(tracker_connections.provider, provider)] : []),
     ))
-    .orderBy(asc(room_tracker_filters.created_at))
-    .limit(1);
-  return row ? { ...row, provider: row.provider as TrackerProvider } : null;
+    .orderBy(asc(room_tracker_filters.created_at));
+  return rows.map((row) => ({ ...row, provider: row.provider as TrackerProvider }));
+}
+
+/** The first of `findRoomJevConnections`, for a question about one tracker's card. */
+export async function findRoomJevConnection(roomId: string, provider?: TrackerProvider): Promise<RoomJevConnection | null> {
+  return (await findRoomJevConnections(roomId, provider))[0] ?? null;
+}
+
+/** The card in the room that already shows this pull request, if any. */
+export async function findCardHoldingPullRequest(roomId: string, prUrl: string): Promise<string | null> {
+  const { findTaskByPrUrl, findTaskByWorkflowArtifactMatches } = await import("../../db/tasks.js");
+  const task = await findTaskByWorkflowArtifactMatches(roomId, [{ provider: "github", kind: "pull_request", url: prUrl }])
+    ?? await findTaskByPrUrl(roomId, prUrl);
+  return task?.id ?? null;
 }
 
 /**
@@ -102,7 +115,7 @@ export async function listJevLinkCandidates(input: {
       eq(tasks.room_id, input.roomId),
       eq(external_items.connection_id, input.connectionId),
       eq(external_items.assignee_id, input.trackerUserId),
-      sql`${external_items.ticket_state} <> 'done'`,
+      sql`${external_items.ticket_state} IS DISTINCT FROM 'done'`,
       notInArray(tasks.status, [...FINISHED_WORK]),
       isNotNull(tasks.external_ref),
     ))

@@ -64,7 +64,7 @@ export interface JevExceptionDeps {
   endpoint(): JevEndpoint | null;
   evaluate?: JevEvaluate;
   timeoutMs?: number;
-  questions: Pick<JevQuestionStore, "claim" | "finish" | "countSince" | "countForSubject">;
+  questions: Pick<JevQuestionStore, "claimWithLimits" | "finish">;
   roomJevConnection(roomId: string, provider?: TrackerProvider): Promise<RoomJevConnection | null>;
   ticketTitle(connectionId: string, key: string): Promise<string | null>;
   postMessage(input: { roomId: string; task: Task; text: string; clientMessageId: string }): Promise<void>;
@@ -92,17 +92,17 @@ export async function proposeForClosedPullRequest(
     if (!connection) return { outcome: "disabled" };
     const endpoint = deps.endpoint();
     if (!endpoint) return { outcome: "unavailable" };
-    if (await deps.questions.countForSubject({ room_id: input.task.room_id, kind: "exception", subject: event.pullRequest.url }) >= JEV_EXCEPTION_MAX_PER_PULL_REQUEST) {
-      return { outcome: "pull_request_limit" };
-    }
-    if (await deps.questions.countSince({ room_id: input.task.room_id, kind: "exception", since: new Date(Date.now() - ROOM_WINDOW_MS) }) >= JEV_EXCEPTION_MAX_PER_ROOM) {
-      return { outcome: "room_limit" };
-    }
-    const claimed = await deps.questions.claim({
+    const claim = await deps.questions.claimWithLimits({
       connection_id: connection.connection_id, room_id: input.task.room_id, kind: "exception",
       subject: event.pullRequest.url, revision: `closed:${event.pullRequest.headSha ?? "unknown"}`, task_id: input.task.id,
+    }, {
+      maxPerSubject: JEV_EXCEPTION_MAX_PER_PULL_REQUEST,
+      maxPerRoom: JEV_EXCEPTION_MAX_PER_ROOM,
+      windowStart: new Date(Date.now() - ROOM_WINDOW_MS),
     });
-    if (!claimed) return { outcome: "already_asked" };
+    if (!("claimed" in claim)) return { outcome: claim.refused === "subject_limit" ? "pull_request_limit" : claim.refused };
+    const claimed = claim.claimed;
+
     const openPullRequests = input.task.workflow_artifacts.filter((artifact) => artifact.kind === "pull_request"
       && artifact.url !== event.pullRequest.url && (artifact.state === "open" || artifact.state === "draft")).length;
     const question = buildJevExceptionQuestion({

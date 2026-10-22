@@ -5,7 +5,7 @@
  * request, and per card and last message, across API processes.
  */
 import { randomUUID } from "node:crypto";
-import { and, count, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNotNull, lt, sql } from "drizzle-orm";
 
 import type { JevQuestionKind, TrackerJevMetrics, TrackerJevMetricsKind } from "../../../../shared/ticket-connectors.mjs";
 import { JEV_QUESTION_KINDS } from "../../../../shared/ticket-connectors.mjs";
@@ -27,6 +27,27 @@ export interface JevQuestionClaim {
 
 export const JEV_LINK_INTENT_TYPE = "tracker_jev_link" as const;
 
+/** Rows older than this are swept, except a link a person rejected (it keeps Jev from asking again). */
+export const JEV_QUESTION_RETENTION_MS = 90 * 24 * 60 * 60_000;
+/** A question still pending after this is treated as lost (its process stopped); it no longer blocks. */
+export const JEV_PENDING_BLOCK_MS = 60_000;
+
+export interface JevClaimLimits {
+  /** At most this many questions of the kind for the subject in the room, every revision included. */
+  maxPerSubject?: number;
+  /** At most this many of the kind in the room since `windowStart`. */
+  maxPerRoom?: number;
+  /** At most this many of the kind for the connection since `windowStart`. */
+  maxPerConnection?: number;
+  windowStart?: Date;
+  /** Refuse while another question for the same subject is still pending. */
+  oneAtATimePerSubject?: boolean;
+}
+
+export type JevClaimResult =
+  | { claimed: JevQuestionRow }
+  | { refused: "already_asked" | "pending" | "subject_limit" | "room_limit" | "connection_limit" };
+
 export const jevQuestionStore = {
   /** Records the question before Jev is asked. Null when this exact question was already asked. */
   async claim(input: JevQuestionClaim, now: Date = new Date()): Promise<JevQuestionRow | null> {
@@ -44,6 +65,74 @@ export const jevQuestionStore = {
       updated_at: at,
     }).onConflictDoNothing().returning();
     return row ?? null;
+  },
+
+  /**
+   * Checks the limits and records the question in one transaction, under an
+   * advisory lock on the kind and the room (or the connection for a question
+   * without a room), so concurrent deliveries cannot pass a limit together.
+   */
+  async claimWithLimits(input: JevQuestionClaim, limits: JevClaimLimits, now: Date = new Date()): Promise<JevClaimResult> {
+    return db.transaction(async (tx) => {
+      const scope = input.room_id ?? `connection:${input.connection_id}`;
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`jevq:${input.kind}:${scope}`}))`);
+      const sameKind = and(eq(tracker_jev_questions.kind, input.kind), sql`coalesce(${tracker_jev_questions.room_id}, '') = ${input.room_id ?? ""}`);
+      const [exact] = await tx.select({ id: tracker_jev_questions.id }).from(tracker_jev_questions)
+        .where(and(sameKind, eq(tracker_jev_questions.subject, input.subject), eq(tracker_jev_questions.revision, input.revision))).limit(1);
+      if (exact) return { refused: "already_asked" as const };
+      if (limits.oneAtATimePerSubject) {
+        const [pending] = await tx.select({ id: tracker_jev_questions.id }).from(tracker_jev_questions).where(and(
+          sameKind, eq(tracker_jev_questions.subject, input.subject), eq(tracker_jev_questions.outcome, "pending"),
+          gte(tracker_jev_questions.created_at, new Date(now.getTime() - JEV_PENDING_BLOCK_MS).toISOString()),
+        )).limit(1);
+        if (pending) return { refused: "pending" as const };
+      }
+      if (limits.maxPerSubject !== undefined) {
+        const [row] = await tx.select({ value: count() }).from(tracker_jev_questions)
+          .where(and(sameKind, eq(tracker_jev_questions.subject, input.subject)));
+        if (Number(row?.value ?? 0) >= limits.maxPerSubject) return { refused: "subject_limit" as const };
+      }
+      const since = (limits.windowStart ?? new Date(0)).toISOString();
+      if (limits.maxPerRoom !== undefined && input.room_id) {
+        const [row] = await tx.select({ value: count() }).from(tracker_jev_questions)
+          .where(and(sameKind, gte(tracker_jev_questions.created_at, since)));
+        if (Number(row?.value ?? 0) >= limits.maxPerRoom) return { refused: "room_limit" as const };
+      }
+      if (limits.maxPerConnection !== undefined) {
+        const [row] = await tx.select({ value: count() }).from(tracker_jev_questions).where(and(
+          eq(tracker_jev_questions.kind, input.kind), eq(tracker_jev_questions.connection_id, input.connection_id),
+          gte(tracker_jev_questions.created_at, since),
+        ));
+        if (Number(row?.value ?? 0) >= limits.maxPerConnection) return { refused: "connection_limit" as const };
+      }
+      const at = now.toISOString();
+      const [row] = await tx.insert(tracker_jev_questions).values({
+        id: `jevq_${randomUUID()}`, connection_id: input.connection_id, room_id: input.room_id, kind: input.kind,
+        subject: input.subject, revision: input.revision, task_id: input.task_id ?? null, outcome: "pending",
+        created_at: at, updated_at: at,
+      }).onConflictDoNothing().returning();
+      return row ? { claimed: row } : { refused: "already_asked" as const };
+    });
+  },
+
+  /** The newest link question that attached this pull request to a card in the room. */
+  async latestLinkForPullRequest(input: { room_id: string; subject: string }): Promise<JevQuestionRow | null> {
+    const [row] = await db.select().from(tracker_jev_questions).where(and(
+      eq(tracker_jev_questions.room_id, input.room_id),
+      eq(tracker_jev_questions.kind, "link"),
+      eq(tracker_jev_questions.subject, input.subject),
+      isNotNull(tracker_jev_questions.task_id),
+    )).orderBy(desc(tracker_jev_questions.created_at), desc(tracker_jev_questions.id)).limit(1);
+    return row ?? null;
+  },
+
+  /** Sweeps rows past retention; a link a person rejected stays, so Jev never asks about that PR again. */
+  async prune(now: Date = new Date()): Promise<number> {
+    const rows = await db.delete(tracker_jev_questions).where(and(
+      lt(tracker_jev_questions.created_at, new Date(now.getTime() - JEV_QUESTION_RETENTION_MS).toISOString()),
+      sql`NOT (${tracker_jev_questions.kind} = 'link' AND ${tracker_jev_questions.resolution} IS NOT DISTINCT FROM 'rejected')`,
+    )).returning({ id: tracker_jev_questions.id });
+    return rows.length;
   },
 
   async find(input: Pick<JevQuestionClaim, "kind" | "room_id" | "subject" | "revision">): Promise<JevQuestionRow | null> {
@@ -172,6 +261,29 @@ export const jevIntentStore = {
       sql`${board_intents.payload}->>'pr_url' = ${input.pr_url}`,
     ));
     return rows.map(toBoardIntent);
+  },
+
+  /** Pending intents for this pull request on any card in the room no longer apply (a new suggestion, an accept). */
+  async supersedeForPullRequest(input: { room_id: string; pr_url: string; reason: string; except_question_id?: string }): Promise<number> {
+    const now = new Date().toISOString();
+    const rows = await db.update(board_intents).set({
+      status: "superseded", decision_reason: input.reason.slice(0, 500), decided_at: now, updated_at: now,
+    }).where(and(
+      eq(board_intents.room_id, input.room_id),
+      eq(board_intents.action_type, JEV_LINK_INTENT_TYPE),
+      eq(board_intents.status, "pending"),
+      sql`${board_intents.payload}->>'pr_url' = ${input.pr_url}`,
+      ...(input.except_question_id ? [sql`${board_intents.payload}->>'question_id' IS DISTINCT FROM ${input.except_question_id}`] : []),
+    )).returning({ id: board_intents.id });
+    return rows.length;
+  },
+
+  /** Marks one pending intent superseded, with the reason a person sees. */
+  async supersede(input: { room_id: string; intent_id: string; reason: string }): Promise<void> {
+    const now = new Date().toISOString();
+    await db.update(board_intents).set({ status: "superseded", decision_reason: input.reason.slice(0, 500), decided_at: now, updated_at: now })
+      .where(and(eq(board_intents.room_id, input.room_id), eq(board_intents.id, input.intent_id),
+        eq(board_intents.action_type, JEV_LINK_INTENT_TYPE), eq(board_intents.status, "pending")));
   },
 
   /** The link was rejected: its other pending intents no longer apply. */

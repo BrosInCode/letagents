@@ -92,6 +92,9 @@ function harness(input: {
     plans: [] as Array<Record<string, unknown>>,
     resolutions: [] as string[],
     superseded: 0,
+    supersededForPullRequest: [] as string[],
+    supersededIntents: [] as string[],
+    lastLinked: null as { id: string; task_id: string } | null,
     used: [] as string[],
     messages: [] as string[],
     evaluateCalls: 0,
@@ -101,19 +104,26 @@ function harness(input: {
     evaluate: input.evaluate ? async (config, request) => { record.evaluateCalls += 1; return input.evaluate!(config, request); } : undefined,
     timeoutMs: input.timeoutMs,
     questions: {
-      claim: async (claim) => { record.claims.push(`${claim.kind}:${claim.subject}:${claim.revision}`); return { id: `jevq_${record.claims.length}` } as never; },
-      finish: async (id, done) => { record.finished.push({ id, outcome: done.outcome }); },
-      countSince: async () => 0,
-      countForSubject: async () => 0,
+      claimWithLimits: async (claim) => {
+        record.claims.push(`${claim.kind}:${claim.subject}:${claim.revision}`);
+        return { claimed: { id: `jevq_${record.claims.length}` } as never };
+      },
+      finish: async (id, done) => {
+        record.finished.push({ id, outcome: done.outcome });
+        if (done.task_id) record.lastLinked = { id, task_id: done.task_id };
+      },
+      latestLinkForPullRequest: async () => (record.lastLinked ? { ...record.lastLinked } as never : null),
       linkRejected: async () => false,
       resolveLink: async (resolution) => { record.resolutions.push(resolution.resolution); },
     },
     intents: {
-      pendingForLink: async () => [],
+      supersedeForPullRequest: async (input) => { record.supersededForPullRequest.push(input.reason); return 0; },
+      supersede: async (input) => { record.supersededIntents.push(input.intent_id); },
       supersedeForLink: async () => { record.superseded += 1; return 1; },
       markUsed: async ({ intent_id }) => { record.used.push(intent_id); },
     },
-    roomJevConnection: async () => input.switchOn === false ? null : { connection_id: "tcon_1", account_id: "acct-1", provider: "jira", site_key: "acme" },
+    roomJevConnections: async () => input.switchOn === false ? [] : [{ connection_id: "tcon_1", account_id: "acct-1", provider: "jira", site_key: "acme" }],
+    cardHoldingPullRequest: async (_roomId, prUrl) => [...tasks.values()].find((task) => task.workflow_artifacts.some((artifact) => artifact.url === prUrl))?.id ?? null,
     authorTrackerUserId: async () => "acc-kai",
     candidates: async () => CANDIDATES,
     commitSubjects: async () => ["Round the last cent", "Add a test"],
@@ -331,7 +341,7 @@ test("a linked pull request closed without a merge gets one question and a fixed
   const deps = {
     endpoint: () => endpoint,
     evaluate: async () => { calls += 1; return { body: { answers: { closed_without_merge: { choice: "superseded", probabilities: { abandoned: 0.1, superseded: 0.8, moved: 0.1 } } } }, latencyMs: 3 }; },
-    questions: { claim: async () => ({ id: "jevq_x" }) as never, finish: async () => undefined, countSince: async () => 0, countForSubject: async () => 0 },
+    questions: { claimWithLimits: async () => ({ claimed: { id: "jevq_x" } as never }), finish: async () => undefined },
     roomJevConnection: async () => ({ connection_id: "tcon_1", account_id: "a", provider: "jira" as const, site_key: "s" }),
     ticketTitle: async () => "Proration",
     postMessage: async (message: { text: string }) => { posts.push(message.text); },
@@ -348,7 +358,7 @@ test("a linked pull request closed without a merge gets one question and a fixed
   const outsider = pullRequestEvent({ authorAssociation: "NONE" }, "closed");
   assert.equal((await proposeForClosedPullRequest(deps, { task: card(), event: outsider, linkConfirmed: true })).outcome, "untrusted_author",
     "a key in a fork PR links it, but an outsider's close asks Jev nothing");
-  assert.equal((await proposeForClosedPullRequest({ ...deps, questions: { ...deps.questions, countForSubject: async () => 3 } },
+  assert.equal((await proposeForClosedPullRequest({ ...deps, questions: { ...deps.questions, claimWithLimits: async () => ({ refused: "subject_limit" as const }) } },
     { task: card(), event: closed, linkConfirmed: true })).outcome, "pull_request_limit");
   const merged = pullRequestEvent({ merged: true }, "closed");
   assert.equal((await proposeForClosedPullRequest(deps, { task: card(), event: merged, linkConfirmed: true })).outcome, "not_applicable");
@@ -365,7 +375,7 @@ test("needs me: one question per card and last message, cached", async () => {
     evaluate: async () => { calls += 1; return { body: { answers: { waiting_on: { choice: "waiting_on_human", probabilities: { waiting_on_human: 0.8, waiting_on_agent: 0.15, nothing: 0.05 } } } }, latencyMs: 3 }; },
     questions: {
       find: async (q: { subject: string; revision: string }) => (rows.get(`${q.subject}:${q.revision}`) ?? null) as never,
-      claim: async (q: { subject: string; revision: string }) => { const row = { id: `q${rows.size}`, outcome: "pending", answer: null }; rows.set(`${q.subject}:${q.revision}`, row); return row as never; },
+      claimWithLimits: async (q: { subject: string; revision: string }) => { const row = { id: `q${rows.size}`, outcome: "pending", answer: null }; rows.set(`${q.subject}:${q.revision}`, row); return { claimed: row as never }; },
       finish: async (id: string, done: { outcome: string; answer?: Record<string, unknown> | null }) => {
         for (const row of rows.values()) if (row.id === id) Object.assign(row, { outcome: done.outcome, answer: done.answer ?? null });
       },
@@ -419,4 +429,45 @@ test("rule drafting: choices become a rule validated as a typed rule; nothing is
   }, { connection: { id: "tcon_1", provider: "jira", status_map: {}, jev_linking_enabled: false }, sentence: "When merged, Done" });
   assert.equal(off.draft, null);
   assert.equal(calls, 0, "the switch off means no call");
+});
+
+test("a stale intent is refused and superseded: the PR merged, a newer suggestion, or the link removed", async () => {
+  const jev = answering("ticket", { ticket_1: 0.92, ticket_2: 0.05, none: 0.03 });
+  const { service, record, tasks } = harness({ evaluate: jev.evaluate });
+  await service.linkPullRequest({ roomId: "room-1", event: pullRequestEvent(), storedEvent, installationId: null });
+  const opened = intent(record.intents[0]!);
+  // The pull request merged while the request waited: the "opened" plan would move the ticket backwards.
+  const merged = tasks.get("task_7")!;
+  tasks.set("task_7", { ...merged, workflow_artifacts: merged.workflow_artifacts.map((artifact) => ({ ...artifact, state: "merged" })) });
+  await assert.rejects(service.approveIntent({ intent: opened, decisionBy: "emmy", reason: null }), /merged now/);
+  assert.deepEqual(record.supersededIntents, ["bi_1"]);
+  assert.equal(record.plans.length, 0, "nothing ran");
+  assert.equal(tasks.get("task_7")!.workflow_artifacts[0]!.linked_by, "jev_suggested", "the approval left no trace on the link");
+
+  // A newer question for the same pull request makes the older request stale.
+  tasks.set("task_7", merged);
+  record.lastLinked = { id: "jevq_newer", task_id: "task_7" };
+  await assert.rejects(service.approveIntent({ intent: opened, decisionBy: "emmy", reason: null }), /newer suggestion/);
+
+  // The link was removed from the card.
+  record.lastLinked = { id: String(record.intents[0]!.question_id), task_id: "task_7" };
+  tasks.set("task_7", { ...merged, workflow_artifacts: [] });
+  await assert.rejects(service.approveIntent({ intent: opened, decisionBy: "emmy", reason: null }), /no longer on this card/);
+  assert.equal(record.plans.length, 0);
+});
+
+test("a new suggestion, and Accept, supersede the pull request's older requests", async () => {
+  const { service, record } = harness({ evaluate: answering("ticket", { ticket_1: 0.92, ticket_2: 0.05, none: 0.03 }).evaluate });
+  await service.linkPullRequest({ roomId: "room-1", event: pullRequestEvent(), storedEvent, installationId: null });
+  assert.deepEqual(record.supersededForPullRequest, ["Jev made a newer suggestion for this pull request."]);
+  await service.acceptLink({ roomId: "room-1", taskId: "task_7", prUrl: PR_URL });
+  assert.equal(record.supersededForPullRequest.length, 2);
+});
+
+test("a pull request another card already shows is not attached to a second card", async () => {
+  const { service, tasks } = harness({ evaluate: answering("ticket", { ticket_1: 0.92, ticket_2: 0.05, none: 0.03 }).evaluate });
+  tasks.set("task_8", { ...tasks.get("task_8")!, workflow_artifacts: [{ provider: "github", kind: "pull_request", url: PR_URL, linked_by: "jev_suggested" }] });
+  const run = await service.linkPullRequest({ roomId: "room-1", event: pullRequestEvent(), storedEvent, installationId: null });
+  assert.equal(run.outcome, "on_other_card");
+  assert.equal(tasks.get("task_7")!.workflow_artifacts.length, 0);
 });

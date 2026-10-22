@@ -116,17 +116,20 @@ async function setup(label: string, input: { jev?: boolean } = {}) {
     getEffect: (id) => broker.getEffect(id),
     schedule: (work) => { pending.push(work()); },
   });
-  const jev = { calls: 0, choice: "ticket_1", score: 0.93 };
+  const jev = { calls: 0, choice: "ticket_1", score: 0.93, delayMs: 0, choices: [] as string[] };
   const service = jevLink!.createJevLinkService({
     endpoint: () => endpoint,
     // No live model call: the answer is fixed by the test.
     evaluate: async () => {
       jev.calls += 1;
-      return { body: { answers: { ticket: { choice: jev.choice, probabilities: { [jev.choice]: jev.score } } } }, latencyMs: 4 };
+      const choice = jev.choices.shift() ?? jev.choice;
+      if (jev.delayMs) await new Promise((resolve) => setTimeout(resolve, jev.delayMs));
+      return { body: { answers: { ticket: { choice, probabilities: { [choice]: jev.score } } } }, latencyMs: 4 };
     },
     questions: jevStore!.jevQuestionStore,
     intents: jevStore!.jevIntentStore,
-    roomJevConnection: lookups!.findRoomJevConnection,
+    roomJevConnections: (roomId) => lookups!.findRoomJevConnections(roomId),
+    cardHoldingPullRequest: lookups!.findCardHoldingPullRequest,
     authorTrackerUserId: lookups!.findAuthorTrackerUserId,
     candidates: lookups!.listJevLinkCandidates,
     commitSubjects: async () => [],
@@ -332,4 +335,95 @@ test("a client edit that changes a marked pull request's number drops the mark",
   // A client changes the number under the same URL: the mark does not follow.
   await db!.updateTask(context.room.id, taskId, { workflow_artifacts: [{ provider: "github", kind: "pull_request", number: 999, url: prUrl }] });
   assert.equal(await linkMark(context.room.id, taskId, prUrl), null);
+});
+
+test("an intent approved after the PR merged is refused and superseded, and writes nothing", options, async () => {
+  const context = await setup("stale");
+  await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
+  const taskId = await syncedCard({ roomId: context.room.id, connectionId: context.connectionId, key: "HT-70", assignee: "acc-kai" });
+  const number = PR_BASE + 97;
+  await deliver(context, payload(context.accountId, number, "opened", "sha-a"));
+  const [pending] = await jevIntents(context.room.id);
+  assert.ok(pending);
+  const merged = payload(context.accountId, number, "closed", "sha-a");
+  (merged.pull_request as Record<string, unknown>).merged = true;
+  await deliver(context, merged);
+  assert.equal((await db!.getTaskById(context.room.id, taskId))!.workflow_artifacts[0]!.state, "merged");
+  await assert.rejects(context.service.approveIntent({ intent: pending, decisionBy: "emmy", reason: null }), /merged now/);
+  const after = (await intents!.getBoardIntent({ room_id: context.room.id, intent_id: pending.id }))!;
+  assert.equal(after.status, "superseded");
+  assert.match(after.decision_reason ?? "", /merged now/);
+  assert.equal((await effects(context.room.id)).length, 0);
+  assert.equal(context.tracker.created.length, 0);
+  assert.equal(await linkMark(context.room.id, taskId, `https://github.com/BrosInCode/letagents/pull/${number}`), "jev_suggested");
+});
+
+test("Accept supersedes the pending requests; approving one afterwards runs nothing", options, async () => {
+  const context = await setup("superseded");
+  await rules!.trackerRuleStore.create(context.connectionId, context.accountId, openedRule);
+  const taskId = await syncedCard({ roomId: context.room.id, connectionId: context.connectionId, key: "HT-71", assignee: "acc-kai" });
+  const number = PR_BASE + 98;
+  const prUrl = `https://github.com/BrosInCode/letagents/pull/${number}`;
+  await deliver(context, payload(context.accountId, number, "opened", "sha-a"));
+  const [pending] = await jevIntents(context.room.id);
+  await context.service.acceptLink({ roomId: context.room.id, taskId, prUrl });
+  const superseded = (await intents!.getBoardIntent({ room_id: context.room.id, intent_id: pending!.id }))!;
+  assert.equal(superseded.status, "superseded");
+  await assert.rejects(context.service.approveIntent({ intent: superseded, decisionBy: "emmy", reason: null }), /no longer pending/);
+  assert.equal((await effects(context.room.id)).length, 0);
+  assert.equal(await linkMark(context.room.id, taskId, prUrl), "jev_confirmed");
+});
+
+test("two quick events for one PR ask Jev once and attach to one card", options, async () => {
+  const context = await setup("race");
+  const first = await syncedCard({ roomId: context.room.id, connectionId: context.connectionId, key: "HT-80", assignee: "acc-kai" });
+  const second = await syncedCard({ roomId: context.room.id, connectionId: context.connectionId, key: "HT-81", assignee: "acc-kai" });
+  const number = PR_BASE + 99;
+  const prUrl = `https://github.com/BrosInCode/letagents/pull/${number}`;
+  context.jev.delayMs = 150;
+  context.jev.choices = ["ticket_1", "ticket_2"];
+  const opened = materialize!.materializeGitHubWebhookEvent("pull_request", payload(context.accountId, number, "opened", "sha-a") as never, unique("d"))!.roomEvent!;
+  const pushed = materialize!.materializeGitHubWebhookEvent("pull_request", payload(context.accountId, number, "synchronize", "sha-b") as never, unique("d"))!.roomEvent!;
+  const results = await Promise.all([
+    context.service.linkPullRequest({ roomId: context.room.id, event: opened, storedEvent: { event_type: "pull_request" }, installationId: null }),
+    context.service.linkPullRequest({ roomId: context.room.id, event: pushed, storedEvent: { event_type: "pull_request" }, installationId: null }),
+  ]);
+  assert.deepEqual(results.map((result) => result.outcome).sort(), ["question_pending", "suggested_high"]);
+  assert.equal(context.jev.calls, 1);
+  const marks = await Promise.all([first, second].map((taskId) => linkMark(context.room.id, taskId, prUrl)));
+  assert.equal(marks.filter(Boolean).length, 1, "the PR is on one card only");
+});
+
+test("needs me with the switch off makes no Jev call", options, async () => {
+  const context = await setup("needs-me-off", { jev: false });
+  const taskId = await syncedCard({ roomId: context.room.id, connectionId: context.connectionId, key: "HT-90", assignee: "acc-kai" });
+  const needsMe = await import("../connectors/jev/needs-me.js");
+  let calls = 0;
+  const deps = {
+    endpoint: () => endpoint,
+    evaluate: async () => { calls += 1; return { body: {}, latencyMs: 1 }; },
+    questions: jevStore!.jevQuestionStore,
+    card: needsMe.findNeedsMeCard,
+    messages: needsMe.readNeedsMeMessages,
+    log: () => undefined,
+  };
+  const off = await needsMe.askJevNeedsMe(deps, { roomId: context.room.id, taskId });
+  assert.equal(off.state, "unavailable");
+  assert.equal(calls, 0);
+  await client!.pool.query("UPDATE tracker_connections SET jev_linking_enabled = true WHERE id = $1", [context.connectionId]);
+  assert.ok(await needsMe.findNeedsMeCard(context.room.id, taskId), "with the switch on, the card qualifies");
+  // A filter set by someone else is not the owner's consent.
+  await client!.pool.query("UPDATE room_tracker_filters SET created_by_account_id = 'someone-else' WHERE room_id = $1", [context.room.id]);
+  assert.equal(await needsMe.findNeedsMeCard(context.room.id, taskId), null);
+});
+
+test("the sweep removes old rows but keeps a rejected link", options, async () => {
+  const context = await setup("prune");
+  const old = new Date(Date.now() - 91 * 24 * 60 * 60_000);
+  const plain = await jevStore!.jevQuestionStore.claim({ connection_id: context.connectionId, room_id: context.room.id, kind: "link", subject: unique("pr"), revision: "a" }, old);
+  const rejected = await jevStore!.jevQuestionStore.claim({ connection_id: context.connectionId, room_id: context.room.id, kind: "link", subject: unique("pr"), revision: "a", task_id: "task_1" }, old);
+  await client!.pool.query("UPDATE tracker_jev_questions SET resolution = 'rejected' WHERE id = $1", [rejected!.id]);
+  await jevStore!.jevQuestionStore.prune();
+  assert.equal(await jevStore!.jevQuestionStore.get(plain!.id), null);
+  assert.ok(await jevStore!.jevQuestionStore.get(rejected!.id));
 });

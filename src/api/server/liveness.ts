@@ -354,6 +354,12 @@ export function startLivenessSweep(): void {
       console.error("Tracker rule run sweep failed:", error);
       }
       try {
+      // Ticket connectors PR6: Jev question rows older than 90 days (hourly).
+      await (await import("../connectors/jev/runtime.js")).pruneJevQuestions();
+      } catch (error) {
+      console.error("Jev question sweep failed:", error);
+      }
+      try {
       await sweepAgentAsks();
       } catch (error) {
       console.error("Agent ask sweep failed:", error);

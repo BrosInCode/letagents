@@ -44,6 +44,9 @@ function probability(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
 }
 
+/** The most text redacted for one field; anything after it never leaves. */
+const JEV_TEXT_REDACT_MAX_CHARS = 70_000;
+
 /** Control characters and bidi overrides become spaces; runs of space collapse. */
 function plain(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩]+/g, " ").replace(/\s+/g, " ").trim();
@@ -53,10 +56,13 @@ function plain(text: string): string {
  * Text bound for Jev: secret-shaped values replaced (the rental firewall's
  * patterns and the connector token shapes), control and bidi characters
  * removed, then cut to `maxChars`. Applied to every string that leaves.
+ * Redaction runs on the whole field before the cut.
  */
 export function textForJev(value: string | null | undefined, maxChars: number): string {
   if (!value) return "";
-  let text = String(value).slice(0, maxChars * 4);
+  // Redact the whole text (GitHub caps a description at 65,536 characters), then cut:
+  // cutting first could split a secret so its pattern no longer matches.
+  let text = String(value).slice(0, JEV_TEXT_REDACT_MAX_CHARS);
   for (const pattern of SECRET_PATTERNS) text = text.replace(pattern.regex, pattern.placeholder);
   text = plain(redactConnectorSecrets(text));
   return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;

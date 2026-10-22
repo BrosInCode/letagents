@@ -168,13 +168,26 @@ export function isJevLinkIntentPayload(value: unknown): value is JevLinkIntentPa
     && Array.isArray(payload!.planned_actions);
 }
 
+/** The pull request states each planned event leaves it in (the card's artifact state). */
+const EXPECTED_STATES: Record<string, readonly string[]> = {
+  opened: ["open", "draft"],
+  reopened: ["open", "draft"],
+  ready_for_review: ["open"],
+  synchronize: ["open", "draft"],
+  converted_to_draft: ["draft"],
+  closed: ["closed", "merged"],
+};
+
 export interface JevLinkServiceDeps {
   endpoint(): JevEndpoint | null;
   evaluate?: JevEvaluate;
   timeoutMs?: number;
-  questions: Pick<JevQuestionStore, "claim" | "finish" | "countSince" | "countForSubject" | "linkRejected" | "resolveLink">;
-  intents: Pick<JevIntentStore, "pendingForLink" | "supersedeForLink" | "markUsed">;
-  roomJevConnection(roomId: string, provider?: TrackerProvider): Promise<RoomJevConnection | null>;
+  questions: Pick<JevQuestionStore, "claimWithLimits" | "finish" | "linkRejected" | "resolveLink" | "latestLinkForPullRequest">;
+  intents: Pick<JevIntentStore, "supersedeForLink" | "supersedeForPullRequest" | "supersede" | "markUsed">;
+  /** The room's filter connections with the Jev switch on (at most one per tracker). */
+  roomJevConnections(roomId: string): Promise<RoomJevConnection[]>;
+  /** The card in the room that already shows this pull request, if any. */
+  cardHoldingPullRequest(roomId: string, prUrl: string): Promise<string | null>;
   authorTrackerUserId(input: { login: string; githubUserId?: string | null; provider: TrackerProvider; siteKey: string }): Promise<string | null>;
   candidates(input: { roomId: string; connectionId: string; trackerUserId: string; limit: number }): Promise<JevLinkCandidate[]>;
   commitSubjects(input: { installationId: string | null; repositoryFullName: string; number: number }): Promise<string[]>;
@@ -211,7 +224,7 @@ function hasPullRequest(task: Task, url: string): TaskWorkflowArtifact | undefin
 }
 
 export class JevLinkDecisionError extends Error {
-  constructor(readonly code: "not_found" | "not_suggested" | "invalid_intent" | "not_pending", message: string) {
+  constructor(readonly code: "not_found" | "not_suggested" | "invalid_intent" | "not_pending" | "stale", message: string) {
     super(message);
     this.name = "JevLinkDecisionError";
   }
@@ -255,6 +268,28 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
     return task;
   }
 
+  /**
+   * Why an intent's plan no longer fits, or null. The plan was made for one
+   * event: the link must still be on the card, the intent must come from the
+   * newest link question for this pull request, and the pull request must
+   * still be in the state that event left it in (an "opened" plan approved
+   * after the merge would move the ticket backwards).
+   */
+  async function staleReason(roomId: string, payload: JevLinkIntentPayload): Promise<string | null> {
+    const linked = await jevLinkedTask(roomId, payload.task_id, payload.pr_url);
+    if (!linked) return "The pull request is no longer on this card, so this change no longer applies. Nothing was written.";
+    const latest = await deps.questions.latestLinkForPullRequest({ room_id: roomId, subject: payload.pr_url });
+    if (!latest || latest.id !== payload.question_id || latest.task_id !== payload.task_id) {
+      return "Jev made a newer suggestion for this pull request, so this request no longer applies. Nothing was written.";
+    }
+    const state = hasPullRequest(linked.task, payload.pr_url)?.state ?? null;
+    const expected = EXPECTED_STATES[payload.event_action];
+    if (state && expected && !expected.includes(state)) {
+      return `The pull request is ${state} now, and this change was planned when it was ${payload.event_action.replace(/_/g, " ")}. Nothing was written.`;
+    }
+    return null;
+  }
+
   return {
     /**
      * Asks Jev about one pull request event that reached no card. Never
@@ -268,35 +303,53 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
       try {
         // Anyone can open a pull request on a public repository; only people with access are linked.
         if (!trustedAuthor(event) || !event.pullRequest.authorLogin) return { outcome: "untrusted_author" };
-        const connection = await deps.roomJevConnection(input.roomId);
-        if (!connection) return { outcome: "disabled" };
+        const connections = await deps.roomJevConnections(input.roomId);
+        if (connections.length === 0) return { outcome: "disabled" };
         const endpoint = deps.endpoint();
         if (!endpoint) return { outcome: "unavailable" };
         const prUrl = event.pullRequest.url;
         if (await deps.questions.linkRejected({ room_id: input.roomId, subject: prUrl })) return { outcome: "rejected_before" };
-        if (await deps.questions.countForSubject({ room_id: input.roomId, kind: "link", subject: prUrl }) >= JEV_LINK_MAX_PER_PULL_REQUEST) {
-          return { outcome: "pull_request_limit" };
+        // Every filter connection with the switch on (one per tracker) gives the author's tickets, at most 20 in all.
+        const candidates: JevLinkCandidate[] = [];
+        const providerByTask = new Map<string, TrackerProvider>();
+        let questionConnection: RoomJevConnection | null = null;
+        let mapped = false;
+        for (const connection of connections) {
+          if (candidates.length >= JEV_LINK_MAX_CANDIDATES) break;
+          const trackerUserId = await deps.authorTrackerUserId({
+            login: event.pullRequest.authorLogin, githubUserId: event.pullRequest.authorId ?? null,
+            provider: connection.provider, siteKey: connection.site_key,
+          });
+          if (!trackerUserId) continue;
+          mapped = true;
+          const found = (await deps.candidates({
+            roomId: input.roomId, connectionId: connection.connection_id, trackerUserId, limit: JEV_LINK_MAX_CANDIDATES - candidates.length,
+          })).slice(0, JEV_LINK_MAX_CANDIDATES - candidates.length);
+          if (found.length > 0) questionConnection ??= connection;
+          for (const candidate of found) {
+            candidates.push(candidate);
+            providerByTask.set(candidate.task_id, connection.provider);
+          }
         }
-        const since = new Date(now().getTime() - JEV_LINK_ROOM_WINDOW_MS);
-        if (await deps.questions.countSince({ room_id: input.roomId, kind: "link", since }) >= JEV_LINK_MAX_PER_ROOM) {
-          log(`link room=${input.roomId} outcome=room_limit`);
-          return { outcome: "room_limit" };
-        }
-        const trackerUserId = await deps.authorTrackerUserId({
-          login: event.pullRequest.authorLogin, githubUserId: event.pullRequest.authorId ?? null,
-          provider: connection.provider, siteKey: connection.site_key,
-        });
-        if (!trackerUserId) return { outcome: "no_author_mapping" };
-        const candidates = (await deps.candidates({
-          roomId: input.roomId, connectionId: connection.connection_id, trackerUserId, limit: JEV_LINK_MAX_CANDIDATES,
-        })).slice(0, JEV_LINK_MAX_CANDIDATES);
-        if (candidates.length === 0) return { outcome: "no_candidates" };
+        if (!mapped) return { outcome: "no_author_mapping" };
+        if (candidates.length === 0 || !questionConnection) return { outcome: "no_candidates" };
 
-        const claimed = await deps.questions.claim({
-          connection_id: connection.connection_id, room_id: input.roomId, kind: "link",
+        // One question per head SHA, and one at a time per pull request: an opened and a
+        // synchronize event seconds apart ask once. The limits are checked with the claim.
+        const claim = await deps.questions.claimWithLimits({
+          connection_id: questionConnection.connection_id, room_id: input.roomId, kind: "link",
           subject: prUrl, revision: event.pullRequest.headSha,
+        }, {
+          maxPerSubject: JEV_LINK_MAX_PER_PULL_REQUEST,
+          maxPerRoom: JEV_LINK_MAX_PER_ROOM,
+          windowStart: new Date(now().getTime() - JEV_LINK_ROOM_WINDOW_MS),
+          oneAtATimePerSubject: true,
         }, now());
-        if (!claimed) return { outcome: "already_asked" };
+        if (!("claimed" in claim)) {
+          if (claim.refused === "room_limit") log(`link room=${input.roomId} outcome=room_limit`);
+          return { outcome: claim.refused === "subject_limit" ? "pull_request_limit" : claim.refused === "pending" ? "question_pending" : claim.refused };
+        }
+        const claimed = claim.claimed;
 
         const commitSubjects = await deps.commitSubjects({
           installationId: input.installationId, repositoryFullName: event.repositoryFullName, number: event.pullRequest.number,
@@ -325,6 +378,12 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
           await deps.questions.finish(claimed.id, { outcome: "card_changed", answer, latency_ms: result.latencyMs });
           return { outcome: "card_changed", question_id: claimed.id };
         }
+        // Another event may have put the pull request on a card while Jev answered: one card only.
+        const holder = await deps.cardHoldingPullRequest(input.roomId, prUrl);
+        if (holder && holder !== task.id) {
+          await deps.questions.finish(claimed.id, { outcome: "on_other_card", answer, latency_ms: result.latencyMs });
+          return { outcome: "on_other_card", question_id: claimed.id };
+        }
         if (await deps.cardLocked(input.roomId, task.id)) {
           await deps.questions.finish(claimed.id, { outcome: "card_locked", answer, latency_ms: result.latencyMs, task_id: task.id });
           return { outcome: "card_locked", question_id: claimed.id };
@@ -345,6 +404,12 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
         }
         await deps.questions.finish(claimed.id, { outcome: decision.outcome, answer, latency_ms: result.latencyMs, task_id: task.id });
         // A pull request already on the card by another link keeps that link; Jev adds nothing.
+        if (!existing) {
+          // The newest suggestion is the one a person decides: older requests for this PR no longer apply.
+          await deps.intents.supersedeForPullRequest({
+            room_id: input.roomId, pr_url: prUrl, except_question_id: claimed.id, reason: "Jev made a newer suggestion for this pull request.",
+          });
+        }
         if (existing || decision.outcome !== "suggested_high") {
           return { outcome: existing ? "already_on_card" : decision.outcome, question_id: claimed.id, task_id: task.id };
         }
@@ -382,7 +447,7 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
             clientMessageId: `jev-link:${claimed.id}`,
             text: `[status] Jev linked pull request #${event.pullRequest.number} to ${ref.key} as a suggestion. `
               + `${intents.length === 1 ? "One change waits" : `${intents.length} changes wait`} for a room admin under Board Manager > Requests `
-              + `(for example: ${jevIntentSummary(ref.key, previews[0]!)}). Nothing changes in ${providerName(connection.provider)} until a person approves.`,
+              + `(for example: ${jevIntentSummary(ref.key, previews[0]!)}). Nothing changes in ${providerName(providerByTask.get(task.id) ?? (ref.provider as TrackerProvider))} until a person approves.`,
           });
         }
         return { outcome: decision.outcome, question_id: claimed.id, task_id: task.id, intents };
@@ -394,7 +459,12 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
 
     /** A person accepted the suggestion on the card: the link is confirmed; later events run the rules. */
     async acceptLink(input: { roomId: string; taskId: string; prUrl: string }): Promise<Task> {
-      return confirm(input.roomId, input.taskId, input.prUrl);
+      const task = await confirm(input.roomId, input.taskId, input.prUrl);
+      // Accepted: later events run the rules themselves, so the requests made for the first event no longer apply.
+      await deps.intents.supersedeForPullRequest({
+        room_id: input.roomId, pr_url: input.prUrl, reason: "The link was accepted on the card; later events run the rules.",
+      });
+      return task;
     },
 
     /** A person rejected the suggestion: the pull request leaves the card, and Jev is not asked again for it here. */
@@ -413,12 +483,22 @@ export function createJevLinkService(deps: JevLinkServiceDeps) {
         throw new JevLinkDecisionError("invalid_intent", "This request is not a Jev link request.");
       }
       const payload = intent.payload;
+      if (intent.status !== "pending" && intent.status !== "approved" && intent.status !== "used") {
+        throw new JevLinkDecisionError("not_pending", "This request is no longer pending.");
+      }
+      // Check the plan still fits before anything is recorded: a used intent only replays its run.
+      if (intent.status !== "used") {
+        const stale = await staleReason(intent.room_id, payload);
+        if (stale) {
+          if (intent.status === "pending") await deps.intents.supersede({ room_id: intent.room_id, intent_id: intent.id, reason: stale });
+          log(`intent room=${intent.room_id} intent=${intent.id} decision=refused_stale`);
+          throw new JevLinkDecisionError("stale", stale);
+        }
+      }
       let decided: BoardIntent | null = intent;
       if (intent.status === "pending") {
         decided = await deps.approveIntent({ room_id: intent.room_id, intent_id: intent.id, decision_by: input.decisionBy, reason: input.reason });
         if (!decided) throw new JevLinkDecisionError("not_pending", "This request is no longer pending.");
-      } else if (intent.status !== "approved" && intent.status !== "used") {
-        throw new JevLinkDecisionError("not_pending", "This request is no longer pending.");
       }
       const task = await confirm(intent.room_id, payload.task_id, payload.pr_url);
       const run = await deps.runApprovedPlan({

@@ -832,7 +832,7 @@ decides. A timeout (10 s), an error, or an answer that is not exactly one of the
 1. A pull request is opened, reopened, made ready for review, or gets a new push (`synchronize`), and it reaches no
    card: no URL, lease or ticket key matches. Tracker sync events never ask.
 2. The room imports tickets through a filter whose connection has the switch on, is active, and belongs to the
-   person who set the filter. A room with no filter makes no query (the room's tracker scope is cached for 30 s).
+   person who set the filter. Every such filter counts (a room has at most one per tracker). A room with no filter makes no query (the room's tracker scope is cached for 30 s).
 3. The author has access to the repository (`OWNER`, `MEMBER` or `COLLABORATOR`), and is the GitHub user of a
    LetAgents account with its own active connection to the same tracker site. The match uses the immutable GitHub
    user id when the webhook carries it, so a renamed login cannot map to someone else. That connection's tracker user
@@ -841,8 +841,9 @@ decides. A timeout (10 s), an error, or an answer that is not exactly one of the
    the connection), assigned to the author's tracker user, on unfinished cards, newest change first, at most 20.
    A ticket outside the room's filter has no card bound here, so it is never a candidate. No candidate means no
    question.
-5. LetAgents records the question first, one per pull request head SHA, at most 5 per pull request and 30 per room
-   in an hour, and none again for a pull request a person rejected in this room.
+5. LetAgents records the question first, in one transaction with its limits: one per pull request head SHA, one at a
+   time per pull request (an `opened` and a `synchronize` seconds apart ask once), at most 5 per pull request and 30
+   per room in an hour, and none again for a pull request a person rejected in this room.
 6. Jev gets the pull request title, the start of its description (2,000 characters), up to 20 commit subjects, and
    the candidates' keys and titles. Text that looks like a secret is replaced, and control and bidi characters are
    removed. The state marks this text as untrusted: evidence to classify, never instructions.
@@ -855,7 +856,8 @@ decides. A timeout (10 s), an error, or an answer that is not exactly one of the
 | `none`, below 0.4, no probability, a timeout, an invalid answer | Nothing. The question row records the outcome. |
 
 A card that a lock holds, or that changed while Jev answered, is left alone. A pull request already on the card keeps
-its earlier link.
+its earlier link, and a pull request that another card already shows is never attached to a second card. A new
+suggestion supersedes the pull request's older requests.
 
 ### Decide a Jev link
 
@@ -867,9 +869,14 @@ the Board Manager are refused (`jev_link_person_required`), and the escalation s
   `jev:<request id>`, so a retried approval writes nothing new. The run is refused when the rule changed or was
   turned off, the filter or connection changed, the card is no longer bound to the ticket, or the owner lost room
   admin since the request was made.
+- **A request that no longer fits** is refused before anything is recorded, and marked superseded with the reason:
+  the pull request left the card, Jev made a newer suggestion for it, or the pull request is no longer in the state
+  the planned event left it in (for example an "opened" plan after the merge, which would move the ticket back).
+  Nothing is written.
 - **Deny a request**: while the link is a suggestion, it is removed from the card and the link's other requests
   are withdrawn. A link a person already accepted stays; only that write is refused.
-- **Accept** on the card confirms the link and writes nothing to the tracker.
+- **Accept** on the card confirms the link, writes nothing to the tracker, and supersedes the pending requests:
+  later events run the rules themselves.
 - **Reject** on the card removes the pull request and withdraws its requests. Jev is not asked again for that pull
   request in that room.
 
@@ -895,7 +902,8 @@ In My work, a card whose ticket's connection has Jev on, and whose room imports 
 set by its owner, shows **Ask Jev who this waits on**. Only a room in your room list that you may read is asked about. Jev reads the card's
 title, key and states and up to 6 recent room messages that name the ticket (sender kind and text), and answers
 **waits on a person**, **waits on an agent**, or **nothing waits**. The answer is cached per card and newest message,
-so asking again before anyone writes about the card costs no call. It is advice: nothing changes.
+so asking again before anyone writes about the card costs no call, and a connection gets at most 300 calls an hour.
+It is advice: nothing changes.
 
 ### Draft a rule from a sentence
 
@@ -909,7 +917,8 @@ the person presses Save. A sentence Jev is unsure about gives an error that asks
 Every question is a `tracker_jev_questions` row with its outcome and latency. Settings → Diagnostics shows, for the
 account's connections over the last 7 days, the count, the outcomes, and the average and 95th percentile latency of
 each kind of question. The server logs one line per question (`[jev tracker] …`) with the outcome and latency, never
-the text.
+the text. Rows older than 90 days are swept hourly, except a link a person rejected, which keeps Jev from asking
+about that pull request again.
 
 ### HTTP routes
 

@@ -22,6 +22,8 @@ import { askJevChoices, JEV_UNTRUSTED_TEXT_NOTE, textForJev, type JevEvaluate } 
 import type { JevQuestionStore } from "./store.js";
 
 export const JEV_NEEDS_ME_MIN_SCORE = 0.5;
+/** Jev calls per connection in an hour, across every person who asks (most answers come from the cache). */
+export const JEV_NEEDS_ME_MAX_PER_CONNECTION = 300;
 const MESSAGE_MAX_CHARS = 300;
 
 const OPTIONS: Record<JevNeedsMeState, string> = {
@@ -127,7 +129,7 @@ export interface JevNeedsMeDeps {
   endpoint(): JevEndpoint | null;
   evaluate?: JevEvaluate;
   timeoutMs?: number;
-  questions: Pick<JevQuestionStore, "claim" | "finish" | "find">;
+  questions: Pick<JevQuestionStore, "claimWithLimits" | "finish" | "find">;
   card(roomId: string, taskId: string): Promise<NeedsMeCard | null>;
   messages(roomId: string, taskId: string): Promise<NeedsMeMessage[]>;
   log?(line: string): void;
@@ -153,8 +155,12 @@ export async function askJevNeedsMe(deps: JevNeedsMeDeps, input: { roomId: strin
   }
   const endpoint = deps.endpoint();
   if (!endpoint) return { ...unavailable, task_id: card.task_id };
-  const claimed = await deps.questions.claim({ ...question, connection_id: card.connection_id, task_id: card.task_id });
-  if (!claimed) return { ...unavailable, task_id: card.task_id };
+  const claim = await deps.questions.claimWithLimits({ ...question, connection_id: card.connection_id, task_id: card.task_id }, {
+    maxPerConnection: JEV_NEEDS_ME_MAX_PER_CONNECTION,
+    windowStart: new Date(Date.now() - 60 * 60_000),
+  });
+  if (!("claimed" in claim)) return { ...unavailable, task_id: card.task_id };
+  const claimed = claim.claimed;
   const result = await askJevChoices(endpoint, buildJevNeedsMeQuestion(card, recent), { evaluate: deps.evaluate, timeoutMs: deps.timeoutMs });
   const answer = result.status === "answered" ? result.answers.waiting_on : undefined;
   const state = answer && isState(answer.choice) && answer.score !== null && answer.score >= JEV_NEEDS_ME_MIN_SCORE ? answer.choice : null;

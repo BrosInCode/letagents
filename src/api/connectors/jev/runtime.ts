@@ -19,7 +19,9 @@ import {
   externalItemsByKey,
   fetchPullRequestCommitSubjects,
   findAuthorTrackerUserId,
+  findCardHoldingPullRequest,
   findRoomJevConnection,
+  findRoomJevConnections,
   listJevLinkCandidates,
 } from "./lookups.js";
 import { askJevNeedsMe, findNeedsMeCard, readNeedsMeMessages } from "./needs-me.js";
@@ -51,6 +53,12 @@ const roomJevConnection: typeof findRoomJevConnection = async (roomId, provider)
   return findRoomJevConnection(roomId, provider);
 };
 
+const roomJevConnections: typeof findRoomJevConnections = async (roomId, provider) => {
+  const scope = await getCachedRoomTrackerScope(roomId);
+  if (!scope.sources.some((source) => !provider || source.provider === provider)) return [];
+  return findRoomJevConnections(roomId, provider);
+};
+
 let linkService: JevLinkService | null = null;
 
 export function getDefaultJevLinkService(): JevLinkService {
@@ -59,7 +67,8 @@ export function getDefaultJevLinkService(): JevLinkService {
     endpoint: () => readJevEndpoint(),
     questions: jevQuestionStore,
     intents: jevIntentStore,
-    roomJevConnection,
+    roomJevConnections: (roomId) => roomJevConnections(roomId),
+    cardHoldingPullRequest: findCardHoldingPullRequest,
     authorTrackerUserId: findAuthorTrackerUserId,
     candidates: listJevLinkCandidates,
     commitSubjects: fetchPullRequestCommitSubjects,
@@ -101,6 +110,16 @@ const exceptionDeps: JevExceptionDeps = {
 
 export function proposeForClosedPullRequestDefault(input: Parameters<typeof proposeForClosedPullRequest>[1]) {
   return proposeForClosedPullRequest(exceptionDeps, input);
+}
+
+let lastPruneAt = 0;
+const PRUNE_EVERY_MS = 60 * 60_000;
+
+/** The 90-day sweep of Jev question rows, at most once an hour per process; a rejected link's row stays. */
+export async function pruneJevQuestions(now = Date.now()): Promise<number> {
+  if (now - lastPruneAt < PRUNE_EVERY_MS) return 0;
+  lastPruneAt = now;
+  return jevQuestionStore.prune(new Date(now));
 }
 
 export function askJevNeedsMeDefault(input: { roomId: string; taskId: string }) {
