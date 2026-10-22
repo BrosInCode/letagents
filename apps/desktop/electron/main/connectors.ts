@@ -1,32 +1,51 @@
-import type {
-  TrackerApiTokenInput,
-  TrackerConnectionList,
-  TrackerConnectionPatch,
-  TrackerConnectionTestResult,
-  TrackerConnectionView,
-  TrackerJevMetrics,
-  TrackerOAuthStart,
-  TrackerProvider,
-  TrackerRuleDraftResult,
-  TrackerRuleInput,
-  TrackerRuleList,
-  TrackerRuleVersionView,
-  TrackerRuleView,
-  TrackerWebhookSetup,
+import {
+  CONNECTORS_NOT_CONFIGURED_CODE,
+  CONNECTORS_NOT_CONFIGURED_MESSAGE,
+  type TrackerApiTokenInput,
+  type TrackerConnectionList,
+  type TrackerConnectionPatch,
+  type TrackerConnectionTestResult,
+  type TrackerConnectionView,
+  type TrackerJevMetrics,
+  type TrackerOAuthStart,
+  type TrackerRuleDraftResult,
+  type TrackerRuleInput,
+  type TrackerRuleList,
+  type TrackerRuleVersionView,
+  type TrackerRuleView,
+  type TrackerWebhookSetup,
 } from "../../../../shared/ticket-connectors.mjs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { apiFetch } from "./auth.js";
+import { apiFetch, DesktopApiError } from "./auth.js";
 import { openAllowedExternalUrl } from "./external-url.js";
 
 /** The only hosts a tracker sign-in may open in the browser. */
 const TRACKER_AUTHORIZE_HOSTS = ["auth.atlassian.com", "linear.app"] as const;
 const CONNECTION_ID = /^tcon_[0-9a-f-]{36}$/;
 
-function provider(value: unknown): TrackerProvider {
+/** Trackers that sign in with OAuth or an API token. GitHub Issues uses the GitHub App instead. */
+function provider(value: unknown): "jira" | "linear" {
   if (value !== "jira" && value !== "linear") throw new Error("Choose Jira or Linear.");
   return value;
+}
+
+/** The list a server without a connector key gives: nothing connected, nothing to add. */
+export type DesktopTrackerConnectionList = TrackerConnectionList & {
+  /** Set when the server answered that connectors are not enabled (no LETAGENTS_CONNECTOR_SECRET_KEY). */
+  not_configured?: true;
+};
+
+/**
+ * The server's answer when it has no connector key: 503 with the code
+ * `connectors_not_configured`. Servers released before the code existed sent
+ * only the text, so the old text counts too.
+ */
+export function isConnectorsNotConfigured(error: unknown): boolean {
+  if (!(error instanceof DesktopApiError) || error.status !== 503) return false;
+  return error.payload?.code === CONNECTORS_NOT_CONFIGURED_CODE
+    || /connectors are not (configured|enabled) on this server/i.test(error.payload?.error ?? "");
 }
 
 function connectionPath(id: unknown): string {
@@ -40,9 +59,22 @@ const json = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-export function listTrackerConnections(): Promise<TrackerConnectionList> {
-  return apiFetch<TrackerConnectionList>("/account/connectors");
+export async function listTrackerConnections(): Promise<DesktopTrackerConnectionList> {
+  try {
+    return await apiFetch<TrackerConnectionList>("/account/connectors");
+  } catch (error) {
+    if (!isConnectorsNotConfigured(error)) throw error;
+    const off = { oauth: false, api_token: false };
+    return {
+      connections: [],
+      providers: { jira: off, linear: off, github: { ...off, github_app: false } },
+      jev_linking_disclosure: "",
+      not_configured: true,
+    };
+  }
 }
+
+export { CONNECTORS_NOT_CONFIGURED_MESSAGE };
 
 /** The path the server's OAuth callback forwards the browser to on this computer. */
 export const TRACKER_OAUTH_LOOPBACK_PATH = "/tracker-oauth/callback";
@@ -137,6 +169,14 @@ export async function connectTrackerWithOAuth(value: unknown): Promise<TrackerCo
 
 export function cancelTrackerOAuth(): void {
   activeOAuth?.cancel();
+}
+
+/** Connect GitHub Issues through the LetAgents GitHub App installation that holds `repository`. */
+export async function connectGitHubIssues(repository: unknown): Promise<TrackerConnectionView> {
+  const name = String(repository ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(name)) throw new Error("Enter a repository as owner/repo.");
+  const result = await apiFetch<{ connection: TrackerConnectionView }>("/account/connectors/github-app", json("POST", { repository: name }));
+  return result.connection;
 }
 
 export async function saveTrackerApiToken(input: TrackerApiTokenInput): Promise<TrackerConnectionView> {

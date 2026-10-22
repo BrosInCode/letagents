@@ -18,7 +18,18 @@ export type LinearCredentials =
   | { kind: "api_token"; api_key: string }
   | { kind: "oauth"; access_token: string; refresh_token: string | null; expires_at: string | null };
 
-export type TrackerCredentials = JiraCredentials | LinearCredentials;
+/**
+ * GitHub Issues: no secret. The connection names a LetAgents GitHub App
+ * installation and the GitHub login it reads for; every request mints a
+ * short-lived token for that installation, scoped to one repository.
+ */
+export interface GitHubAppCredentials {
+  kind: "github_app";
+  installation_id: string;
+  login: string;
+}
+
+export type TrackerCredentials = JiraCredentials | LinearCredentials | GitHubAppCredentials;
 
 /**
  * What a provider call gets: the connection's identity and map, its decrypted

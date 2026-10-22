@@ -360,6 +360,7 @@ const api: DesktopApi = {
     connectOAuth: (provider) => ipcRenderer.invoke("desktop:connectors:connect-oauth", provider),
     cancelOAuth: () => ipcRenderer.invoke("desktop:connectors:cancel-oauth"),
     saveApiToken: (input) => ipcRenderer.invoke("desktop:connectors:save-api-token", input),
+    connectGitHub: (repository) => ipcRenderer.invoke("desktop:connectors:connect-github", repository),
     test: (id) => ipcRenderer.invoke("desktop:connectors:test", id),
     update: (id, patch) => ipcRenderer.invoke("desktop:connectors:update", id, patch),
     remove: (id) => ipcRenderer.invoke("desktop:connectors:remove", id),

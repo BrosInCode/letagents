@@ -11,6 +11,8 @@ const { createConnectorCipher } = await import("../connectors/crypto.js");
 const { TrackerProviderError } = await import("../connectors/providers/types.js");
 import type { TrackerConnectionRow, TrackerConnectionStore } from "../connectors/store.js";
 import type { WorkItemProvider } from "../connectors/providers/types.js";
+import type { GitHubIssuesProvider } from "../connectors/providers/github.js";
+import { CONNECTORS_NOT_CONFIGURED_MESSAGE } from "../../../shared/ticket-connectors.mjs";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 
 const key = randomBytes(32).toString("hex");
@@ -112,9 +114,24 @@ function provider(name: "jira" | "linear", overrides: Partial<WorkItemProvider> 
   };
 }
 
+/** GitHub Issues: the App holds acme/api in installation 555; the login can read acme/api only. */
+function githubProvider(): GitHubIssuesProvider {
+  return {
+    ...provider("jira"),
+    name: "github",
+    async whoAmI(conn) {
+      const credentials = conn.credentials as { installation_id: string; login: string };
+      return { id: "31524469", label: credentials.login, site: { key: `installation:${credentials.installation_id}`, url: "https://github.com/acme", name: "acme" } };
+    },
+    async assertReadable(conn, repo) {
+      if (repo !== "acme/api") throw new TrackerProviderError("definite", `${(conn.credentials as { login: string }).login} cannot read ${repo} on GitHub.`, 403);
+    },
+  };
+}
+
 type Who = "owner_token" | "session" | "agent_session" | "cookie_session" | "anonymous" | "other_account";
 
-async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {}) {
+async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch; githubApp?: boolean } = {}) {
   const memory = memoryStore();
   const app = express();
   app.use(express.json());
@@ -125,7 +142,7 @@ async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetch
       req.sessionAccount = null;
     } else if (who !== "anonymous") {
       req.authKind = who === "cookie_session" || who === "other_account" ? "session" : who;
-      req.sessionAccount = { account_id: who === "other_account" ? "acct_2" : "acct_1", login: "emmy" } as AuthenticatedRequest["sessionAccount"];
+      req.sessionAccount = { account_id: who === "other_account" ? "acct_2" : "acct_1", login: "emmy", provider: "github" } as AuthenticatedRequest["sessionAccount"];
     }
     if (who !== "cookie_session" && who !== "anonymous") req.headers.authorization = "Bearer test-token";
     next();
@@ -133,9 +150,15 @@ async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetch
   registerConnectorRoutes(app, {
     store: memory.store,
     cipher: options.cipher === false ? null : createConnectorCipher(key),
-    providers: { jira: provider("jira"), linear: provider("linear") },
+    providers: { jira: provider("jira"), linear: provider("linear"), github: githubProvider() },
     env: options.env ?? {},
     fetchImpl: options.fetchImpl,
+    githubAppConfigured: async () => options.githubApp !== false,
+    githubDirectory: {
+      async repositoryInstallation(repo) {
+        return repo === "acme/api" || repo === "acme/secret" ? { installation_id: "555" } : null;
+      },
+    },
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -169,9 +192,14 @@ test("without LETAGENTS_CONNECTOR_SECRET_KEY every connector route answers 503",
       ["POST", "/account/connectors/tcon_1/test"],
       ["PATCH", "/account/connectors/tcon_1"],
       ["DELETE", "/account/connectors/tcon_1"],
+      ["POST", "/account/connectors/github-app"],
     ]) {
-      assert.equal((await server.call(method, path, method === "GET" ? undefined : { provider: "jira" })).status, 503, `${method} ${path}`);
+      const answer = await server.call(method, path, method === "GET" ? undefined : { provider: "jira" });
+      assert.equal(answer.status, 503, `${method} ${path}`);
+      // The app shows its own page state for this code; the text names the setting, never a stack.
+      assert.deepEqual(answer.json, { error: CONNECTORS_NOT_CONFIGURED_MESSAGE, code: "connectors_not_configured" }, `${method} ${path}`);
     }
+    assert.match(CONNECTORS_NOT_CONFIGURED_MESSAGE, /^Connectors are not enabled on this server\. Ask your server admin to set LETAGENTS_CONNECTOR_SECRET_KEY\.$/);
     assert.equal((await server.call("GET", "/account/connectors/oauth/jira/callback?state=x&code=y")).status, 503);
   } finally {
     await server.close();
@@ -189,7 +217,11 @@ test("only the app's session bearer may use connector routes; agents' owner toke
     assert.equal((await server.call("PATCH", "/account/connectors/tcon_1", { jev_linking_enabled: true }, "owner_token")).status, 403);
     const listed = await server.call("GET", "/account/connectors");
     assert.equal(listed.status, 200);
-    assert.deepEqual(listed.json.providers, { jira: { oauth: false, api_token: true }, linear: { oauth: false, api_token: true } });
+    assert.deepEqual(listed.json.providers, {
+      jira: { oauth: false, api_token: true },
+      linear: { oauth: false, api_token: true },
+      github: { oauth: false, api_token: false, github_app: true },
+    });
     assert.match(listed.json.jev_linking_disclosure, /Jev/);
   } finally {
     await server.close();
@@ -425,6 +457,52 @@ test("OAuth is unavailable without an https base URL, and Jira OAuth keeps a cus
     const completed = await server.call("POST", "/account/connectors/oauth/jira/complete", { state: authorize.searchParams.get("state"), code: "c" });
     assert.equal(completed.status, 201, completed.text);
     assert.equal(completed.json.connection.site_url, "https://jira.acme-corp.com");
+  } finally {
+    await server.close();
+  }
+});
+
+test("GitHub Issues connects the App installation of a repository the person can read, and stores no token", async () => {
+  const server = await serve();
+  try {
+    const unknown = await server.call("POST", "/account/connectors/github-app", { repository: "other/repo" });
+    assert.equal(unknown.status, 404);
+    assert.match(unknown.json.error, /not installed on other\/repo/);
+    const unreadable = await server.call("POST", "/account/connectors/github-app", { repository: "acme/secret" });
+    assert.equal(unreadable.status, 403, "the App can read it, the person cannot: no connection");
+    assert.equal(server.memory.rows.size, 0);
+    assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "not a repo" })).status, 400);
+    assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "acme/api" }, "owner_token")).status, 403);
+
+    const created = await server.call("POST", "/account/connectors/github-app", { repository: "Acme/API" });
+    assert.equal(created.status, 201);
+    assert.equal(created.json.connection.provider, "github");
+    assert.equal(created.json.connection.auth_kind, "github_app");
+    assert.equal(created.json.connection.display_name, "acme");
+    assert.deepEqual(created.json.connection.status_map, { Open: "todo", "Open (assigned)": "in_progress", Closed: "done" });
+    const row = [...server.memory.rows.values()][0]!;
+    assert.equal(row.site_key, "installation:555");
+    const stored = createConnectorCipher(key).decrypt(
+      { ciphertext: row.credentials_ciphertext, iv: row.credentials_iv, version: row.credentials_version },
+      { connection_id: row.id, account_id: "acct_1" },
+    );
+    assert.deepEqual(stored, { kind: "github_app", installation_id: "555", login: "emmy" }, "only a reference to the installation");
+
+    const webhook = await server.call("GET", `/account/connectors/${row.id}/webhook`);
+    assert.equal(webhook.status, 409, "the App's own webhook delivers issue events");
+    const token = await server.call("POST", "/account/connectors/api-token", { provider: "github", api_token: "x" });
+    assert.equal(token.status, 400);
+  } finally {
+    await server.close();
+  }
+});
+
+test("GitHub Issues is not offered on a server without a GitHub App", async () => {
+  const server = await serve({ githubApp: false });
+  try {
+    const listed = await server.call("GET", "/account/connectors");
+    assert.equal(listed.json.providers.github.github_app, false);
+    assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "acme/api" })).status, 409);
   } finally {
     await server.close();
   }

@@ -1,12 +1,31 @@
 /**
- * Ticket connectors: shared constants for the API and the desktop app.
- * See docs/ticket-connectors.md.
+ * Connectors: shared constants for the API and the desktop app. A tracker is
+ * one kind of connector (Jira, Linear, GitHub Issues). See docs/ticket-connectors.md.
  */
 
 /** The generic ticket states every tracker status maps to. */
 export const TICKET_STATES = ["todo", "in_progress", "in_review", "done"];
 
-export const TRACKER_PROVIDERS = ["jira", "linear"];
+export const TRACKER_PROVIDERS = ["jira", "linear", "github"];
+
+/** What the app shows for each tracker. */
+export const TRACKER_PROVIDER_LABELS = {
+  jira: "Jira",
+  linear: "Linear",
+  github: "GitHub Issues",
+};
+
+export function trackerProviderLabel(provider) {
+  return TRACKER_PROVIDER_LABELS[provider] ?? String(provider);
+}
+
+/**
+ * The text a server without LETAGENTS_CONNECTOR_SECRET_KEY answers with (503,
+ * code `connectors_not_configured`), and what the app shows in its place.
+ */
+export const CONNECTORS_NOT_CONFIGURED_CODE = "connectors_not_configured";
+export const CONNECTORS_NOT_CONFIGURED_MESSAGE = "Connectors are not enabled on this server. "
+  + "Ask your server admin to set LETAGENTS_CONNECTOR_SECRET_KEY.";
 
 /** What a status that no map entry names becomes, flagged for the user. */
 export const UNMAPPED_TICKET_STATE = "in_progress";
@@ -32,6 +51,13 @@ export const DEFAULT_STATUS_MAPS = {
     "type:started": "in_progress",
     "type:completed": "done",
     "type:canceled": "done",
+  },
+  // GitHub Issues has two states. An open issue with an assignee is being
+  // worked on; labels are not states.
+  github: {
+    "Open": "todo",
+    "Open (assigned)": "in_progress",
+    "Closed": "done",
   },
 };
 
@@ -77,7 +103,7 @@ export function isTrackerProvider(value) {
   return typeof value === "string" && TRACKER_PROVIDERS.includes(value);
 }
 
-/** `created_by` of a card that sync imported from a tracker: `tracker:jira`, `tracker:linear`. */
+/** `created_by` of a card that sync imported from a tracker: `tracker:jira`, `tracker:linear`, `tracker:github`. */
 export const TRACKER_IMPORT_CREATOR_PREFIX = "tracker:";
 
 export function trackerImportCreator(provider) {

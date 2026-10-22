@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  TRACKER_PROVIDER_LABELS,
   TRACKER_SYNC_EVENT_SOURCE,
   TRACKER_SYNC_EVENT_TYPE,
   type TrackerProvider,
@@ -11,7 +12,7 @@ import { formatTaskId } from "../db/utils.js";
 
 type InsertExecutor = Pick<typeof db, "insert">;
 
-const PROVIDER_LABELS: Record<TrackerProvider, string> = { jira: "Jira", linear: "Linear" };
+const PROVIDER_LABELS: Readonly<Record<TrackerProvider, string>> = TRACKER_PROVIDER_LABELS;
 
 /**
  * A quiet room event for a ticket change: it is listed in the room's Events

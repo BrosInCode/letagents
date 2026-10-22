@@ -30,10 +30,10 @@
       class="web-work-trackers"
       aria-labelledby="work-trackers-title"
     >
-      <h2 id="work-trackers-title">Ticket trackers</h2>
+      <h2 id="work-trackers-title">Connectors</h2>
       <p>
-        Manage your Jira and Linear connections in the desktop app’s Settings →
-        Ticket trackers. Your connected tickets appear here in My work.
+        Manage your Jira, Linear and GitHub Issues connections in the desktop
+        app’s Settings → Connectors. Your connected tickets appear here in My work.
       </p>
       <button type="button" @click="trackers?.close()">Done</button>
     </dialog>

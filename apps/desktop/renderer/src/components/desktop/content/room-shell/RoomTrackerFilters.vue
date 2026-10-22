@@ -89,10 +89,12 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type {
-  RoomTrackerFilterView,
-  TrackerConnectionView,
-  TrackerProvider,
+import {
+  isTrackerProvider,
+  trackerProviderLabel,
+  type RoomTrackerFilterView,
+  type TrackerConnectionView,
+  type TrackerProvider,
 } from "../../../../../../../../shared/ticket-connectors.mjs";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { desktopIpc } from "../../../../ipc/index";
@@ -118,12 +120,14 @@ const selectedProvider = computed<TrackerProvider | null>(() =>
   connections.value.find((connection) => connection.id === connectionId.value)?.provider ?? null);
 const placeholder = computed(() => selectedProvider.value === "linear"
   ? "team:ENG or project:<id>"
-  : "project = HT AND statusCategory != Done");
+  : selectedProvider.value === "github"
+    ? "owner/repo (up to 10, separated by spaces)"
+    : "project = HT AND statusCategory != Done");
 const formDescription = computed(() => testResult.value
   ?? "Cards are created for matching tickets. Your connection reads them; the tracker owns their state.");
 
 function providerLabel(provider: string): string {
-  return provider === "linear" ? "Linear" : provider === "jira" ? "Jira" : provider;
+  return isTrackerProvider(provider) ? trackerProviderLabel(provider) : provider;
 }
 
 function filterStatus(filter: RoomTrackerFilterView): string {

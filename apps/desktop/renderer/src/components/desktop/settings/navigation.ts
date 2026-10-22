@@ -1,17 +1,16 @@
-import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
-import type { SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
+import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
+import type { LegacySettingsPaneId, SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
 
 export const settingsNavGroups: SettingsNavGroup[] = [
   { label: "You", items: [
     { id: "account:profile", title: "Account", description: "Your identity and GitHub connection", icon: CircleUser },
     { id: "account:renting", title: "Renting", description: "Availability and agent rentals", icon: Handshake },
-    { id: "account:connectors", title: "Ticket trackers", description: "Connect Jira or Linear to your boards", icon: Ticket },
+    { id: "account:connectors", title: "Connectors", description: "Connect trackers, agent apps and remote sign-ins", icon: Plug },
   ] },
   { label: "Workspace", items: [
     { id: "rooms:defaults", title: "Rooms", description: "Manage rooms, pins, and access", icon: SlidersHorizontal },
     { id: "storage:chat", title: "Storage", description: "Local data and cloud publishing", icon: Cloud },
     { id: "system:agents", title: "Agents", description: "Agent status and availability", icon: Bot },
-    { id: "system:mcp", title: "Connections", description: "Connect your existing agent apps", icon: ServerCog },
   ] },
   { label: "Application", items: [
     { id: "system:app-agent", title: "Assistant", description: "Choose how the app assistant helps you", icon: Sparkles },
@@ -31,10 +30,18 @@ export const settingsSubsections: Partial<Record<SettingsPaneId, SettingsNavItem
     { id: "storage:sync", title: "Publishing", description: "Publish a local room to the cloud", icon: CloudUpload },
     { id: "storage:database", title: "Local files", description: "Find your database and attachments", icon: Database },
   ],
-  "system:mcp": [
-    { id: "system:mcp", title: "Connected apps", description: "Agent apps connected through MCP", icon: ServerCog },
-    { id: "system:setup", title: "Connect an app", description: "Set up LetAgents in an existing agent app", icon: Wrench },
-    { id: "system:remote-mcp", title: "Remote connector", description: "Apps signed in through the remote MCP connector", icon: Cloud },
+  "account:connectors": [
+    { id: "account:connectors", title: "Trackers", description: "Jira, Linear and GitHub Issues for your boards", icon: Ticket },
+    { id: "account:connectors-agents", title: "Agent apps", description: "Agent apps connected through MCP", icon: ServerCog },
+    { id: "account:connectors-remote", title: "Remote sign-ins", description: "Apps signed in through the remote MCP connector", icon: Cloud },
+    {
+      id: "account:connectors-setup",
+      title: "Connect an agent app",
+      description: "Set up LetAgents in an existing agent app",
+      icon: Wrench,
+      hidden: true,
+      parent: "account:connectors-agents",
+    },
   ],
   "system:diagnostics": [
     { id: "system:diagnostics", title: "Health", description: "See the background service and agents across all rooms", icon: Activity },
@@ -42,6 +49,29 @@ export const settingsSubsections: Partial<Record<SettingsPaneId, SettingsNavItem
     { id: "system:supervisor", title: "Cloud access", description: "Advanced cloud authorization and credential recovery", icon: KeyRound },
   ],
 };
+
+/** Where each old pane id opens now. Deep links and saved state keep working. */
+export const legacySettingsPaneRedirects: Readonly<Record<LegacySettingsPaneId, SettingsPaneId>> = {
+  "system:mcp": "account:connectors-agents",
+  "system:setup": "account:connectors-setup",
+  "system:remote-mcp": "account:connectors-remote",
+};
+
+/** A pane id as it opens today: an old id goes to the pane that replaced it. */
+export function resolveSettingsPane(pane: SettingsPaneId | LegacySettingsPaneId): SettingsPaneId {
+  return (legacySettingsPaneRedirects as Record<string, SettingsPaneId>)[pane] ?? pane as SettingsPaneId;
+}
+
+/** The sub-navigation items of a section; hidden panes are left out. */
+export function visibleSettingsSubsections(section: SettingsPaneId): SettingsNavItem[] {
+  return (settingsSubsections[section] ?? []).filter(item => !item.hidden);
+}
+
+/** The sub-navigation item to mark as current: a hidden pane marks its parent. */
+export function settingsSubsectionFor(pane: SettingsPaneId): SettingsPaneId {
+  const section = settingsSectionFor(pane);
+  return settingsSubsections[section]?.find(item => item.id === pane)?.parent ?? pane;
+}
 
 export function settingsSectionFor(pane: SettingsPaneId): SettingsPaneId {
   for (const [section, items] of Object.entries(settingsSubsections)) {

@@ -274,7 +274,8 @@ export function createTrackerRuleEngine(deps: TrackerRuleEngineDeps) {
   function trackerInput(run: TrackerRuleRunRow, index: number, connection: RoomRuleConnection): SubmitTrackerEffectInput | null {
     const planned = (run.planned_actions as unknown[])[index];
     const ref = parseExternalRef(run.external_ref);
-    if (!isPlannedAction(planned) || !ref || !run.rule_id) return null;
+    // Rules do not write to GitHub Issues yet: the journal accepts Jira and Linear only.
+    if (!isPlannedAction(planned) || !ref || !run.rule_id || connection.provider === "github") return null;
     return {
       room_id: run.room_id,
       task_id: run.task_id,

@@ -2,7 +2,7 @@ import type { MyWorkJevNeedsMe, MyWorkPage } from "../../../../../shared/ticket-
 import type { DesktopMyWorkQuery } from "../../ipc-types.js";
 import { apiFetch } from "../auth.js";
 
-const TRACKERS = new Set(["jira", "linear", "native"]);
+const TRACKERS = new Set(["jira", "linear", "github", "native"]);
 
 /** The account's work across its cloud rooms (ticket connectors PR4). */
 export async function getDesktopMyWork(query?: DesktopMyWorkQuery): Promise<MyWorkPage> {

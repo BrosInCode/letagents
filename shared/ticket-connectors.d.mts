@@ -1,10 +1,15 @@
 export type TicketState = "todo" | "in_progress" | "in_review" | "done";
-export type TrackerProvider = "jira" | "linear";
-export type TrackerAuthKind = "oauth" | "api_token";
+export type TrackerProvider = "jira" | "linear" | "github";
+/** `github_app`: no stored token; reads use the LetAgents GitHub App installation. */
+export type TrackerAuthKind = "oauth" | "api_token" | "github_app";
 export type TrackerConnectionStatus = "active" | "needs_reauth" | "error";
 
 export declare const TICKET_STATES: readonly TicketState[];
 export declare const TRACKER_PROVIDERS: readonly TrackerProvider[];
+export declare const TRACKER_PROVIDER_LABELS: Readonly<Record<TrackerProvider, string>>;
+export declare function trackerProviderLabel(provider: TrackerProvider): string;
+export declare const CONNECTORS_NOT_CONFIGURED_CODE: "connectors_not_configured";
+export declare const CONNECTORS_NOT_CONFIGURED_MESSAGE: string;
 export declare const UNMAPPED_TICKET_STATE: TicketState;
 export declare const DEFAULT_STATUS_MAPS: Readonly<Record<TrackerProvider, Readonly<Record<string, TicketState>>>>;
 export declare const JEV_LINKING_DISCLOSURE: string;
@@ -92,6 +97,8 @@ export interface TrackerConnectionView {
 export interface TrackerProviderAvailability {
   oauth: boolean;
   api_token: boolean;
+  /** GitHub Issues: the server has a GitHub App to read issues with. */
+  github_app?: boolean;
 }
 
 export interface TrackerConnectionList {
@@ -128,6 +135,12 @@ export interface TrackerApiTokenInput {
   /** Jira only: the Atlassian account email that owns the token. */
   email?: string;
   api_token: string;
+}
+
+/** `POST /account/connectors/github-app`: connect the GitHub App installation that holds this repository. */
+export interface TrackerGitHubAppInput {
+  /** `owner/repo`; the person must be able to read it on GitHub. */
+  repository: string;
 }
 
 export interface TrackerConnectionPatch {

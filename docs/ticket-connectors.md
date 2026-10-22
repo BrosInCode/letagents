@@ -1,11 +1,48 @@
 # Ticket connectors
 
-A board card can name a ticket from an external tracker (Jira, Linear). Pull
-requests, branches and room messages that mention the ticket's key attach to
-that card, so one card answers "what is up with this ticket".
+A board card can name a ticket from an external tracker (Jira, Linear, GitHub
+Issues). Pull requests, branches and room messages that mention the ticket's
+key attach to that card, so one card answers "what is up with this ticket".
 
 This page grows with each part of the feature. The build plan is in
 [plans/ticket-connectors.md](plans/ticket-connectors.md).
+
+## Connectors page
+
+The desktop app keeps everything a person connects on one page: **Settings →
+Connectors** (under **You**). The page has three parts:
+
+| Part | What it lists | Where it was before |
+|---|---|---|
+| **Trackers** | Jira, Linear and GitHub Issues connections (this document). | Settings → Ticket trackers |
+| **Agent apps** | Agent apps on this computer that run LetAgents as a local MCP server, and the flow to connect another one. | Settings → Connections → Connected apps, Connect an app |
+| **Remote sign-ins** | Apps signed in through the remote MCP connector (`/mcp`), with the steps to add it. | Settings → Connections → Remote connector |
+
+At the top, one list shows every connector with its name, its kind (Tracker,
+Agent app or Remote sign-in) and its status:
+
+- **Connected**: the connection works.
+- **Not connected**: an agent app on this computer that has no LetAgents setup.
+- **Needs attention**: a tracker that needs a reconnect or reported an error,
+  or an agent app whose LetAgents setup has a problem.
+
+**Add connector** opens a catalog: Jira, Linear, GitHub Issues, Connect an agent
+app, and Remote connector. A tracker opens its form on the Trackers part;
+Connect an agent app opens the setup flow; Remote connector shows the steps.
+
+The old settings ids still open: `system:mcp` opens Agent apps,
+`system:setup` opens the setup flow, and `system:remote-mcp` opens Remote
+sign-ins (`legacySettingsPaneRedirects` in
+`apps/desktop/renderer/src/components/desktop/settings/navigation.ts`). The
+Trackers part keeps the id `account:connectors`.
+
+When the server has no `LETAGENTS_CONNECTOR_SECRET_KEY`, the connector routes
+answer 503 with the code `connectors_not_configured`. The page then shows
+"Connectors are not enabled on this server. Ask your server admin to set
+LETAGENTS_CONNECTOR_SECRET_KEY." instead of an error, and the trackers in the
+catalog cannot be added. Agent apps and remote sign-ins do not need the key. The
+app also reads the older 503 text, so it shows the same state for a server
+released before the code existed.
 
 ## Ticket keys on cards
 
@@ -80,6 +117,14 @@ that has a ticket, search the board for the key first.
 - Linear keys look like Jira keys, so a Linear key matches only a team key
   LetAgents knows: the team keys of the room's own Linear cards, and the
   `team:<KEY>` terms of the room's Linear ticket filters.
+- GitHub Issues keys are `owner/repo#123`, stored in lower case
+  (`github:brosincode/letagents#123`). The detector reads `#123`,
+  `owner/repo#123` and `Fixes #123` only in a room whose GitHub Issues filter
+  names that repository; with no such filter, GitHub keys match nothing. A bare
+  `#123` names the pull request's own repository when the filter names it, else
+  the only repository the filter names, else nothing. A number inside a word, a
+  path, a URL or an HTML entity (`&#123;`) is not a key. A number that is a pull
+  request, not an issue, imports nothing.
 
 ## Rooms without ticket keys
 
@@ -104,7 +149,10 @@ runs no sync and looks as before.
 3. Type the filter:
    - Jira: JQL without `ORDER BY`, for example `project = HT AND statusCategory != Done`.
    - Linear: `team:<KEY>` and `project:<id>` terms, for example `team:ENG`.
-   - Empty: every ticket the connection can read.
+   - GitHub Issues: up to 10 repositories as `owner/repo`, separated by spaces,
+     for example `BrosInCode/letagents`. Each one must be in the connection's
+     GitHub App installation, and you must be able to read it on GitHub.
+   - Empty (Jira and Linear only): every ticket the connection can read.
 4. Choose **Test**. The app shows how many tickets match (up to 200).
 5. Choose **Save**. The first sync starts within one poll interval.
 
@@ -160,7 +208,7 @@ once, and an older copy (a slow poll) never undoes a newer one.
 
 Webhooks make ticket changes show at once instead of at the next poll.
 
-1. Open **Settings → Ticket trackers** and choose **Webhook** on the connection.
+1. Open **Settings → Connectors → Trackers** and choose **Webhook** on the connection.
 2. Copy the URL and the secret.
 3. In Jira (**System → WebHooks**), add a webhook with that URL and secret for
    issue created, updated and deleted events. In Linear
@@ -410,14 +458,15 @@ cd apps/desktop && HOME=<scratch folder> node --import tsx --test renderer/__tes
 
 ## Connections and providers
 
-An account connects Jira or Linear once, in the desktop app under
-**Settings → Ticket trackers**. The server can then read that person's tickets
-and, through the workflow effect journal, move tickets and add comments.
+An account connects Jira, Linear or GitHub Issues once, in the desktop app under
+**Settings → Connectors → Trackers**. The server can then read that person's
+tickets and, through the workflow effect journal, move Jira and Linear tickets
+and add comments.
 
 ### Connect a tracker
 
-1. Open **Settings → Ticket trackers**.
-2. Choose **Add Jira** or **Add Linear**.
+1. Open **Settings → Connectors → Trackers**.
+2. Choose **Add Jira** or **Add Linear** (for GitHub Issues, see below).
 3. Choose **Sign in with Jira** (or Linear) to approve access in the browser.
    The app waits; when you approve, the browser returns to the app on this
    computer and the app finishes the connection. Or enter an API token:
@@ -552,15 +601,83 @@ All routes except the OAuth callback need the desktop app's session bearer.
 | `POST /account/connectors/oauth/:provider/start` | Start OAuth (`loopback_port`); returns the URL to open. |
 | `GET /account/connectors/oauth/:provider/callback` | The tracker's redirect target; forwards to `http://127.0.0.1:<loopback_port>/tracker-oauth/callback`. |
 | `POST /account/connectors/oauth/:provider/complete` | Finish OAuth (`state`, `code`) as the account that started it. |
-| `POST /account/connectors/api-token` | Connect with an API token (`provider`, `api_token`; Jira also `site_url`, `email`). |
+| `POST /account/connectors/api-token` | Connect with an API token (`provider`, `api_token`; Jira also `site_url`, `email`). Refuses `github`. |
+| `POST /account/connectors/github-app` | Connect GitHub Issues: the GitHub App installation that holds `repository` (`owner/repo`). |
 | `POST /account/connectors/:id/test` | List up to five tickets assigned to you and record unmapped statuses. |
 | `PATCH /account/connectors/:id` | Change `display_name`, `status_map` or `jev_linking_enabled`. |
 | `DELETE /account/connectors/:id` | Remove the connection. |
 
+Without a connector key every route answers 503 with
+`{ "error": "Connectors are not enabled on this server. Ask your server admin to set LETAGENTS_CONNECTOR_SECRET_KEY.", "code": "connectors_not_configured" }`.
+OAuth routes know only Jira and Linear; `GET /account/connectors/:id/webhook`
+answers 409 for a GitHub Issues connection.
+
+### GitHub Issues
+
+GitHub Issues uses the LetAgents GitHub App that the server already runs for Git
+Rooms. There is no token to paste and no new credential is stored.
+
+**Connect.** Choose **Add GitHub Issues**, type one repository (`owner/repo`)
+where the App is installed, and choose **Connect**. The server:
+
+1. finds the App installation that holds that repository (the server's own
+   record, kept current by the App's `installation` webhooks);
+2. checks with GitHub that your GitHub login can read that repository;
+3. stores a connection whose site is the installation (`installation:<id>`)
+   and whose sealed "credentials" are only `{ kind: "github_app",
+   installation_id, login }`, with `auth_kind` `github_app`.
+
+One connection covers the installation. Each room filter then names the
+repositories to import.
+
+**Every read checks two things**, before any issue is read:
+
+1. The repository is in the connection's installation. A repository of another
+   installation, or one the App does not hold, is refused without a request to
+   GitHub.
+2. The connection's GitHub login can read the repository
+   (`GET /repos/{owner}/{repo}/collaborators/{login}/permission` is not `none`).
+   The answer is kept for 5 minutes (a refusal for 1 minute).
+
+The token for each read is minted for the installation with
+`repositories: [<that repository>]` and `permissions: { issues: read,
+metadata: read }`, so GitHub itself limits it to one repository and to reading.
+Test connection searches open issues assigned to you with an installation token
+limited to reading, and lists only issues in repositories you can read.
+
+**States.** GitHub has open and closed issues. The raw status adds whether an
+open issue has an assignee, so the status map can tell the two apart. Labels
+are never states.
+
+| Raw status | Default state |
+|---|---|
+| `Open` | To do |
+| `Open (assigned)` | In progress |
+| `Closed` | Done |
+
+**Sync.** The first poll of a filter imports open issues; later polls read every
+issue updated since the last poll, closed issues included. Pull requests are
+not issues and are skipped.
+
+**Webhooks.** The App already receives `issues` events at `/webhooks/github`.
+Each event goes to the same path as a Jira or Linear webhook
+(`TrackerSync.handleWebhook`) for every active GitHub Issues connection on that
+installation: the event only names the issue, and sync reads it again through
+the checks above. There is no per-connection webhook to set up.
+
+**Not yet.** Rules do not write to GitHub Issues: the rule routes refuse a rule
+on a GitHub Issues connection, and the provider's transition and comment calls
+refuse. The workflow effect journal still accepts Jira and Linear only.
+
+**Server setup.** The GitHub App needs the **Issues: read** repository
+permission (and **Metadata: read**, which every App has). Without Issues read,
+connecting answers that the App cannot read issues. A server without a GitHub
+App does not offer GitHub Issues (`providers.github.github_app` is false).
+
 ### Tests
 
 ```bash
-node --import tsx --test src/api/__tests__/connector-crypto.test.ts src/api/__tests__/connector-providers.test.ts src/api/__tests__/connector-routes.test.ts src/api/__tests__/tracker-effect-broker.test.ts
+node --import tsx --test src/api/__tests__/connector-crypto.test.ts src/api/__tests__/connector-providers.test.ts src/api/__tests__/github-issues-provider.test.ts src/api/__tests__/connector-routes.test.ts src/api/__tests__/tracker-effect-broker.test.ts
 TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts
 ```
 
@@ -576,7 +693,7 @@ workflow effect journal.
 
 ### Write a rule
 
-Open Settings, Ticket trackers, then the connection's **Rules** section, and press **Add rule**.
+Open Settings, Connectors, Trackers, then the connection's **Rules** section, and press **Add rule**.
 
 1. Give the rule a name.
 2. Choose the rooms: every room that imports with this connection, or one of them.
@@ -790,7 +907,7 @@ with an expired or revoked one, gets `401` with
 | `POST /oauth/authorize/decision` | The consent page's buttons. The form carries a one-time consent token bound to the account; a cross-site `Origin` or `Sec-Fetch-Site` gets `403`. Approve redirects with `code`, `state` and `iss`; cancel with `error=access_denied`. |
 | `POST /oauth/token` | `authorization_code` (code once, 5 minutes, verifier, same redirect URI and client) and `refresh_token`. Access tokens last 1 hour, refresh tokens 30 days. Each refresh rotates the refresh token; a spent refresh token used again revokes the grant. Every registered client may refresh, whatever `grant_types` it asked for: registration answers with `authorization_code` and `refresh_token` (RFC 7591 section 3.2.1), because access tokens last only 1 hour. A code used again revokes the tokens it issued. |
 | `POST /oauth/revoke` | RFC 7009. Either token of a grant revokes the whole grant and deletes its remote MCP sessions. |
-| `GET` / `DELETE /account/mcp-connections` | Account settings (desktop app: Settings → Connections → Remote connector). Session sign-in only, not owner tokens. |
+| `GET` / `DELETE /account/mcp-connections` | Account settings (desktop app: Settings → Connectors → Remote sign-ins). Session sign-in only, not owner tokens. |
 
 What an approval gives: the same powers as an owner token, on `/mcp` only. An OAuth access token on any other API
 path gets the invalid-bearer `401`; inside a remote MCP session, the tool calls act as the account's owner token, and

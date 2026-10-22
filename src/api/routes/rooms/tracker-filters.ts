@@ -1,7 +1,10 @@
 import type { Express, Response } from "express";
 
 import {
+  CONNECTORS_NOT_CONFIGURED_CODE,
+  CONNECTORS_NOT_CONFIGURED_MESSAGE,
   ROOM_TRACKER_FILTER_MAX_LENGTH,
+  trackerProviderLabel,
   type RoomTrackerFilterList,
   type RoomTrackerFilterTestResult,
   type TrackerProvider,
@@ -9,6 +12,7 @@ import {
 import { type ConnectionService, connectorErrorText, createConnectionService } from "../../connectors/connections.js";
 import { ConnectorDecryptError, loadConnectorCipher } from "../../connectors/crypto.js";
 import { createWorkItemProviders, type WorkItemProviders } from "../../connectors/providers/index.js";
+import { parseGitHubFilter } from "../../connectors/providers/github.js";
 import { jiraFilterClause } from "../../connectors/providers/jira.js";
 import { parseLinearFilter } from "../../connectors/providers/linear.js";
 import { TrackerProviderError } from "../../connectors/providers/types.js";
@@ -44,7 +48,8 @@ export interface RoomTrackerFilterRouteDeps
 /** Throws a "definite" TrackerProviderError when the filter is not valid for the tracker. */
 function validateFilter(provider: TrackerProvider, filter: string): void {
   if (provider === "jira") jiraFilterClause(filter);
-  else parseLinearFilter(filter);
+  else if (provider === "linear") parseLinearFilter(filter);
+  else parseGitHubFilter(filter);
 }
 
 /**
@@ -106,6 +111,27 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
     return filter;
   }
 
+  /**
+   * GitHub Issues reads with the App's installation token, so a filter may
+   * name only repositories in the connection's installation that the
+   * connection's GitHub login can read. Sync checks again on every read.
+   */
+  async function readableRepos(res: Response, connection: TrackerConnectionRow, filter: string): Promise<boolean> {
+    if (connection.provider !== "github") return true;
+    if (!connectors.service) {
+      res.status(503).json({ error: CONNECTORS_NOT_CONFIGURED_MESSAGE, code: CONNECTORS_NOT_CONFIGURED_CODE });
+      return false;
+    }
+    try {
+      const open = connectors.service.open(connection);
+      for (const repo of parseGitHubFilter(filter)) await connectors.providers.github.assertReadable(open, repo);
+      return true;
+    } catch (error) {
+      res.status(400).json({ error: error instanceof TrackerProviderError ? error.message : "The repositories could not be checked." });
+      return false;
+    }
+  }
+
   async function list(req: AuthenticatedRequest, project: Project): Promise<RoomTrackerFilterList> {
     const accountId = req.authKind === "session" ? req.sessionAccount?.account_id ?? null : null;
     const role = accountId ? await deps.resolveProjectRole(project, req.sessionAccount) : null;
@@ -133,6 +159,7 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
     if (!connection) return;
     const filter = readFilter(res, connection.provider as TrackerProvider, body.filter);
     if (filter === null) return;
+    if (!await readableRepos(res, connection, filter)) return;
     if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
       res.status(400).json({ error: "enabled must be a boolean." });
       return;
@@ -143,7 +170,7 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
       .find((row) => row.provider === connection.provider && row.connection_id !== connection.id);
     if (other) {
       res.status(409).json({
-        error: `This room already imports ${other.provider === "jira" ? "Jira" : "Linear"} tickets through ${other.connection_label}. Remove that filter first.`,
+        error: `This room already imports ${trackerProviderLabel(other.provider)} tickets through ${other.connection_label}. Remove that filter first.`,
         code: "tracker_filter_provider_taken",
       });
       return;
@@ -182,6 +209,10 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
     }
     const filter = body.filter === undefined ? existing.filter : readFilter(res, existing.provider, body.filter);
     if (filter === null) return;
+    if (body.filter !== undefined && existing.provider === "github") {
+      const connection = await ownedConnection(res, accountId, existing.connection_id);
+      if (!connection || !await readableRepos(res, connection, filter)) return;
+    }
     await upsertRoomTrackerFilter({
       room_id: project.id,
       connection_id: existing.connection_id,
@@ -213,7 +244,7 @@ export function registerRoomTrackerFilterRoutes(app: Express, deps: RoomTrackerF
     const accountId = await manager(req, res, project);
     if (!accountId) return;
     if (!connectors.service) {
-      res.status(503).json({ error: "Ticket connectors are not configured on this server." });
+      res.status(503).json({ error: CONNECTORS_NOT_CONFIGURED_MESSAGE, code: CONNECTORS_NOT_CONFIGURED_CODE });
       return;
     }
     const body = (req.body ?? {}) as Record<string, unknown>;

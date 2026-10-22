@@ -5,11 +5,15 @@
  *
  * Linear keys look like Jira keys, so Linear matches only prefixes the caller
  * names as known team keys. With no team keys, Linear matches nothing.
+ *
+ * GitHub Issues keys are `owner/repo#123` (lower case). `#123` and
+ * `owner/repo#123` match only for repositories the caller names (the room's
+ * GitHub Issues filter); with none, GitHub matches nothing.
  */
 
-export type TicketProvider = "jira" | "linear";
+export type TicketProvider = "jira" | "linear" | "github";
 
-export const TICKET_PROVIDERS: readonly TicketProvider[] = ["jira", "linear"];
+export const TICKET_PROVIDERS: readonly TicketProvider[] = ["jira", "linear", "github"];
 
 export interface TicketKeyMatch {
   provider: TicketProvider;
@@ -21,12 +25,21 @@ export interface TicketKeyMatch {
 export interface KeyDetectorOptions {
   /** Linear team keys known for this room or connection, e.g. `["ENG"]`. */
   linearTeamKeys?: readonly string[];
+  /** Repositories (`owner/repo`) the room's GitHub Issues filter names. */
+  githubRepos?: readonly string[];
+  /**
+   * The repository a bare `#123` names, e.g. the pull request's own. Used only
+   * when `githubRepos` holds it; without one, a bare number names the only
+   * repository in `githubRepos`, and nothing when there are several.
+   */
+  githubDefaultRepo?: string | null;
 }
 
 // Bound the work for one input: a pasted log can be very long.
 const MAX_SCANNED_CHARS = 64 * 1024;
 const MAX_KEYS_PER_INPUT = 50;
-export const EXTERNAL_REF_MAX_LENGTH = 64;
+/** `github:` + a 39-character owner + `/` + a 100-character repository + `#` + 9 digits fits. */
+export const EXTERNAL_REF_MAX_LENGTH = 160;
 
 // A key is not part of a longer word: `xHT-12` and `HT-12b` are not keys,
 // `feature/HT-12-x` and `x-HT-12-y` are.
@@ -34,6 +47,10 @@ const JIRA_KEY_PATTERN = /(?<![A-Za-z0-9])([A-Z][A-Z0-9]+)-(\d+)(?![A-Za-z0-9])/
 const LINEAR_KEY_PATTERN = /(?<![A-Za-z0-9])([A-Z][A-Z0-9]*)-(\d+)(?![A-Za-z0-9])/g;
 const JIRA_KEY_EXACT = /^[A-Z][A-Z0-9]+-\d+$/;
 const LINEAR_KEY_EXACT = /^[A-Z][A-Z0-9]*-\d+$/;
+// `#123` or `owner/repo#123`, not inside a word, a path or an HTML entity (`&#123;`).
+const GITHUB_KEY_PATTERN = /(?<![A-Za-z0-9_.&/#-])(?:([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}))?#(\d{1,9})(?![A-Za-z0-9_])/g;
+const GITHUB_REPO_EXACT = /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9._-]{1,100}$/;
+const GITHUB_KEY_EXACT = /^([a-z0-9][a-z0-9-]{0,38}\/[a-z0-9._-]{1,100})#([1-9]\d{0,8})$/;
 
 // Common technical names that have the shape of a Jira key.
 const NOT_TICKET_PREFIXES = new Set([
@@ -73,12 +90,51 @@ export function createLinearKeyDetector(teamKeys: readonly string[]): (text: str
   return (text) => scan(text, LINEAR_KEY_PATTERN, (prefix) => known.has(prefix));
 }
 
+/** `owner/repo` in lower case, or null when it is not a repository name. */
+export function normalizeGitHubRepo(value: string): string | null {
+  const repo = value.trim().toLowerCase();
+  return GITHUB_REPO_EXACT.test(repo) && !repo.endsWith(".git") ? repo : null;
+}
+
+/**
+ * The GitHub hook: issue keys (`owner/repo#123`) for the named repositories
+ * only. A bare `#123` names the default repository when it is one of them, or
+ * the only one.
+ */
+export function createGitHubKeyDetector(
+  repos: readonly string[],
+  defaultRepo?: string | null,
+): (text: string) => string[] {
+  const known = new Set(repos.map(normalizeGitHubRepo).filter((repo): repo is string => Boolean(repo)));
+  if (known.size === 0) return () => [];
+  const preferred = defaultRepo ? normalizeGitHubRepo(defaultRepo) : null;
+  const bareRepo = preferred && known.has(preferred) ? preferred : known.size === 1 ? [...known][0]! : null;
+  return (text) => {
+    if (!text) return [];
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    const input = text.length > MAX_SCANNED_CHARS ? text.slice(0, MAX_SCANNED_CHARS) : text;
+    for (const match of input.matchAll(GITHUB_KEY_PATTERN)) {
+      const repo = match[1] ? normalizeGitHubRepo(match[1]) : bareRepo;
+      const number = Number(match[2]);
+      if (!repo || !known.has(repo) || !Number.isSafeInteger(number) || number < 1) continue;
+      const key = `${repo}#${number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+      if (keys.length >= MAX_KEYS_PER_INPUT) break;
+    }
+    return keys;
+  };
+}
+
 export function detectTicketKeys(
   provider: TicketProvider,
   text: string,
   options?: KeyDetectorOptions,
 ): string[] {
   if (provider === "linear") return createLinearKeyDetector(options?.linearTeamKeys ?? [])(text);
+  if (provider === "github") return createGitHubKeyDetector(options?.githubRepos ?? [], options?.githubDefaultRepo)(text);
   return scan(text, JIRA_KEY_PATTERN, (prefix) => !NOT_TICKET_PREFIXES.has(prefix));
 }
 
@@ -107,7 +163,7 @@ export function detectKeysInBranch(branch: string | null | undefined, options?: 
   return detectAll([branch?.replace(/^refs\/heads\//, "")], options);
 }
 
-// `Fixes HT-12`, `closes: HT-12`, `Resolves HT-12`: the keyword is case-insensitive,
+// `Fixes HT-12`, `closes: HT-12`, `Resolves #12`: the keyword is case-insensitive,
 // the key that follows it keeps the key rules (upper case). One per line.
 const CLOSING_KEYWORD_LINE = /(?:^|[\s(\[])(?:fixes|closes|resolves):?[ \t]+(\S+)/i;
 
@@ -147,17 +203,30 @@ export function detectKeysInMessage(text: string | null | undefined, options?: K
 
 /**
  * Normalizes a typed external ref. Accepts `jira:HT-1234`, `linear:ENG-12`,
- * or a bare `HT-1234` (read as Jira). Returns null for an invalid value.
+ * `github:owner/repo#12`, or a bare `HT-1234` (read as Jira). Returns null for
+ * an invalid value.
  */
 export function normalizeExternalRef(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed || trimmed.length > EXTERNAL_REF_MAX_LENGTH) return null;
   const separator = trimmed.indexOf(":");
   const provider = (separator === -1 ? "jira" : trimmed.slice(0, separator).trim().toLowerCase()) as TicketProvider;
-  const key = (separator === -1 ? trimmed : trimmed.slice(separator + 1)).trim().toUpperCase();
+  const rest = (separator === -1 ? trimmed : trimmed.slice(separator + 1)).trim();
+  if (provider === "github") {
+    const key = rest.toLowerCase();
+    return GITHUB_KEY_EXACT.test(key) && !key.split("#")[0]!.endsWith(".git") ? formatExternalRef(provider, key) : null;
+  }
+  const key = rest.toUpperCase();
   if (provider === "jira" && JIRA_KEY_EXACT.test(key)) return formatExternalRef(provider, key);
   if (provider === "linear" && LINEAR_KEY_EXACT.test(key)) return formatExternalRef(provider, key);
   return null;
+}
+
+/** `{ repo, number }` of a GitHub Issues key (`owner/repo#12`), or null. */
+export function parseGitHubIssueKey(key: string): { repo: string; number: number } | null {
+  const match = GITHUB_KEY_EXACT.exec(key.trim().toLowerCase());
+  if (!match || match[1]!.endsWith(".git")) return null;
+  return { repo: match[1]!, number: Number(match[2]) };
 }
 
 export function parseExternalRef(ref: string): TicketKeyMatch | null {

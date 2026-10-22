@@ -5,7 +5,8 @@ export interface TicketRefParts {
   key: string;
 }
 
-const PROVIDER_LABELS: Record<string, string> = { jira: "Jira", linear: "Linear" };
+const PROVIDER_LABELS: Record<string, string> = { jira: "Jira", linear: "Linear", github: "GitHub Issues" };
+const GITHUB_REF = /^github:\s*([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}#[1-9]\d{0,8})$/i;
 
 export function ticketRefParts(externalRef: string | null | undefined): TicketRefParts | null {
   if (!externalRef) return null;
@@ -29,13 +30,16 @@ export interface TaskEditPatch {
 }
 
 /**
- * Reads a typed ticket key: `HT-1234` (Jira), `jira:HT-1234` or
- * `linear:ENG-12`. Null for an empty value, undefined for one that is not a
- * key. The server checks the key again; this only catches typos early.
+ * Reads a typed ticket key: `HT-1234` (Jira), `jira:HT-1234`,
+ * `linear:ENG-12` or `github:owner/repo#12`. Null for an empty value,
+ * undefined for one that is not a key. The server checks the key again; this
+ * only catches typos early.
  */
 export function normalizedExternalRef(value: string): string | null | undefined {
   const trimmed = value.trim();
   if (!trimmed) return null;
+  const github = GITHUB_REF.exec(trimmed);
+  if (github) return `github:${github[1]!.toLowerCase()}`;
   const match = /^(?:(jira|linear):)?\s*([A-Za-z][A-Za-z0-9]*-\d+)$/i.exec(trimmed);
   if (!match) return undefined;
   const provider = (match[1] || "jira").toLowerCase();
@@ -53,14 +57,14 @@ export function taskForTicketQuery<T extends { externalRef?: string | null }>(ta
   const ref = normalizedExternalRef(query);
   if (!ref) return null;
   const exact = tasks.find((task) => task.externalRef === ref);
-  if (exact || /^\s*(?:jira|linear):/i.test(query)) return exact ?? null;
+  if (exact || /^\s*(?:jira|linear|github):/i.test(query)) return exact ?? null;
   const key = ref.slice(ref.indexOf(":") + 1);
   return tasks.find((task) => ticketRefParts(task.externalRef)?.key === key) ?? null;
 }
 
-/** Cards that sync imported carry `created_by` `tracker:jira` or `tracker:linear`. */
+/** Cards that sync imported carry `created_by` `tracker:jira`, `tracker:linear` or `tracker:github`. */
 export function isImportedTask(task: { createdBy?: string | null }): boolean {
-  return task.createdBy === "tracker:jira" || task.createdBy === "tracker:linear";
+  return task.createdBy === "tracker:jira" || task.createdBy === "tracker:linear" || task.createdBy === "tracker:github";
 }
 
 const TICKET_STATE_LABELS: Record<string, string> = {

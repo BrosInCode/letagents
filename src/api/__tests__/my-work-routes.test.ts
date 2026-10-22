@@ -58,7 +58,7 @@ test("query parameters reach the reader as the account's own query", async () =>
     assert.deepEqual(seen[0], {
       accountId: "acct-1", login: "Emmy", cursor: "abc", limit: 20, tracker: "jira", roomId: "room-1", needsMe: true, includeCompleted: false,
     });
-    assert.equal((await server.get("/account/my-work?tracker=github")).status, 400);
+    assert.equal((await server.get("/account/my-work?tracker=asana")).status, 400);
     assert.equal((await server.get("/account/my-work?limit=many")).status, 400);
   } finally {
     await server.close();

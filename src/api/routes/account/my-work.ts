@@ -30,7 +30,7 @@ function queryString(value: unknown): string | null {
  * `GET /account/my-work`: the cards across the account's rooms that are its
  * work (ticket connectors PR4). Same auth as the account activity stream: the
  * desktop session or an owner token. Query: `cursor`, `limit` (1–100),
- * `tracker` (`jira`, `linear` or `native`), `room`, `needs_me=true`,
+ * `tracker` (`jira`, `linear`, `github` or `native`), `room`, `needs_me=true`,
  * `include_completed=true` (opt-in finished work).
  */
 export function registerMyWorkRoute(app: Express, deps: MyWorkRouteDeps = defaultDeps): void {
@@ -81,7 +81,7 @@ export function registerMyWorkRoute(app: Express, deps: MyWorkRouteDeps = defaul
     }
     const tracker = queryString(req.query.tracker);
     if (tracker && tracker !== "native" && !isTrackerProvider(tracker)) {
-      res.status(400).json({ error: "tracker must be jira, linear or native." });
+      res.status(400).json({ error: "tracker must be jira, linear, github or native." });
       return;
     }
     const limitText = queryString(req.query.limit);

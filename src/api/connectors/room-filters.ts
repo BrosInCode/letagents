@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import { and, asc, eq, sql } from "drizzle-orm";
 
-import type { RoomTrackerFilterView, TrackerProvider } from "../../../shared/ticket-connectors.mjs";
+import { trackerProviderLabel, type RoomTrackerFilterView, type TrackerProvider } from "../../../shared/ticket-connectors.mjs";
 import { db } from "../db/client.js";
 import { room_tracker_filters, tracker_connections } from "../db/schema.js";
+import { normalizeGitHubRepo } from "./key-detectors.js";
 
 export type RoomTrackerFilterRow = typeof room_tracker_filters.$inferSelect;
 
@@ -18,7 +19,7 @@ export interface RoomTrackerFilterWithConnection extends RoomTrackerFilterRow {
 export class RoomTrackerFilterProviderTakenError extends Error {
   readonly code = "tracker_filter_provider_taken";
   constructor(provider: TrackerProvider) {
-    super(`This room already imports ${provider === "jira" ? "Jira" : "Linear"} tickets through another connection. Remove that filter first.`);
+    super(`This room already imports ${trackerProviderLabel(provider)} tickets through another connection. Remove that filter first.`);
     this.name = "RoomTrackerFilterProviderTakenError";
   }
 }
@@ -277,9 +278,16 @@ export interface RoomTrackerScope {
   sources: RoomTrackerSource[];
   /** Linear team keys the room's filters name (`team:ENG`). */
   linearTeamKeys: string[];
+  /** Repositories the room's GitHub Issues filters name (`owner/repo`, lower case). */
+  githubRepos: string[];
 }
 
-const NO_TRACKER: RoomTrackerScope = { sources: [], linearTeamKeys: [] };
+const NO_TRACKER: RoomTrackerScope = { sources: [], linearTeamKeys: [], githubRepos: [] };
+
+/** The `owner/repo` terms of a GitHub Issues filter, lower case; invalid terms are skipped. */
+export function githubReposInFilter(filter: string): string[] {
+  return [...new Set(filter.split(/[\s,]+/).map(normalizeGitHubRepo).filter((repo): repo is string => Boolean(repo)))];
+}
 
 /** Linear `team:<KEY>` terms in a filter. */
 export function linearTeamKeysInFilter(filter: string): string[] {
@@ -307,6 +315,8 @@ export async function getRoomTrackerScope(roomId: string): Promise<RoomTrackerSc
     sources,
     linearTeamKeys: [...new Set(sources.filter((source) => source.provider === "linear")
       .flatMap((source) => linearTeamKeysInFilter(source.filter)))],
+    githubRepos: [...new Set(sources.filter((source) => source.provider === "github")
+      .flatMap((source) => githubReposInFilter(source.filter)))],
   };
 }
 

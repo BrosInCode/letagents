@@ -85,7 +85,7 @@ export function registerTaskMutationTools(server: McpServer): void {
       external_ref: externalRefSchema
         .nullable()
         .optional()
-        .describe("Ticket the card names, e.g. 'jira:HT-1234' or 'linear:ENG-12'. A bare key means Jira. Null clears it."),
+        .describe("Ticket the card names, e.g. 'jira:HT-1234', 'linear:ENG-12' or 'github:owner/repo#12'. A bare key means Jira. Null clears it."),
       ...workerTaskIdentitySchema,
       ...boardIntentApprovalSchema,
     },

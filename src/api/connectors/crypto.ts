@@ -17,7 +17,7 @@ const TAG_BYTES = 16;
 
 export class ConnectorKeyMissingError extends Error {
   readonly code = "connector_key_missing";
-  constructor(message = `${CONNECTOR_SECRET_KEY_ENV} is not set; ticket connectors are disabled on this server.`) {
+  constructor(message = `${CONNECTOR_SECRET_KEY_ENV} is not set; connectors are disabled on this server.`) {
     super(message);
     this.name = "ConnectorKeyMissingError";
   }
@@ -61,7 +61,7 @@ function parseKey(raw: string): Buffer {
     if (decoded.length === 32) return decoded;
   }
   throw new ConnectorKeyMissingError(
-    `${CONNECTOR_SECRET_KEY_ENV} must be 32 random bytes, as 64 hex characters or base64; ticket connectors are disabled on this server.`,
+    `${CONNECTOR_SECRET_KEY_ENV} must be 32 random bytes, as 64 hex characters or base64; connectors are disabled on this server.`,
   );
 }
 

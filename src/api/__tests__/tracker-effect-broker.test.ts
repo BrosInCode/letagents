@@ -393,7 +393,7 @@ test("without a tracker executor, tracker effects fail without a write", async (
   const broker = createWorkflowEffectBroker({ store: journal.store, provider: unusedGitHub });
   const effect = await broker.submitTrackerEffect(transition());
   assert.equal(effect.state, "failed");
-  assert.match(effect.last_error ?? "", /not configured/);
+  assert.match(effect.last_error ?? "", /not enabled/);
 });
 
 test("an ambiguous transition not found after three lookups is retried, and the retry reads the status first", async () => {

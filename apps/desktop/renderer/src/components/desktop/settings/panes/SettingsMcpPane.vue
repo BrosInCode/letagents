@@ -1,5 +1,9 @@
 <template>
   <section class="settings-panel" data-testid="settings-mcp-panel">
+    <div class="settings-mcp-head">
+      <p class="settings-control-description">Agent apps on this computer that run LetAgents as a local MCP server.</p>
+      <button class="ghost-button" type="button" data-testid="settings-mcp-connect" @click="$emit('connect')">Connect an agent app</button>
+    </div>
     <div class="surface-list settings-system-list">
       <article
         v-for="target in mcpInstallState.targets"
@@ -37,4 +41,24 @@ import { configPathStatusLabel } from "../presentation";
 defineProps<{
   mcpInstallState: DesktopMcpInstallState;
 }>();
+
+defineEmits<{
+  /** Open the setup flow for another agent app. */
+  connect: [];
+}>();
 </script>
+
+<style scoped>
+.settings-mcp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.settings-mcp-head p {
+  margin: 0;
+}
+</style>

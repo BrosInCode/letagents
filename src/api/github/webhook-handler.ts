@@ -569,6 +569,18 @@ export async function handleGitHubWebhookEvent(
     }
 
     case "issues":
+      // GitHub Issues connections on this installation read the issue again.
+      // Fire and forget: the room projection below does not wait for trackers.
+      void import("../connectors/github-issues-events.js")
+        .then(({ applyGitHubIssuesEvent }) => applyGitHubIssuesEvent(payload, installationId))
+        .catch((error: unknown) => {
+          console.error("GitHub Issues connector update failed:", error instanceof Error ? error.message : String(error));
+        });
+      return handleMaterializedRepoRoomWebhook(eventName, payload, deliveryId, {
+        installationId,
+        githubRepoId,
+        roomId,
+      }, options);
     case "issue_comment":
     case "pull_request_review":
     case "check_run":

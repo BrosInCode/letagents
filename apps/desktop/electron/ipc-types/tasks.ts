@@ -63,7 +63,7 @@ export interface DesktopTaskSummary {
 /** The tracker record behind a card (ticket connectors). */
 export interface DesktopTaskTicket {
   externalRef: string;
-  provider: "jira" | "linear";
+  provider: import("../../../../shared/ticket-connectors.mjs").TrackerProvider;
   key: string;
   title: string;
   ticketState: string;
@@ -79,7 +79,7 @@ export interface DesktopMyWorkQuery {
   cursor?: string | null;
   limit?: number;
   /** `native` lists cards that name no ticket. */
-  tracker?: "jira" | "linear" | "native" | null;
+  tracker?: import("../../../../shared/ticket-connectors.mjs").TrackerProvider | "native" | null;
   /** The server's room id. */
   roomId?: string | null;
   needsMe?: boolean;

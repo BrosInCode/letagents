@@ -37,6 +37,7 @@ import {
   type RoomTrackerFilterRow,
   type RoomTrackerSource,
 } from "./room-filters.js";
+import { githubFilterAllows } from "./providers/github.js";
 import { jiraFilterClause } from "./providers/jira.js";
 import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnectionStore } from "./store.js";
 import { recordTrackerTicketEvent } from "./tracker-events.js";
@@ -359,7 +360,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const startedAt = now().toISOString();
     const connection = await deps.store.get(filter.connection_id);
     if (!connection || connection.status !== "active") {
-      const error = connection ? "The tracker connection needs attention in Settings → Ticket trackers." : "The tracker connection was removed.";
+      const error = connection ? "The tracker connection needs attention in Settings → Connectors." : "The tracker connection was removed.";
       await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error, failed: { intervalMs } });
       return { seen: 0, changed: 0, error };
     }
@@ -460,7 +461,8 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
 
   /**
    * The ticket, only if it matches the source's filter. Jira asks the tracker
-   * with the filter's JQL; Linear compares the ticket's team and project.
+   * with the filter's JQL; Linear compares the ticket's team and project;
+   * GitHub Issues compares the issue's repository.
    */
   async function fetchMatchingItem(source: RoomTrackerSource, connection: TrackerConnectionRow, key: string): Promise<ExternalItem | null> {
     const open = deps.connections.open(connection);
@@ -469,6 +471,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const item = await deps.providers[source.provider].getItem(open, key);
     if (!item) return null;
     if (source.provider === "linear") return linearFilterAllows(source.filter, item) ? item : null;
+    if (source.provider === "github") return githubFilterAllows(source.filter, item) ? item : null;
     const base = jiraFilterClause(source.filter.trim() || null);
     if (!base) return item;
     try {

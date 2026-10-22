@@ -27,6 +27,8 @@ export interface RepoEventTicketKeyInputs {
   branchRef?: string | null;
   title?: string | null;
   body?: string | null;
+  /** The pull request's URL: its repository is what a bare `#123` names. */
+  pullRequestUrl?: string | null;
 }
 
 export interface RepoRoomEventTaskResolverDeps {
@@ -263,6 +265,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
         branchRef: event.pullRequest.headRef,
         title: event.pullRequest.title,
         body: event.pullRequest.body,
+        pullRequestUrl: event.pullRequest.url,
       }, referencedTaskId);
       if (keyTask) {
         return keyTask;
@@ -309,6 +312,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
         branchRef: event.pullRequest.headRef,
         title: event.pullRequest.title,
         body: event.pullRequest.body,
+        pullRequestUrl: event.pullRequest.url,
       }, referencedTaskId);
       if (keyTask) {
         return keyTask;

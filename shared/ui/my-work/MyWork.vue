@@ -16,7 +16,7 @@
           class="work-secondary"
           @click="emit('open-trackers')"
         >
-          <WorkIcon name="link" />Ticket trackers
+          <WorkIcon name="link" />Connectors
         </button>
       </header>
       <div

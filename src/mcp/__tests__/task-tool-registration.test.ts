@@ -167,7 +167,8 @@ test("add_task, update_task and get_board accept the ticket fields", () => {
   assert.equal(schema("add_task", "external_ref").safeParse("jira:HT-1234").success, true);
   assert.equal(schema("add_task", "external_ref").safeParse(undefined).success, true);
   assert.equal(schema("update_task", "external_ref").safeParse(null).success, true);
-  assert.equal(schema("update_task", "external_ref").safeParse("x".repeat(65)).success, false);
+  assert.equal(schema("update_task", "external_ref").safeParse(`github:${"a".repeat(39)}/${"b".repeat(100)}#123456789`).success, true);
+  assert.equal(schema("update_task", "external_ref").safeParse("x".repeat(161)).success, false);
   assert.equal(schema("get_board", "search").safeParse("HT-1234").success, true);
 });
 

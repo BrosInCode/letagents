@@ -1,8 +1,14 @@
 import { findTaskByExternalRefs, getCachedRoomExternalRefScope } from "../db/task-external-refs.js";
 import type { Task } from "../db/types.js";
 import type { RepoEventTicketKeyInputs } from "../github/repo-event-task-resolution.js";
-import { detectKeysInPullRequest, type TicketKeyMatch } from "./key-detectors.js";
+import { detectKeysInPullRequest, normalizeGitHubRepo, type TicketKeyMatch } from "./key-detectors.js";
 import { getCachedRoomTrackerScope } from "./room-filters.js";
+
+/** `owner/repo` of `https://github.com/owner/repo/pull/12`, or null. */
+export function repositoryOfPullRequestUrl(url: string | null | undefined): string | null {
+  const match = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/\d+/i.exec(url ?? "");
+  return match ? normalizeGitHubRepo(match[1]!) : null;
+}
 
 export interface TicketKeyResolutionOptions {
   /**
@@ -28,11 +34,12 @@ export async function findTaskByTicketKeys(
   const imports = Boolean(trackers?.sources.length);
   if (!scope.hasExternalRefs && !imports) return undefined;
   const linearTeamKeys = [...new Set([...(scope.detectorOptions.linearTeamKeys ?? []), ...(trackers?.linearTeamKeys ?? [])])];
+  const githubRepos = [...new Set([...(scope.detectorOptions.githubRepos ?? []), ...(trackers?.githubRepos ?? [])])];
   const matches = detectKeysInPullRequest({
     headRef: inputs.branchRef,
     title: inputs.title,
     body: inputs.body,
-  }, { ...scope.detectorOptions, linearTeamKeys });
+  }, { ...scope.detectorOptions, linearTeamKeys, githubRepos, githubDefaultRepo: repositoryOfPullRequestUrl(inputs.pullRequestUrl) });
   if (matches.length === 0) return undefined;
   const found = scope.hasExternalRefs ? await findTaskByExternalRefs(roomId, matches.map((match) => match.ref)) : undefined;
   if (found || !imports || !options.importTicket) return found;
