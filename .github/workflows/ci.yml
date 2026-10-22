@@ -366,22 +366,25 @@ jobs:
     permissions:
       contents: read
     env:
-      # The MCP and desktop tests write under the home directory. Node's
-      # os.homedir() reads USERPROFILE on Windows and HOME under Git Bash, so
-      # both point at a scratch folder inside the runner's temp directory.
-      HOME: ${{ runner.temp }}/home
-      USERPROFILE: ${{ runner.temp }}/home
       # Pin the API base URL to an unroutable local address so no test can
       # reach the production API. Nothing listens on port 9.
       LETAGENTS_API_URL: http://127.0.0.1:9
     steps:
-      # The Windows runner's git converts LF to CRLF on checkout. The npm
-      # package ships the committed LF bytes, so the tests run against those.
-      - name: Keep committed line endings
+      # The MCP and desktop tests write under the home directory. Node's
+      # os.homedir() reads USERPROFILE on Windows and HOME under Git Bash, so
+      # both point at a scratch folder inside the runner's temp directory,
+      # here and, through GITHUB_ENV, in every later step. (The runner context
+      # cannot be used in a job-level env block.)
+      # The runner's git converts LF to CRLF on checkout. The npm package
+      # ships the committed LF bytes, so the tests run against those.
+      - name: Use a scratch home and keep committed line endings
         shell: bash
         run: |
-          mkdir -p "${HOME}"
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          export HOME="${home}" USERPROFILE="${home}"
           git config --global core.autocrlf false
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
