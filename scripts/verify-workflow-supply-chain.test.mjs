@@ -470,8 +470,11 @@ test("the dependency gates run once, in dependency-audit, before every check job
     assert.equal(steps[0].continueOnError, null, `"${gate}" must fail dependency-audit`);
   }
   // It only checks: nothing it installed may run a lifecycle script.
-  for (const step of audit.steps) {
-    assert.doesNotMatch(step.run ?? "", /\bnpm\s+(?:rebuild|exec|run(?!\s+verify:dependency-age$))\b/, step.name);
+  for (const command of audit.steps.flatMap((step) => (step.run ?? "").split("\n"))) {
+    assert.doesNotMatch(command, /\bnpx\b|\bnpm\s+(?:rebuild|exec|x|run(?!\s+verify:dependency-age$)|run-script)\b/, command);
+    if (/\bnpm\s+(?:install|i|add|ci)\b/.test(command)) {
+      assert.match(command, /\s--ignore-scripts\b/, `dependency-audit must install without lifecycle scripts: ${command}`);
+    }
   }
 
   // The check jobs install the same lockfiles and run their lifecycle
