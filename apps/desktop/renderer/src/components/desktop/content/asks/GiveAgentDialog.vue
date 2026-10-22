@@ -1,155 +1,112 @@
 <template>
-  <DesktopDialogShell
-    :open="Boolean(token)"
-    panel-class="desktop-task-modal agent-give-dialog"
-    aria-labelledby="agent-give-title"
-    close-label="Close"
-    :close-disabled="busy"
-    test-id="agent-give-dialog"
-    @close="close"
-  >
-    <p v-if="loading" class="agent-ask-ready-copy">Opening the request…</p>
-
-    <template v-else-if="done">
-      <header class="agent-ask-header"><h3 id="agent-give-title">Added</h3></header>
-      <p class="agent-ask-ready-copy">{{ done }}</p>
-      <footer class="desktop-task-create-actions">
-        <button type="button" class="desktop-board-primary-action" @click="close">Done</button>
-      </footer>
-    </template>
-
-    <template v-else-if="unavailable || !ask">
-      <header class="agent-ask-header"><h3 id="agent-give-title">{{ unavailable?.code === "ask_used" ? "Thank you" : "Request unavailable" }}</h3></header>
-      <p class="agent-ask-ready-copy" data-testid="agent-give-unavailable">{{ unavailable?.error ?? error ?? "This link isn't valid." }}</p>
-      <footer class="desktop-task-create-actions">
-        <button type="button" class="desktop-board-primary-action" @click="close">Close</button>
-      </footer>
-    </template>
-
-    <template v-else>
-      <header class="agent-ask-header">
-        <h3 id="agent-give-title">{{ ask.asker }} asked for an agent</h3>
-        <p class="agent-give-meta">{{ ask.model_label }}<template v-if="ask.room_display_name"> · {{ ask.room_display_name }}</template></p>
-      </header>
-      <blockquote v-if="ask.note" class="agent-give-note">{{ ask.note }}</blockquote>
-
-      <fieldset class="agent-ask-field">
-        <legend>Agent</legend>
-        <div class="agent-give-models">
-          <button v-for="option in options" :key="option.key" type="button" class="agent-give-model"
-            :aria-pressed="selected === option.key" :disabled="busy || !option.canGive" @click="selected = option.key">
-            <span>{{ option.model.label }}</span>
-            <small>{{ !option.canGive ? "Can't be given yet" : option.requested ? "Requested" : `${ask.asker} must accept` }}</small>
-          </button>
-        </div>
-      </fieldset>
-
-      <fieldset class="agent-ask-field agent-ask-amount">
-        <legend>How much to give</legend>
-        <div class="agent-ask-chips">
-          <button v-for="choice in AMOUNT_CHOICES" :key="choice" type="button" :aria-pressed="amount === choice && !customOpen"
-            :disabled="busy" @click="amount = choice; customOpen = false">{{ choice }}%</button>
-          <button type="button" :aria-pressed="customOpen" :disabled="busy" @click="customOpen = true">Custom</button>
-        </div>
-        <input v-if="customOpen" v-model="customText" class="agent-ask-custom" type="text" inputmode="numeric" placeholder="15"
-          aria-label="Custom amount in percent" :disabled="busy" />
-        <small class="agent-ask-hint">Of your main usage limit.</small>
-      </fieldset>
-
-      <p class="agent-give-terms">Uses your quota. Once given, you can't take it back.</p>
-      <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
-
-      <footer class="desktop-task-create-actions">
-        <button type="button" class="desktop-task-detail-button" :disabled="busy" data-testid="agent-give-cant" @click="cantHelp">Can't right now</button>
-        <button type="button" class="desktop-board-primary-action" :disabled="busy || !current" data-testid="agent-give-add" @click="give">
-          {{ busy ? "Adding…" : current ? `Add ${current.model.label}` : "Choose an agent" }}
-        </button>
-      </footer>
-    </template>
+  <DesktopDialogShell :open="Boolean(token)" panel-class="give-agent-dialog" aria-labelledby="agent-give-title" :show-close="false" :close-disabled="Boolean(busy)" initial-focus="#agent-give-title" test-id="agent-give-dialog" @close="close">
+    <GiveAgentPanel :key="token || ''" v-model:selected="selected" :request="ask" :options="options" :initial-amount="initialAmount" heading-id="agent-give-title" :loading="loading" :unavailable="unavailable?.error" :error="error" :busy="busy" :done="done" :offered="offered" :retry-give="giveFailed" @give="give" @decline="cantHelp" @close="close" @retry="load">
+      <template #close><button type="button" class="give-close" aria-label="Close request" :disabled="Boolean(busy)" @click="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button></template>
+    </GiveAgentPanel>
   </DesktopDialogShell>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import type { DesktopAgentAsk, DesktopAgentAskModel } from "../../../../../../electron/ipc-types/asks";
 import { desktopIpc, desktopBridgeUpgradeMessage } from "../../../../ipc/index.js";
 import DesktopDialogShell from "../DesktopDialogShell.vue";
-import { AMOUNT_CHOICES, parseCustomAmount } from "./ask-links";
+import { parseCustomAmount } from "./ask-links";
+import GiveAgentPanel from "../../../../../../../../shared/ui/give-agent/GiveAgentPanel.vue";
 
 const LAST_AMOUNT_KEY = "letagents-desktop:last-gift-amount";
 const props = defineProps<{ token: string | null }>();
 const emit = defineEmits<{ close: []; given: [roomName: string | null] }>();
 
 const loading = ref(false);
-const busy = ref(false);
+const busy = ref<"give" | "decline" | null>(null);
+const offered = ref(false);
+const giveFailed = ref(false);
 const ask = ref<DesktopAgentAsk | null>(null);
 const unavailable = ref<{ code: string; error: string } | null>(null);
 const error = ref<string | null>(null);
 const done = ref<string | null>(null);
 const options = ref<Array<{ key: string; model: DesktopAgentAskModel; requested: boolean; canGive: boolean }>>([]);
 const selected = ref<string | null>(null);
-const amount = ref(10);
-const customOpen = ref(false);
-const customText = ref("");
-const current = computed(() => options.value.find(option => option.key === selected.value && option.canGive) ?? null);
+const initialAmount = ref(10);
+let generation = 0;
+onBeforeUnmount(() => { generation++; });
 
 function lastAmount(): number | null {
   try { return parseCustomAmount(localStorage.getItem(LAST_AMOUNT_KEY) ?? ""); } catch { return null; }
 }
 
-watch(() => props.token, async token => {
-  ask.value = null; unavailable.value = null; error.value = null; done.value = null; customOpen.value = false; customText.value = "";
+watch(selected, () => { if (giveFailed.value) error.value = null; giveFailed.value = false; });
+watch(() => props.token, () => { void load(); }, { immediate: true });
+
+async function load() {
+  const version = ++generation, token = props.token;
+  ask.value = null; unavailable.value = null; error.value = null; done.value = null; busy.value = null;
+  options.value = []; selected.value = null; offered.value = false; giveFailed.value = false; loading.value = false;
   if (!token) return;
   if (!desktopIpc.asks) { error.value = desktopBridgeUpgradeMessage(); return; }
   loading.value = true;
   try {
     const [preview, models] = await Promise.all([desktopIpc.asks.preview(token), desktopIpc.asks.listModels()]);
+    if (version !== generation) return;
     if (!preview.ok) { error.value = preview.error; return; }
     ask.value = preview.value.ask; unavailable.value = preview.value.unavailable;
-    const list = models.ok ? models.value : [];
-    // Only models on LetAgents' current list are offered; one that has left it can't be given.
+    if (unavailable.value) return;
+    if (!models.ok) { error.value = models.error; return; }
+    const list = models.value;
     const requested = list.find(model => model.providerId === preview.value.ask.provider_id && model.model === preview.value.ask.model) ?? null;
     const ordered = requested ? [requested, ...list.filter(model => model !== requested)] : list;
-    options.value = await Promise.all(ordered.map(async model => ({
+    const available = await Promise.all(ordered.map(async model => ({
       key: `${model.providerId}:${model.model ?? ""}`, model, requested: model === requested,
       canGive: await desktopIpc.asks!.canGive(model.providerId),
     })));
-    selected.value = options.value.find(option => option.canGive)?.key ?? null;
-    // Preselect what was asked for, then what this person gave last time, then 10% (S3).
-    amount.value = preview.value.ask.amount_percent ?? lastAmount() ?? 10;
-    if (!(AMOUNT_CHOICES as readonly number[]).includes(amount.value)) { customOpen.value = true; customText.value = String(amount.value); }
-  } finally {
-    loading.value = false;
-  }
-}, { immediate: true });
+    if (version !== generation) return;
+    options.value = available;
+    selected.value = available.find(option => option.canGive)?.key ?? null;
+    initialAmount.value = preview.value.ask.amount_percent ?? lastAmount() ?? 10;
+  } catch {
+    if (version === generation) error.value = "Couldn't open this request. Check your connection and try again.";
+  } finally { if (version === generation) loading.value = false; }
+}
 
-async function give() {
-  const token = props.token; const choice = current.value;
+async function give(chosen: number) {
+  const token = props.token; const choice = options.value.find(option => option.key === selected.value && option.canGive);
+  const version = generation;
   if (!token || !choice || busy.value) return;
-  const chosen = customOpen.value ? parseCustomAmount(customText.value) : amount.value;
-  if (chosen === null) { error.value = "Enter a whole number from 1 to 100."; return; }
-  busy.value = true; error.value = null;
+  if (!Number.isInteger(chosen) || chosen < 1 || chosen > 100) { error.value = "Enter a whole number from 1 to 100."; return; }
+  busy.value = "give"; error.value = null; giveFailed.value = false;
   try {
     const result = await desktopIpc.asks!.give({ token, providerId: choice.model.providerId, model: choice.model.model, modelLabel: choice.model.label, amountPercent: chosen });
-    if (!result.ok) { error.value = result.error; return; }
+    if (version !== generation) return;
+    if (!result.ok) { error.value = result.error; giveFailed.value = true; return; }
     try { localStorage.setItem(LAST_AMOUNT_KEY, String(chosen)); } catch { /* storage unavailable */ }
+    offered.value = result.value.state === "on_hold";
     done.value = result.value.state === "on_hold"
       ? `${ask.value?.asker} will be asked to accept ${choice.model.label}.`
       : `Your agent is in ${ask.value?.asker}'s room. Thanks for helping.`;
     emit("given", ask.value?.room_display_name ?? null);
+  } catch {
+    if (version === generation) { error.value = "Couldn’t add this agent. Check your connection and try again."; giveFailed.value = true; }
   } finally {
-    busy.value = false;
+    if (version === generation) busy.value = null;
   }
 }
 
 async function cantHelp() {
   if (!props.token || busy.value) return;
-  busy.value = true; error.value = null;
+  const version = generation;
+  busy.value = "decline"; error.value = null; giveFailed.value = false;
   const result = await desktopIpc.asks?.cantHelp(props.token).catch(() => null);
-  busy.value = false;
+  if (version !== generation) return;
+  busy.value = null;
   if (!result?.ok) { error.value = result && !result.ok ? result.error : "Couldn't reach LetAgents. Check your connection and try again."; return; }
   close();
 }
 
 function close() { if (!busy.value) emit("close"); }
 </script>
+
+<style>
+.give-agent-dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); display: flex; min-height: 0; outline: none; box-shadow: 0 32px 100px #0006; border-radius: 17px; }
+@media (max-width:480px) { .give-agent-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 24px); } }
+</style>
