@@ -34,6 +34,7 @@ export const settingsSubsections: Partial<Record<SettingsPaneId, SettingsNavItem
   "system:mcp": [
     { id: "system:mcp", title: "Connected apps", description: "Agent apps connected through MCP", icon: ServerCog },
     { id: "system:setup", title: "Connect an app", description: "Set up LetAgents in an existing agent app", icon: Wrench },
+    { id: "system:remote-mcp", title: "Remote connector", description: "Apps signed in through the remote MCP connector", icon: Cloud },
   ],
   "system:diagnostics": [
     { id: "system:diagnostics", title: "Health", description: "See the background service and agents across all rooms", icon: Activity },

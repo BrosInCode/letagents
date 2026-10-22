@@ -3,12 +3,13 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
-import { buildAllowedOrigins, INVALID_BEARER_MESSAGE } from "../../http/middleware.js";
+import { buildAllowedOrigins, replyInvalidBearer } from "../../http/middleware.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 import type { RemoteMcpSessions } from "../../remote-mcp/sessions.js";
 import { RemoteMcpBusyError } from "../../remote-mcp/errors.js";
 import type { OwnerTokenAccount } from "../../db/types/auth.js";
 import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.js";
+import { mcpBearerChallenge, REMOTE_MCP_PATH } from "../../mcp-oauth/config.js";
 
 /**
  * Remote (streamable HTTP) MCP endpoint. Mounted at `/mcp`, next to the other
@@ -16,7 +17,7 @@ import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.
  * take the endpoint URL as given and `https://letagents.chat/mcp` is the
  * conventional shape for a hosted MCP server.
  */
-export const REMOTE_MCP_PATH = "/mcp";
+export { REMOTE_MCP_PATH };
 
 /**
  * Request bodies above this are refused before the MCP SDK validates them.
@@ -67,19 +68,23 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 403, "This Origin may not use the MCP endpoint.");
       return;
     }
-    // Only an owner token sent as a bearer (LETAGENTS_TOKEN) opens this
-    // endpoint. Browser cookies, app sessions, worker bearers and host grants
-    // do not. Invalid bearers were already refused by the auth middleware.
+    // Only an owner token (LETAGENTS_TOKEN) or an OAuth access token issued
+    // for this resource, sent as a bearer, opens this endpoint. Browser
+    // cookies, app sessions, worker bearers and host grants do not. Invalid
+    // bearers were already refused by the auth middleware.
     const authorization = parseBearerAuthorization(req.headers.authorization);
-    if (authorization.kind === "token" && (req.authKind !== "owner_token" || !req.sessionAccount)) {
+    const oauthGrant = req.authKind === "mcp_oauth" ? req.mcpOAuth ?? null : null;
+    if (authorization.kind === "token" && ((req.authKind !== "owner_token" && !oauthGrant) || !req.sessionAccount)) {
       // Same status, headers and body as the middleware's invalid-bearer reply,
       // so a valid credential of another kind cannot be told from a bad one.
-      res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+      replyInvalidBearer(req, res);
       return;
     }
     if (authorization.kind !== "token" || !req.sessionAccount) {
-      jsonRpcError(res, 401, "A LetAgents owner token is required as 'Authorization: Bearer <LETAGENTS_TOKEN>'.",
-        { "WWW-Authenticate": 'Bearer realm="letagents"' });
+      // MCP authorization: the challenge names the protected resource metadata,
+      // which leads an OAuth client to LetAgents sign-in.
+      jsonRpcError(res, 401, "Sign in to LetAgents (OAuth), or send 'Authorization: Bearer <LETAGENTS_TOKEN>'.",
+        { "WWW-Authenticate": mcpBearerChallenge() });
       return;
     }
     const account = req.sessionAccount as OwnerTokenAccount;
@@ -94,7 +99,9 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 413, "The MCP request body is too large.");
       return;
     }
-    const token = authorization.token;
+    // What the session binds to: the owner token itself, or the OAuth grant's
+    // secret, which stays the same when the client refreshes its access token.
+    const token = oauthGrant ? oauthGrant.session_secret : authorization.token;
     const serve = async (session: Parameters<RemoteMcpSessions["handle"]>[0]) => {
       try {
         await sessions.handle(session, account, req, res, req.body);

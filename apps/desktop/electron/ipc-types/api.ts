@@ -450,6 +450,12 @@ export interface DesktopApi {
     /** PR6: count, outcome and latency of Jev questions for the account's connections. */
     jevMetrics?: () => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerJevMetrics>;
   };
+  /** Apps signed in to the remote MCP endpoint (https://letagents.chat/mcp) with OAuth. */
+  mcpConnections: {
+    list: () => Promise<{ connections: import("../main/mcp-connections.js").RemoteMcpConnectionView[] }>;
+    /** Revokes the app's tokens and ends its remote MCP sessions. */
+    disconnect: (id: string) => Promise<void>;
+  };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;
     getStorageStatus: () => Promise<DesktopSecureStorageStatus>;

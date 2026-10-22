@@ -10,8 +10,18 @@ import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
+import { isRemoteMcpRequestPath, mcpBearerChallenge } from "../mcp-oauth/config.js";
 
 export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
+
+/**
+ * The invalid-bearer reply. On /mcp it also carries the OAuth challenge, so an
+ * MCP client refreshes its access token or signs in again (MCP authorization).
+ */
+export function replyInvalidBearer(req: { path?: string }, res: express.Response): void {
+  if (isRemoteMcpRequestPath(req.path)) res.setHeader("WWW-Authenticate", mcpBearerChallenge("invalid_token"));
+  res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+}
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
@@ -69,12 +79,19 @@ export function registerHttpMiddleware(
       req.authKind = auth.authKind;
       req.agentSession = auth.agentSession ?? null;
       req.supervisorGrant = auth.supervisorGrant ?? null;
+      req.mcpOAuth = auth.mcpOAuth ?? null;
+      // MCP OAuth tokens are bound to the /mcp resource (resolveRequestAuth
+      // already refuses them elsewhere; this keeps that true for any resolver).
+      if (req.authKind === "mcp_oauth" && !isRemoteMcpRequestPath(req.path)) {
+        replyInvalidBearer(req, _res);
+        return;
+      }
       // A rejected credential must not inherit anonymous room permissions.
       // The sign-in probe reports authenticated:false so clients can clear
       // expired saved credentials; it exposes no room access or mutations.
       const isAuthStatusProbe = req.method === "GET" && req.path === "/auth/session";
       if (!req.authKind && !isAuthStatusProbe && parseBearerAuthorization(req.headers.authorization).kind !== "none") {
-        _res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+        replyInvalidBearer(req, _res);
         return;
       }
       if (req.authKind === "supervisor_grant") {

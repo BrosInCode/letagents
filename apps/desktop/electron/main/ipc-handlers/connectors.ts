@@ -29,10 +29,13 @@ import {
   testDesktopRoomTrackerFilter,
 } from "../rooms/tracker-filters.js";
 import { askDesktopMyWorkNeedsMe, getDesktopMyWork } from "../rooms/my-work.js";
+import { disconnectRemoteMcpConnection, listRemoteMcpConnections } from "../mcp-connections.js";
 
 /** Ticket connectors: the account's Jira and Linear connections, room ticket filters, and My work. */
 export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:connectors:list", () => listTrackerConnections());
+  targetIpcMain.handle("desktop:mcp-connections:list", () => listRemoteMcpConnections());
+  targetIpcMain.handle("desktop:mcp-connections:disconnect", (_event, id) => disconnectRemoteMcpConnection(id));
   targetIpcMain.handle("desktop:connectors:connect-oauth", (_event, provider) => connectTrackerWithOAuth(provider));
   targetIpcMain.handle("desktop:connectors:cancel-oauth", () => cancelTrackerOAuth());
   targetIpcMain.handle("desktop:connectors:save-api-token", (_event, input) => saveTrackerApiToken(input));

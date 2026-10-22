@@ -376,6 +376,10 @@ const api: DesktopApi = {
     },
     jevMetrics: () => ipcRenderer.invoke("desktop:connectors:jev-metrics"),
   },
+  mcpConnections: {
+    list: () => ipcRenderer.invoke("desktop:mcp-connections:list"),
+    disconnect: (id) => ipcRenderer.invoke("desktop:mcp-connections:disconnect", id),
+  },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
     getStorageStatus: () => ipcRenderer.invoke("desktop:supervisor-grant:get-storage-status"),

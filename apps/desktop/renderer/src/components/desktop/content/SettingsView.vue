@@ -45,6 +45,7 @@
       />
 
       <SettingsConnectorsPane v-else-if="activePane === 'account:connectors'" />
+      <SettingsRemoteMcpPane v-else-if="activePane === 'system:remote-mcp'" />
       <SettingsStoragePane
         v-else-if="isStoragePane"
         :account-rooms="accountRooms"
@@ -158,6 +159,7 @@ import SettingsConnectorsPane from "../settings/panes/SettingsConnectorsPane.vue
 import SettingsDiagnosticsPane from "../settings/panes/SettingsDiagnosticsPane.vue";
 import SettingsMcpPane from "../settings/panes/SettingsMcpPane.vue";
 import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";
+import SettingsRemoteMcpPane from "../settings/panes/SettingsRemoteMcpPane.vue";
 import SettingsRentingPane from "../settings/panes/SettingsRentingPane.vue";
 import SettingsRoomsPane from "../settings/panes/SettingsRoomsPane.vue";
 import SettingsRuntimePane from "../settings/panes/SettingsRuntimePane.vue";
