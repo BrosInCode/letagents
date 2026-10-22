@@ -3,7 +3,7 @@ import type { WorkspaceReview } from './workspace-review.mjs';
 import type nodePath from 'node:path';
 export function unavailableWorkspace(): WorkspaceChangeSummary;
 export function escapesWorkspace(root: string, parent: string, path?: Pick<typeof nodePath, 'relative' | 'isAbsolute' | 'sep'>): boolean;
-export function captureWorkspaceTree(workspace: string, identity: string): Promise<string | null>;
+export function captureWorkspaceTree(workspace: string, identity: string, deadline?: AbortSignal): Promise<string | null>;
 export function releaseWorkspaceTree(workspace: string, identity: string): Promise<void>;
 export function captureWorkspaceHead(workspace: string): Promise<string | null>;
 export function captureRemoteTips(workspace: string): Promise<string[] | null>;

@@ -4,7 +4,7 @@ import { lstat, mkdtemp, open, readlink, realpath, rm } from 'node:fs/promises';
 import { devNull, tmpdir } from 'node:os';
 import nodePath, { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS } from './workspace-change-capture.mjs';
+import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
 const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 // Replace refs are off: with them the workspace could put any object in the place of
 // the one a capture reads (a base's tree, the start snapshot itself).
@@ -69,12 +69,12 @@ const gitBool = (root, key, signal, fallback) => git(root, ['config', '--type=bo
 async function storageSettings(root, signal) {
     const [trustExecutableBit, symlinks, autocrlf] = await Promise.all([
         gitBool(root, 'core.fileMode', signal, process.platform !== 'win32'),
-        gitBool(root, 'core.symlinks', signal, true),
+        gitBool(root, 'core.symlinks', signal, process.platform !== 'win32'),
         git(root, ['config', '--get', 'core.autocrlf'], signal).then(value => /^(?:true|input|yes|on|1)$/i.test(value.trim()), () => false),
     ]);
     return { trustExecutableBit, symlinks, autocrlf };
 }
-const ATTRIBUTES = ['filter', 'text', 'eol', 'ident', 'working-tree-encoding'];
+const ATTRIBUTES = ['filter', 'text', 'crlf', 'eol', 'ident', 'working-tree-encoding'];
 /** The conversion attributes of every path, in one Git call: path -> { attribute: value }. */
 async function conversionAttributes(root, paths, signal) {
     const output = await git(root, ['check-attr', '-z', '--stdin', ...ATTRIBUTES], signal, undefined, paths.map(path => `${path}\0`).join(''));
@@ -91,15 +91,19 @@ const unspecified = (value) => value === undefined || value === 'unspecified';
 /** A `filter=<driver>` attribute: a clean program Git would run on `git add`, or LFS. */
 const filterDriver = (attributes) => unspecified(attributes.filter) || attributes.filter === 'unset' ? null : attributes.filter;
 /** Whether one of Git's own conversions (line endings, ident, working-tree-encoding) may change what is stored. */
-const converts = (attributes, autocrlf) => !unspecified(attributes.ident) || !unspecified(attributes['working-tree-encoding'])
-    || (attributes.text !== 'unset' && (autocrlf || !unspecified(attributes.text) || !unspecified(attributes.eol)));
+function converts(attributes, autocrlf) {
+    const text = unspecified(attributes.text) ? attributes.crlf : attributes.text; // `crlf` is the old name of `text`.
+    return !unspecified(attributes.ident) || !unspecified(attributes['working-tree-encoding'])
+        || (text !== 'unset' && (autocrlf || !unspecified(text) || !unspecified(attributes.eol)));
+}
 const LFS_POINTER_VERSIONS = ['version https://git-lfs.github.com/spec/v1\n', 'version https://hawser.github.com/spec/v1\n'];
 const isLfsPointer = (bytes) => bytes.length <= 1024 && LFS_POINTER_VERSIONS.some(version => bytes.subarray(0, version.length).toString('utf8') === version);
-/** The pointer file that git-lfs's clean filter stores for these bytes (pointer spec v1). */
+/** The pointer file that git-lfs's clean filter stores for these bytes (pointer spec v1); an empty file stays empty. */
 const lfsPointer = (bytes) => Buffer.from(`${LFS_POINTER_VERSIONS[0]}oid sha256:${createHash('sha256').update(bytes).digest('hex')}\nsize ${bytes.length}\n`);
 /**
  * Retained Git tree, with no changes to the user's index, branch, or working files.
  * Unsupported/oversized observations fail closed; a partial baseline is never a turn diff.
+ * `deadline` (the settled turn's budget) ends the capture early; it always has its own.
  *
  * Each file is stored as `git add` would store it, so that a file nobody touched has
  * HEAD's blob and mode, and both trees of a turn (start and settled) are made the same
@@ -113,10 +117,13 @@ const lfsPointer = (bytes) => Buffer.from(`${LFS_POINTER_VERSIONS[0]}oid sha256:
  *  - No conversion applies (the common case outside Windows): the raw bytes are hashed
  *    here and only a changed file is given to Git, as before.
  *  - Git's own conversions apply (core.autocrlf, or a text, eol, ident or
- *    working-tree-encoding attribute): Git hashes the file from its path, with the same
- *    conversions `git add` uses, all such files in one `hash-object --stdin-paths`.
- *    `--path` with the raw bytes would do the same per file; one process per file is
- *    too slow when, under autocrlf, every text file needs it.
+ *    working-tree-encoding attribute): Git adds the file to the private index itself,
+ *    all such files in one `update-index --add`, so the result is exactly `git add`'s:
+ *    the index holds HEAD, and a file that is CRLF in HEAD stays CRLF (Git converts
+ *    only files whose indexed blob has no CR). `hash-object --path` with the raw bytes
+ *    has no index and would strip every CR, and one process per file is too slow when,
+ *    under autocrlf, every text file needs it. core.safecrlf is off for this call: a
+ *    file with mixed endings is an observation here, not a commit to warn about.
  *  - A `filter=<driver>` attribute names a clean program. The capture never runs one:
  *    it must not execute what the workspace configures (see the filter sentinel test),
  *    and an LFS clean on a large binary is slow and may contact a server. git-lfs's
@@ -125,9 +132,12 @@ const lfsPointer = (bytes) => Buffer.from(`${LFS_POINTER_VERSIONS[0]}oid sha256:
  *    stored as `git add` would store it. A file that is still the pointer (not
  *    smudged) is hashed as is. Any other driver's file is hashed raw: it shows as
  *    changed whenever the clean output would differ from the working bytes.
+ *    The attributes are read once, before the files: a workspace that rewrites
+ *    `.gitattributes` and its filter configuration in between can still have Git run
+ *    its program, as the agent could run it itself. The guard is against accident.
  */
-export async function captureWorkspaceTree(workspace, identity) {
-    const signal = AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS);
+export async function captureWorkspaceTree(workspace, identity, deadline = undefined) {
+    const signal = deadline ? AbortSignal.any([AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS), deadline]) : AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS);
     const scratch = await mkdtemp(join(tmpdir(), 'letagents-workspace-'));
     const index = join(scratch, 'index');
     try {
@@ -158,7 +168,7 @@ export async function captureWorkspaceTree(workspace, identity) {
         // Each lane owns its reusable buffer until hash-object has consumed its stdin.
         // Slots preserve Git index-info order, including directory-to-file replacements.
         const results = new Array(paths.length);
-        const converted = []; // Files Git hashes itself after the lanes, with its conversions.
+        const converted = []; // Files Git adds to the private index itself after the lanes, with its conversions.
         let bytesRead = 0, next = 0, failed = false;
         await Promise.all(Array.from({ length: Math.min(4, paths.length) }, async () => {
             let readBuffer;
@@ -188,11 +198,11 @@ export async function captureWorkspaceTree(workspace, identity) {
                     if (stat.isSymbolicLink())
                         bytes = Buffer.from(await readlink(absolute));
                     else if (stat.isFile() && stat.size <= 8 * 1024 * 1024) {
-                        if (mode !== '120000' && !driver && converts(attributes.get(path) ?? {}, settings.autocrlf) && !/[\r\n]/.test(path)) {
+                        if (mode !== '120000' && !driver && converts(attributes.get(path) ?? {}, settings.autocrlf)) {
                             // Git reads this one itself; the budget counts its size now.
                             if ((bytesRead += stat.size) > 64 * 1024 * 1024)
                                 throw new Error('Workspace observation unavailable.');
-                            converted.push({ slot, path, mode });
+                            converted.push(path);
                             continue;
                         }
                         const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -210,7 +220,7 @@ export async function captureWorkspaceTree(workspace, identity) {
                     bytesRead += bytes.length;
                     if (bytes.length > 8 * 1024 * 1024 || bytesRead > 64 * 1024 * 1024)
                         throw new Error('Workspace observation unavailable.');
-                    if (driver === 'lfs' && !isLfsPointer(bytes))
+                    if (driver === 'lfs' && bytes.length && !isLfsPointer(bytes))
                         bytes = lfsPointer(bytes);
                     const rawOid = createHash(head.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
                     if (original.get(path)?.[0] === mode && original.get(path)?.[2] === rawOid)
@@ -223,14 +233,10 @@ export async function captureWorkspaceTree(workspace, identity) {
             // Do not reject early: every started file/Git operation must finish before cleanup.
         }));
         if (failed || signal.aborted) return null;
-        if (converted.length) {
-            const oids = (await git(root, ['hash-object', '-w', '--stdin-paths'], signal, undefined, converted.map(file => `${file.path}\n`).join(''))).split('\n').filter(Boolean);
-            if (oids.length !== converted.length) return null;
-            converted.forEach(({ slot, path, mode }, position) => {
-                if (original.get(path)?.[0] !== mode || original.get(path)?.[2] !== oids[position])
-                    results[slot] = `${mode} ${oids[position]}\t${path}\0`;
-            });
-        }
+        // Converted files first, raw entries after: --replace lets a file take a directory's place
+        // and the reverse, and a removal of an entry that is already gone is not an error.
+        if (converted.length)
+            await git(root, ['-c', 'core.safecrlf=false', 'update-index', '--add', '--replace', '-z', '--stdin'], signal, index, converted.map(path => `${path}\0`).join(''));
         const entries = results.filter(value => value !== undefined);
         if (entries.length)
             await git(root, ['update-index', '-z', '--index-info'], signal, index, entries.join(''));
@@ -355,10 +361,10 @@ const parents = (path) => path.split('/').slice(0, -1).map((_, index, parts) => 
  * from the remotes, an unknown starting commit, no tip or more than one
  * independent tip gained, or any Git failure.
  */
-async function ownStartingTree(workspace, start, startingHead, remoteTips) {
+async function ownStartingTree(workspace, start, startingHead, remoteTips, deadline) {
     if (!objectId.test(start ?? '') || !objectId.test(startingHead ?? '') || !Array.isArray(remoteTips))
         return start;
-    const signal = AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS);
+    const signal = AbortSignal.any([AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS), deadline]);
     let scratch;
     try {
         const root = await realpath(workspace);
@@ -416,15 +422,17 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips) {
  * difference.
  */
 export async function captureWorkspacePair(workspace, startingRevision, baseline, identity, startingHead = null, remoteTips = null) {
-    const tree = await captureWorkspaceTree(workspace, `${identity}:settled`);
+    // One budget for the whole settled turn, whatever Defender or a slow disk does to each command.
+    const deadline = AbortSignal.timeout(WORKSPACE_SETTLE_TIMEOUT_MS);
+    const tree = await captureWorkspaceTree(workspace, `${identity}:settled`, deadline);
     try {
-        const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree, true) : unavailableWorkspace();
+        const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree, true, deadline) : unavailableWorkspace();
         const turn = async () => {
             // The settled files are already captured: a remote that is still silent delays only this
             // comparison, and a question that failed in any way leaves the plain one.
-            const from = await ownStartingTree(workspace, baseline, startingHead, await Promise.resolve(remoteTips).catch(() => null));
-            const own = from === baseline ? null : await captureWorkspaceChanges(workspace, from, tree, true);
-            return own?.state === 'ready' ? { ...own, base_revision: baseline } : captureWorkspaceChanges(workspace, baseline, tree, true);
+            const from = await ownStartingTree(workspace, baseline, startingHead, await Promise.resolve(remoteTips).catch(() => null), deadline);
+            const own = from === baseline ? null : await captureWorkspaceChanges(workspace, from, tree, true, deadline);
+            return own?.state === 'ready' ? { ...own, base_revision: baseline } : captureWorkspaceChanges(workspace, baseline, tree, true, deadline);
         };
         const changes = tree && baseline ? await turn() : unavailableWorkspace();
         const preview = (snapshot) => ({ ...snapshot,

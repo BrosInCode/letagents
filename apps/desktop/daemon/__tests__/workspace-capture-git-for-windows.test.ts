@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
+import { captureWorkspaceChanges } from '../../../../shared/workspace-change-capture.mjs';
 import { captureWorkspacePair, captureWorkspaceTree, escapesWorkspace, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 
 // A Git for Windows checkout stores files differently from what is on disk: text files
@@ -68,6 +69,39 @@ test('text files under line-ending conversion are stored as git add stores them'
   }
 });
 
+test('files Git itself would leave alone under core.autocrlf stay HEAD\'s blob', async t => {
+  // `git add` converts a file only when its indexed blob has no CR: a .bat committed with
+  // CRLF stays CRLF. A file with mixed endings is stored converted, and core.safecrlf=true
+  // (which makes `git add` refuse it) does not make the capture fail.
+  const f = repo(t, { 'build.bat': 'echo one\r\necho two\r\n', 'plain.txt': 'one\ntwo\n', 'mixed.txt': 'x\n' }, { 'core.autocrlf': 'true', 'core.safecrlf': 'true' });
+  assert.equal(git(f.directory, 'status', '--short'), '', 'Git itself sees the checkout as clean');
+  assert.equal(await f.capture('crlf in head'), f.tree, 'a CRLF-committed file is unchanged');
+  writeFileSync(join(f.directory, 'build.bat'), 'echo one\r\necho three\r\n');
+  writeFileSync(join(f.directory, 'mixed.txt'), 'x\r\ny\n');
+  writeFileSync(join(f.directory, 'new line\nin name.txt'), 'odd\r\n');
+  const settled = await f.capture('crlf edited');
+  assert.equal(f.blob(settled, 'build.bat'), 'echo one\r\necho three\r\n', 'stays CRLF, as git add keeps it');
+  assert.equal(f.blob(settled, 'mixed.txt'), 'x\ny\n', 'mixed endings are stored converted; safecrlf does not stop the capture');
+  assert.equal(f.blob(settled, 'new line\nin name.txt'), 'odd\n', 'a path with a newline is converted too');
+  for (const identity of ['crlf in head', 'crlf edited']) await releaseWorkspaceTree(f.directory, identity);
+});
+
+test('ident, working-tree-encoding and the old crlf attribute are Git\'s conversions too', async t => {
+  const cases = [
+    { name: 'ident', attributes: '*.c ident\n', files: { 'a.c': '/* $Id$ */\n' }, onDisk: (text: string) => /\$Id: [0-9a-f]{40} \$/.test(text) },
+    { name: 'working-tree-encoding', attributes: '*.ps1 text working-tree-encoding=UTF-16LE\n', files: { 'a.ps1': Buffer.from('Write-Host hi\n', 'utf16le') }, onDisk: (text: string) => text === 'Write-Host hi\n' },
+    { name: 'crlf (old name of text)', attributes: '*.txt crlf\n', config: { 'core.eol': 'crlf' }, files: { 'a.txt': 'one\ntwo\n' }, onDisk: (text: string) => text === 'one\r\ntwo\r\n' },
+  ];
+  for (const { name, attributes, config, files, onDisk } of cases) {
+    const f = repo(t, { '.gitattributes': attributes, ...files }, config);
+    const [path] = Object.keys(files);
+    assert.ok(onDisk(readFileSync(join(f.directory, path), name.startsWith('working') ? 'utf16le' : 'utf8')), `${name}: Git converted the checkout`);
+    assert.equal(await f.capture(name), f.tree, `${name}: an untouched checkout is HEAD's tree`);
+    if (name.startsWith('working')) assert.equal(f.blob(f.tree, path), 'Write-Host hi\n', 'HEAD holds UTF-8');
+    await releaseWorkspaceTree(f.directory, name);
+  }
+});
+
 test('a turn under core.autocrlf shows the turn\'s own edit and no line-ending noise', async t => {
   const f = repo(t, { 'app.ts': 'line 1\nline 2\nline 3\n', 'other.ts': 'other\n' }, { 'core.autocrlf': 'true' });
   const baseline = await f.capture('turn');
@@ -95,8 +129,12 @@ test('an LFS file is stored as its pointer without running the clean filter', as
   // A clone without git-lfs keeps the pointer on disk; it is stored as it is.
   writeFileSync(join(f.directory, 'model.bin'), pointer('real content'));
   assert.equal(await f.capture('lfs pointer on disk'), f.tree);
+  // git-lfs stores an empty file as an empty blob, not as a pointer.
+  writeFileSync(join(f.directory, 'empty.bin'), '');
+  const withEmpty = await f.capture('lfs empty');
+  assert.equal(f.blob(withEmpty, 'empty.bin'), '');
   assert.equal(existsSync(join(f.directory, 'FILTER_EXECUTED')), false, 'no clean filter ran');
-  for (const identity of ['lfs untouched', 'lfs edited', 'lfs pointer on disk']) await releaseWorkspaceTree(f.directory, identity);
+  for (const identity of ['lfs untouched', 'lfs edited', 'lfs pointer on disk', 'lfs empty']) await releaseWorkspaceTree(f.directory, identity);
 });
 
 test('a file with another clean filter is stored raw and the filter never runs', async t => {
@@ -198,4 +236,16 @@ test('a parent directory on another drive escapes the workspace', () => {
   assert.equal(escapesWorkspace('/work/repo', '/work/repo/..dots'), false);
   assert.equal(escapesWorkspace('/work/repo', '/work'), true);
   assert.equal(escapesWorkspace('/work/repo', '/elsewhere'), true);
+});
+
+test('a settled turn has one deadline that ends its tree capture and its comparisons', async t => {
+  const f = repo(t, { 'a.txt': 'a\n' });
+  const expired = AbortSignal.abort();
+  assert.equal(await captureWorkspaceTree(f.directory, 'expired', expired), null, 'no partial tree past the deadline');
+  assert.equal(git(f.directory, 'for-each-ref', '--format=%(refname)', 'refs/letagents/workspace-review'), '');
+  assert.equal((await captureWorkspaceChanges(f.directory, f.head, f.tree, true, expired)).state, 'unavailable');
+  const baseline = await f.capture('live');
+  const pair = await captureWorkspacePair(f.directory, f.head, baseline, 'live');
+  assert.equal(pair.contribution.changes.state, 'ready', 'a deadline that is not reached changes nothing');
+  await releaseWorkspaceTree(f.directory, 'live');
 });
