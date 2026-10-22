@@ -1,4 +1,4 @@
-import type { ChildProcess } from "child_process";
+import type { ChildProcess, SpawnSyncReturns } from "child_process";
 import { createServer } from "net";
 
 import { spawnCodex, terminateCodexProcessTree } from "../../../shared/codex-executable.mjs";
@@ -7,9 +7,17 @@ import { codexOwnerIsolationOverrides } from "../../../shared/codex-owner-isolat
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-// App-servers this process started, by pid, so a stop can see whether the
-// child has already exited (its pid may then belong to another process).
+// App-servers this process started, by pid, so a Windows stop can see whether
+// the child has already exited (its pid may then belong to another process).
+// Entries stay after exit, so a repeated stop of the same stored pid never
+// ends a stranger's tree.
 const launchedAppServers = new Map<number, ChildProcess>();
+
+export type TerminateDeps = {
+  platform: NodeJS.Platform;
+  kill: (pid: number, signal: NodeJS.Signals) => void;
+  runSync?: (file: string, args: string[]) => Pick<SpawnSyncReturns<Buffer>, "error"> | undefined;
+};
 
 function readyUrlFromServerUrl(serverUrl: string): string {
   const url = new URL(serverUrl);
@@ -109,29 +117,44 @@ export async function launchAppServer(
   return child.pid ?? null;
 }
 
-export function terminateSpawnedProcess(pid: number): void {
-  // On Windows the pid is a shim wrapper; its whole tree must go. A child
-  // this process started is checked for exit first. A pid read from the
-  // state file (an app-server from an earlier run) has no child to check,
-  // so it is ended as it is.
-  const child = launchedAppServers.get(pid);
-  if (child && (child.exitCode !== null || child.signalCode !== null)) {
-    launchedAppServers.delete(pid);
+export function terminateSpawnedProcess(
+  pid: number,
+  deps: TerminateDeps = { platform: process.platform, kill: (target, signal) => process.kill(target, signal) },
+): void {
+  if (deps.platform === "win32") {
+    // The pid is a shim wrapper; its whole tree must go. A child this
+    // process started is checked for exit first, because its pid may since
+    // belong to another process. A pid read from the state file (an
+    // app-server from an earlier run) has no child to check, so it is ended
+    // as it is.
+    const child = launchedAppServers.get(pid);
+    if (child && (child.exitCode !== null || child.signalCode !== null)) return;
+    if (terminateCodexProcessTree(pid, { platform: "win32", ...(child ? { child } : {}), ...(deps.runSync ? { runSync: deps.runSync } : {}) })) return;
+    try {
+      deps.kill(pid, "SIGTERM");
+    } catch {
+      // Already gone.
+    }
     return;
   }
-  if (terminateCodexProcessTree(pid, child ? { child } : {})) return;
+
+  // POSIX: the app-server leads its own process group, which can outlive
+  // it, so the group is signalled whether or not the leader has exited.
   try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, "SIGTERM");
-      return;
-    }
+    deps.kill(-pid, "SIGTERM");
+    return;
   } catch {
     // Fall back to the direct process below.
   }
 
   try {
-    process.kill(pid, "SIGTERM");
+    deps.kill(pid, "SIGTERM");
   } catch {
     // Already gone.
   }
+}
+
+/** For tests: remember a child as if launchAppServer had started it. */
+export function rememberLaunchedAppServerForTest(pid: number, child: ChildProcess): void {
+  launchedAppServers.set(pid, child);
 }

@@ -148,8 +148,9 @@ const NO_CMD_SAFE_QUOTE = "LetAgents cannot pass an argument that contains a dou
  * both passes are those inside double quotes. Every argument is therefore
  * quoted. A `%` becomes `%%cd:~0,0%`: the first `%` has no closing name and
  * stays, and `%cd:~0,0%` is a zero-length slice of the always-set CD
- * variable, so the command line expands it back to one `%` and the batch
- * file gets `%`.
+ * variable (an extensions feature, hence /e:on), so the command line
+ * expands it back to one `%` and the batch file gets `%`. Rust's standard
+ * library starts batch files the same way.
  * A double quote inside an argument would end the quoted span for cmd.exe
  * and cannot be escaped on both passes, so it is refused. Node's C runtime
  * reads backslashes before the closing quote as escapes, so those double.
@@ -196,9 +197,10 @@ export function codexLaunchCommand(executable, args, options = {}) {
     file: comSpec,
     // Verbatim arguments are joined as given, so argv[0] is quoted here.
     argv0: `"${comSpec}"`,
-    // /d: no AutoRun; /v:off: no delayed `!NAME!` expansion, whatever the
-    // registry says; /s: strip exactly the outer quotes of the /c string.
-    args: ["/d", "/v:off", "/s", "/c", `"${line}"`],
+    // /d: no AutoRun; /e:on: command extensions, which the `%cd:~0,0%`
+    // rewrite needs, whatever the registry says; /v:off: no delayed `!NAME!`
+    // expansion; /s: strip exactly the outer quotes of the /c string.
+    args: ["/d", "/e:on", "/v:off", "/s", "/c", `"${line}"`],
     windowsVerbatimArguments: true,
   };
 }

@@ -133,7 +133,7 @@ test("another batch file runs through cmd.exe with every argument quoted", () =>
     file: "C:\\WINDOWS\\system32\\cmd.exe",
     argv0: '"C:\\WINDOWS\\system32\\cmd.exe"',
     args: [
-      "/d", "/v:off", "/s", "/c",
+      "/d", "/e:on", "/v:off", "/s", "/c",
       '""C:\\Tools\\my codex\\codex.bat" "app-server" "--listen" "ws://127.0.0.1:1" "100%%cd:~0,0% ^sure & done" "end\\\\""',
     ],
     windowsVerbatimArguments: true,
@@ -143,7 +143,7 @@ test("another batch file runs through cmd.exe with every argument quoted", () =>
   const unreadable = codexLaunchCommand(bat, [], {
     platform: "win32", env: { SystemRoot: "D:\\WINDOWS" }, readFile: () => { throw new Error("EACCES"); },
   });
-  assert.deepEqual(unreadable.args, ["/d", "/v:off", "/s", "/c", '""C:\\Tools\\my codex\\codex.bat""']);
+  assert.deepEqual(unreadable.args, ["/d", "/e:on", "/v:off", "/s", "/c", '""C:\\Tools\\my codex\\codex.bat""']);
   assert.equal(unreadable.file, "D:\\WINDOWS\\System32\\cmd.exe");
   assert.equal(unreadable.argv0, '"D:\\WINDOWS\\System32\\cmd.exe"');
   assert.equal(codexLaunchCommand(bat, [], { platform: "win32", env: {}, readFile: () => "" }).file,
