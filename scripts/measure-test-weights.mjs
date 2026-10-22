@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 //   node scripts/measure-test-weights.mjs --out scripts/electron-test-weights.json \
 //     --cwd apps/desktop --run "npm run test:electron:files --" electron/__tests__/*.test.ts
 //
+// --run is split on spaces; quoted arguments are not supported.
 // Each file runs once, in its own process, with HOME on a scratch folder so
 // the desktop suites do not write into the real ~/.letagents. The output maps
 // each file to whole seconds of wall time. Rerun it after a suite changes a lot;
@@ -46,11 +47,13 @@ export function mergeWeights(previous, measured) {
   return Object.fromEntries(Object.entries(next).sort(([left], [right]) => (left < right ? -1 : 1)));
 }
 
+// A missing file starts an empty map; a corrupt one is an error, not a reset.
 function readWeights(file) {
   try {
     return JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    return {};
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw new Error(`${file} is not readable JSON: ${error.message}`);
   }
 }
 

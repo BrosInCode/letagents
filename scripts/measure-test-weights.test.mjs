@@ -49,3 +49,22 @@ test("the command times each file alone and writes the weights file", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("a corrupt weights file stops the run instead of being replaced", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "measure-test-weights-corrupt-"));
+  try {
+    writeFileSync(path.join(directory, "fast.mjs"), "");
+    const out = path.join(directory, "weights.json");
+    writeFileSync(out, "{not json");
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, [script, "--out", out, "--cwd", directory, "--run", process.execPath, "fast.mjs"], {
+          stdio: ["ignore", "pipe", "pipe"],
+        }),
+      /not readable JSON/,
+    );
+    assert.equal(readFileSync(out, "utf8"), "{not json");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
