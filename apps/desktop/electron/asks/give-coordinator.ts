@@ -80,6 +80,7 @@ type Gift = {
   purgePending?: boolean;
   purgeTries?: number;
 };
+/** Gifts by entry id: a link given again after a failed try has two rows, so the failed agent is still removed. */
 type Journal = { version: 1; gifts: Record<string, Gift> };
 
 function journalPath(): string {
@@ -89,7 +90,10 @@ function journalPath(): string {
 async function readJournal(): Promise<Journal> {
   try {
     const parsed = JSON.parse(await readFile(journalPath(), "utf8")) as Partial<Journal>;
-    return parsed?.version === 1 && parsed.gifts && typeof parsed.gifts === "object" ? { version: 1, gifts: parsed.gifts } : { version: 1, gifts: {} };
+    if (parsed?.version !== 1 || !parsed.gifts || typeof parsed.gifts !== "object") return { version: 1, gifts: {} };
+    // Older journals were keyed by link token; every row is keyed by its entry id from here on.
+    const gifts = Object.values(parsed.gifts).filter(gift => gift && typeof gift.entryId === "string" && gift.entryId);
+    return { version: 1, gifts: Object.fromEntries(gifts.map(gift => [gift.entryId, gift])) };
   } catch { return { version: 1, gifts: {} }; }
 }
 
@@ -206,7 +210,7 @@ export class AskGiveCoordinator {
       if (!roomId || !token || !grantId || !expiresAt) throw new AskGiveError("LetAgents didn't confirm the agent's access. Try again.");
       // Recorded before the daemon has the agent: if this attempt dies here, the watcher removes what it left.
       await updateJournal(journal => {
-        journal.gifts[input.token] = { token: input.token, askId: claimed.id, entryId, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
+        journal.gifts[entryId] = { token: input.token, askId: claimed.id, entryId, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
           windowId: null, lastUsedPercent: null, consumedPercent: 0, starting: true };
       });
       creating = true;
@@ -224,7 +228,8 @@ export class AskGiveCoordinator {
       prepared = entry;
       // The agent exists now; a crash from here on still leaves it watched.
       await updateJournal(journal => {
-        journal.gifts[input.token] = { token: input.token, askId: claimed.id, entryId: entry.id, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
+        delete journal.gifts[entryId];
+        journal.gifts[entry.id] = { token: input.token, askId: claimed.id, entryId: entry.id, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
           windowId: null, lastUsedPercent: null, consumedPercent: 0 };
       });
       if (!await this.daemon.compareAndSetDesiredState(entry.id, "paused", "running")) {
@@ -238,7 +243,7 @@ export class AskGiveCoordinator {
       const window = mainWindow(usage, null, input.providerId, input.model);
       // What this app's other gifts may still use is already promised, so it isn't left to give.
       const promised = Object.values((await readJournal()).gifts)
-        .filter(gift => gift.token !== input.token && gift.providerId === input.providerId && !gift.purgePending)
+        .filter(gift => gift.entryId !== ready.id && gift.providerId === input.providerId && !gift.purgePending)
         .reduce((total, gift) => total + Math.max(0, gift.amountPercent - gift.consumedPercent), 0);
       const left = window ? 100 - window.usedPercent - promised : 100;
       if (window && left < input.amountPercent) {
@@ -249,8 +254,8 @@ export class AskGiveCoordinator {
       const waitingForAsker = joined.state === "on_hold"
         && Boolean(await this.daemon.compareAndSetDesiredState(ready.id, "running", "paused").catch(() => false));
       await updateJournal(journal => {
-        const gift = journal.gifts[input.token];
-        if (gift) journal.gifts[input.token] = { ...gift, entryId: ready.id, windowId: window?.id ?? null, lastUsedPercent: window?.usedPercent ?? null, waitingForAsker };
+        const gift = journal.gifts[ready.id];
+        if (gift) journal.gifts[ready.id] = { ...gift, windowId: window?.id ?? null, lastUsedPercent: window?.usedPercent ?? null, waitingForAsker };
       });
       this.startWatching();
       return joined;
@@ -263,9 +268,10 @@ export class AskGiveCoordinator {
         })
         : true;
       // Forget it only once it is really gone; otherwise the watcher keeps trying.
-      if (stopped) await updateJournal(journal => { delete journal.gifts[input.token]; });
+      const key = prepared?.id ?? entryId;
+      if (stopped) await updateJournal(journal => { delete journal.gifts[entryId]; delete journal.gifts[key]; });
       else {
-        await updateJournal(journal => { const gift = journal.gifts[input.token]; if (gift) { gift.starting = false; gift.purgePending = true; gift.purgeTries = 1; } });
+        await updateJournal(journal => { const gift = journal.gifts[key]; if (gift) { gift.starting = false; gift.purgePending = true; gift.purgeTries = 1; } });
         this.startWatching();
       }
       await this.api.release(input.token, false).catch(() => undefined);
@@ -318,7 +324,7 @@ export class AskGiveCoordinator {
     if (preview && (FINISHED.has(preview.ask.state) || preview.ask.is_giver === false)) return this.finish(gift);
     if (gift.waitingForAsker && preview?.ask.state === "active") {
       if (await this.daemon.compareAndSetDesiredState(gift.entryId, "paused", "running").catch(() => false)) {
-        await updateJournal(journal => { const current = journal.gifts[gift.token]; if (current) current.waitingForAsker = false; });
+        await updateJournal(journal => { const current = journal.gifts[gift.entryId]; if (current) current.waitingForAsker = false; });
       }
       return;
     }
@@ -334,7 +340,7 @@ export class AskGiveCoordinator {
       await this.api.end(gift.token, "amount_used").catch(() => undefined);
       return this.finish(gift);
     }
-    await updateJournal(journal => { const current = journal.gifts[gift.token]; if (current) journal.gifts[gift.token] = { ...current, ...counted }; });
+    await updateJournal(journal => { const current = journal.gifts[gift.entryId]; if (current) journal.gifts[gift.entryId] = { ...current, ...counted }; });
   }
 
   /**
@@ -348,12 +354,12 @@ export class AskGiveCoordinator {
     } catch (error) {
       const purgeTries = (gift.purgeTries ?? 0) + 1;
       if (purgeTries < GIVE_UP_PURGE_TRIES) {
-        await updateJournal(journal => { const current = journal.gifts[gift.token]; if (current) Object.assign(current, { starting: false, purgePending: true, purgeTries }); });
+        await updateJournal(journal => { const current = journal.gifts[gift.entryId]; if (current) Object.assign(current, { starting: false, purgePending: true, purgeTries }); });
         throw error;
       }
       console.warn("[agent gifts] could not remove", gift.entryId, `after ${purgeTries} tries; it stays in the agent list to remove by hand`, error);
     }
-    await updateJournal(journal => { delete journal.gifts[gift.token]; });
+    await updateJournal(journal => { delete journal.gifts[gift.entryId]; });
   }
 
   /**
@@ -365,7 +371,7 @@ export class AskGiveCoordinator {
     const journal = await readJournal();
     for (const gift of Object.values(journal.gifts)) {
       const paused = await this.daemon.compareAndSetDesiredState(gift.entryId, "running", "paused").catch(() => false);
-      if (paused) await updateJournal(next => { if (next.gifts[gift.token]) next.gifts[gift.token]!.pausedForQuit = true; });
+      if (paused) await updateJournal(next => { if (next.gifts[gift.entryId]) next.gifts[gift.entryId]!.pausedForQuit = true; });
     }
   }
 
@@ -374,7 +380,7 @@ export class AskGiveCoordinator {
     const journal = await readJournal();
     for (const gift of Object.values(journal.gifts).filter(entry => entry.pausedForQuit)) {
       const resumed = await this.daemon.compareAndSetDesiredState(gift.entryId, "paused", "running").catch(() => false);
-      if (resumed) await updateJournal(next => { if (next.gifts[gift.token]) next.gifts[gift.token]!.pausedForQuit = false; });
+      if (resumed) await updateJournal(next => { if (next.gifts[gift.entryId]) next.gifts[gift.entryId]!.pausedForQuit = false; });
     }
   }
 
@@ -394,6 +400,11 @@ export class AskGiveCoordinator {
     throw new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
   }
 
+  /**
+   * An id the daemon never had (an attempt that died before its create call)
+   * is answered "purged": the daemon's absent-identity rule in
+   * lifecycle-administration-coordinator.ts, pinned by its own test.
+   */
   private async stopAndPurge(entryId: string): Promise<void> {
     await this.daemon.setDesiredState(entryId, "stopped").catch(() => undefined);
     for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {

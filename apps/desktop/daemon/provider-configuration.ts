@@ -339,6 +339,8 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   }
   const stored = plainPolicy(input.launchPolicy, provider);
   const policy = withoutHomeHarness(stored);
+  // Every rental is a guest here, as in the adapter's attestation: an agent that
+  // works for someone else gets no local tools, whether given (`_ask_`) or rented.
   const guest = input.supervisorEntryId?.startsWith("supervised_rental_") === true;
   const homeHarness = !guest && storedHomeHarness(stored) && homeHarnessProviders.has(provider);
   const homeHarnessField = homeHarness ? { homeHarness: true as const } : {};
