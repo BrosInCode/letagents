@@ -130,19 +130,33 @@ test("a path written for Windows is read against the project, whichever separato
     [windows, "cat 'C:\\work\\repo\\\\x'", true], [windows, "cat 'C:\\work\\repo\\.\\x'", true], [windows, "cat 'C:\\work\\repo\\.git\\config'", true],
     [windows, "cat 'C:\\work\\repo\\.GIT\\config'", true], [windows, "cat 'C:\\work\\repo\\.env'", true], [windows, "cat 'C:\\work\\repo\\.ssh\\id_rsa'", true],
     [windows, "cat 'src\\.env'", true], [windows, "cat 'src\\.git\\config'", true],
+    // Windows drops the dots and spaces at the end of a name, so these climb or name the history store. Three dots are a plain name.
+    [windows, "ls 'C:\\work\\repo\\.. '", true], [windows, "ls 'C:\\work\\repo\\. '", true], [windows, "cat 'C:\\work\\repo\\...\\x'", false], [windows, "cat '.. \\x'", true],
+    [windows, "cat 'C:\\work\\repo\\.git.\\config'", true], [windows, "cat '.git \\config'", true], [windows, "cat 'C:\\work\\repo\\x. '", false],
+    // `=`, `:` and `,` may be part of a folder's name: `C:/work/repo,other` is a sibling of the project.
+    [windows, "cat C:/work/repo,other/x", true], [windows, "cat C:/work/repo=other/x", true], [windows, "cat C:/work/repo/x,y", false],
+    // cmd.exe puts a variable's value in place of `%NAME%`.
+    [windows, "cat %USERPROFILE%/x", true], [windows, "ls %APPDATA%", true], [windows, "git log --format=%h", false], [windows, "git log --format=%h%s", true],
     // A project on a share.
     [share, "cat '\\\\nas\\share\\repo\\x'", false], [share, "cat //nas/share/repo/x", false], [share, "ls '\\\\nas\\share\\repo'", false],
     [share, "cat '\\\\nas\\share\\other\\x'", true], [share, "cat '\\\\nas\\other\\repo\\x'", true], [share, "cat '\\\\nas\\share'", true], [share, "cat 'C:\\work\\repo\\x'", true],
+    [share, "cat //nas/share/repo,other/x", true],
     // A POSIX project reads no Windows path at all.
     [project, "cat '\\Users\\dev\\shop-api\\x'", true], [project, "cat 'C:\\Users\\dev\\shop-api\\x'", true], [project, "cat C:/Users/dev/shop-api/x", true],
     [project, "cat '..\\..\\x'", true], [project, "cat '\\\\nas\\share\\x'", true], [project, "cat 'src\\a.ts'", true], [project, "cat a:/etc/passwd", true],
+    // On a POSIX project a one-letter name before `:` is not a drive, as `grep 'key: value'` and Git formats write it.
+    [project, "grep -rn 'y: string' src", false], [project, "git log -1 --format=x:%s", false], [project, "git log --author=a:b", false], [project, "cat C:x", false],
+    [project, "git log --format=%h%s", false], [project, "cat /Users/dev/shop-api/a:/Users/dev/shop-api/b", false], [project, "cat /Users/dev/shop-api/x,y", false],
+    // A sibling folder whose name holds `:`, `=` or `,` is not the project and a relative name.
+    [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true], [project, "cat '/Users/dev/shop-api/.. '", true],
   ];
   for (const [root, command, needs] of cases) {
     assert.equal(commandNeedsPerson(command, root), needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
     assert.equal(commandOnlyReads(command, root), !needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
   }
   // A drive, a share, or a folder on whichever drive is current is not a project.
-  for (const root of ["C:\\", "C:", "C:/", "C:work", "\\\\nas\\share", "\\\\nas\\share\\", "//nas", "//nas/share", "\\work\\repo", "C:\\work\\..\\repo", "C:\\work\\\\repo"]) {
+  for (const root of ["C:\\", "C:", "C:/", "C:work", "\\\\nas\\share", "\\\\nas\\share\\", "//nas", "//nas/share", "\\work\\repo", "C:\\work\\..\\repo", "C:\\work\\\\repo",
+    "C:\\work\\repo.", "C:\\work\\repo\\.. ", "/tmp/repo\\", "/tmp/repo\\/"]) {
     assert.equal(commandNeedsPerson("ls", root), true, root);
   }
   assert.deepEqual(buildPermissionReviewRequest({ commands: ["ls"], project: "C:\\work\\repo\\" })?.state, { commands: ["ls"], project: "C:\\work\\repo" });
