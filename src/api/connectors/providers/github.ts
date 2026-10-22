@@ -44,6 +44,8 @@ const ACCESS_DENY_TTL_MS = 60_000;
 const TOKEN_SAFETY_MS = 5 * 60_000;
 const MAX_CACHE_ENTRIES = 2_000;
 const READ_PERMISSIONS = { issues: "read", metadata: "read" } as const;
+/** For `/users/{login}` only: no issue access. */
+const METADATA_PERMISSIONS = { metadata: "read" } as const;
 /** The status of a read LetAgents itself refused (repository outside the installation, or not readable by the login). */
 export const ACCESS_REFUSED = 403;
 
@@ -188,7 +190,7 @@ export interface GitHubIssuesProvider extends WorkItemProvider {
 
 function credentialsOf(conn: ProviderConnection): GitHubAppCredentials {
   const credentials = conn.credentials as Partial<GitHubAppCredentials>;
-  if (credentials.kind !== "github_app" || !credentials.installation_id || !credentials.login) {
+  if (credentials.kind !== "github_app" || !credentials.installation_id || !credentials.login || !credentials.repository) {
     throw new TrackerProviderError("auth", "This GitHub Issues connection is incomplete. Connect it again.");
   }
   return credentials as GitHubAppCredentials;
@@ -206,13 +208,18 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
   const fetchImpl = options.fetchImpl ?? fetch;
   const directory = options.directory ?? defaultGitHubAppDirectory;
   const now = options.now ?? (() => new Date());
-  // Per installation and repository ("" = no repository scope): a read-only token.
+  // Per installation, repository and permission set: a read-only token for one repository.
   const tokens = new Map<string, { token: string; reuseUntil: number }>();
   // Per installation, login and repository: whether the login may read it.
   const access = new Map<string, { allowed: boolean; until: number }>();
 
-  async function mintToken(installationId: string, repoName: string | null): Promise<string> {
-    const cacheKey = `${installationId}:${repoName ?? ""}`;
+  /** Every token names exactly one repository: GitHub refuses it for any other. */
+  async function mintToken(
+    installationId: string,
+    repoName: string,
+    permissions: Record<string, string> = READ_PERMISSIONS,
+  ): Promise<string> {
+    const cacheKey = `${installationId}:${repoName}:${Object.keys(permissions).sort().join(",")}`;
     const cached = tokens.get(cacheKey);
     if (cached && cached.reuseUntil > now().getTime()) return cached.token;
     const app = await directory.appCredentials();
@@ -224,7 +231,7 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
         url: `${GITHUB_API}/app/installations/${encodeURIComponent(installationId)}/access_tokens`,
         method: "POST",
         headers: { Authorization: `Bearer ${jwt}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-        body: { ...(repoName ? { repositories: [repoName] } : {}), permissions: READ_PERMISSIONS },
+        body: { repositories: [repoName], permissions },
         secrets: [jwt],
       });
     } catch (error) {
@@ -267,7 +274,7 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
     const holder = await directory.repositoryInstallation(name);
     if (!holder || holder.installation_id !== installationId) throw new GitHubAccessRefusedError(login, name);
     const repoName = (holder.full_name ?? name).split("/")[1]!;
-    const cacheKey = `${installationId}:${login.toLowerCase()}:${name}`;
+    const cacheKey = `${installationId}:${conn.tracker_user_id ?? ""}:${login.toLowerCase()}:${name}`;
     const cached = access.get(cacheKey);
     let allowed = cached && cached.until > now().getTime() ? cached.allowed : null;
     if (allowed === null) {
@@ -278,7 +285,8 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
         // The answer must be about the person who connected: a renamed login
         // that someone else took later has another GitHub id.
         const userId = asRecord(response.user).id;
-        const samePerson = !conn.tracker_user_id || userId === undefined || String(userId) === conn.tracker_user_id;
+        const samePerson = Boolean(conn.tracker_user_id) && userId !== undefined && userId !== null
+          && String(userId) === conn.tracker_user_id;
         allowed = Boolean(permission && permission !== "none" && samePerson);
       } catch (error) {
         // 404: GitHub does not know this login for the repository.
@@ -376,31 +384,13 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
     return items;
   }
 
-  /** Open issues assigned to the login in the installation's repositories it can read. */
+  /**
+   * Test connection: open issues assigned to the login in the repository the
+   * connection was made with. No search across the installation, so no token
+   * reaches past one repository.
+   */
   async function listAssignedToMe(conn: ProviderConnection, limit: number): Promise<ExternalItem[]> {
-    const { installation_id: installationId, login } = credentialsOf(conn);
-    const token = await mintToken(installationId, null);
-    const response = await get(token, "/search/issues", {
-      q: `is:issue is:open assignee:${login}`,
-      sort: "updated",
-      order: "desc",
-      per_page: String(Math.min(limit, PAGE_SIZE)),
-    });
-    const items: ExternalItem[] = [];
-    for (const issue of Array.isArray(asRecord(response.json).items) ? asRecord(response.json).items as unknown[] : []) {
-      const repo = /^https:\/\/api\.github\.com\/repos\/([^/]+\/[^/]+)$/.exec(asString(asRecord(issue).repository_url) ?? "")?.[1];
-      const name = repo ? normalizeGitHubRepo(repo) : null;
-      if (!name) continue;
-      try {
-        await assertReadable(conn, name);
-      } catch (error) {
-        if (error instanceof GitHubAccessRefusedError) continue;
-        throw error;
-      }
-      const item = toItem(conn, name, issue);
-      if (item) items.push(item);
-    }
-    return items;
+    return listRepo(conn, credentialsOf(conn).repository, { assigneeMe: true }, limit);
   }
 
   const notWritten = () => new TrackerProviderError("definite", "Rules do not write to GitHub Issues yet.");
@@ -411,18 +401,28 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
     assertMember,
 
     async whoAmI(conn): Promise<TrackerUser> {
-      const { installation_id: installationId, login } = credentialsOf(conn);
+      const { installation_id: installationId, login, repository } = credentialsOf(conn);
       const installation = await directory.installation(installationId);
       if (!installation) {
         throw new TrackerProviderError("auth", "The LetAgents GitHub App is no longer installed for this connection. Install it, then connect GitHub Issues again.");
       }
-      const token = await mintToken(installationId, null);
-      const user = asRecord((await get(token, `/users/${encodeURIComponent(login)}`)).json);
-      const id = user.id === undefined || user.id === null ? null : String(user.id);
+      // Connect passes the signed-in person's GitHub id; the permission check
+      // has already proved it. Otherwise ask GitHub, with a metadata-only token
+      // for the connected repository.
+      let id = conn.tracker_user_id;
+      let label = login;
+      if (!id) {
+        const holder = await directory.repositoryInstallation(repository);
+        if (!holder || holder.installation_id !== installationId) throw new GitHubAccessRefusedError(login, repository);
+        const token = await mintToken(installationId, (holder.full_name ?? repository).split("/")[1]!, METADATA_PERMISSIONS);
+        const user = asRecord((await get(token, `/users/${encodeURIComponent(login)}`)).json);
+        id = user.id === undefined || user.id === null ? null : String(user.id);
+        label = asString(user.login) ?? login;
+      }
       if (!id) throw new TrackerProviderError("definite", `GitHub does not know the login ${login}.`);
       return {
         id,
-        label: asString(user.login) ?? login,
+        label,
         site: {
           key: `installation:${installationId}`,
           url: `https://github.com/${encodeURIComponent(installation.target_login)}`,

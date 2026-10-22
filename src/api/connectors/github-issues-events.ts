@@ -6,7 +6,8 @@ import { connectorErrorText } from "./connections.js";
 import { parseGitHubIssuesWebhook } from "./providers/github.js";
 import type { ExternalItemChange } from "./providers/types.js";
 import type { TrackerConnectionRow } from "./store.js";
-import { getDefaultTrackerSync, type TrackerSync } from "./sync.js";
+import { githubReposInFilter } from "./room-filters.js";
+import { getDefaultTrackerSync, trackerPollIntervalMs, type TrackerSync } from "./sync.js";
 
 export interface GitHubIssuesEventDeps {
   sync: Pick<TrackerSync, "handleWebhook"> | null;
@@ -39,10 +40,17 @@ export async function applyGitHubIssuesEvent(
   if (!installationId || !deps.sync) return 0;
   const changes: ExternalItemChange[] = parseGitHubIssuesWebhook(payload);
   if (changes.length === 0) return 0;
+  // An issue LetAgents does not hold yet polls only filters naming its
+  // repository, at most twice per poll interval (the early-poll gap of sync).
+  const repos = new Set(changes.map((change) => change.key.slice(0, change.key.indexOf("#"))));
+  const earlyPoll = {
+    accept: (filter: string) => githubReposInFilter(filter).some((repo) => repos.has(repo)),
+    minGapMs: Math.round(trackerPollIntervalMs() / 2),
+  };
   let applied = 0;
   for (const connection of await deps.connectionsForInstallation(installationId)) {
     try {
-      applied += (await deps.sync.handleWebhook(connection, changes)).applied;
+      applied += (await deps.sync.handleWebhook(connection, changes, { earlyPoll })).applied;
     } catch (error) {
       console.error("GitHub Issues event apply failed:", connectorErrorText(error));
     }

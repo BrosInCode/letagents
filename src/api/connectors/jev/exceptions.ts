@@ -6,7 +6,7 @@
  * fixed per answer: nothing Jev or the pull request wrote is posted, and
  * nothing is written to the tracker (invariant 5).
  */
-import { JEV_EXCEPTION_KINDS, JEV_PR_BODY_MAX_CHARS, type JevExceptionKind, type TrackerProvider } from "../../../../shared/ticket-connectors.mjs";
+import { JEV_EXCEPTION_KINDS, JEV_PR_BODY_MAX_CHARS, trackerProviderLabel, type JevExceptionKind, type TrackerProvider } from "../../../../shared/ticket-connectors.mjs";
 import type { Task } from "../../db/types.js";
 import type { JevEndpoint } from "../../messages/jev-conversation-routing.js";
 import type { RepoRoomEvent } from "../../repo-workflow/types.js";
@@ -52,7 +52,7 @@ export function buildJevExceptionQuestion(input: { title: string; body: string |
 
 /** The proposal posted for each answer. Fixed text: it names only the key, the number and the tracker. */
 export function jevExceptionProposal(kind: JevExceptionKind, input: { key: string; number: number; provider: TrackerProvider }): string {
-  const tracker = input.provider === "jira" ? "Jira" : "Linear";
+  const tracker = trackerProviderLabel(input.provider);
   const head = `[status] Pull request #${input.number} for ${input.key} closed without a merge. Jev reads it as`;
   const tail = `LetAgents changed nothing in ${tracker}.`;
   if (kind === "abandoned") return `${head} abandoned. Proposal: if the work stopped, move ${input.key} back in ${tracker} or close it there. ${tail}`;

@@ -574,4 +574,13 @@ test("a GitHub issue imports through the same sync path; messages match only the
   assert.deepEqual(scope.detectorOptions.githubRepos, ["acme/api"]);
   assert.deepEqual(detectKeysInMessage("Fixes #12, and other/repo#3", scope.detectorOptions).map((match) => match.ref), ["github:acme/api#12"]);
   assert.deepEqual((await filters!.getRoomTrackerScope(room.id)).githubRepos, ["acme/api"]);
+
+  // An issue event polls early only filters naming its repository, at most once per gap.
+  const other = await db!.createProjectWithName(unique("github-other"));
+  await filters!.upsertRoomTrackerFilter({ room_id: other.id, connection_id: connectionId, provider: "github", filter: "acme/web", enabled: true, account_id: accountId });
+  const accept = (text: string) => filters!.githubReposInFilter(text).includes("acme/api");
+  assert.equal(await filters!.requestMatchingRoomTrackerFilterSync(connectionId, accept, 60_000), 1);
+  assert.equal(await filters!.requestMatchingRoomTrackerFilterSync(connectionId, accept, 60_000), 0, "not again within the gap");
+  const [web] = await client!.db.select().from(schema!.room_tracker_filters).where(eq(schema!.room_tracker_filters.room_id, other.id));
+  assert.equal(web?.sync_requested_at, null);
 });

@@ -119,6 +119,8 @@ test("GitHub keys are not read inside words, paths, URLs or HTML entities", () =
   assert.deepEqual(detect("abc#12 x/#12 &#123; https://github.com/brosincode/letagents#12 #0 #12a"), []);
   assert.deepEqual(detect("(#12) and \"#13\", #12 again"), ["brosincode/letagents#12", "brosincode/letagents#13"]);
   assert.deepEqual(createGitHubKeyDetector([])("#12"), []);
+  assert.deepEqual(detect("color: #333; background:#999999 and border-color: #111"), [], "CSS colours are not issues");
+  assert.deepEqual(detect("see #333 in prose"), ["brosincode/letagents#333"], "in prose a number stays an issue");
 });
 
 test("pull requests link GitHub issues by branch, title, or a closing keyword in the body", () => {

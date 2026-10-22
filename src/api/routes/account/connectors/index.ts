@@ -434,33 +434,47 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       res.status(429).json({ error: "Too many connection attempts. Wait a few minutes and try again." });
       return;
     }
+    // The person is the signed-in GitHub id, checked before anything about the repository.
+    const githubUserId = account.provider_user_id ? String(account.provider_user_id) : null;
+    if (!githubUserId) {
+      res.status(400).json({ error: "Sign in to LetAgents with GitHub to connect GitHub Issues." });
+      return;
+    }
+    const credentials = { kind: "github_app" as const, installation_id: "", login: account.login, repository: repo };
     try {
       const holder = await githubDirectory.repositoryInstallation(repo);
-      if (!holder) {
-        // The same text as "cannot read": the answer never tells whether a private repository exists.
-        throw new GitHubAccessRefusedError(account.login, repo);
-      }
-      const credentials = { kind: "github_app" as const, installation_id: holder.installation_id, login: account.login };
-      const probe = {
+      if (!holder) throw new GitHubAccessRefusedError(account.login, repo);
+      credentials.installation_id = holder.installation_id;
+      // Every read checks the repository; connecting also needs the person's own
+      // access (not only public read), and the permission answer must name this
+      // GitHub id, so an outsider or a renamed login cannot attach to an installation.
+      await deps.providers.github.assertMember({
         id: "probe_github",
-        provider: "github" as const,
-        auth_kind: "github_app" as const,
+        provider: "github",
+        auth_kind: "github_app",
         status_map: {},
-        tracker_user_id: null as string | null,
+        tracker_user_id: githubUserId,
         credentials,
         async saveCredentials() { return true; },
-      };
-      // The GitHub login is the person who signed in, by GitHub id, not only by name.
-      const user = await deps.providers.github.whoAmI(probe);
-      if (!account.provider_user_id || user.id !== String(account.provider_user_id)) {
-        res.status(409).json({ error: "Your GitHub login changed since you signed in. Sign out of LetAgents, sign in again, then connect." });
-        return;
-      }
-      probe.tracker_user_id = user.id;
-      // Every read checks the repository; connecting also needs the person's own
-      // access (not only public read), so an outsider cannot attach to an installation.
-      await deps.providers.github.assertMember(probe, repo);
-      const row = await connections.connect({ account_id: accountId, provider: "github", auth_kind: "github_app", credentials, site: null });
+      }, repo);
+    } catch (error) {
+      // One answer for "not installed", "cannot read" and any GitHub error on
+      // the way (a mint 404 or 422, a timeout): no probe for private names.
+      if (!(error instanceof TrackerProviderError)) throw error;
+      console.warn("GitHub Issues connect refused:", connectorErrorText(error));
+      const refused = new GitHubAccessRefusedError(account.login, repo);
+      res.status(403).json({ error: refused.message });
+      return;
+    }
+    try {
+      const row = await connections.connect({
+        account_id: accountId,
+        provider: "github",
+        auth_kind: "github_app",
+        credentials,
+        site: null,
+        tracker_user_id: githubUserId,
+      });
       res.status(201).json({ connection: toConnectionView(row) });
     } catch (error) {
       sendProviderError(res, error);

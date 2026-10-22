@@ -98,6 +98,17 @@ export function normalizeGitHubRepo(value: string): string | null {
 }
 
 /**
+ * A bare `#333` or `#999999` written as a CSS colour (`color: #333;`): a
+ * colon before it or a semicolon after it. In prose, `#333` stays an issue
+ * number: there it cannot be told apart from one.
+ */
+function isCssColour(text: string, index: number, length: number): boolean {
+  const digits = length - 1;
+  if (digits !== 3 && digits !== 6) return false;
+  return /:\s*$/.test(text.slice(Math.max(0, index - 8), index)) || /^\s*;/.test(text.slice(index + length, index + length + 4));
+}
+
+/**
  * The GitHub hook: issue keys (`owner/repo#123`) for the named repositories
  * only. A bare `#123` names the default repository when it is one of them, or
  * the only one.
@@ -120,6 +131,7 @@ export function createGitHubKeyDetector(
     const seen = new Set<string>();
     const input = text.length > MAX_SCANNED_CHARS ? text.slice(0, MAX_SCANNED_CHARS) : text;
     for (const match of input.matchAll(GITHUB_KEY_PATTERN)) {
+      if (!match[1] && isCssColour(input, match.index!, match[0].length)) continue;
       const repo = match[1] ? normalizeGitHubRepo(match[1]) : bareRepo;
       const number = Number(match[2]);
       if (!repo || !known.has(repo) || !Number.isSafeInteger(number) || number < 1) continue;

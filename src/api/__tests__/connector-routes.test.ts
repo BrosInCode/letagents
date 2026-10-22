@@ -129,6 +129,9 @@ function githubProvider(): GitHubIssuesProvider {
       return "api";
     },
     async assertMember(conn, repo) {
+      // A GitHub error on the way (the App lacks Issues: read) must not change the answer.
+      if (repo === "acme/noissues") throw new TrackerProviderError("definite", "Tracker at api.github.com answered 422", 422);
+      if (conn.tracker_user_id !== "31524469") throw new GitHubAccessRefusedError((conn.credentials as { login: string }).login, repo);
       await this.assertReadable(conn, repo);
     },
   };
@@ -161,7 +164,7 @@ async function serve(options: { cipher?: boolean; env?: NodeJS.ProcessEnv; fetch
     githubAppConfigured: async () => options.githubApp !== false,
     githubDirectory: {
       async repositoryInstallation(repo) {
-        return repo === "acme/api" || repo === "acme/secret" ? { installation_id: "555" } : null;
+        return repo === "acme/api" || repo === "acme/secret" || repo === "acme/noissues" ? { installation_id: "555" } : null;
       },
     },
   });
@@ -477,7 +480,13 @@ test("GitHub Issues connects the App installation of a repository the person can
     assert.equal(unknown.json.error.replace("other/repo", "R"), unreadable.json.error.replace("acme/secret", "R"),
       "one text for 'not installed' and 'cannot read': no probe for private repository names");
     const renamed = await server.call("POST", "/account/connectors/github-app", { repository: "acme/api" }, "other_account");
-    assert.equal(renamed.status, 409, "the GitHub id behind the login must be the signed-in person's");
+    assert.equal(renamed.status, 403, "the GitHub id behind the login must be the signed-in person's");
+    const warn = console.warn;
+    console.warn = () => {};
+    const noIssues = await server.call("POST", "/account/connectors/github-app", { repository: "acme/noissues" });
+    console.warn = warn;
+    assert.equal(noIssues.status, 403, "a GitHub error after the lookup is the same refusal");
+    assert.equal(noIssues.json.error.replace("acme/noissues", "R"), unreadable.json.error.replace("acme/secret", "R"));
     assert.equal(server.memory.rows.size, 0);
     assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "not a repo" })).status, 400);
     assert.equal((await server.call("POST", "/account/connectors/github-app", { repository: "acme/api" }, "owner_token")).status, 403);
@@ -494,7 +503,8 @@ test("GitHub Issues connects the App installation of a repository the person can
       { ciphertext: row.credentials_ciphertext, iv: row.credentials_iv, version: row.credentials_version },
       { connection_id: row.id, account_id: "acct_1" },
     );
-    assert.deepEqual(stored, { kind: "github_app", installation_id: "555", login: "emmy" }, "only a reference to the installation");
+    assert.deepEqual(stored, { kind: "github_app", installation_id: "555", login: "emmy", repository: "acme/api" }, "only a reference to the installation");
+    assert.equal(row.tracker_user_id, "31524469");
 
     const webhook = await server.call("GET", `/account/connectors/${row.id}/webhook`);
     assert.equal(webhook.status, 409, "the App's own webhook delivers issue events");

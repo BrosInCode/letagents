@@ -27,6 +27,8 @@ export interface GitHubAppCredentials {
   kind: "github_app";
   installation_id: string;
   login: string;
+  /** The repository the person connected with (`owner/repo`, lower case): Test connection reads it. */
+  repository: string;
 }
 
 export type TrackerCredentials = JiraCredentials | LinearCredentials | GitHubAppCredentials;

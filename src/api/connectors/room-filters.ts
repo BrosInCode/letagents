@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { trackerProviderLabel, type RoomTrackerFilterView, type TrackerProvider } from "../../../shared/ticket-connectors.mjs";
 import { db } from "../db/client.js";
@@ -258,6 +258,30 @@ export async function requestRoomTrackerFilterSync(connectionId: string, now = n
     .where(and(eq(room_tracker_filters.connection_id, connectionId), eq(room_tracker_filters.enabled, true)))
     .returning({ id: room_tracker_filters.id });
   return rows.length;
+}
+
+/**
+ * Asks for an early poll of only the connection's filters that `accept` names,
+ * and not again within `minGapMs` of the last ask. GitHub Issues uses it: any
+ * GitHub user can open an issue on a public repository, so an event must not
+ * poll every repository of the installation.
+ */
+export async function requestMatchingRoomTrackerFilterSync(
+  connectionId: string,
+  accept: (filter: string) => boolean,
+  minGapMs: number,
+  now = new Date(),
+): Promise<number> {
+  const f = room_tracker_filters;
+  const rows = await db.select({ id: f.id, filter: f.filter }).from(f)
+    .where(and(eq(f.connection_id, connectionId), eq(f.enabled, true)));
+  const ids = rows.filter((row) => accept(row.filter)).map((row) => row.id);
+  if (ids.length === 0) return 0;
+  const cutoff = new Date(now.getTime() - minGapMs).toISOString();
+  const updated = await db.update(f).set({ sync_requested_at: now.toISOString() })
+    .where(and(inArray(f.id, ids), sql`(${f.sync_requested_at} IS NULL OR ${f.sync_requested_at} < ${cutoff})`))
+    .returning({ id: f.id });
+  return updated.length;
 }
 
 /** Rooms that import from the connection: where its ticket states belong. */

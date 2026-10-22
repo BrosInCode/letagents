@@ -82,6 +82,8 @@ export interface ConnectionService {
     auth_kind: TrackerAuthKind;
     credentials: TrackerCredentials;
     site: { key: string; url: string | null; name: string } | null;
+    /** The tracker user id the caller already proved (GitHub Issues: the signed-in GitHub id). */
+    tracker_user_id?: string | null;
   }): Promise<TrackerConnectionRow>;
   /** Record what a provider error means for the connection. */
   recordFailure(row: TrackerConnectionRow, error: unknown): Promise<string>;
@@ -138,7 +140,7 @@ export function createConnectionService(deps: {
         provider: input.provider,
         auth_kind: input.auth_kind,
         status_map: defaultStatusMap(input.provider),
-        tracker_user_id: null,
+        tracker_user_id: input.tracker_user_id ?? null,
         credentials: input.credentials,
         async saveCredentials(next) { probe.credentials = next; return true; },
       };

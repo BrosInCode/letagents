@@ -32,6 +32,7 @@ import {
   claimDueRoomTrackerFilters,
   finishRoomTrackerFilterSync,
   getCachedRoomTrackerScope,
+  requestMatchingRoomTrackerFilterSync,
   requestRoomTrackerFilterSync,
   roomIdsWithTrackerFilter,
   type RoomTrackerFilterRow,
@@ -93,10 +94,23 @@ export interface ApplyTrackerItemOptions {
   roomIds?: readonly string[];
 }
 
+export interface WebhookSyncOptions {
+  /**
+   * For a ticket LetAgents does not hold yet: poll early only the filters this
+   * accepts, at most once per `minGapMs`. Without it, every filter of the
+   * connection polls early (Jira and Linear, whose webhooks the owner set up).
+   */
+  earlyPoll?: { accept: (filter: string) => boolean; minGapMs: number };
+}
+
 export interface TrackerSync {
   applyItem(connection: TrackerConnectionRow, item: ExternalItem, options?: ApplyTrackerItemOptions): Promise<ApplyTrackerItemResult>;
   syncFilter(filter: RoomTrackerFilterRow, intervalMs?: number): Promise<{ seen: number; changed: number; error: string | null }>;
-  handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]): Promise<{ applied: number }>;
+  handleWebhook(
+    connection: TrackerConnectionRow,
+    changes: readonly ExternalItemChange[],
+    options?: WebhookSyncOptions,
+  ): Promise<{ applied: number }>;
   importTicketForRoom(roomId: string, matches: readonly TicketKeyMatch[]): Promise<Task | undefined>;
   /** After a person links a card to a ticket: bind it if the room's filter matches the ticket. */
   refreshLinkedCard(roomId: string, externalRef: string): Promise<void>;
@@ -414,7 +428,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     }
   }
 
-  async function handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]) {
+  async function handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[], options: WebhookSyncOptions = {}) {
     if (connection.status !== "active") return { applied: 0 };
     const provider = deps.providers[connection.provider as TrackerProvider];
     const named = [...new Set(changes.filter((change) => !change.deleted).map((change) => change.key))].slice(0, MAX_WEBHOOK_KEYS);
@@ -438,7 +452,13 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
       }
     }
     // A ticket new to LetAgents may match a room's filter: poll soon.
-    if (named.length > keys.length) await requestRoomTrackerFilterSync(connection.id, now());
+    if (named.length > keys.length) {
+      if (options.earlyPoll) {
+        await requestMatchingRoomTrackerFilterSync(connection.id, options.earlyPoll.accept, options.earlyPoll.minGapMs, now());
+      } else {
+        await requestRoomTrackerFilterSync(connection.id, now());
+      }
+    }
     return { applied };
   }
 

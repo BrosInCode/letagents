@@ -88,7 +88,7 @@ function connection(credentials: Partial<GitHubAppCredentials> = {}): ProviderCo
     auth_kind: "github_app",
     status_map: { ...DEFAULT_STATUS_MAPS.github },
     tracker_user_id: "31524469",
-    credentials: { kind: "github_app", installation_id: INSTALLATION, login: "EmmyMay", ...credentials },
+    credentials: { kind: "github_app", installation_id: INSTALLATION, login: "EmmyMay", repository: "brosincode/letagents", ...credentials },
     async saveCredentials() { return true; },
   };
 }
@@ -187,16 +187,16 @@ test("getItem reads one issue; a pull request number or a missing issue is no it
   await assert.rejects(provider.getItem(connection(), "HT-12"), /not a GitHub issue key/);
 });
 
-test("whoAmI names the installation as the site and the person by GitHub id", async () => {
+test("whoAmI names the installation as the site; without a proven id it asks GitHub with a metadata-only token", async () => {
   const fetch = fakeFetch([mint, (call) => call.url.pathname === "/users/EmmyMay" ? { json: fixture("github-user") } : undefined]);
   const provider = createGitHubIssuesProvider({ fetchImpl: fetch.impl, directory: directory(), now });
-  assert.deepEqual(await provider.whoAmI(connection()), {
-    id: "31524469",
-    label: "EmmyMay",
-    site: { key: `installation:${INSTALLATION}`, url: "https://github.com/BrosInCode", name: "BrosInCode" },
-  });
+  const site = { key: `installation:${INSTALLATION}`, url: "https://github.com/BrosInCode", name: "BrosInCode" };
+  assert.deepEqual(await provider.whoAmI(connection()), { id: "31524469", label: "EmmyMay", site });
+  assert.equal(fetch.calls.length, 0, "connect passes the signed-in GitHub id: nothing to ask");
+
+  assert.deepEqual(await provider.whoAmI({ ...connection(), tracker_user_id: null }), { id: "31524469", label: "EmmyMay", site });
   const minted = fetch.calls.find((call) => call.url.pathname.endsWith("/access_tokens"))!;
-  assert.deepEqual(minted.body, { permissions: { issues: "read", metadata: "read" } });
+  assert.deepEqual(minted.body, { repositories: ["letagents"], permissions: { metadata: "read" } });
 });
 
 test("a removed installation or app asks the person to connect again", async () => {
@@ -220,18 +220,21 @@ test("a removed installation or app asks the person to connect again", async () 
     error instanceof TrackerProviderError && error.outcome === "auth");
 });
 
-test("Test connection lists assigned issues only in repositories the login can read", async () => {
+test("Test connection reads issues assigned to the person in the connected repository, and no token reaches past one repository", async () => {
   const fetch = fakeFetch([
     mint,
-    (call) => call.url.pathname === "/search/issues" ? { json: fixture("github-search-assigned") } : undefined,
-    (call) => call.url.pathname === "/repos/brosincode/letagents/collaborators/EmmyMay/permission" ? { json: fixture("github-permission-read") } : undefined,
-    (call) => call.url.pathname === "/repos/brosincode/secret-roadmap/collaborators/EmmyMay/permission" ? { json: fixture("github-permission-none") } : undefined,
+    permission("github-permission-read"),
+    (call) => call.url.pathname === "/repos/brosincode/letagents/issues" ? { json: fixture("github-repo-issues") } : undefined,
   ]);
   const provider = createGitHubIssuesProvider({ fetchImpl: fetch.impl, directory: directory(), now });
   const items = await provider.listItems(connection(), null, { assigneeMe: true, limit: 5 });
-  assert.deepEqual(items.map((item) => item.key), ["brosincode/letagents#42"]);
-  const search = fetch.calls.find((call) => call.url.pathname === "/search/issues")!;
-  assert.equal(search.url.searchParams.get("q"), "is:issue is:open assignee:EmmyMay");
+  assert.ok(items.length > 0);
+  const list = fetch.calls.find((call) => call.url.pathname.endsWith("/issues"))!;
+  assert.equal(list.url.searchParams.get("assignee"), "EmmyMay");
+  assert.ok(!fetch.calls.some((call) => call.url.pathname.startsWith("/search")), "no search across the installation");
+  for (const call of fetch.calls.filter((entry) => entry.url.pathname.endsWith("/access_tokens"))) {
+    assert.deepEqual(call.body?.repositories, ["letagents"], "every token names one repository");
+  }
   await assert.rejects(provider.listItems(connection(), null, {}), /Name at least one repository/);
 });
 
@@ -266,8 +269,11 @@ test("a GitHub App issues event goes to the same webhook path for each connectio
   const rows = [{ id: "tcon_a" }, { id: "tcon_b" }] as TrackerConnectionRow[];
   const applied = await applyGitHubIssuesEvent(fixture("github-issues-webhook-closed"), INSTALLATION, {
     sync: {
-      async handleWebhook(row, changes) {
+      async handleWebhook(row, changes, options) {
         handled.push({ id: row.id, keys: changes.map((change) => change.key) });
+        assert.equal(options?.earlyPoll?.accept("BrosInCode/letagents acme/api"), true);
+        assert.equal(options?.earlyPoll?.accept("acme/api acme/web"), false, "filters not naming the repository never poll early");
+        assert.ok((options?.earlyPoll?.minGapMs ?? 0) >= 7_500);
         return { applied: 1 };
       },
     },
@@ -305,6 +311,18 @@ test("a permission answer about another GitHub user (a renamed login taken by so
   const fetch = fakeFetch([mint, (call) => call.url.pathname.endsWith("/permission") ? { json: other } : undefined]);
   const provider = createGitHubIssuesProvider({ fetchImpl: fetch.impl, directory: directory(), now });
   await assert.rejects(provider.listItems(connection(), "brosincode/letagents", {}), GitHubAccessRefusedError);
+});
+
+test("a permission answer without a GitHub id, or a connection without one, reads nothing", async () => {
+  const noId = { ...(fixture("github-permission-read") as Record<string, unknown>), user: { login: "EmmyMay" } };
+  const provider = createGitHubIssuesProvider({
+    fetchImpl: fakeFetch([mint, (call) => call.url.pathname.endsWith("/permission") ? { json: noId } : undefined]).impl,
+    directory: directory(),
+    now,
+  });
+  await assert.rejects(provider.listItems(connection(), "brosincode/letagents", {}), GitHubAccessRefusedError);
+  const anonymous = createGitHubIssuesProvider({ fetchImpl: fakeFetch([mint, permission("github-permission-read")]).impl, directory: directory(), now });
+  await assert.rejects(anonymous.listItems({ ...connection(), tracker_user_id: null }, "brosincode/letagents", {}), GitHubAccessRefusedError);
 });
 
 test("connecting needs the person's own access to the repository, not only public read", async () => {

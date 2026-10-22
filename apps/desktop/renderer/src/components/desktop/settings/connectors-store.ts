@@ -50,10 +50,25 @@ export function remoteSignInsChanged(): void {
 
 export function loadTrackerConnections(): Promise<void> {
   trackerLoad ??= (async () => {
-    const version = trackerVersion;
+    let list: Awaited<ReturnType<Window["letagentsDesktop"]["connectors"]["list"]>> | null = null;
+    let failure: unknown = null;
+    // A change made during the read makes its answer stale: read once more.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const version = trackerVersion;
+      try {
+        list = await window.letagentsDesktop.connectors.list();
+        failure = null;
+      } catch (error) {
+        list = null;
+        failure = error;
+      }
+      if (version === trackerVersion) break;
+      list = null;
+      failure = null;
+    }
     try {
-      const list = await window.letagentsDesktop.connectors.list();
-      if (version !== trackerVersion) return;
+      if (failure) throw failure;
+      if (!list) return;
       trackerConnectionsState.notConfigured = list.not_configured === true;
       trackerConnectionsState.connections = list.connections;
       trackerConnectionsState.providers = list.providers;
@@ -71,10 +86,25 @@ export function loadTrackerConnections(): Promise<void> {
 
 export function loadRemoteSignIns(): Promise<void> {
   remoteLoad ??= (async () => {
-    const version = remoteVersion;
+    let connections: RemoteSignIn[] | null = null;
+    let failure: unknown = null;
+    // A change made during the read makes its answer stale: read once more.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const version = remoteVersion;
+      try {
+        connections = (await window.letagentsDesktop.mcpConnections.list()).connections;
+        failure = null;
+      } catch (error) {
+        connections = null;
+        failure = error;
+      }
+      if (version === remoteVersion) break;
+      connections = null;
+      failure = null;
+    }
     try {
-      const connections = (await window.letagentsDesktop.mcpConnections.list()).connections;
-      if (version !== remoteVersion) return;
+      if (failure) throw failure;
+      if (!connections) return;
       remoteSignInsState.connections = connections;
       remoteSignInsState.error = null;
     } catch (error) {

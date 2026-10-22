@@ -645,15 +645,19 @@ repositories to import.
    be about the GitHub id that connected, so a renamed login that someone else
    takes later reads nothing.
 
-"Not installed" and "cannot read" give the same text, so the answer never tells
+"Not installed", "cannot read" and any GitHub error during the connect checks
+(for example the App lacks Issues: read) give the same 403 text; the real reason
+goes to the server log only. They give the same text, so the answer never tells
 whether a private repository exists. Test connection and the room filter test
 are rate limited for GitHub Issues (they spend the organization's App budget).
 
 The token for each read is minted for the installation with
 `repositories: [<that repository>]` and `permissions: { issues: read,
 metadata: read }`, so GitHub itself limits it to one repository and to reading.
-Test connection searches open issues assigned to you with an installation token
-limited to reading, and lists only issues in repositories you can read.
+Every token names exactly one repository; no token reaches the whole
+installation. Test connection lists open issues assigned to you in the
+repository you connected with. A lookup of your GitHub id, when one is needed,
+uses a metadata-only token for that repository.
 
 **States.** GitHub has open and closed issues. The raw status adds whether an
 open issue has an assignee, so the status map can tell the two apart. Labels
@@ -673,7 +677,10 @@ not issues and are skipped.
 Each event goes to the same path as a Jira or Linear webhook
 (`TrackerSync.handleWebhook`) for every active GitHub Issues connection on that
 installation: the event only names the issue, and sync reads it again through
-the checks above. There is no per-connection webhook to set up.
+the checks above. There is no per-connection webhook to set up. Anyone can open
+an issue on a public repository, so an event for an issue LetAgents does not
+hold yet asks for an early poll only of the filters that name its repository,
+and at most once per half poll interval.
 
 **Not yet.** Rules do not write to GitHub Issues: the rule routes refuse a rule
 on a GitHub Issues connection, and the provider's transition and comment calls
