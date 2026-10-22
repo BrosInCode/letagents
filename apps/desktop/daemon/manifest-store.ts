@@ -1186,7 +1186,17 @@ export class ManifestStore {
     if (bool(state.turn_control_present) && ![null, "completed"].includes(state.turn_status as string | null)) throw new Error("Purge cannot remove an agent with nonterminal turn control.");
     const blockers = [
       database.prepare("SELECT 1 FROM worker_session_bindings WHERE entry_id=? LIMIT 1").get(agentId),
-      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
+      // Confirmed deletion may discard queued work that never reached a provider.
+      // Keep started turns, saved results, and ambiguous crash recovery fenced.
+      database.prepare(`SELECT 1 FROM supervised_agent_inbox i WHERE i.agent_id=?
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        AND NOT (i.state IN ('pending','retryable','blocked') AND i.attempt_count=0
+          AND i.provider_turn_id IS NULL AND i.outcome IS NULL
+          AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
+          AND NOT EXISTS (SELECT 1 FROM supervised_agent_terminal_results r WHERE r.inbox_item_id=i.inbox_item_id)
+          AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e
+            WHERE e.inbox_item_id=i.inbox_item_id AND e.idempotency_key GLOB 'recovery:blocked:*'))
+        LIMIT 1`).get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND state IN ('prepared','executing') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_ingress_health WHERE agent_id=? AND state NOT IN ('stopped','blocked') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(agentId),
