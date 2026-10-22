@@ -4,8 +4,10 @@ import type {
   TrackerConnectionPatch,
   TrackerConnectionTestResult,
   TrackerConnectionView,
+  TrackerJevMetrics,
   TrackerOAuthStart,
   TrackerProvider,
+  TrackerRuleDraftResult,
   TrackerRuleInput,
   TrackerRuleList,
   TrackerRuleVersionView,
@@ -215,4 +217,14 @@ export async function rollbackTrackerRule(connectionId: unknown, ruleId: unknown
 
 export async function removeTrackerRule(connectionId: unknown, ruleId: unknown): Promise<void> {
   await apiFetch<{ deleted: boolean }>(rulePath(connectionId, ruleId), { method: "DELETE" });
+}
+
+/** PR6: Jev turns a sentence into a rule for the editor. Nothing is saved until the person presses Save. */
+export function draftTrackerRule(connectionId: unknown, sentence: unknown): Promise<TrackerRuleDraftResult> {
+  return apiFetch<TrackerRuleDraftResult>(`${rulePath(connectionId)}/draft`, json("POST", { sentence: String(sentence ?? "").slice(0, 2_000) }), { timeoutMs: 20_000 });
+}
+
+/** PR6: count, outcome and latency of Jev questions for the account's connections (7 days). */
+export function getTrackerJevMetrics(): Promise<TrackerJevMetrics> {
+  return apiFetch<TrackerJevMetrics>("/account/tracker-jev-metrics");
 }

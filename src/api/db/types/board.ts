@@ -17,7 +17,9 @@ export type BoardIntentActionType =
   | "task_claim"
   | "task_close"
   | "task_override"
-  | "task_update";
+  | "task_update"
+  /** Ticket connectors PR6: "Move KEY to STATUS?" after Jev linked a pull request. A person decides it. */
+  | "tracker_jev_link";
 
 export type BoardIntentStatus =
   | "pending"

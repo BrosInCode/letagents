@@ -23,6 +23,11 @@ export interface DesktopTaskSummary {
     label: string;
     url: string;
   }>;
+  /**
+   * Ticket connectors PR6: pull requests Jev suggested for this card that no
+   * person accepted yet. The card's details offer Accept and Reject for each.
+   */
+  jevSuggestedPullRequests?: Array<{ url: string; number: number | null; title: string | null }>;
   activeLeases: Array<{
     id: string;
     kind: "work" | "review" | string;

@@ -51,7 +51,26 @@
 
     <form v-if="draft" class="settings-form settings-connector-rule-form" data-testid="settings-connector-rule-form" @submit.prevent="save">
       <p class="settings-control-title">{{ draft.id ? "Edit rule" : "New rule" }}</p>
-      <!-- PR6 extension point: a "Draft from a sentence" control goes here and calls applyDraft(rule). -->
+      <div v-if="canDraft" class="settings-connector-rule-sentence" data-testid="settings-connector-rule-sentence">
+        <label class="settings-field"><span>Draft from a sentence</span>
+          <input
+            v-model="sentence"
+            type="text"
+            maxlength="500"
+            placeholder="When a PR is merged, move the ticket to Done and comment"
+            data-testid="settings-connector-rule-sentence-input"
+            @keydown.enter.prevent="draftFromSentence"
+          />
+        </label>
+        <button
+          class="ghost-button"
+          type="button"
+          :disabled="drafting || !sentence.trim()"
+          data-testid="settings-connector-rule-sentence-draft"
+          @click="draftFromSentence"
+        >{{ drafting ? "Drafting" : "Draft" }}</button>
+        <p class="settings-muted-note">Jev fills the form below. Check it, then press Save. The sentence is sent to Jev's model provider.</p>
+      </div>
       <slot name="draft" :apply="applyDraft" />
       <label class="settings-field"><span>Name</span>
         <input v-model="draft.name" type="text" maxlength="120" required placeholder="Move to In Review when a PR opens" />
@@ -224,6 +243,32 @@ function applyDraft(rule: TrackerRuleInput) {
   draft.value = ruleDraftFrom(rule, draft.value?.id ?? null);
 }
 
+// PR6: "Draft from a sentence". Behind the connection's Jev switch, as every Jev call.
+const sentence = ref("");
+const drafting = ref(false);
+const canDraft = computed(() => props.connection.jev_linking_enabled && typeof api().draft === "function");
+
+async function draftFromSentence() {
+  const draftRule = api().draft;
+  const text = sentence.value.trim();
+  if (!draftRule || !text || drafting.value) return;
+  drafting.value = true;
+  feedback.value = null;
+  try {
+    const result = await draftRule(props.connection.id, text);
+    if (result.draft) {
+      applyDraft(result.draft);
+      feedback.value = { state: "success", message: "Jev drafted the rule. Check every field, then press Save." };
+    } else {
+      feedback.value = { state: "error", message: result.error ?? "Jev could not draft this rule. Write it by hand." };
+    }
+  } catch (error) {
+    feedback.value = { state: "error", message: message(error, "Jev could not draft this rule. Write it by hand.") };
+  } finally {
+    drafting.value = false;
+  }
+}
+
 function onEventChange() {
   if (!draft.value) return;
   draft.value.action = ruleActionOptions(draft.value.event)[0]!.value;
@@ -292,6 +337,11 @@ defineExpose({ applyDraft });
 .settings-connector-rules {
   display: grid;
   gap: 8px;
+}
+
+.settings-connector-rule-sentence {
+  display: grid;
+  gap: 6px;
 }
 
 .settings-connector-rules summary {

@@ -18,6 +18,8 @@ export type DesktopTaskSummaryPayload = {
     url?: string | null;
     ref?: string | null;
     state?: string | null;
+    /** Server-set link mark (PR1, PR6). */
+    linked_by?: string | null;
   }> | null;
   workflow_refs?: Array<{
     provider?: string;
@@ -81,6 +83,9 @@ export function mapDesktopTaskSummaryPayload(
       ref: artifact.ref || null,
       state: artifact.state || null,
     })),
+    jevSuggestedPullRequests: (task.workflow_artifacts || [])
+      .filter((artifact) => artifact.linked_by === "jev_suggested" && artifact.kind === "pull_request" && artifact.url)
+      .map((artifact) => ({ url: artifact.url!, number: artifact.number ?? null, title: artifact.title || null })),
     workflowRefs: (task.workflow_refs || [])
       .map((ref) => ({
         provider: ref.provider || "unknown",

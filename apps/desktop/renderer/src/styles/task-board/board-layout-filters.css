@@ -463,3 +463,15 @@
     transform: none !important;
   }
 }
+
+/* Ticket connectors PR6: a pull request Jev suggested, with Accept and Reject. */
+.desktop-task-jev-suggestion {
+  display: grid;
+  gap: 6px;
+}
+
+.desktop-task-jev-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

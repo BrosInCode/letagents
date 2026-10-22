@@ -357,7 +357,7 @@ test("application registers startup preparation before rental recovery without d
       initializeDesktopNotifications: async () => {}, prepareDesktopNotificationLaunch() {}, prepareDesktopNotifications() {}, setDesktopNotificationBadgeCount() {},
     } }),
     mock.module("../main/attachments.js", { namedExports: { handleAttachmentProtocolRequest() {} } }),
-    mock.module("../main/ask-links.js", { namedExports: { registerAskLinks() {} } }),
+    mock.module("../main/ask-links.js", { namedExports: { claimDesktopInstance: () => true, registerAskLinks() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
     mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", workspaceRoot: "/fixture" } }),
     mock.module("../main/room-stream.js", { namedExports: {

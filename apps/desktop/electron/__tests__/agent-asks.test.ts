@@ -8,12 +8,13 @@ process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH = join(mkdtempSync(join(tmpdir(), 
 const appEvents = new Map<string, (...args: any[]) => void>();
 const appCalls: string[] = [];
 const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClient() { appCalls.push("scheme"); },
-  on(name: string, handler: (...args: any[]) => void) { appEvents.set(name, handler); }, quit() { appCalls.push("quit"); } };
+  on(name: string, handler: (...args: any[]) => void) { appEvents.set(name, handler); }, quit() { appCalls.push("quit"); },
+  instanceLock: true, requestSingleInstanceLock() { return this.instanceLock; } };
 const autoUpdater = { on() {} };
 mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
-const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow } = await import("../asks/give-coordinator.js");
+const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow, usedUpLimit } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
-const { parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
+const { askLinkFromArgv, claimDesktopInstance, parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
 const { readFileSync } = await import("node:fs");
 
 const TOKEN = "abcdefghijklmnopqrstuvwxyz012345";
@@ -24,6 +25,11 @@ test("links parse from the app scheme and the web, and nothing else", () => {
   for (const url of [`http://letagents.chat/ask/${TOKEN}`, `letagents://room/${TOKEN}`, "letagents://ask/short", `https://x/ask/${TOKEN}/more`, "nope"]) {
     assert.equal(parseAskLink(url), null, url);
   }
+});
+
+test("on Windows and Linux the link is found among the launch arguments", () => {
+  assert.equal(askLinkFromArgv(["C:\\LetAgents\\LetAgents.exe", "--flag", `letagents://ask/${TOKEN}`]), TOKEN);
+  assert.equal(askLinkFromArgv(["/opt/LetAgents/letagents", "--no-sandbox"]), null);
 });
 
 test("a given agent is always a guest entry, so every rental safeguard applies", () => {
@@ -49,7 +55,7 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
+function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
   const calls: string[] = [];
   const api = {
     claim: async () => { calls.push("claim"); if (overrides.claimFails) throw new Error("Someone is adding this agent right now."); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
@@ -66,7 +72,8 @@ function fakes(overrides: { joinedState?: string; readyFails?: boolean; usedPerc
     ensureRunning: async () => ({ generation: 1 }),
     compareAndSetDesiredState: async (_id: string, from: string, to: string) => { states.push(`${from}->${to}`); return true; },
     list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed" } : entry],
-    getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 }] } } }),
+    getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 },
+      ...(overrides.shortUsedPercent === undefined ? [] : [{ id: "five_hour", label: "5 hours", usedPercent: overrides.shortUsedPercent }])] } } }),
     setDesiredState: async () => { stopped = true; calls.push("stop"); }, purgeAgent: async () => { calls.push("purge"); return { outcome: "purged" }; },
   };
   const grants = { createRentalPausedAndInstall: async () => { calls.push("install"); return { entry, agentKey: "john/helper" }; } };
@@ -103,6 +110,33 @@ test("the pre-check counts what other gifts from the same app may still use", as
   await second.coordinator.pauseForQuit();
   const { writeFileSync } = await import("node:fs");
   writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+});
+
+test("a used-up short limit refuses the gift, even with weekly room left", async () => {
+  const { coordinator, calls } = fakes({ usedPercent: 20, shortUsedPercent: 100 });
+  await assert.rejects(coordinator.give({ ...give, providerId: "claude-code", model: "claude-opus-5-5" }), /Your usage limit \(5 hours\) is used up/);
+  assert.ok(calls.includes("purge"), "the started agent is stopped");
+  assert.equal(calls.at(-1), "release:false", "and the link is given back");
+});
+
+test("only the limits that stop this model count as used up", () => {
+  const usage = (windows: Array<[string, number]>) => ({ providerContinuationId: "c", context: null, compaction: null,
+    account: { state: "available" as const, windows: windows.map(([id, usedPercent]) => ({ id, label: id, usedPercent, resetsAt: null, observedAt: "now" })) } });
+  const full = (windows: Array<[string, number]>, providerId: string, model: string | null) => usedUpLimit(usage(windows), providerId, model)?.id ?? null;
+  // Claude: another model's weekly limit and extra usage don't stop this one.
+  assert.equal(full([["seven_day", 40], ["seven_day_opus", 100]], "claude-code", "claude-sonnet-5-5"), null);
+  assert.equal(full([["seven_day", 40], ["seven_day_opus", 100]], "claude-code", "claude-opus-5-5"), "seven_day_opus");
+  assert.equal(full([["five_hour", 20], ["overage", 100]], "claude-code", "claude-opus-5-5"), null);
+  assert.equal(full([["five_hour", 100]], "claude-code", "claude-opus-5-5"), "five_hour");
+  // Codex: only the main Codex bucket.
+  assert.equal(full([["codex:primary", 10], ["extra:primary", 100]], "codex", "gpt-5"), null);
+  assert.equal(full([["codex:secondary", 100]], "codex", "gpt-5"), "codex:secondary");
+  // Cursor: included usage is used up only when no on-demand budget is left.
+  assert.equal(full([["cursor-plan", 100], ["cursor-on-demand", 50]], "cursor", null), null);
+  assert.equal(full([["cursor-plan", 100], ["cursor-on-demand", 100]], "cursor", null), "cursor-plan");
+  assert.equal(full([["cursor-plan", 100]], "cursor", null), "cursor-plan");
+  // The amount is counted against this model's main limit, never another model's.
+  assert.equal(mainWindow(usage([["seven_day_opus", 90], ["five_hour", 10], ["seven_day", 30]]), null, "claude-code", "claude-sonnet-5-5")?.id, "seven_day");
 });
 
 test("only a model on the current list can be given", async () => {
@@ -231,4 +265,35 @@ test("a substitute stays paused until the asker accepts it, then starts", async 
   assert.deepEqual(states.slice(2), ["paused->running"], "accepted: the agent starts");
   await coordinator.watchOnce();
   assert.deepEqual(states.slice(3), [], "started once");
+});
+
+test("off macOS only the first instance runs; a later one hands its link over and starts nothing", async t => {
+  const inbox = await import("../main/ask-link-inbox.js");
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const argv = process.argv;
+  t.after(() => { Object.defineProperty(process, "platform", platform); process.argv = argv; app.instanceLock = true; });
+  Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+  appEvents.delete("second-instance");
+  inbox.takePendingAskLink();
+
+  app.instanceLock = false;
+  assert.equal(claimDesktopInstance(), false, "a second instance must exit");
+  assert.equal(appEvents.has("second-instance"), false);
+
+  app.instanceLock = true;
+  process.argv = ["/opt/LetAgents/letagents", `letagents://ask/${TOKEN}`];
+  assert.equal(claimDesktopInstance(), true);
+  assert.equal(inbox.takePendingAskLink(), TOKEN, "a link the app was launched with is delivered");
+  appEvents.get("second-instance")!({}, ["/opt/LetAgents/letagents", `letagents://ask/${"z".repeat(32)}`]);
+  assert.equal(inbox.takePendingAskLink(), "z".repeat(32), "a later instance's link reaches this one");
+});
+
+test("the app claims its instance before starting anything", () => {
+  const main = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+  const claim = main.indexOf("if (claimDesktopInstance()) startDesktopApp();\nelse app.exit(0);");
+  assert.ok(claim > 0);
+  assert.ok(main.indexOf("function startDesktopApp(): void {") > claim);
+  for (const startup of ["prepareDesktopNotifications();", "registerAskLinks();", "registerDesktopIpcHandlers();", 'app.once("ready"']) {
+    assert.ok(main.indexOf(startup) > main.indexOf("function startDesktopApp(): void {"), `${startup} runs only in the first instance`);
+  }
 });

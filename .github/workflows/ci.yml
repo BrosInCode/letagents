@@ -140,7 +140,7 @@ jobs:
         run: node --import tsx --test src/api/__tests__/github-notify-account-access.test.ts src/api/__tests__/github-room-events.test.ts src/api/__tests__/github-room-event-projection.test.ts src/api/__tests__/github-room-event-artifacts.test.ts src/api/__tests__/github-git-room-routing.test.ts
 
       - name: Test ticket connectors and the workflow effect broker
-        run: node --import tsx --test src/api/__tests__/connector-crypto.test.ts src/api/__tests__/connector-providers.test.ts src/api/__tests__/connector-routes.test.ts src/api/__tests__/tracker-effect-broker.test.ts src/api/__tests__/tracker-webhooks.test.ts src/api/__tests__/workflow-effect-broker.test.ts src/api/__tests__/github-review-effect-provider.test.ts src/api/__tests__/tracker-rules.test.ts src/api/__tests__/tracker-rule-routes.test.ts
+        run: node --import tsx --test src/api/__tests__/connector-crypto.test.ts src/api/__tests__/connector-providers.test.ts src/api/__tests__/connector-routes.test.ts src/api/__tests__/tracker-effect-broker.test.ts src/api/__tests__/tracker-webhooks.test.ts src/api/__tests__/workflow-effect-broker.test.ts src/api/__tests__/github-review-effect-provider.test.ts src/api/__tests__/tracker-rules.test.ts src/api/__tests__/tracker-rule-routes.test.ts src/api/__tests__/tracker-jev.test.ts src/api/__tests__/tracker-jev-routes.test.ts
 
       - name: Build Vue app
         run: npm run build:web
@@ -446,7 +446,7 @@ jobs:
 
       - name: Test tracker connections, rules and the workflow effect journal
         if: matrix.group == 2
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/tracker-sync-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts src/api/__tests__/tracker-rules-db.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/tracker-sync-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts src/api/__tests__/tracker-rules-db.test.ts src/api/__tests__/tracker-jev-db.test.ts
 
       - name: Test My work
         if: matrix.group == 2

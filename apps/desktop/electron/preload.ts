@@ -167,6 +167,9 @@ const api: DesktopApi = {
     getTaskTicket: (roomIdentifier: string, taskId: string) =>
       ipcRenderer.invoke("desktop:room:get-task-ticket", roomIdentifier, taskId),
     getMyWork: (query) => ipcRenderer.invoke("desktop:room:my-work", query ?? {}),
+    askMyWorkNeedsMe: (roomId, taskId) => ipcRenderer.invoke("desktop:room:my-work-needs-me", roomId, taskId),
+    decideTaskJevLink: (roomIdentifier, taskId, prUrl, decision) =>
+      ipcRenderer.invoke("desktop:room:decide-task-jev-link", roomIdentifier, taskId, prUrl, decision),
     listTrackerFilters: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:list-tracker-filters", roomIdentifier),
     saveTrackerFilter: (roomIdentifier: string, input) =>
@@ -369,7 +372,9 @@ const api: DesktopApi = {
       versions: (id, ruleId) => ipcRenderer.invoke("desktop:connectors:rules:versions", id, ruleId),
       rollback: (id, ruleId, version) => ipcRenderer.invoke("desktop:connectors:rules:rollback", id, ruleId, version),
       remove: (id, ruleId) => ipcRenderer.invoke("desktop:connectors:rules:remove", id, ruleId),
+      draft: (id, sentence) => ipcRenderer.invoke("desktop:connectors:rules:draft", id, sentence),
     },
+    jevMetrics: () => ipcRenderer.invoke("desktop:connectors:jev-metrics"),
   },
   mcpConnections: {
     list: () => ipcRenderer.invoke("desktop:mcp-connections:list"),

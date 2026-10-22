@@ -18,7 +18,9 @@ import { askApi, AskGiveError, type AskApi } from "./api.js";
 
 const READY_TIMEOUT_MS = 90_000;
 const READY_POLL_MS = 500;
-const WATCH_MS = 60_000;
+// Often enough that a busy turn can't run far past the amount between checks. Claude and
+// Cursor readings arrive as they change; Codex refreshes its own about every 30s.
+const WATCH_MS = 15_000;
 const FINISHED = new Set(["ended", "expired", "cancelled", "open"]);
 
 /**
@@ -56,8 +58,9 @@ export function giftPermissionProfile(providerId: string): string | null {
 
 type Gift = {
   token: string; askId: string; entryId: string; roomId: string; amountPercent: number;
-  /** Gifts from the same app share one usage limit. Older journals lack it. */
+  /** Gifts from the same app share one usage limit. Older journals lack these. */
   providerId?: string;
+  model?: string | null;
   /** Limit window being counted, and how much of it this gift has used so far (G16: survives resets). */
   windowId: string | null; lastUsedPercent: number | null; consumedPercent: number;
   /** Paused because the app quit; the next app start resumes it (D40: offline, then back). */
@@ -94,8 +97,34 @@ function updateJournal(change: (journal: Journal) => void): Promise<void> {
 }
 
 /** The window a gift counts against: the longest one the provider reports (weekly before 5-hour). */
-export function mainWindow(usage: ProviderUsage | null | undefined, preferred: string | null) {
+/**
+ * The limits this model runs against. Another model's own limit doesn't apply
+ * (Claude's Opus or Sonnet weekly, Codex's other buckets), nor does Claude's
+ * extra usage, which is spent only after the plan. Older journals know no model: all apply.
+ */
+export function modelLimits(usage: ProviderUsage | null | undefined, providerId?: string, model?: string | null) {
   const windows = usage?.account.state === "unavailable" ? [] : usage?.account.windows ?? [];
+  const name = (model ?? "").toLowerCase();
+  if (providerId === "claude-code") {
+    return windows.filter(limit => limit.id === "five_hour" || limit.id === "seven_day"
+      || (limit.id === "seven_day_opus" && name.includes("opus")) || (limit.id === "seven_day_sonnet" && name.includes("sonnet")));
+  }
+  if (providerId === "codex") {
+    const main = windows.filter(limit => limit.id.startsWith("codex:"));
+    return main.length ? main : windows;
+  }
+  return windows;
+}
+
+/** A limit that would stop this agent now. Cursor's included usage stops nothing while on-demand budget is left. */
+export function usedUpLimit(usage: ProviderUsage | null | undefined, providerId?: string, model?: string | null) {
+  const limits = modelLimits(usage, providerId, model);
+  const onDemand = providerId === "cursor" ? limits.find(limit => limit.id === "cursor-on-demand") : undefined;
+  return limits.find(limit => limit.usedPercent >= 100 && !(onDemand && limit.id === "cursor-plan" && onDemand.usedPercent < 100)) ?? null;
+}
+
+export function mainWindow(usage: ProviderUsage | null | undefined, preferred: string | null, providerId?: string, model?: string | null) {
+  const windows = modelLimits(usage, providerId, model);
   if (preferred) { const kept = windows.find(window => window.id === preferred); if (kept) return kept; }
   const rank = (label: string) => /week/i.test(label) ? 3 : /day|month/i.test(label) ? 2 : 1;
   return [...windows].sort((a, b) => rank(b.label) - rank(a.label))[0] ?? null;
@@ -173,7 +202,7 @@ export class AskGiveCoordinator {
       prepared = entry;
       // Recorded before the agent runs, so a crash from here on still leaves it watched.
       await updateJournal(journal => {
-        journal.gifts[input.token] = { token: input.token, askId: claimed.id, entryId: entry.id, roomId, providerId: input.providerId, amountPercent: input.amountPercent,
+        journal.gifts[input.token] = { token: input.token, askId: claimed.id, entryId: entry.id, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
           windowId: null, lastUsedPercent: null, consumedPercent: 0 };
       });
       if (!await this.daemon.compareAndSetDesiredState(entry.id, "paused", "running")) {
@@ -181,7 +210,10 @@ export class AskGiveCoordinator {
       }
       const ready = await this.waitUntilReady(entry.id);
       const usage = await this.readUsage(ready.id, roomId);
-      const window = mainWindow(usage, null);
+      // Any limit already used up (a 5-hour one, say) means the agent couldn't do anything.
+      const usedUp = usedUpLimit(usage, input.providerId, input.model);
+      if (usedUp) throw new AskGiveError(`Your usage limit (${usedUp.label}) is used up. Try again after it resets.`);
+      const window = mainWindow(usage, null, input.providerId, input.model);
       // What this app's other gifts may still use is already promised, so it isn't left to give.
       const promised = Object.values((await readJournal()).gifts)
         .filter(gift => gift.token !== input.token && gift.providerId === input.providerId)
@@ -255,11 +287,11 @@ export class AskGiveCoordinator {
       return;
     }
     const usage = await this.readUsage(gift.entryId, gift.roomId);
-    if (usage?.account.windows.some(window => window.usedPercent >= 100)) {
+    if (usedUpLimit(usage, gift.providerId, gift.model)) {
       await this.api.end(gift.token, "provider_limit").catch(() => undefined);
       return this.finish(gift);
     }
-    const window = mainWindow(usage, gift.windowId);
+    const window = mainWindow(usage, gift.windowId, gift.providerId, gift.model);
     if (!window) return;
     const counted = countUsage(gift, window);
     if (counted.consumedPercent >= gift.amountPercent) {

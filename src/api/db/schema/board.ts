@@ -156,7 +156,7 @@ export const board_intents = pgTable(
     ),
     action_type_check: check(
       "board_intents_action_type_check",
-      sql`${table.action_type} IN ('task_create', 'task_claim', 'task_close', 'task_override', 'task_update')`
+      sql`${table.action_type} IN ('task_create', 'task_claim', 'task_close', 'task_override', 'task_update', 'tracker_jev_link')`
     ),
   })
 );

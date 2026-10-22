@@ -160,6 +160,42 @@
       </button>
     </section>
 
+    <section
+      v-if="jevSuggestions.length"
+      class="desktop-task-detail-section"
+      aria-label="Suggested by Jev"
+      data-testid="room-board-jev-suggestions"
+    >
+      <h4>Suggested by Jev</h4>
+      <p class="desktop-task-detail-muted">
+        Jev thinks this pull request does this card's work. Rules run for it only after a person accepts.
+      </p>
+      <div v-for="pr in jevSuggestions" :key="pr.url" class="desktop-task-jev-suggestion">
+        <a class="desktop-task-detail-link" :href="pr.url" target="_blank" rel="noopener noreferrer">
+          <small>GitHub</small>
+          <span>{{ pr.number !== null ? `#${pr.number}` : "Pull request" }}{{ pr.title ? ` ${pr.title}` : "" }}</span>
+        </a>
+        <div v-if="canDecideJev" class="desktop-task-jev-actions">
+          <button
+            type="button"
+            class="desktop-task-detail-button"
+            :disabled="jevBusy !== null"
+            :data-testid="`jev-accept-${pr.number ?? 'pr'}`"
+            @click="decideJev(pr.url, 'accept')"
+          >{{ jevBusy === `${pr.url}:accept` ? "Accepting..." : "Accept" }}</button>
+          <button
+            type="button"
+            class="desktop-task-detail-button"
+            :disabled="jevBusy !== null"
+            :data-testid="`jev-reject-${pr.number ?? 'pr'}`"
+            @click="decideJev(pr.url, 'reject')"
+          >{{ jevBusy === `${pr.url}:reject` ? "Rejecting..." : "Reject" }}</button>
+        </div>
+      </div>
+      <p v-if="!canDecideJev" class="desktop-task-detail-muted">A room admin can accept or reject it.</p>
+      <p v-if="jevError" class="desktop-task-detail-muted" role="status">{{ jevError }}</p>
+    </section>
+
     <section v-if="ticket && task.ticketState" class="desktop-task-detail-section" aria-label="Ticket" data-testid="room-board-ticket-section">
       <h4>Ticket</h4>
       <p v-if="ticketDetailsError" class="desktop-task-detail-muted">{{ ticketDetailsError }}</p>
@@ -230,7 +266,7 @@ import { Pencil } from '@lucide/vue';
 import MarkdownBlock from '../formatting/MarkdownBlock.vue';
 import TaskLinkedThreads from './TaskLinkedThreads.vue';
 import type { DesktopAgentPresence, DesktopTaskSummary, DesktopTaskTicket } from "../../../../../../electron/ipc-types";
-import { desktopIpc } from "../../../../ipc/index.js";
+import { desktopIpc, getRoomBridge } from "../../../../ipc/index.js";
 import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
 import { useNow } from "../../../../composables/useNow";
@@ -272,6 +308,26 @@ const emit = defineEmits<{
 }>();
 
 const ticket = computed(() => ticketRefParts(props.task.externalRef));
+
+// Ticket connectors PR6: a pull request Jev suggested waits for a person.
+const jevSuggestions = computed(() => props.task.jevSuggestedPullRequests ?? []);
+const canDecideJev = computed(() => Boolean(props.canEdit && props.roomIdentifier && getRoomBridge()?.decideTaskJevLink));
+const jevBusy = ref<string | null>(null);
+const jevError = ref<string | null>(null);
+
+async function decideJev(prUrl: string, decision: "accept" | "reject"): Promise<void> {
+  const decide = getRoomBridge()?.decideTaskJevLink;
+  if (!decide || !props.roomIdentifier || jevBusy.value) return;
+  jevBusy.value = `${prUrl}:${decision}`;
+  jevError.value = null;
+  try {
+    await decide(props.roomIdentifier, props.task.id, prUrl, decision);
+  } catch {
+    jevError.value = decision === "accept" ? "The link could not be accepted. Try again." : "The link could not be rejected. Try again.";
+  } finally {
+    jevBusy.value = null;
+  }
+}
 
 const ticketState = computed(() => ticketStateLabel(props.task.ticketState));
 const ticketDetails = ref<DesktopTaskTicket | null>(null);

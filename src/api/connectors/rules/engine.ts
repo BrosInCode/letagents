@@ -76,6 +76,33 @@ export interface TrackerRuleRepoEventInput {
    * A lease, a hand-set `pr_url` or another artifact is not a confirmed link.
    */
   matchedByTicketKey: boolean;
+  /**
+   * PR6: the pull request is on the card through a Jev link that a person
+   * accepted (`linked_by: "jev_confirmed"`). A Jev suggestion is not enough.
+   */
+  linkConfirmedByPerson?: boolean;
+}
+
+/** One rule that would fire for a pull request event, and the writes it would plan (PR6). */
+export interface TrackerRulePreview {
+  rule_id: string;
+  rule_version: number;
+  rule_name: string;
+  connection_id: string;
+  external_ref: string;
+  event_type: string;
+  event_action: string;
+  event_url: string | null;
+  planned_actions: PlannedTrackerAction[];
+}
+
+/** A preview a person approved, with the room and card it is for. */
+export interface TrackerRuleApprovedPlan extends Omit<TrackerRulePreview, "planned_actions"> {
+  room_id: string;
+  task_id: string;
+  /** `jev:<intent id>`: the run's delivery, unique per rule and ticket. */
+  delivery_id: string;
+  planned_actions: unknown[];
 }
 
 export interface TrackerRuleRepoEventResult {
@@ -99,20 +126,28 @@ function checkRunPullRequestNumbers(storedEvent: TrackerRuleRepoEventInput["stor
   return Array.isArray(numbers) ? numbers.filter((number): number is number => typeof number === "number") : [];
 }
 
+/** Link marks that let a rule fire: a ticket key, or a Jev link a person accepted. Never `jev_suggested`. */
+export const CONFIRMED_LINK_MARKS: ReadonlySet<string> = new Set(["ticket_key", "jev_confirmed"]);
+
 /**
  * Whether the event reached the card through a confirmed link (ticket
  * connectors plan, PR5). A pull request or review counts when the resolver
- * matched it by the ticket key. A check run has no key of its own: it counts
- * when it ran for a pull request that the key linked to the card. PR6 adds a
- * human-confirmed Jev link here.
+ * matched it by the ticket key, or (PR6) through a Jev link a person
+ * accepted. A check run has no key of its own: it counts when it ran for a
+ * pull request that the key, or an accepted Jev link, put on the card. A Jev
+ * suggestion nobody accepted never counts (invariant 5).
  */
-export function eventLinkIsConfirmed(input: Pick<TrackerRuleRepoEventInput, "roomEvent" | "storedEvent" | "task" | "matchedByTicketKey">): boolean {
+export function eventLinkIsConfirmed(input: Pick<TrackerRuleRepoEventInput, "roomEvent" | "storedEvent" | "task" | "matchedByTicketKey" | "linkConfirmedByPerson">): boolean {
   const event = input.roomEvent;
-  if (event.kind === "pull_request" || event.kind === "pull_request_review") return input.matchedByTicketKey;
+  if (event.kind === "pull_request" || event.kind === "pull_request_review") {
+    return input.matchedByTicketKey || input.linkConfirmedByPerson === true;
+  }
   if (event.kind !== "check_run") return false;
   const numbers = new Set(checkRunPullRequestNumbers(input.storedEvent));
   return input.task.workflow_artifacts.some((artifact) => artifact.kind === "pull_request"
-    && artifact.linked_by === "ticket_key"
+    && typeof artifact.linked_by === "string" && CONFIRMED_LINK_MARKS.has(artifact.linked_by)
+    // The number in the URL, not the artifact's own field: the URL is what the mark was set for.
+    && pullRequestNumberFromUrl(artifact.url) === artifact.number
     && typeof artifact.number === "number" && numbers.has(artifact.number)
     && repositoryPullRequestUrl(artifact.url, event.repositoryFullName) !== null);
 }
@@ -408,6 +443,108 @@ export function createTrackerRuleEngine(deps: TrackerRuleEngineDeps) {
         console.warn("[ticket-connectors] tracker rules failed for a repo event:", errorText(error));
         return NO_RUNS;
       }
+    },
+
+    /**
+     * PR6: the rules that would fire for a pull request event if the card
+     * were linked, with the writes they would plan. Reads only: nothing is
+     * claimed or reserved. The same checks as `runForRepoEvent` apply (the
+     * room's filter connection, a card bound by sync, a trusted author, an
+     * owner who is still room admin); only the link is assumed.
+     */
+    async previewForRepoEvent(input: Omit<TrackerRuleRepoEventInput, "matchedByTicketKey" | "linkConfirmedByPerson" | "deliveryId">): Promise<TrackerRulePreview[]> {
+      if (isTrackerSyncEvent(input.storedEvent) || input.roomEvent.kind !== "pull_request") return [];
+      const ref = input.task.external_ref ? parseExternalRef(input.task.external_ref) : null;
+      if (!ref || (ref.provider !== "jira" && ref.provider !== "linear")) return [];
+      const provider = ref.provider as TrackerProvider;
+      try {
+        const scope = await deps.roomScope(input.task.room_id);
+        if (!scope.sources.some((source) => source.provider === provider)) return [];
+        const connection = await deps.roomConnection(input.task.room_id, provider);
+        if (!connection) return [];
+        const rules = await deps.store.forRoom(connection.connection_id, input.task.room_id);
+        if (rules.length === 0) return [];
+        if (!await deps.ticketBound({ connectionId: connection.connection_id, roomId: input.task.room_id, taskId: input.task.id, key: ref.key })) return [];
+        if (!repoEventIsTrusted(input.roomEvent, input.storedEvent)) return [];
+        const facts = trackerRuleFacts(input.roomEvent, input.storedEvent, null);
+        if (!facts) return [];
+        const matched = matchTrackerRules(rules, facts);
+        if (matched.length === 0 || !await deps.ownerIsRoomAdmin(input.task.room_id, connection.account_id)) return [];
+        const values = trackerRuleTemplateValues(input.roomEvent, input.storedEvent, input.task);
+        return matched.map((rule) => ({
+          rule_id: rule.id,
+          rule_version: rule.version,
+          rule_name: rule.name,
+          connection_id: connection.connection_id,
+          external_ref: ref.ref,
+          event_type: input.roomEvent.kind,
+          event_action: input.roomEvent.action,
+          event_url: input.roomEvent.kind === "pull_request" ? input.roomEvent.pullRequest.url : null,
+          planned_actions: planTrackerRuleActions(rule, values, provider),
+        }));
+      } catch (error) {
+        console.warn("[ticket-connectors] tracker rule preview failed:", errorText(error));
+        return [];
+      }
+    },
+
+    /**
+     * PR6: runs one rule's planned writes after a person approved them (a
+     * Jev link's board intent), through the same path as a matched event: a
+     * `tracker_rule_runs` row, then one journal row per action, each after
+     * the one before succeeded. `deliveryId` is `jev:<intent id>`, so a
+     * retried approval finds its run and reserves nothing new. Refused when
+     * the rule changed or was turned off, the connection or binding moved,
+     * or the owner lost room admin since the intent was made.
+     */
+    async runApprovedPlan(input: TrackerRuleApprovedPlan): Promise<{ status: "started" | "existing" | "refused"; reason?: string; run_id?: string }> {
+      const ref = parseExternalRef(input.external_ref);
+      if (!ref || (ref.provider !== "jira" && ref.provider !== "linear")) return { status: "refused", reason: "no_ticket" };
+      const planned = input.planned_actions.filter(isPlannedAction);
+      if (planned.length === 0 || planned.length !== input.planned_actions.length || planned.length > TRACKER_RULE_MAX_ACTIONS) {
+        return { status: "refused", reason: "invalid_plan" };
+      }
+      const connection = await deps.roomConnection(input.room_id, ref.provider as TrackerProvider);
+      if (!connection || connection.connection_id !== input.connection_id) return { status: "refused", reason: "connection_unavailable" };
+      const rule = (await deps.store.forRoom(connection.connection_id, input.room_id)).find((candidate) => candidate.id === input.rule_id);
+      if (!rule || rule.version !== input.rule_version) return { status: "refused", reason: "rule_changed" };
+      if (!await deps.ticketBound({ connectionId: connection.connection_id, roomId: input.room_id, taskId: input.task_id, key: ref.key })) {
+        return { status: "refused", reason: "ticket_not_bound" };
+      }
+      if (!await deps.ownerIsRoomAdmin(input.room_id, connection.account_id)) return { status: "refused", reason: "owner_not_admin" };
+      const { run, claimed } = await deps.store.claimRun({
+        rule_id: rule.id,
+        rule_version: rule.version,
+        rule_name: rule.name,
+        connection_id: connection.connection_id,
+        room_id: input.room_id,
+        task_id: input.task_id,
+        external_ref: ref.ref,
+        delivery_id: input.delivery_id,
+        event_type: input.event_type,
+        event_action: input.event_action,
+        event_url: input.event_url,
+        planned_actions: planned as unknown as Array<Record<string, unknown>>,
+      });
+      if (!run) return { status: "refused", reason: "debounced" };
+      if (!claimed) return { status: "refused", reason: run.outcome === "skipped" ? run.detail ?? "skipped" : "claimed_elsewhere", run_id: run.id };
+      if (run.outcome !== "pending") return { status: "existing", run_id: run.id };
+      if ((Array.isArray(run.effect_ids) ? run.effect_ids : []).length > 0) {
+        deps.schedule(() => advance(run.id, connection));
+        return { status: "existing", run_id: run.id };
+      }
+      let first: ReserveResult | null = null;
+      try {
+        first = await reserveAction(run, 0, connection);
+      } catch (error) {
+        console.warn("[ticket-connectors] an approved tracker write was not reserved:", errorText(error));
+      }
+      if (!first) {
+        await deps.store.finishRun(run.id, { outcome: "error", detail: "reservation_failed" });
+        return { status: "refused", reason: "reservation_failed", run_id: run.id };
+      }
+      deps.schedule(() => advance(run.id, connection, first!));
+      return { status: "started", run_id: run.id };
     },
 
     /**

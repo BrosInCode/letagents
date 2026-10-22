@@ -40,9 +40,12 @@ import {
 } from "../../request/agent-identity.js";
 import { resolveGitRoomProjectRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { registerJevLinkRoutes, respondToJevLinkIntentDecision, type JevLinkDecisions } from "./jev-links.js";
 
 export interface RoomBoardRouteDeps {
   taskEvents?: EventEmitter;
+  /** PR6: Jev link decisions; defaults to the server's service. */
+  jevLinks?: () => Promise<JevLinkDecisions>;
   ensureTaskGitRoomForActiveWorkLease?(input: { parentRoomId: string; taskId: string }): Promise<unknown>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
@@ -342,6 +345,7 @@ export function registerRoomBoardRoutes(
   const resolveBoardWorkerIdentity = deps.resolveOptionalWorkerIdentity ?? resolveOptionalWorkerIdentity;
   const getActiveBoardManagerForRoom = deps.getActiveBoardManagerForRoom ?? getActiveBoardManager;
   const getRoomBoardSettingsForRoom = deps.getRoomBoardSettingsForRoom ?? getRoomBoardSettings;
+  registerJevLinkRoutes(app, deps);
 
   app.get(/^\/rooms\/(.+)\/board-governance$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
@@ -575,6 +579,13 @@ export function registerRoomBoardRoutes(
       room_id: project.id,
       intent_id: intentId,
     });
+    // PR6: a person decides a Jev link, and the server runs what they approve.
+    if (existingIntent?.action_type === "tracker_jev_link") {
+      await respondToJevLinkIntentDecision({
+        req, res, project, intent: existingIntent, decision: "approve", decisionBy, reason, workerIdentity, deps,
+      });
+      return;
+    }
     let approvingManagerAssignmentId: string | null = null;
     if (workerIdentity) {
       const approvingManager = await getActiveBoardManagerForRoom(project.id);
@@ -765,6 +776,15 @@ export function registerRoomBoardRoutes(
     }
 
     const existingIntent = await getBoardIntent({ room_id: project.id, intent_id: intentId });
+    if (existingIntent?.action_type === "tracker_jev_link") {
+      await respondToJevLinkIntentDecision({
+        req, res, project, intent: existingIntent, decision: "deny",
+        decisionBy: requesterLabel(req, body, workerIdentity),
+        reason: deps.normalizeOptionalString(body.reason),
+        workerIdentity, deps,
+      });
+      return;
+    }
     if (existingIntent?.status === "denied") {
       const proposerNotification = await emitBoardIntentDecisionNotification({ deps, project, intent: existingIntent });
       res.json({ room_id: project.id, intent: existingIntent, proposer_notification: proposerNotification });

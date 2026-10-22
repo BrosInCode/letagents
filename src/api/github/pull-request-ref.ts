@@ -14,6 +14,7 @@ export function toGitHubRepoPullRequestRef(
     merged: pullRequest.merged,
     ...(pullRequest.draft ? { draft: true } : {}),
     authorLogin: pullRequest.user?.login,
+    ...(typeof pullRequest.user?.id === "number" ? { authorId: String(pullRequest.user.id) } : {}),
     ...(pullRequest.author_association ? { authorAssociation: pullRequest.author_association } : {}),
     mergedByLogin: pullRequest.merged_by?.login,
   };

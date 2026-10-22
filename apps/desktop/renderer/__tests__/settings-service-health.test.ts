@@ -32,6 +32,8 @@ async function component(supervisor: Partial<DesktopApi["supervisor"]> | undefin
     "@lucide/vue": Object.fromEntries(["ChevronRight"].map(name => [name, { render: () => null }])),
     "../../../../ipc/index.js": { desktopIpc: { supervisor } },
     "../../../../domain/service-health": { projectServiceHealth, updateServiceEvents },
+    // Ticket connectors PR6: the Jev metrics section reads its own bridge; not part of this test.
+    "./SettingsJevMetrics.vue": { default: { render: () => null } },
   };
   const javascript = ts.transpileModule(compiled.content, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
     .replace(/import\s+\{([\s\S]*?)\}\s+from\s+["']([^"']+)["'];?/g, (_all, names: string, name: string) => {
