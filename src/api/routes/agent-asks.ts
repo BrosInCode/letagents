@@ -19,7 +19,7 @@ const databaseStore = {
   create: asks.createAsk, byToken: asks.getAskByToken, byId: asks.getAskById, listRoom: asks.listRoomAsks,
   listAccount: asks.listAccountAsks, cancel: asks.cancelAsk, claim: asks.claimAsk, release: asks.releaseClaim,
   authority: asks.createAskLaunchAuthority, joined: asks.acknowledgeAskJoin, accept: asks.acceptSubstitute,
-  decline: asks.declineSubstitute, end: asks.endAsk, name: asks.personName, isAdmin: isProjectAdmin,
+  decline: asks.declineSubstitute, end: asks.endAsk, name: asks.personName, avatar: asks.personAvatarUrl, isAdmin: isProjectAdmin,
   room: getProjectById, forWorker: asks.askForWorker, canWrite: canWriteRoomRepo,
   files: workspace.listFiles, read: workspace.readRepoFile, search: workspace.searchRepo, propose: workspace.proposeChange,
   proposals: workspace.listProposals, reads: workspace.listReads, decide: workspace.decideProposal,
@@ -83,7 +83,7 @@ async function summary(ask: AgentAsk, viewer: string | null, store: AgentAskStor
   if (!detail) return base;
   const room = await store.room(ask.room_id).catch(() => null);
   return {
-    ...base, note: ask.note, room_display_name: room?.display_name ?? null,
+    ...base, asker_avatar_url: await store.avatar(ask.asker_account_id), note: ask.note, room_display_name: room?.display_name ?? null,
     is_asker: viewer === ask.asker_account_id, is_giver: viewer !== null && viewer === ask.giver_account_id,
     giver: ask.giver_account_id ? await store.name(ask.giver_account_id) : null,
     given_model_label: ask.given_model_label, given_amount_percent: ask.given_amount_percent,

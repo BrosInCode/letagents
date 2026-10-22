@@ -7,18 +7,35 @@
   >
     <div class="work-content">
       <header class="work-heading">
-        <div>
+        <div class="work-heading-title">
+          <slot name="navigation" />
           <h1>My work</h1>
-          <p>Your tasks and your agents’ work, across every room.</p>
         </div>
-        <button
-          type="button"
-          class="work-secondary"
-          @click="emit('open-trackers')"
-        >
-          <WorkIcon name="link" />Connectors
-        </button>
+        <div class="work-heading-actions">
+          <button
+            v-if="pendingMoves"
+            type="button"
+            class="work-text-button"
+            @click="applyGroups"
+          >
+            Show updates ↑
+          </button>
+          <button
+            type="button"
+            class="work-secondary"
+            :disabled="loading"
+            :aria-busy="loading"
+            aria-label="Refresh work"
+            data-testid="my-work-refresh"
+            @click="refresh"
+          >
+            <WorkIcon name="refresh" />Refresh
+          </button>
+        </div>
       </header>
+      <span class="work-sr-only" role="status">{{
+        loading ? "Refreshing work…" : ""
+      }}</span>
       <div
         class="work-tabs"
         role="tablist"
@@ -87,31 +104,6 @@
           /><kbd>/</kbd></label
         >
       </div>
-      <div class="work-sync-line">
-        <span role="status">{{
-          loading
-            ? "Refreshing work…"
-            : nextCursor
-              ? "Loaded work · more available below"
-              : ""
-        }}</span
-        ><button
-          v-if="pendingMoves"
-          type="button"
-          class="work-text-button"
-          @click="applyGroups"
-        >
-          Show updates ↑</button
-        ><button
-          type="button"
-          class="work-text-button"
-          :disabled="loading"
-          data-testid="my-work-refresh"
-          @click="refresh"
-        >
-          Refresh
-        </button>
-      </div>
       <div v-if="error" class="work-error" role="alert">
         {{ error }} <button type="button" @click="reload()">Retry</button>
       </div>
@@ -133,9 +125,8 @@
             ><template #summary
               ><span class="work-section-heading"
                 ><span>{{ group.label }}</span
-                ><span class="work-section-count">{{ group.cards.length }}</span
-                ><span class="work-section-caption">{{
-                  group.caption
+                ><span class="work-section-count">{{
+                  group.cards.length
                 }}</span></span
               ></template
             >
@@ -164,13 +155,14 @@
                       :data-provider="card.provider"
                       :title="card.provider"
                     /><span class="work-key">{{ workKey(card) }}</span
-                    ><span v-if="card.threads.count"
-                      >· {{ card.threads.count }} linked
-                      {{
-                        card.threads.count === 1 ? "message" : "messages"
-                      }}</span
                     ><span class="work-compact-owner"
-                      >· {{ workOwner(card) }}</span
+                      ><span aria-hidden="true">·</span
+                      ><ChatAvatar
+                        :name="workOwner(card)"
+                        :agent="Boolean(card.agent?.agent_key)"
+                        :agent-key="card.agent?.agent_key"
+                        :provider="card.agent?.provider"
+                      /><span>{{ workOwner(card) }}</span></span
                     ></span
                   ></span
                 ><span class="work-row-owner"
@@ -178,6 +170,7 @@
                     :name="workOwner(card)"
                     :agent="Boolean(card.agent?.agent_key)"
                     :agent-key="card.agent?.agent_key"
+                    :provider="card.agent?.provider"
                   /><span>{{ workOwner(card) }}</span></span
                 ><span class="work-row-progress"
                   ><span class="work-signal"><i />{{ workSignal(card) }}</span
@@ -239,14 +232,8 @@
           </button>
         </div>
       </div>
-      <footer class="work-list-footer">
-        <span
-          >{{ visibleCards.length }}
-          {{ visibleCards.length === 1 ? "item" : "items" }} across
-          {{ visibleRoomCount }} {{ visibleRoomCount === 1 ? "room" : "rooms"
-          }}{{ nextCursor ? " · more available" : "" }}</span
-        ><button
-          v-if="nextCursor"
+      <footer v-if="nextCursor" class="work-list-footer">
+        <button
           type="button"
           class="work-secondary"
           :disabled="loading"
@@ -322,7 +309,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   "open-card": [roomId: string, taskId: string];
   "open-thread": [roomId: string, threadRootId: string];
-  "open-trackers": [];
 }>();
 const {
   cards,
@@ -370,9 +356,6 @@ const visibleCards = computed(() =>
       (view.value === "all" ||
         groupPositions.value.get(myWorkCardKey(card)) === view.value),
   ),
-);
-const visibleRoomCount = computed(
-  () => new Set(visibleCards.value.map((card) => card.room_id)).size,
 );
 const visibleGroups = computed(() =>
   workGroups
