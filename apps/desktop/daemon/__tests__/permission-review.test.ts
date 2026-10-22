@@ -144,6 +144,7 @@ test("a path written for Windows is read against the project, whichever separato
     // cmd.exe quotes nothing with single quotes, and writes `/dev/null` as a file on the current drive.
     [windows, "echo 'ok & del victim.txt'", true], [windows, "echo 'a | b'", true], [windows, "echo '!X!'", true], [windows, "echo 'x^y'", true], [windows, "echo 'a\"b'", true],
     [windows, "echo 'ok > x'", true], [windows, "echo ok > /dev/null", true], [windows, "npm test >/dev/null 2>&1", true], [windows, "git status 2>&1", false],
+    [windows, "git log --format='ok & del victim.txt'", true], [windows, "echo x='ok > victim.txt'", true], [windows, "git log --format='!X!'", true], [windows, "git log --format='%h %s'", true],
     [windows, "grep -rn 'parse Date' src", false], [windows, "echo \"a b\"", false], [windows, "git log -1 --format='%h'", false],
     // A stream of a file (`file::$DATA` is the file itself) is not another file.
     [windows, "cat 'C:/work/repo/.npmrc::$DATA'", true], [windows, "cat '.env:x'", true], [windows, "cat '.ssh=x'", true], [windows, "cat 'C:\\work\\repo\\.git::$INDEX_ALLOCATION'", true],
@@ -162,7 +163,9 @@ test("a path written for Windows is read against the project, whichever separato
     [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true],
     // On POSIX a name that ends in a dot or a space is that name.
     [project, "cat '/Users/dev/shop-api/.. '", false], [project, "cat './. '", false], [project, "cat 'x.env '", false], [project, "echo %X%", false],
-    [project, "echo 'ok & del x'", false], [project, "echo ok > /dev/null", false],
+    [project, "echo 'ok & del x'", false], [project, "echo ok > /dev/null", false], [project, "git log --format='ok & x'", false],
+    // `\` is part of a name on POSIX, so `/Users/dev\shop-api` is another folder.
+    [project, "git -C '/Users/dev\\shop-api' log", true], [project, "git -C '/Users/dev/shop-api\\' log", true], [project, "cat '/Users/dev\\shop-api/x'", true],
     // A Git pathspec that starts with `:` carries an instruction: `:(top)` reads from the repository's top, which may be above the project.
     [project, "git grep -l -e x ':(top)README.md'", true], [project, "git grep -e x -- ':(top)x'", true], [project, "git log -- ':/x'", true], [project, "git grep -e x ':!x'", true],
     [project, "git grep -e x -- ':(glob)src/*.ts'", true], [project, "git show 'HEAD:(top)x'", false], [project, "git show :README.md", true],

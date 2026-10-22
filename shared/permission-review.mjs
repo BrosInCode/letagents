@@ -109,6 +109,8 @@ function placeInProject(text, project) {
   const path = absolutePath(text);
   const root = absolutePath(project);
   if (!path || !root || path.root === null || path.root !== root.root) return null;
+  // On a POSIX project `\` is part of a name, so `/a\b` is not `/a/b`.
+  if (root.root === "/" && text.includes("\\")) return null;
   const parts = path.parts.length > 1 && path.parts.at(-1) === "" ? path.parts.slice(0, -1) : path.parts;
   if (parts.some((part) => part === "") || parts.slice(0, -1).some((part) => part === ".")) return null;
   if (parts.length < root.parts.length || root.parts.some((part, index) => parts[index] !== part)) return null;
@@ -527,7 +529,8 @@ function readProjectCommands(command, project) {
   const commands = readCommands(command);
   if (!commands || !onWindows(project)) return commands;
   if (/%[^%]*%/.test(command) || command.includes("/dev/null")) return null;
-  return commands.some((simple) => simple.words.some((word) => word.quoted && /[&|<>^!"]/.test(word.value))) ? null : commands;
+  // Every word: a quoted value joined to its option (`--format='a & b'`) is read as one plain word.
+  return commands.some((simple) => simple.words.some((word) => /[&|<>^!"]/.test(word.value))) ? null : commands;
 }
 
 /**
