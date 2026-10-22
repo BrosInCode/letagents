@@ -452,18 +452,23 @@ export async function findTaskByWorkflowArtifactMatches(
 /**
  * A client that writes back the artifact list it read cannot send
  * `linked_by` (validation drops it). Keep the stored mark for every artifact
- * whose URL is already on the card, so a key-linked pull request stays quiet.
+ * whose URL is already on the card and that carries no mark, so a key-linked
+ * pull request stays quiet. A server write that sets a mark (a person
+ * confirming a Jev link) replaces the stored one.
  */
 function keepServerArtifactMarks(
   current: readonly TaskWorkflowArtifact[],
   next: TaskWorkflowArtifact[],
 ): TaskWorkflowArtifact[] {
-  const marks = new Map(current.flatMap((artifact) =>
-    artifact.url && artifact.linked_by ? [[artifact.url, artifact.linked_by] as const] : []));
-  if (marks.size === 0) return next;
+  const marked = new Map(current.flatMap((artifact) =>
+    artifact.url && artifact.linked_by ? [[artifact.url, artifact] as const] : []));
+  if (marked.size === 0) return next;
   return next.map((artifact) => {
-    const mark = artifact.url ? marks.get(artifact.url) : undefined;
-    return mark && artifact.linked_by !== mark ? { ...artifact, linked_by: mark } : artifact;
+    const stored = artifact.url ? marked.get(artifact.url) : undefined;
+    // The mark belongs to the pull request it was set for: a client that
+    // changes the artifact's kind or number loses it.
+    return stored && !artifact.linked_by && stored.kind === artifact.kind && (stored.number ?? null) === (artifact.number ?? null)
+      ? { ...artifact, linked_by: stored.linked_by } : artifact;
   });
 }
 

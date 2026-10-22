@@ -49,3 +49,20 @@ test("a rule run reads in the governance audit with rule, event, card and outcom
   assert.equal(readableAuditEvent(entry), "Rule \"Opened\" ran");
   assert.equal(auditResultText(entry), "On pull request opened for task_7 · jira:HT-1234: done.");
 });
+
+test("a Jev link request reads as the server's summary, with what approving does", async () => {
+  const { readableIntentBody, readableIntentTitle } = await import("../src/components/desktop/content/room-board/governance-presentation.js");
+  const intent = {
+    id: "bi_1", actionType: "tracker_jev_link", taskId: "task_7", status: "pending",
+    payload: { summary: 'Move HT-1234 to In Review? (rule "Opened")', pr_number: 91, external_ref: "jira:HT-1234", task_id: "task_7" },
+  } as never;
+  assert.equal(readableIntentTitle(intent), "Ticket change after a Jev link");
+  assert.equal(readableIntentBody(intent),
+    'Move HT-1234 to In Review? (rule "Opened") Jev linked pull request #91 to jira:HT-1234. Approving confirms the link and runs the change; denying removes a link nobody accepted.');
+});
+
+test("Jev's needs-me answer reads as advice", async () => {
+  const { jevNeedsMeLabel } = await import("../src/components/desktop/content/my-work/my-work-presentation.js");
+  assert.equal(jevNeedsMeLabel("waiting_on_human"), "Jev: this waits on a person.");
+  assert.equal(jevNeedsMeLabel("unavailable"), "Jev could not tell. Try again after the next message.");
+});

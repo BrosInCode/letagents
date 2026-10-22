@@ -320,8 +320,9 @@ already exist:
 3. **Ticket is done, PR still open**: the tracker says the ticket is done
    while one of the card's pull requests is open or a draft.
 
-The **Needs me** filter lists only such rows. Jev-based "needs me" is a later
-part of this feature.
+The **Needs me** filter lists only such rows. On a card whose ticket's
+connection has Jev on, **Ask Jev who this waits on** gives Jev's reading (see
+[Ask Jev who a card waits on](#ask-jev-who-a-card-waits-on)).
 
 ### Filters
 
@@ -448,12 +449,11 @@ unmapped, and the settings page asks you to choose its column. Edit the map in
 
 ### Jev linking
 
-Each connection has a **Link pull requests with Jev** switch. It is off by
-default. When it is on, a later part of this feature asks Jev to link a pull
-request that names no ticket. For each such pull request, its title, a shortened
-description, commit subjects, and the keys and titles of up to 20 open tickets
-from the connection are sent to Jev's model provider. Jev only suggests a link;
-it never changes a ticket by itself.
+Each connection has a **Use Jev with this connection** switch. It is off by
+default, and every Jev question for the connection's rooms needs it (see
+[Jev decides the link and the exceptions](#jev-decides-the-link-and-the-exceptions)).
+The disclosure next to the switch names what leaves the server for each kind
+of question. Jev only suggests; a person approves every ticket change.
 
 ### Tracker writes go through the journal
 
@@ -624,7 +624,8 @@ name to a transition at run time, as for any tracker write. A `comment` template
    `external_ref` and the link is confirmed: the resolver matched the pull request or review by the ticket key (in
    the branch, title or body, or a pull request the key linked before), or the check ran for a pull request that
    the key linked to the card. A work lease, a `pr_url` set by hand, or another artifact is not enough. A card that
-   a lock or another branch's lease protects runs no rule. (PR6 adds a human-confirmed Jev link here.)
+   a lock or another branch's lease protects runs no rule. A Jev link counts only after a person accepted it
+   (`linked_by: "jev_confirmed"`); a Jev suggestion never fires a rule.
 3. The engine finds the room's enabled filter for the card's tracker. The filter's author must own the connection,
    and the connection must be active. A room without such a filter runs nothing more (invariant 1).
 4. The engine loads the connection's enabled rules for the room (rules for every room, and rules for this room).
@@ -717,11 +718,11 @@ desktop app, may list, create, change, switch, roll back or delete them. The rou
 connection routes: owner tokens (what agents carry) are refused. Another account's connection or rule answers
 `404`. A rule limited to one room must name a room that already imports with the connection.
 
-### Rule drafting (PR6 extension point)
+### Rule drafting
 
-PR6 adds `POST /account/connectors/:id/rules/draft`, which turns a sentence into rule JSON. The editor in
-`SettingsConnectorRules.vue` has a `draft` slot and an exposed `applyDraft(rule)`, which fill the form from a
-`TrackerRuleInput`; the person still presses Save, and the draft goes through the same validation.
+**Draft from a sentence** in the rule editor turns a plain sentence into a rule with Jev (see
+[Draft a rule from a sentence](#draft-a-rule-from-a-sentence)). The person still presses Save, and the draft goes
+through the same validation as a typed rule.
 
 ### HTTP routes
 
@@ -736,6 +737,7 @@ All under the desktop app's session bearer, for a connection the account owns.
 | `GET /account/connectors/:id/rules/:ruleId/versions` | Version history, newest first. |
 | `POST /account/connectors/:id/rules/:ruleId/rollback` | `{ "version": 2 }`: that content becomes the newest version. |
 | `DELETE /account/connectors/:id/rules/:ruleId` | Delete the rule. |
+| `POST /account/connectors/:id/rules/draft` | `{ "sentence": "..." }`: a drafted rule for the editor, never saved (PR6). |
 
 ### Tables
 
@@ -814,3 +816,133 @@ reverse proxy in front of the API must forward `/mcp` with response buffering of
 a read timeout at or above `LETAGENTS_POLL_MAX_MS`.
 
 Setup steps for the Claude app are in `AGENTS.md`, section "Remote connector (Claude app)".
+
+## Jev decides the link and the exceptions
+
+Jev is the choice model LetAgents already uses for conversation routing and command review. It answers bounded
+questions: it picks one of the options LetAgents names and gives probabilities, never free text. PR6 uses it in four
+places. Each needs the connection's **Use Jev with this connection** switch; with the switch off, LetAgents makes no
+Jev call and sends nothing.
+
+**Jev never writes on its own.** A Jev link lands as a suggestion on the card or as a board request that a person
+decides. A timeout (10 s), an error, or an answer that is not exactly one of the options means "do nothing".
+
+### Link a pull request that names no ticket
+
+1. A pull request is opened, reopened, made ready for review, or gets a new push (`synchronize`), and it reaches no
+   card: no URL, lease or ticket key matches. Tracker sync events never ask.
+2. The room imports tickets through a filter whose connection has the switch on, is active, and belongs to the
+   person who set the filter. A room with no filter makes no query (the room's tracker scope is cached for 30 s).
+3. The author has access to the repository (`OWNER`, `MEMBER` or `COLLABORATOR`), and is the GitHub user of a
+   LetAgents account with its own active connection to the same tracker site. The match uses the immutable GitHub
+   user id when the webhook carries it, so a renamed login cannot map to someone else. That connection's tracker user
+   is the author's tracker user.
+4. The candidates are the open tickets that the room's filter imported (sync bound each to a card in this room through
+   the connection), assigned to the author's tracker user, on unfinished cards, newest change first, at most 20.
+   A ticket outside the room's filter has no card bound here, so it is never a candidate. No candidate means no
+   question.
+5. LetAgents records the question first, one per pull request head SHA, at most 5 per pull request and 30 per room
+   in an hour, and none again for a pull request a person rejected in this room.
+6. Jev gets the pull request title, the start of its description (2,000 characters), up to 20 commit subjects, and
+   the candidates' keys and titles. Text that looks like a secret is replaced, and control and bidi characters are
+   removed. The state marks this text as untrusted: evidence to classify, never instructions.
+7. The answer is one of `ticket_1` … `ticket_20` or `none`, with Jev's probability.
+
+| Answer | What happens |
+|---|---|
+| A ticket, probability 0.8 or more | The pull request is attached to the card with `linked_by: "jev_suggested"`. Each rule that would have fired for this event becomes a board request "Move HT-1234 to In Review?". The room gets one status message that points to the requests. With no such rule, the suggestion only. |
+| A ticket, 0.4 to 0.8 | The suggestion only. The card's details show it under **Suggested by Jev** with **Accept** and **Reject**. |
+| `none`, below 0.4, no probability, a timeout, an invalid answer | Nothing. The question row records the outcome. |
+
+A card that a lock holds, or that changed while Jev answered, is left alone. A pull request already on the card keeps
+its earlier link.
+
+### Decide a Jev link
+
+Only a room admin signed in to the LetAgents app decides a Jev link. An agent's owner token, a worker session and
+the Board Manager are refused (`jev_link_person_required`), and the escalation sweep never approves one.
+
+- **Approve a request**: the link becomes `jev_confirmed`, and the rule's planned writes run once through the PR5
+  path (a `tracker_rule_runs` row, then each journal row after the one before succeeded). The run's delivery is
+  `jev:<request id>`, so a retried approval writes nothing new. The run is refused when the rule changed or was
+  turned off, the filter or connection changed, the card is no longer bound to the ticket, or the owner lost room
+  admin since the request was made.
+- **Deny a request**: while the link is a suggestion, it is removed from the card and the link's other requests
+  are withdrawn. A link a person already accepted stays; only that write is refused.
+- **Accept** on the card confirms the link and writes nothing to the tracker.
+- **Reject** on the card removes the pull request and withdraws its requests. Jev is not asked again for that pull
+  request in that room.
+
+After a person accepts once, later events for the pull request run the PR5 automatic path, like a key link.
+A mark belongs to the pull request it was set for: a client edit that changes the artifact's kind or number drops it,
+and a check run counts only for the number in the marked URL.
+A suggestion nobody accepted never fires a rule, and it is handled as quietly as a key link: no lease check and no
+"ignored" notice.
+
+### A pull request closed without a merge
+
+When a pull request that a ticket key or an accepted Jev link put on a card closes without a merge, Jev answers one
+question: **abandoned**, **superseded** or **moved**. With probability 0.5 or more, LetAgents posts a proposal in the
+room, for example: "Pull request #91 for HT-1234 closed without a merge. Jev reads it as superseded by another pull
+request. Proposal: check that the new pull request names HT-1234, so it attaches to this card. LetAgents changed
+nothing in Jira." The text is fixed per answer; nothing that the pull request or Jev wrote is posted. Only a pull
+request from an author with access to the repository is asked about (a key in a fork's pull request links it, but its
+close asks nothing). One question per closed pull request head, at most 3 per pull request and 30 per room in an hour.
+
+### Ask Jev who a card waits on
+
+In My work, a card whose ticket's connection has Jev on, and whose room imports through that connection's filter
+set by its owner, shows **Ask Jev who this waits on**. Only a room in your room list that you may read is asked about. Jev reads the card's
+title, key and states and up to 6 recent room messages that name the ticket (sender kind and text), and answers
+**waits on a person**, **waits on an agent**, or **nothing waits**. The answer is cached per card and newest message,
+so asking again before anyone writes about the card costs no call. It is advice: nothing changes.
+
+### Draft a rule from a sentence
+
+In the rule editor, **Draft from a sentence** sends the sentence and the connection's status names to Jev as Choice
+questions (event, action, merged, draft, review state, check result, target status, comment or not). The server
+builds the rule from the answers and validates it exactly as a typed rule. The editor fills in; nothing is saved until
+the person presses Save. A sentence Jev is unsure about gives an error that asks to write the rule by hand.
+
+### Metrics
+
+Every question is a `tracker_jev_questions` row with its outcome and latency. Settings → Diagnostics shows, for the
+account's connections over the last 7 days, the count, the outcomes, and the average and 95th percentile latency of
+each kind of question. The server logs one line per question (`[jev tracker] …`) with the outcome and latency, never
+the text.
+
+### HTTP routes
+
+| Route | Purpose |
+|---|---|
+| `POST /rooms/:room/board-intents/:id/approve` and `/deny` | A `tracker_jev_link` request: a room admin in the app only. |
+| `POST /rooms/:room/tasks/:task/jev-link/accept` and `/reject` | `{ "pr_url": "..." }`: the card's suggestion. A room admin in the app. |
+| `POST /account/my-work/needs-me` | `{ "room_id", "task_id" }`: Jev's reading of who the card waits on. |
+| `POST /account/connectors/:id/rules/draft` | `{ "sentence" }`: a drafted rule; the connection's owner, switch on. |
+| `GET /account/tracker-jev-metrics` | Count, outcomes and latency per kind of question, last 7 days. |
+
+### Tables
+
+Migration `0125_tracker_jev_questions`: `tracker_jev_questions` (unique per kind, room, subject and revision: the
+pull request and head SHA, the closed pull request, the card and newest message), and `tracker_jev_link` added to the
+board intent types.
+
+### Tests
+
+```bash
+node --import tsx --test src/api/__tests__/tracker-jev.test.ts src/api/__tests__/tracker-jev-routes.test.ts
+TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-jev-db.test.ts
+```
+
+- `tracker-jev.test.ts`: a timeout and invalid JSON give no action; answers outside the options are refused; the
+  question holds at most 20 tickets, a cut description and no secret; the switch off makes no call; never for a sync
+  event or an outside author; high confidence makes a suggestion and requests but no effect; low confidence makes a
+  suggestion only; approval runs the PR5 path once and confirms the link; denial of a suggestion detaches it; a
+  `jev_suggested` link never fires a rule; the closed pull request proposal; the needs-me cache; rule drafts.
+- `tracker-jev-db.test.ts` (no live model call): the candidate set is capped at 20 and leaves out tickets outside
+  the room's filter, done tickets, other assignees and other rooms; a pull request with no key gets a suggestion and
+  one request and no journal row; a push while it is a suggestion fires no rule; approval writes once and a retry
+  writes nothing; after approval a push runs the rule automatically; denial detaches and Jev is not asked again; low
+  confidence; the switch off; the metrics.
+- `tracker-jev-routes.test.ts`: only a person in the app decides a link; the draft route needs the switch and never
+  saves.

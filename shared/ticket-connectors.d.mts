@@ -8,6 +8,62 @@ export declare const TRACKER_PROVIDERS: readonly TrackerProvider[];
 export declare const UNMAPPED_TICKET_STATE: TicketState;
 export declare const DEFAULT_STATUS_MAPS: Readonly<Record<TrackerProvider, Readonly<Record<string, TicketState>>>>;
 export declare const JEV_LINKING_DISCLOSURE: string;
+export declare const JEV_LINK_MAX_CANDIDATES: number;
+export declare const JEV_PR_BODY_MAX_CHARS: number;
+export declare const JEV_COMMIT_SUBJECTS_MAX: number;
+export declare const JEV_NEEDS_ME_MESSAGES_MAX: number;
+export declare const JEV_QUESTION_TIMEOUT_MS: number;
+export declare const JEV_LINK_HIGH_CONFIDENCE: number;
+export declare const JEV_LINK_LOW_CONFIDENCE: number;
+export type JevQuestionKind = "link" | "exception" | "needs_me" | "rule_draft";
+export declare const JEV_QUESTION_KINDS: readonly JevQuestionKind[];
+export type JevNeedsMeState = "waiting_on_human" | "waiting_on_agent" | "nothing";
+export declare const JEV_NEEDS_ME_STATES: readonly JevNeedsMeState[];
+export type JevExceptionKind = "abandoned" | "superseded" | "moved";
+export declare const JEV_EXCEPTION_KINDS: readonly JevExceptionKind[];
+export declare const JEV_RULE_DRAFT_MAX_CHARS: number;
+
+/** How a pull request came to be on a card (server-set; never accepted from a client). */
+export type TaskArtifactLinkMark = "ticket_key" | "jev_suggested" | "jev_confirmed";
+
+/** `GET /account/connectors/jev-metrics`: Jev questions for the account's connections. */
+export interface TrackerJevMetricsKind {
+  kind: JevQuestionKind;
+  count: number;
+  /** Outcome code -> count. */
+  outcomes: Record<string, number>;
+  /** Over the answered questions; null when none was answered. */
+  latency_ms_avg: number | null;
+  latency_ms_p95: number | null;
+}
+
+export interface TrackerJevMetrics {
+  /** The window the counts cover. */
+  since: string;
+  /** False when the server holds no Jev credential: no question is asked. */
+  available: boolean;
+  /** Connections of the account with the Jev switch on. */
+  enabled_connections: number;
+  kinds: TrackerJevMetricsKind[];
+}
+
+/** `POST /account/my-work/needs-me`: Jev's reading of who a card waits on. */
+export interface MyWorkJevNeedsMe {
+  task_id: string;
+  room_id: string;
+  /** `unavailable`: no answer (switch off, no credential, timeout, invalid answer). */
+  state: JevNeedsMeState | "unavailable";
+  confidence: number | null;
+  /** True when the answer was read from the cache for the card's last message. */
+  cached: boolean;
+}
+
+/** `POST /account/connectors/:id/rules/draft`. */
+export interface TrackerRuleDraftResult {
+  /** A rule for the editor; the person still presses Save. Null when Jev could not draft one. */
+  draft: TrackerRuleInput | null;
+  error: string | null;
+}
 export declare const STATUS_MAP_MAX_ENTRIES: number;
 export declare const STATUS_NAME_MAX_LENGTH: number;
 export declare function isTicketState(value: unknown): value is TicketState;
@@ -260,6 +316,8 @@ export interface MyWorkCard {
   pull_requests: MyWorkPullRequest[];
   needs_me: boolean;
   needs_me_reasons: MyWorkNeedsMeReason[];
+  /** PR6: the ticket's connection has the Jev switch on, so "Ask Jev" may read who the card waits on. */
+  jev_needs_me: boolean;
   updated_at: string;
 }
 

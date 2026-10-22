@@ -84,13 +84,13 @@
         </details>
 
         <SettingsRow
-          title="Link pull requests with Jev"
+          title="Use Jev with this connection"
           :description="disclosure"
           :description-id="`settings-connector-jev-${connection.id}`"
         >
           <template #action>
             <DesktopSwitch
-              label="Link pull requests with Jev"
+              label="Use Jev with this connection"
               :describedby="`settings-connector-jev-${connection.id}`"
               :test-id="`settings-connector-jev-switch-${connection.id}`"
               :checked="connection.jev_linking_enabled"

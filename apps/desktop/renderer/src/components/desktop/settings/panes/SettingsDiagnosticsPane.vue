@@ -58,11 +58,14 @@
         <p v-else class="settings-muted-note">No service events observed yet.</p>
       </section>
     </template>
+
+    <SettingsJevMetrics />
   </section>
 </template>
 
 <script setup lang="ts">
 import { ChevronRight } from "@lucide/vue";
+import SettingsJevMetrics from "./SettingsJevMetrics.vue";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import type { DesktopAccountRoomEntry, DesktopSupervisorServiceSnapshot, DesktopSupervisorStateSnapshot } from "../../../../../../electron/ipc-types";
 import type { DesktopHostApproval } from "../../../../../../shared/host-approvals";

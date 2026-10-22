@@ -154,6 +154,7 @@ function payloadActorName(intent: DesktopBoardIntentSummary, key: string): strin
 }
 
 export function readableIntentTitle(intent: DesktopBoardIntentSummary): string {
+  if (intent.actionType === "tracker_jev_link") return "Ticket change after a Jev link";
   return intent.actionType === "task_create"
     ? "Create task"
     : readableIntentAction(intent.actionType);
@@ -178,6 +179,20 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
   }
   if (intent.actionType === "task_update") {
     return status ? `Update ${taskId} to ${status}` : `Update ${taskId}`;
+  }
+  if (intent.actionType === "tracker_jev_link") {
+    // Ticket connectors PR6: the server wrote the summary ("Move HT-1234 to In Review?").
+    const summary = payloadText(intent, "summary");
+    const number = typeof intent.payload.pr_number === "number" ? `#${intent.payload.pr_number}` : "a pull request";
+    const ref = payloadText(intent, "external_ref") ?? taskId;
+    // The approver sees every comment the change will post, word for word.
+    const comments = (Array.isArray(intent.payload.planned_actions) ? intent.payload.planned_actions : [])
+      .flatMap((action) => {
+        const entry = action as { kind?: unknown; body?: unknown };
+        return entry.kind === "tracker_comment" && typeof entry.body === "string" ? [entry.body] : [];
+      });
+    const commentText = comments.length ? ` Comment: ${comments.map((body) => JSON.stringify(body)).join("; ")}.` : "";
+    return `${summary ?? `Change ${ref}?`} Jev linked pull request ${number} to ${ref}.${commentText} Approving confirms the link and runs the change; denying removes a link nobody accepted.`;
   }
   if (intent.actionType === "task_override") {
     const action = payloadText(intent, "action");

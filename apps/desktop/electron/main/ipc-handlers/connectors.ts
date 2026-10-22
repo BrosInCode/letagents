@@ -4,6 +4,8 @@ import {
   cancelTrackerOAuth,
   connectTrackerWithOAuth,
   createTrackerRule,
+  draftTrackerRule,
+  getTrackerJevMetrics,
   getTrackerWebhookSetup,
   listTrackerConnections,
   listTrackerRules,
@@ -18,6 +20,7 @@ import {
   updateTrackerRule,
 } from "../connectors.js";
 import {
+  decideDesktopTaskJevLink,
   getDesktopRoomTaskTicket,
   listDesktopRoomTrackerFilters,
   removeDesktopRoomTrackerFilter,
@@ -25,7 +28,7 @@ import {
   setDesktopRoomTrackerFilterEnabled,
   testDesktopRoomTrackerFilter,
 } from "../rooms/tracker-filters.js";
-import { getDesktopMyWork } from "../rooms/my-work.js";
+import { askDesktopMyWorkNeedsMe, getDesktopMyWork } from "../rooms/my-work.js";
 
 /** Ticket connectors: the account's Jira and Linear connections, room ticket filters, and My work. */
 export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void {
@@ -44,7 +47,12 @@ export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void
   targetIpcMain.handle("desktop:connectors:rules:versions", (_event, id, ruleId) => listTrackerRuleVersions(id, ruleId));
   targetIpcMain.handle("desktop:connectors:rules:rollback", (_event, id, ruleId, version) => rollbackTrackerRule(id, ruleId, version));
   targetIpcMain.handle("desktop:connectors:rules:remove", (_event, id, ruleId) => removeTrackerRule(id, ruleId));
+  targetIpcMain.handle("desktop:connectors:rules:draft", (_event, id, sentence) => draftTrackerRule(id, sentence));
+  targetIpcMain.handle("desktop:connectors:jev-metrics", () => getTrackerJevMetrics());
   targetIpcMain.handle("desktop:room:my-work", (_event, query) => getDesktopMyWork(query));
+  targetIpcMain.handle("desktop:room:my-work-needs-me", (_event, roomId, taskId) => askDesktopMyWorkNeedsMe(roomId, taskId));
+  targetIpcMain.handle("desktop:room:decide-task-jev-link", (_event, roomIdentifier, taskId, prUrl, decision) =>
+    decideDesktopTaskJevLink(roomIdentifier, taskId, prUrl, decision));
   targetIpcMain.handle("desktop:room:get-task-ticket", (_event, roomIdentifier, taskId) => getDesktopRoomTaskTicket(roomIdentifier, taskId));
   targetIpcMain.handle("desktop:room:list-tracker-filters", (_event, roomIdentifier) => listDesktopRoomTrackerFilters(roomIdentifier));
   targetIpcMain.handle("desktop:room:save-tracker-filter", (_event, roomIdentifier, input) => saveDesktopRoomTrackerFilter(roomIdentifier, input));

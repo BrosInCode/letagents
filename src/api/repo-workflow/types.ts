@@ -26,6 +26,8 @@ export interface RepoPullRequestRef {
   merged?: boolean;
   draft?: boolean;
   authorLogin?: string | null;
+  /** The author's immutable GitHub user id, when the webhook carried it. */
+  authorId?: string | null;
   /** GitHub's `author_association` for the pull request's author. */
   authorAssociation?: string | null;
   mergedByLogin?: string | null;
@@ -168,6 +170,8 @@ export type TaskWorkflowArtifactKind =
   | "merge";
 export type TaskWorkflowRefKind = TaskWorkflowArtifactKind;
 
+export type TaskWorkflowArtifactLinkMark = "ticket_key" | "jev_suggested" | "jev_confirmed";
+
 export interface TaskWorkflowArtifact {
   provider: TaskWorkflowRefProvider;
   kind: TaskWorkflowArtifactKind;
@@ -180,9 +184,11 @@ export interface TaskWorkflowArtifact {
   detail?: RoomSharedArtifactDetail | null;
   /**
    * Set by the server when a ticket key, not a lease or an explicit link,
-   * attached this pull request to the card. Never accepted from a client.
+   * attached this pull request to the card (`ticket_key`), or when Jev
+   * suggested the link (`jev_suggested`) and a person confirmed it
+   * (`jev_confirmed`). Never accepted from a client.
    */
-  linked_by?: "ticket_key" | null;
+  linked_by?: TaskWorkflowArtifactLinkMark | null;
 }
 
 export interface TaskWorkflowArtifactMatch {

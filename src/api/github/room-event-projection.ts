@@ -25,6 +25,9 @@ import {
 } from "./room-event-projection/task-projection.js";
 import { resolveLinkedTaskForRepoRoomEvent } from "./room-event-projection/task-resolver.js";
 import { artifactEvents, githubRoomEvents } from "../server/events.js";
+import type { JevLinkPullRequestInput } from "../connectors/jev-link.js";
+import type { Task } from "../db/types.js";
+import type { RepoRoomEvent } from "../repo-workflow/types.js";
 import {
   getDefaultTrackerRuleEngine,
   type TrackerRuleRepoEventInput,
@@ -47,6 +50,10 @@ export interface GitHubRoomEventProjectionDeps {
   emitRepoRoomEventProjectionMessage: typeof emitRepoRoomEventProjectionMessage;
   applyGitHubRefRoomLifecycle: typeof applyGitHubRefRoomLifecycle;
   runTrackerRulesForRepoEvent: (input: TrackerRuleRepoEventInput) => Promise<TrackerRuleRepoEventResult>;
+  /** PR6: ask Jev to link a pull request that reached no card. Runs after the webhook answers; never throws. */
+  linkPullRequestWithJev: (input: JevLinkPullRequestInput) => void;
+  /** PR6: ask Jev about a linked pull request closed without a merge. Runs after the webhook answers; never throws. */
+  proposeForClosedPullRequestWithJev: (input: { task: Task; event: RepoRoomEvent; linkConfirmed: boolean }) => void;
 }
 
 export function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
@@ -95,6 +102,18 @@ const defaultGitHubRoomEventProjectionDeps: GitHubRoomEventProjectionDeps = {
   emitRepoRoomEventProjectionMessage,
   applyGitHubRefRoomLifecycle,
   runTrackerRulesForRepoEvent: async (input) => (await getDefaultTrackerRuleEngine()).runForRepoEvent(input),
+  // Jev can take up to 10 s, so the webhook does not wait for it. A lost
+  // question (a crash) changes nothing: Jev never writes on its own.
+  linkPullRequestWithJev: (input) => {
+    void import("../connectors/jev/runtime.js")
+      .then(({ getDefaultJevLinkService }) => getDefaultJevLinkService().linkPullRequest(input))
+      .catch((error) => console.warn("[jev tracker] link failed:", error instanceof Error ? error.name : "unknown"));
+  },
+  proposeForClosedPullRequestWithJev: (input) => {
+    void import("../connectors/jev/runtime.js")
+      .then(({ proposeForClosedPullRequestDefault }) => proposeForClosedPullRequestDefault(input))
+      .catch((error) => console.warn("[jev tracker] exception failed:", error instanceof Error ? error.name : "unknown"));
+  },
 };
 
 export async function handleMaterializedGitHubRoomEvent(
@@ -180,6 +199,7 @@ export async function handleMaterializedGitHubRoomEvent(
     githubRoutingContext,
     messageIdBase,
     matchedByTicketKey: taskResolution.matchedByTicketKey === true,
+    ...(taskResolution.jevLink ? { jevLink: taskResolution.jevLink } : {}),
   });
   if (!taskProjection.authoritative && linkedTask) {
     await deps.updateGitHubRoomEventLinkedTaskId(persisted.event.idempotency_key, null);
@@ -198,6 +218,28 @@ export async function handleMaterializedGitHubRoomEvent(
       roomEvent,
       task: linkedTask,
       matchedByTicketKey: taskResolution.matchedByTicketKey === true,
+      linkConfirmedByPerson: taskResolution.jevLink === "jev_confirmed",
+    });
+    // PR6: a pull request on the card by its key or an accepted Jev link
+    // closed without a merge: Jev proposes what happened, in the room.
+    if (roomEvent.kind === "pull_request" && roomEvent.action === "closed" && roomEvent.pullRequest.merged !== true) {
+      deps.proposeForClosedPullRequestWithJev({
+        task: linkedTask,
+        event: roomEvent,
+        linkConfirmed: taskResolution.matchedByTicketKey === true || taskResolution.jevLink === "jev_confirmed",
+      });
+    }
+  }
+
+  // PR6: a pull request that names no ticket and reached no card. The service
+  // checks the room's Jev switch before anything else; a room without it
+  // makes no Jev call.
+  if (!taskResolution.task && roomEvent.kind === "pull_request") {
+    deps.linkPullRequestWithJev({
+      roomId: project.id,
+      event: roomEvent,
+      storedEvent: persisted.event,
+      installationId: input.installationId,
     });
   }
 
