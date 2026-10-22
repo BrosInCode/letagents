@@ -43,7 +43,7 @@ const DOUBLE_QUOTED = /^[\x20\x23\x25-\x5b\x5d-\x5f\x61-\x7e]*$/;
 /** Joining or discarding an output stream names no file a command could overwrite. */
 const STREAM = /^(?:2>&1|[12]?>>? ?\/dev\/null)(?=[ \t\n;|&]|$)/;
 
-const CREDENTIAL = /(?:^|[/=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/._-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
+const CREDENTIAL = /(?:^|[/\\=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/\\._-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
 
 /** A script, target, or file named for an action that ships, removes, or reaches production. */
 const CONSEQUENTIAL_NAME = /deploy|release|publish|rollback|destroy|teardown|wipe|purge|drop|nuke|erase|delete|remove|reset|clean|clear|uninstall|install|migrat|seed|prod|backup|restore|upload|email|notify|charge|refund|invoice|payment|(?:^|[^a-z])(?:env|db|sync|ship|push|rm)(?:$|[^a-z])/i;
@@ -52,11 +52,61 @@ function isText(value, max) {
   return typeof value === "string" && value.length > 0 && value.length <= max;
 }
 
+/**
+ * Both `/` and `\` split a path. Windows reads either, and a POSIX shell
+ * never passes a `\` through unquoted, so reading both everywhere costs
+ * nothing and lets no part hide behind the other separator.
+ */
+export const PATH_SEPARATOR = /[\\/]/;
+
+/**
+ * Where an absolute path starts, and its parts, or null when the text is
+ * relative. The root is `/` for a POSIX path or one that starts with a
+ * separator alone, the drive in lower case followed by `/` for `C:\x` or
+ * `C:/x`, and `//server/share` for a network share written either way. A
+ * drive with no separator after it (`C:x`) names a folder the shell remembers
+ * for that drive, so it is absolute but has no root this file can read.
+ * Parts keep their case: how a file system folds it is not known here.
+ */
+function absolutePath(text) {
+  const drive = /^([A-Za-z]):/.exec(text);
+  if (drive) {
+    const rest = text.slice(2);
+    if (!PATH_SEPARATOR.test(rest.charAt(0))) return { root: null, parts: [] };
+    return { root: `${drive[1].toLowerCase()}:/`, parts: rest.slice(1).split(PATH_SEPARATOR) };
+  }
+  if (!PATH_SEPARATOR.test(text.charAt(0))) return null;
+  if (!PATH_SEPARATOR.test(text.charAt(1))) return { root: "/", parts: text.slice(1).split(PATH_SEPARATOR) };
+  const [server, share, ...parts] = text.slice(2).split(PATH_SEPARATOR);
+  // `//x` alone is read as a share without a name. Nothing is inside it.
+  return server && share ? { root: `//${server}/${share}`, parts } : { root: null, parts: [] };
+}
+
+/**
+ * Where an absolute path is against the project: the project itself, inside
+ * it, or null when it is elsewhere or not read. A path with another root (a
+ * different drive, a different share, a POSIX root against a drive) is
+ * elsewhere, whatever its parts say. An empty part or `.` inside the path is
+ * not read; one separator at the end is.
+ */
+function placeInProject(text, project) {
+  const path = absolutePath(text);
+  const root = absolutePath(project);
+  if (!path || !root || path.root === null || path.root !== root.root) return null;
+  const parts = path.parts.length > 1 && path.parts.at(-1) === "" ? path.parts.slice(0, -1) : path.parts;
+  if (parts.some((part) => part === "") || parts.slice(0, -1).some((part) => part === ".")) return null;
+  if (parts.length < root.parts.length || root.parts.some((part, index) => parts[index] !== part)) return null;
+  return parts.length === root.parts.length ? "self" : "inside";
+}
+
 function normalizedProject(project) {
   if (!isText(project, PERMISSION_REVIEW_MAX_PROJECT_CHARS) || !/^[\x21-\x7e]+$/.test(project)) return null;
-  const trimmed = project.replace(/\/+$/, "");
-  return trimmed.startsWith("/") && trimmed.length > 1
-    && trimmed.split("/").slice(1).every((part) => part && part !== "." && part !== "..") ? trimmed : null;
+  const trimmed = project.replace(/[\\/]+$/, "");
+  const path = absolutePath(trimmed);
+  // A root alone (`/`, `C:\`, `\\server\share`) is not a project: everything would be inside it.
+  // `\x` names a folder on whichever drive is current, so which files are inside it is not known.
+  return path && path.root !== null && path.parts.length > 0 && !(path.root === "/" && trimmed.includes("\\"))
+    && path.parts.every((part) => part && part !== "." && part !== "..") ? trimmed : null;
 }
 
 /** The text inside a quote that starts at `index`, and where the quote ends, or null. */
@@ -140,19 +190,38 @@ function readCommands(command) {
   return commands.length > 0 ? commands : null;
 }
 
+/**
+ * The pieces of a word that may each name a path: `a=b`, `a:b` and `a,b` are
+ * read as two. The colon after a drive letter (`C:\x`, `C:x`) is part of the
+ * path, not a break, so a Windows path is read whole.
+ */
+function pathPieces(value) {
+  const pieces = [];
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === ":" && index === start + 1 && /[A-Za-z]/.test(value[start])) continue;
+    if (char === "=" || char === ":" || char === ",") {
+      pieces.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  pieces.push(value.slice(start));
+  return pieces;
+}
+
 /** True when the text names nothing outside the project and nothing that holds credentials or history. */
 function staysInProject(value, project) {
   // `@file` makes several programs read their arguments from the file.
   if (value.includes("://") || /(?:^|[=:,])@/.test(value) || CREDENTIAL.test(value)) return false;
-  for (const piece of value.split(/[=:,]/)) {
+  // A project written with `/` alone is on a system where `\` separates nothing, and a path written with one is not read there.
+  if (value.includes("\\") && absolutePath(project)?.root === "/") return false;
+  for (const piece of pathPieces(value)) {
     if (piece.startsWith("~")) return false;
-    const parts = piece.split("/");
+    const parts = piece.split(PATH_SEPARATOR);
     if (parts.some((part) => part === ".." || part.toLowerCase() === ".git")) return false;
-    if (piece.startsWith("/")) {
-      const path = piece.replace(/\/+$/, "") || "/";
-      if (parts.slice(1, -1).some((part) => part === "" || part === ".")) return false;
-      if (path !== project && !path.startsWith(`${project}/`)) return false;
-    }
+    // Absolute in any form: `/x`, `\x`, `C:\x`, `C:/x`, `C:x`, `\\server\share\x`, `//server/share/x`.
+    if (/^(?:[\\/]|[A-Za-z]:)/.test(piece) && placeInProject(piece, project) === null) return false;
   }
   return true;
 }
@@ -356,7 +425,7 @@ const PROGRAMS = {
   },
   git: ([verb, ...args], project) => {
     // `-C` naming the project itself runs Git where it runs anyway. Any other folder may be another repository, with hooks of its own.
-    if (verb === "-C") return args[0]?.replace(/\/+$/, "") === project && PROGRAMS.git(args.slice(1), project);
+    if (verb === "-C") return typeof args[0] === "string" && placeInProject(args[0], project) === "self" && PROGRAMS.git(args.slice(1), project);
     if (verb === "branch") return args.every((arg) => /^(?:--show-current|--list|--all|--remotes|-a|-r|-l|-v|-vv)$/.test(arg));
     if (verb === "tag") return args.every((arg) => /^(?:--list|-l)$/.test(arg));
     // One `--` may separate revisions from paths. What follows it is a path.

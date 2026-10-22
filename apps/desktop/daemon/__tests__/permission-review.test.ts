@@ -107,6 +107,47 @@ test("a command that names anything outside the project needs a person", () => {
   }
 });
 
+test("a path written for Windows is read against the project, whichever separator or root it uses", () => {
+  const windows = "C:\\work\\repo";
+  const share = "\\\\nas\\share\\repo";
+  const cases: Array<[project: string, command: string, needsPerson: boolean]> = [
+    // Inside a project on a drive, written either way, with either case of drive letter.
+    [windows, "cat 'C:\\work\\repo\\src\\a.ts'", false], [windows, "cat C:/work/repo/src/a.ts", false], [windows, "cat 'c:\\work\\repo\\src\\a.ts'", false],
+    [windows, "ls 'C:\\work\\repo'", false], [windows, "ls 'C:\\work\\repo\\'", false], [windows, "cat src/a.ts", false], [windows, "cat 'src\\a.ts'", false],
+    [windows, "cat x=C:/work/repo/x", false], [windows, "git -C C:/work/repo log", false], [windows, "git -C 'C:\\work\\repo\\' log", false],
+    [`${windows}\\`, "cat 'C:\\work\\repo\\src\\a.ts'", false], ["C:/work/repo", "cat 'C:\\work\\repo\\src\\a.ts'", false],
+    // Outside it: another folder, another drive, the rest of the folder's name, or another case of it.
+    [windows, "cat 'C:\\work\\other\\x'", true], [windows, "cat 'C:\\work\\repo-other\\x'", true], [windows, "cat 'C:\\work\\Repo\\x'", true],
+    [windows, "cat 'D:\\work\\repo\\x'", true], [windows, "cat D:/work/repo/x", true], [windows, "cat x=C:/work/other/x", true], [windows, "git -C 'C:\\work\\other' log", true],
+    // A drive alone, a drive's current folder, and a path on whichever drive is current.
+    [windows, "cat 'C:\\'", true], [windows, "cat C:x", true], [windows, "cat C:", true], [windows, "cat 'C:\\work\\repo\\'x", true],
+    [windows, "cat '\\work\\repo\\x'", true], [windows, "cat /work/repo/x", true],
+    // Climbing, with either separator, also from inside the project.
+    [windows, "cat '..\\..\\secret'", true], [windows, "cat 'src\\..\\..\\x'", true], [windows, "cat 'C:/work/repo/..\\..\\x'", true], [windows, "cat 'C:\\work\\repo\\..\\x'", true],
+    // A network share.
+    [windows, "cat '\\\\nas\\share\\x'", true], [windows, "cat //nas/share/x", true], [windows, "cat '\\\\nas\\share\\C:\\work\\repo'", true],
+    // Doubled or `.` parts, history, and credentials.
+    [windows, "cat 'C:\\work\\repo\\\\x'", true], [windows, "cat 'C:\\work\\repo\\.\\x'", true], [windows, "cat 'C:\\work\\repo\\.git\\config'", true],
+    [windows, "cat 'C:\\work\\repo\\.GIT\\config'", true], [windows, "cat 'C:\\work\\repo\\.env'", true], [windows, "cat 'C:\\work\\repo\\.ssh\\id_rsa'", true],
+    [windows, "cat 'src\\.env'", true], [windows, "cat 'src\\.git\\config'", true],
+    // A project on a share.
+    [share, "cat '\\\\nas\\share\\repo\\x'", false], [share, "cat //nas/share/repo/x", false], [share, "ls '\\\\nas\\share\\repo'", false],
+    [share, "cat '\\\\nas\\share\\other\\x'", true], [share, "cat '\\\\nas\\other\\repo\\x'", true], [share, "cat '\\\\nas\\share'", true], [share, "cat 'C:\\work\\repo\\x'", true],
+    // A POSIX project reads no Windows path at all.
+    [project, "cat '\\Users\\dev\\shop-api\\x'", true], [project, "cat 'C:\\Users\\dev\\shop-api\\x'", true], [project, "cat C:/Users/dev/shop-api/x", true],
+    [project, "cat '..\\..\\x'", true], [project, "cat '\\\\nas\\share\\x'", true], [project, "cat 'src\\a.ts'", true], [project, "cat a:/etc/passwd", true],
+  ];
+  for (const [root, command, needs] of cases) {
+    assert.equal(commandNeedsPerson(command, root), needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+    assert.equal(commandOnlyReads(command, root), !needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+  }
+  // A drive, a share, or a folder on whichever drive is current is not a project.
+  for (const root of ["C:\\", "C:", "C:/", "C:work", "\\\\nas\\share", "\\\\nas\\share\\", "//nas", "//nas/share", "\\work\\repo", "C:\\work\\..\\repo", "C:\\work\\\\repo"]) {
+    assert.equal(commandNeedsPerson("ls", root), true, root);
+  }
+  assert.deepEqual(buildPermissionReviewRequest({ commands: ["ls"], project: "C:\\work\\repo\\" })?.state, { commands: ["ls"], project: "C:\\work\\repo" });
+});
+
 test("credentials and the repository's own history store need a person", () => {
   needsPerson([
     "cat .env", "cat .env.local", "cat config/.env", "cat src/.ENV", "cat .envrc", "cat .env_production", "ls .ssh", "cat .aws/credentials", "cat .npmrc", "cat .netrc", "cat .pgpass",

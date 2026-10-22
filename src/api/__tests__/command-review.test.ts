@@ -31,6 +31,26 @@ test("a command reserved for a person never reaches Jev", async () => {
   assert.equal(calls, 0);
 });
 
+test("a Windows path that leaves the project is reserved for a person, and one inside it is reviewed", async () => {
+  const windows = "C:\\work\\repo";
+  const evaluate = async () => ({ body: answer(1, 0, 0, 0), latencyMs: 1 });
+  const cases: Array<[project: string, command: string, reason: "needs_person" | "reviewed"]> = [
+    [windows, "cat 'C:\\work\\repo\\src\\a.ts'", "reviewed"], [windows, "cat C:/work/repo/src/a.ts", "reviewed"], [windows, "cat 'src\\a.ts'", "reviewed"],
+    [windows, "cat 'C:\\work\\other\\x'", "needs_person"], [windows, "cat 'D:\\work\\repo\\x'", "needs_person"], [windows, "cat '..\\..\\secret'", "needs_person"],
+    [windows, "cat '\\\\nas\\share\\x'", "needs_person"], [windows, "cat 'C:/work/repo/..\\..\\x'", "needs_person"], [windows, "cat C:x", "needs_person"],
+    [windows, "cat '\\work\\repo\\x'", "needs_person"], [windows, "cat 'C:\\work\\repo\\.git\\config'", "needs_person"],
+    [project, "cat '\\Users\\dev\\shop-api\\x'", "needs_person"], [project, "cat 'C:\\Users\\dev\\shop-api\\x'", "needs_person"], [project, "cat '..\\..\\x'", "needs_person"],
+  ];
+  for (const [root, command, reason] of cases) {
+    const result = await reviewCommands({ commands: [command], project: root }, { endpoint, evaluate });
+    assert.equal(result.reason, reason, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+    assert.equal(result.decision, reason === "reviewed" ? "allow" : "ask");
+  }
+  for (const root of ["C:\\", "C:", "\\\\nas\\share", "\\work\\repo"]) {
+    assert.deepEqual(await reviewCommands({ commands: ["ls"], project: root }, { endpoint, evaluate }), { decision: "ask", reason: "needs_person", answers: null }, root);
+  }
+});
+
 test("Jev is sent the commands and the project, and nothing else", async () => {
   const sent: Array<{ state: unknown; questions: Record<string, unknown> }> = [];
   const evaluate = async (_endpoint: JevEndpoint, request: { state: unknown; questions: Record<string, unknown> }) => {
