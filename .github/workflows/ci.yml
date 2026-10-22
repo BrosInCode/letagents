@@ -120,7 +120,7 @@ jobs:
         run: npm run test:workflow-supply-chain
 
       - name: Test CI test shard selection
-        run: node --test scripts/select-test-shard.test.mjs
+        run: node --test scripts/select-test-shard.test.mjs scripts/measure-test-weights.test.mjs
 
       - name: Test production Docker context
         run: npm run test:docker-context
@@ -333,7 +333,7 @@ jobs:
             "electron "*)
               shard="${SUITE#electron }"
               cd apps/desktop
-              node ../../scripts/select-test-shard.mjs --shard "${shard}" electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt"
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/electron-test-weights.json electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt"
               mapfile -t files < "${RUNNER_TEMP}/electron-shard.txt"
               if [ "${#files[@]}" -eq 0 ]; then
                 echo "Electron shard ${shard} has no test files." >&2
