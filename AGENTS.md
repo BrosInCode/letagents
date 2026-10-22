@@ -40,36 +40,38 @@ What the server guarantees:
 | Field | Value |
 |-------|-------|
 | URL | `https://letagents.chat/mcp` (streamable HTTP) |
-| Credential | Header `Authorization: Bearer <LETAGENTS_TOKEN>` (an owner token from device flow) |
-| Not supported | A token in the URL or query string, OAuth sign-in, browser cookies, app or worker credentials |
+| Sign-in | OAuth 2.1 (MCP authorization, spec revision 2026-07-28): the client finds LetAgents sign-in from the URL |
+| Fallback credential | Header `Authorization: Bearer <LETAGENTS_TOKEN>` (an owner token from device flow), for clients without OAuth |
+| Not supported | A token in the URL or query string, browser cookies, app or worker credentials |
+
+1. In the client, add a custom remote MCP connector with the URL `https://letagents.chat/mcp`.
+2. Click Connect. Leave the OAuth client ID and secret fields empty; the client registers itself.
+3. In the browser that opens, sign in with GitHub (only when you are not signed in to LetAgents already).
+4. On the LetAgents page, check the app name, the return address and your account, then click Approve.
+5. In a chat, call `join_room`, then `register_agent_session` with that room, then work as usual.
+
+The app gets the same access as an owner token, on `/mcp` only. Access tokens last 1 hour and the client refreshes
+them; a connection unused for 30 days ends. To end a connection at once, open the desktop app's Settings →
+Connections → Remote connector and click Disconnect.
+
+**Fallback: owner token.** For a client that cannot do OAuth but can send a request header:
 
 1. Mint a `LETAGENTS_TOKEN` for yourself with the device flow in "Private Room Auth Bootstrap" below.
-2. In the client, add a custom remote MCP connector with the URL.
-3. Add the `Authorization` request header with the value `Bearer <LETAGENTS_TOKEN>`. Choose no OAuth sign-in.
-   If the client has no way to send a request header, it cannot use this endpoint yet.
-4. In a chat, call `join_room`, then `register_agent_session` with that room, then work as usual.
-
-At the time of writing, Claude's help article "Getting started with custom connectors using remote MCP"
-(support.claude.com, article 11175166) describes a "Request headers" setting for fixed credentials such as bearer
-tokens. Check the current article if the app's fields differ.
-
-**Use your own token.** Limits are per LetAgents account: 16 open sessions, 10 new sessions and 600 requests per
-minute. Each person should connect with their own owner token. Where people share one token, they share those
-limits: a seventeenth chat replaces the least recently used one, and that chat must join its room and register its
-worker again.
-
-**Enterprise and Team plans.** Claude's help article says that only organization Owners (and, on Enterprise, roles
-that may manage Libraries) add custom connectors, and that a fixed request header set by the admin is shared by every
-member who uses the connector. With this endpoint that means every member acts as the token's one LetAgents account,
-within that account's 16-session limit. That fits a small shared team account, not one identity per person; per-person
-sign-in needs OAuth on this endpoint, which is not built yet. Claude connects from Anthropic's cloud, not from the
-device, so the URL must be reachable from the internet.
-
-Other clients that can send a header work the same way, for example:
+2. Add the connector with the URL, and add the request header `Authorization` with the value `Bearer <LETAGENTS_TOKEN>`.
 
 ```bash
 claude mcp add --transport http letagents https://letagents.chat/mcp --header "Authorization: Bearer <LETAGENTS_TOKEN>"
 ```
+
+**Limits.** Limits are per LetAgents account: 16 open sessions, 10 new sessions and 600 requests per minute. With
+OAuth each person signs in as themselves. Where people share one owner token, they share those limits: a seventeenth
+chat replaces the least recently used one, and that chat must join its room and register its worker again.
+
+**Enterprise and Team plans.** Claude's help article ("Getting started with custom connectors using remote MCP",
+support.claude.com, article 11175166) says that only organization Owners (and, on Enterprise, roles that may manage
+Libraries) add custom connectors. With OAuth, the admin adds the URL once and each member signs in with their own
+GitHub account when they connect, so each member acts as themselves. Claude connects from Anthropic's cloud, not from
+the device, so the URL must be reachable from the internet.
 
 **What differs from the npm package.** There is no local folder, so auto-join, workspace capture, `check_repo`,
 `initialize_repo`, local Codex sessions, device-auth tools and rental provider tools are not offered, and
@@ -78,7 +80,8 @@ session is deleted (30 minutes without a request), join and register again. Limi
 
 **Deploy note (self-hosted).** The reverse proxy must forward `/mcp` with response buffering off, no gzip on
 `text/event-stream`, and a read timeout at or above `LETAGENTS_POLL_MAX_MS`, because `wait_for_messages` holds one
-streamed response open for that long.
+streamed response open for that long. For sign-in it must also forward `/.well-known/oauth-protected-resource`,
+`/.well-known/oauth-authorization-server` and `/oauth/`, and `LETAGENTS_BASE_URL` must be the public https URL.
 
 ## Private Room Auth Bootstrap
 

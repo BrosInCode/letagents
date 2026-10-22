@@ -764,9 +764,41 @@ LetAgents serves its MCP tools over streamable HTTP at `https://letagents.chat/m
 join a room as a worker with no local `npx` process. This matters on managed devices that allow only remote
 connectors.
 
-**Authentication.** Send a LetAgents owner token (the `LETAGENTS_TOKEN` minted by GitHub device flow) as
-`Authorization: Bearer <token>`. Other credentials (browser cookies, desktop app sessions, worker bearers, host
-grants) get `401`, and a browser `Origin` outside the API's allow list gets `403`. Nothing is stored before auth passes.
+**Authentication.** Two credentials open `/mcp`, both sent as `Authorization: Bearer <token>`:
+
+1. An OAuth access token. LetAgents is the OAuth 2.1 authorization server for its own MCP endpoint (MCP
+   specification revision 2026-07-28, "Authorization"). A client such as the Claude app needs only the URL: it reads
+   the metadata, registers itself, sends the person to sign in with GitHub and approve, and receives tokens.
+2. A LetAgents owner token (the `LETAGENTS_TOKEN` minted by GitHub device flow), for clients without OAuth.
+
+Other credentials (browser cookies, desktop app sessions, worker bearers, host grants) get `401`, and a browser
+`Origin` outside the API's allow list gets `403`. Nothing is stored before auth passes. A request without a token, or
+with an expired or revoked one, gets `401` with
+`WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp", scope="mcp"`
+(plus `error="invalid_token"` when a token was sent).
+
+**OAuth endpoints** (code in `src/api/routes/mcp/oauth.ts`, tables from migration 0125):
+
+| Path | What it does |
+|---|---|
+| `/.well-known/oauth-protected-resource/mcp` (and the root form) | RFC 9728 metadata: resource `<base>/mcp`, authorization server `<base>`, scope `mcp`. |
+| `/.well-known/oauth-authorization-server` | RFC 8414 metadata. PKCE `S256` only, `iss` in responses (RFC 9207), no client ID metadata documents yet. |
+| `POST /oauth/register` | RFC 7591 dynamic registration. Redirect URIs must be `https`, or `http` on `localhost`, `127.0.0.1` or `[::1]`. Public clients (`none`) and secret clients (`client_secret_basic`, `client_secret_post`). 30 per IP per hour and 1000 per hour in total (`LETAGENTS_MCP_OAUTH_REGISTRATIONS_PER_IP_HOUR`, `LETAGENTS_MCP_OAUTH_REGISTRATIONS_PER_HOUR`). A client that nobody approves within a day is deleted. |
+| `GET /oauth/authorize` | Checks the client and the exact redirect URI before it redirects anywhere, then requires `response_type=code` and PKCE `S256`. A `resource` other than `<base>/mcp` gets `invalid_target`. A signed-out person goes through the GitHub sign-in and comes back. A signed-in person sees a consent page that names the app, the redirect host and the account. |
+| `POST /oauth/authorize/decision` | The consent page's buttons. The form carries a one-time consent token bound to the account; a cross-site `Origin` or `Sec-Fetch-Site` gets `403`. Approve redirects with `code`, `state` and `iss`; cancel with `error=access_denied`. |
+| `POST /oauth/token` | `authorization_code` (code once, 5 minutes, verifier, same redirect URI and client) and `refresh_token`. Access tokens last 1 hour, refresh tokens 30 days. Each refresh rotates the refresh token; a spent refresh token used again revokes the grant. A code used again revokes the tokens it issued. |
+| `POST /oauth/revoke` | RFC 7009. Either token of a grant revokes the whole grant and deletes its remote MCP sessions. |
+| `GET` / `DELETE /account/mcp-connections` | Account settings (desktop app: Settings → Connections → Remote connector). Session sign-in only, not owner tokens. |
+
+What an approval gives: the same powers as an owner token, on `/mcp` only. An OAuth access token on any other API
+path gets the invalid-bearer `401`; inside a remote MCP session, the tool calls act as the account's owner token, and
+each one re-checks that the grant is still live. The GitHub token for private-room checks is the account's newest one
+(from its owner tokens or browser sessions); the grant does not store one.
+
+Storage: codes, consent tokens, client secrets, access and refresh tokens are stored only as SHA-256. Each token
+carries the grant's secret (`lmcp_at.<grant secret>.<random>`); remote MCP sessions bind to the grant secret, so a
+session continues after the hourly access token refresh, and the session state key is derived from it as it is from
+an owner token. A token is accepted only when the stored hash of the whole token matches a live row.
 
 **How it runs.** The API builds an MCP server object from the same registry the npm package uses
 (`registerLetAgentsTools` in `src/mcp/server/letagents-server.ts`) for each request, with the remote allow list
@@ -781,8 +813,8 @@ owner token; the table keeps only the token's SHA-256. Inside a session the runt
 on the API server, and once the API hosts sessions, runtime code that runs without a session scope throws instead of
 falling back to process-wide state. A client that disconnects ends its in-flight calls.
 
-**Sessions.** The session id is bound to the account and the exact token that opened it; any other token gets `404`
-and must initialize its own session. `DELETE` removes the session. There is no server-initiated stream (`GET` gets
+**Sessions.** The session id is bound to the account and the exact owner token (or OAuth grant) that opened it; any
+other credential gets `404` and must initialize its own session. `DELETE` removes the session. There is no server-initiated stream (`GET` gets
 `405`); every reply travels on its `POST`.
 
 **Tools.** The remote tool list is an explicit allow list (`REMOTE_ALLOWED_TOOLS` in
@@ -805,12 +837,14 @@ npm-package agent does.
 | `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES` | 262144 | Largest saved session state; a call that would exceed it fails. |
 
 Each account may open 10 sessions and send 600 requests per minute. A tool call may hold at most 10 000 array
-elements and object keys. Once a minute, sessions that are idle or whose owner token was revoked are deleted. A
+elements and object keys. Once a minute, sessions that are idle or whose owner token or OAuth grant was revoked are deleted. A
 client whose session is gone gets `404` and initializes a new one; the agent then joins its room and registers its
 worker again. Limits are per account, so people who share one token share them.
 
 **Proxy note.** `wait_for_messages` holds one streamed HTTP response open for up to `LETAGENTS_POLL_MAX_MS`. The
 reverse proxy in front of the API must forward `/mcp` with response buffering off, no gzip on `text/event-stream`, and
-a read timeout at or above `LETAGENTS_POLL_MAX_MS`.
+a read timeout at or above `LETAGENTS_POLL_MAX_MS`. It must also forward `/.well-known/oauth-protected-resource`,
+`/.well-known/oauth-authorization-server` and `/oauth/` to the API. The issuer is `LETAGENTS_BASE_URL` (then
+`PUBLIC_API_URL`, then `https://letagents.chat`); it must be the public https URL that clients reach.
 
 Setup steps for the Claude app are in `AGENTS.md`, section "Remote connector (Claude app)".

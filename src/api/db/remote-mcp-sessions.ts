@@ -1,7 +1,7 @@
 import { and, asc, eq, lt, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { owner_tokens, remote_mcp_sessions } from "./schema.js";
+import { mcp_oauth_grants, owner_tokens, remote_mcp_sessions } from "./schema.js";
 
 export type RemoteMcpSessionRow = typeof remote_mcp_sessions.$inferSelect;
 
@@ -84,10 +84,12 @@ export async function deleteIdleRemoteMcpSessions(cutoffIso: string, busySession
   return rows.map((row) => row.session_id);
 }
 
-/** Delete sessions whose owner token no longer exists; returns their ids. */
+/** Delete sessions whose owner token or OAuth grant no longer exists or is revoked; returns their ids. */
 export async function deleteRevokedRemoteMcpSessions(): Promise<string[]> {
   const rows = await db.delete(remote_mcp_sessions)
-    .where(sql`NOT EXISTS (SELECT 1 FROM ${owner_tokens} WHERE ${owner_tokens.token_hash} = ${remote_mcp_sessions.token_hash})`)
+    .where(sql`NOT EXISTS (SELECT 1 FROM ${owner_tokens} WHERE ${owner_tokens.token_hash} = ${remote_mcp_sessions.token_hash})
+      AND NOT EXISTS (SELECT 1 FROM ${mcp_oauth_grants} WHERE ${mcp_oauth_grants.secret_hash} = ${remote_mcp_sessions.token_hash}
+        AND ${mcp_oauth_grants.revoked_at} IS NULL AND ${mcp_oauth_grants.expires_at} > now())`)
     .returning({ session_id: remote_mcp_sessions.session_id });
   return rows.map((row) => row.session_id);
 }

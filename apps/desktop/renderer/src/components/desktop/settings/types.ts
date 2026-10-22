@@ -16,6 +16,7 @@ export type SettingsPaneId =
   | "system:runtime"
   | "system:updates"
   | "system:mcp"
+  | "system:remote-mcp"
   | "system:agents"
   | "system:diagnostics";
 

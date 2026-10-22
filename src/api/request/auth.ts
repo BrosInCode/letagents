@@ -3,6 +3,9 @@ import { parseBearerAuthorization } from "./bearer-authorization.js";
 
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { getOwnerTokenAccountByTokenHash } from "../db/auth/owner-tokens.js";
+import { getMcpOAuthAccessGrant, getMcpOAuthGrantBySecretHash } from "../db/mcp-oauth.js";
+import { isRemoteMcpRequestPath, mcpOAuthUrls } from "../mcp-oauth/config.js";
+import { grantSecretOf, looksLikeMcpAccessToken, safeEqual, sha256Hex } from "../mcp-oauth/tokens.js";
 import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
@@ -17,11 +20,14 @@ import { isAgentSessionBearerCapability, isAgentSessionBearerFeatureEnabled } fr
 
 export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestAuth> {
   // A remote MCP session's in-process call: re-resolve the bound owner token
-  // from its hash, so a fresh check (live rechecks, revocation) sees the
-  // session's current account, or nothing once the token is revoked.
+  // (or OAuth grant) from its hash, so a fresh check (live rechecks,
+  // revocation) sees the session's current account, or nothing once the
+  // token or grant is revoked. A grant acts with an owner token's powers here.
   const internal = inProcessPrincipal(req);
   if (internal) {
-    const account = await getOwnerTokenAccountByTokenHash(internal.tokenHash);
+    const account = await getOwnerTokenAccountByTokenHash(internal.tokenHash)
+      ?? (await getMcpOAuthGrantBySecretHash(internal.tokenHash))?.account
+      ?? null;
     return account && account.account_id === internal.account.account_id
       ? { account, authKind: "owner_token" }
       : { account: null, authKind: null };
@@ -43,6 +49,8 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
 
   if (authorization.kind === "invalid") return { account: null, authKind: null };
   const providerToken = authorization.token;
+
+  if (looksLikeMcpAccessToken(providerToken)) return resolveMcpOAuthAccessToken(req, providerToken);
 
   const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
   if (ownerTokenAccount) {
@@ -105,5 +113,25 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
   return {
     account: null,
     authKind: null,
+  };
+}
+
+/**
+ * An OAuth access token from the remote MCP authorization server. Its
+ * audience is the /mcp resource, so it is accepted on /mcp only; any other
+ * path gets the invalid-bearer answer.
+ */
+async function resolveMcpOAuthAccessToken(req: Request, token: string): Promise<ResolvedRequestAuth> {
+  const refused: ResolvedRequestAuth = { account: null, authKind: null };
+  if (!isRemoteMcpRequestPath(req.path)) return refused;
+  const grantSecret = grantSecretOf("access", token);
+  if (!grantSecret) return refused;
+  const grant = await getMcpOAuthAccessGrant(sha256Hex(token));
+  if (!grant || !safeEqual(sha256Hex(grantSecret), grant.secret_hash)) return refused;
+  if (grant.resource !== mcpOAuthUrls().resource) return refused;
+  return {
+    account: grant.account,
+    authKind: "mcp_oauth",
+    mcpOAuth: { grant_id: grant.grant_id, session_secret: grantSecret },
   };
 }

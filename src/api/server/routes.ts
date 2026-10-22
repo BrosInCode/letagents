@@ -170,6 +170,7 @@ import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
+import { registerMcpOAuthRoutes } from "../routes/mcp/oauth.js";
 import { RemoteMcpSessions } from "../remote-mcp/sessions.js";
 import { InProcessDispatcher } from "../remote-mcp/in-process-dispatch.js";
 import {
@@ -535,6 +536,7 @@ export function registerApiRoutes(app: Express): void {
   sharedRemoteMcpSessions?.close();
   sharedRemoteMcpSessions = new RemoteMcpSessions({ dispatcher: new InProcessDispatcher(app) });
   registerRemoteMcpRoutes(app, { sessions: sharedRemoteMcpSessions });
+  registerMcpOAuthRoutes(app);
 
   registerGitHubAppCallbackRoute(app);
 

@@ -474,7 +474,7 @@ jobs:
 
       - name: Test the remote MCP endpoint against the API
         if: matrix.group == 3
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/remote-mcp-db.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/remote-mcp-db.test.ts src/api/__tests__/mcp-oauth-db.test.ts
 
       - name: Test room message search
         if: matrix.group == 3
