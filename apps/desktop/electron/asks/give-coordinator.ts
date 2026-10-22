@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -29,9 +29,14 @@ const FINISHED = new Set(["ended", "expired", "cancelled", "open"]);
  * apply to rentals (credential isolation, a scratch workspace, guest-safe
  * permission profiles only, no home setup, no automatic approvals) applies
  * here too, with no second code path to keep in sync.
+ *
+ * Each attempt gets its own id. The daemon binds a creation id to the first
+ * parameters it saw and keeps a tombstone once that entry is purged, so an id
+ * made from the ask alone would refuse every later try with another app, and
+ * every try at all after a failed one was cleaned up.
  */
-export function giftEntryId(askId: string): string {
-  return `supervised_rental_ask_${createHash("sha256").update(askId).digest("hex").slice(0, 32)}`;
+export function giftEntryId(askId: string, attempt: string): string {
+  return `supervised_rental_ask_${createHash("sha256").update(`${askId}\n${attempt}`).digest("hex").slice(0, 32)}`;
 }
 
 /** Standing instructions for a given agent: what it is, its limits, and to wait to be asked. */
@@ -67,6 +72,8 @@ type Gift = {
   pausedForQuit?: boolean;
   /** A substitute stays paused until the asker accepts it. */
   waitingForAsker?: boolean;
+  /** The daemon refused to remove this agent after its gift failed; each check tries again until it is gone. */
+  purgePending?: boolean;
 };
 type Journal = { version: 1; gifts: Record<string, Gift> };
 
@@ -172,7 +179,7 @@ export class AskGiveCoordinator {
     if (!readiness?.canStart) throw new AskGiveError(readiness?.detail || readiness?.message || "Set up this app first, then try again.");
 
     const claimed = await this.api.claim(input.token);
-    const entryId = giftEntryId(claimed.id);
+    const entryId = giftEntryId(claimed.id, randomUUID());
     let prepared: DesktopSupervisorManifestEntry | null = null;
     try {
       await this.daemon.ensureRunning().catch(() => { throw new AskGiveError("Your Mac couldn't start this agent. The request is still open for others."); });
@@ -234,9 +241,16 @@ export class AskGiveCoordinator {
       return joined;
     } catch (error) {
       if (prepared) {
-        const stopped = await this.stopAndPurge(prepared.id).then(() => true, () => false);
+        const stopped = await this.stopAndPurge(prepared.id).then(() => true, (reason: unknown) => {
+          console.warn("[agent gifts] stop failed", claimed.id, reason);
+          return false;
+        });
         // Forget it only once it is really gone; otherwise the watcher keeps trying.
         if (stopped) await updateJournal(journal => { delete journal.gifts[input.token]; });
+        else {
+          await updateJournal(journal => { const gift = journal.gifts[input.token]; if (gift) gift.purgePending = true; });
+          this.startWatching();
+        }
       }
       await this.api.release(input.token, false).catch(() => undefined);
       throw error instanceof AskGiveError ? error : new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
@@ -277,6 +291,8 @@ export class AskGiveCoordinator {
   }
 
   private async checkGift(gift: Gift): Promise<void> {
+    // Its gift already failed and the link was given back: only the local agent is left to remove.
+    if (gift.purgePending) return this.finish(gift);
     const preview = await this.api.preview(gift.token).catch(() => null);
     // Finished, or no longer this giver's: a declined substitute's link can reopen and be given by someone else.
     if (preview && (FINISHED.has(preview.ask.state) || preview.ask.is_giver === false)) return this.finish(gift);
@@ -354,15 +370,22 @@ export class AskGiveCoordinator {
     }
     const generation = (await this.daemon.ensureRunning()).generation;
     const prepared = await this.daemon.purgeAgent(entryId, generation);
-    if (prepared.outcome !== "revocation_required") return;
+    if (prepared.outcome !== "revocation_required") return purged(prepared);
     if (prepared.revocationKind === "worker_session" && prepared.agentSessionId) {
       await this.grants.revokeEntryForPurge(entryId, prepared.agentSessionId);
-      await this.daemon.purgeAgent(entryId, generation, prepared.agentSessionId);
-      return;
+      return purged(await this.daemon.purgeAgent(entryId, generation, prepared.agentSessionId));
     }
     await this.grants.revokeEntryForPurgeWithoutWorkerSession(entryId);
-    await this.daemon.purgeAgent(entryId, generation, null, true);
+    return purged(await this.daemon.purgeAgent(entryId, generation, null, true));
   }
+}
+
+/** Only "purged" means the agent is gone. A refusal carries the daemon's reason, so a later try can be judged by it. */
+function purged(result: { outcome: string; error?: string }): void {
+  if (result.outcome === "purged") return;
+  throw new Error(result.outcome === "invalid"
+    ? (result.error?.trim() || "The daemon refused to remove this agent.")
+    : "The daemon did not confirm that this agent was removed.");
 }
 
 export const askGiveCoordinator = new AskGiveCoordinator();
