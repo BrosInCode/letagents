@@ -46,9 +46,63 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The dependency gates, once per run: the cooldown, the registry signatures
+  # and the advisories of every lockfile the check jobs install. Each check
+  # job waits for this one, so no dependency lifecycle script runs before the
+  # gates pass, and one registry hiccup can fail at most this one job.
+  dependency-audit:
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+
+      - name: Install dependencies without lifecycle scripts
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
+      - name: Audit dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs .
+
+      - name: Install Vue dependencies without lifecycle scripts
+        run: cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify Vue dependency signatures
+        run: cd src/web && node ../../scripts/retry-command.mjs npm audit signatures
+
+      - name: Audit Vue dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs src/web
+
+      - name: Install desktop dependencies without lifecycle scripts
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      - name: Audit desktop dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
+
   # Everything the required "build" check covers except the desktop test
   # suites, which run in parallel in desktop-tests below.
   build-checks:
+    needs: dependency-audit
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     steps:
@@ -71,22 +125,8 @@ jobs:
       - name: Test production Docker context
         run: npm run test:docker-context
 
-      - name: Enforce dependency cooldown
-        run: npm run verify:dependency-age
-
       - name: Install dependencies without lifecycle scripts
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
-
-      - name: Verify dependency signatures
-        run: node scripts/retry-command.mjs npm audit signatures
-
-      - name: Install pinned dependency audit client
-        run: |
-          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
-          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
-
-      - name: Audit dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -108,12 +148,6 @@ jobs:
 
       - name: Install Vue dependencies without lifecycle scripts
         run: cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
-
-      - name: Verify Vue dependency signatures
-        run: cd src/web && node ../../scripts/retry-command.mjs npm audit signatures
-
-      - name: Audit Vue dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs src/web
 
       - name: Run verified Vue dependency lifecycle scripts
         run: cd src/web && npm rebuild
@@ -147,12 +181,6 @@ jobs:
 
       - name: Install desktop dependencies without lifecycle scripts
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
-
-      - name: Verify desktop dependency signatures
-        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
-
-      - name: Audit desktop dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
 
       # The packaged MCP runtime is sealed into the desktop code as a digest
       # of the tree its committed lock installs. The release build refuses to
@@ -245,9 +273,10 @@ jobs:
 
   # The desktop suites ran in series in one job and took most of its time.
   # Each runs here in its own job, with the commands `npm test` runs in
-  # apps/desktop, after the same dependency checks as build-checks.
+  # apps/desktop, after the dependency gates in dependency-audit.
   desktop-tests:
     name: desktop-tests (${{ matrix.suite }})
+    needs: dependency-audit
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -272,26 +301,10 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Enforce dependency cooldown
-        run: npm run verify:dependency-age
-
       - name: Install dependencies without lifecycle scripts
         run: |
           node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
           node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
-
-      - name: Verify dependency signatures
-        run: |
-          node scripts/retry-command.mjs npm audit signatures
-          node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
-
-      - name: Install pinned dependency audit client
-        run: |
-          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
-          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
-
-      - name: Audit dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents
 
       - name: Run verified dependency lifecycle scripts
         run: |
@@ -340,7 +353,7 @@ jobs:
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [build-checks, desktop-tests]
+    needs: [dependency-audit, build-checks, desktop-tests]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -358,6 +371,7 @@ jobs:
   # its group; the groups are balanced by measured step time.
   integration-db-tests:
     name: integration-db-tests (group ${{ matrix.group }})
+    needs: dependency-audit
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -392,22 +406,8 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Enforce dependency cooldown
-        run: npm run verify:dependency-age
-
       - name: Install dependencies without lifecycle scripts
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
-
-      - name: Verify dependency signatures
-        run: node scripts/retry-command.mjs npm audit signatures
-
-      - name: Install pinned dependency audit client
-        run: |
-          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
-          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
-
-      - name: Audit dependency advisories
-        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -694,7 +694,7 @@ jobs:
 
   # The required "integration-tests" check, gated like "build" above.
   integration-tests:
-    needs: [integration-db-tests]
+    needs: [dependency-audit, integration-db-tests]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

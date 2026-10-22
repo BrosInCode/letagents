@@ -373,8 +373,8 @@ test("dependency advisory checks use the pinned supported audit client", () => {
         script ===
         'npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2\necho "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"',
     ).length,
-    4,
-    "build, desktop test, integration and evaluator jobs must install isolated pinned audit clients",
+    2,
+    "only the dependency-audit and evaluator jobs may install isolated pinned audit clients",
   );
   assert.equal(
     releaseScripts.filter(
@@ -390,11 +390,9 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs src/web",
     "node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents",
-    "node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents",
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs .",
   ];
-  expectedCiAudits.push("node scripts/verify-dependency-advisories.mjs .");
   const actualCiAudits = ciScripts.filter((script) =>
     script.startsWith("node scripts/verify-dependency-advisories.mjs"),
   );
@@ -410,8 +408,6 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/retry-command.mjs npm audit signatures",
     "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
-    "node scripts/retry-command.mjs npm audit signatures\nnode scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
-    "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures",
   ]);
@@ -422,6 +418,9 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   assert.deepEqual(
     ciScripts.filter(containsDirectNpmCi),
     [
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
@@ -440,6 +439,62 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     ],
     "release installs must disable npm's implicit unbounded audit",
   );
+});
+
+test("the dependency gates run once, in dependency-audit, before every check job", () => {
+  const jobs = workflowJobs(".github/workflows/ci.yml");
+  const job = (name) => {
+    const found = jobs.find((candidate) => candidate.name === name);
+    assert.ok(found, `ci.yml must define the ${name} job`);
+    return found;
+  };
+  const audit = job("dependency-audit");
+  assert.deepEqual(audit.needs, [], "dependency-audit must start at once");
+  assert.equal(audit.condition, "inputs.purpose != 'room-ack-evaluation'");
+  assert.equal(audit.continueOnError, null);
+
+  // Every gate runs here, unconditionally, and fails the job.
+  const gates = [
+    "npm run verify:dependency-age",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/verify-dependency-advisories.mjs .",
+    "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
+    "node scripts/verify-dependency-advisories.mjs src/web",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents",
+  ];
+  for (const gate of gates) {
+    const steps = audit.steps.filter((step) => step.run === gate);
+    assert.equal(steps.length, 1, `dependency-audit must run "${gate}" once`);
+    assert.equal(steps[0].condition, null, `dependency-audit must not skip "${gate}"`);
+    assert.equal(steps[0].continueOnError, null, `"${gate}" must fail dependency-audit`);
+  }
+  // It only checks: nothing it installed may run a lifecycle script.
+  for (const command of audit.steps.flatMap((step) => (step.run ?? "").split("\n"))) {
+    assert.doesNotMatch(command, /\bnpx\b|\bnpm\s+(?:rebuild|exec|x|run(?!\s+verify:dependency-age$)|run-script)\b/, command);
+    if (/\bnpm\s+(?:install|i|add|ci)\b/.test(command)) {
+      assert.match(command, /\s--ignore-scripts\b/, `dependency-audit must install without lifecycle scripts: ${command}`);
+    }
+  }
+
+  // The check jobs install the same lockfiles and run their lifecycle
+  // scripts, so each waits for the gates and none repeats them.
+  const notGated = new Set(["dependency-audit", "build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
+  const checkJobs = jobs.filter((candidate) => !notGated.has(candidate.name));
+  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "integration-db-tests"]);
+  for (const checkJob of checkJobs) {
+    assert.deepEqual(checkJob.needs, ["dependency-audit"], `${checkJob.name} must wait for dependency-audit`);
+    for (const step of checkJob.steps) {
+      const run = step.run ?? "";
+      assert.ok(!containsDirectNpmAudit(run), `${checkJob.name}:${step.name} must not repeat npm audit`);
+      assert.doesNotMatch(run, /verify-dependency-advisories\.mjs/, `${checkJob.name}:${step.name} must not repeat the advisory audit`);
+      assert.doesNotMatch(run, /verify:dependency-age|verify-dependency-age\.mjs/, `${checkJob.name}:${step.name} must not repeat the cooldown`);
+      assert.doesNotMatch(run, /dependency-audit-npm/, `${checkJob.name}:${step.name} must not install the audit client`);
+    }
+  }
+  for (const gate of ["build", "integration-tests"]) {
+    assert.ok(job(gate).needs.includes("dependency-audit"), `${gate} must wait for dependency-audit`);
+  }
 });
 
 test("the retry wrapper only wraps the pinned npm ci installs and signature checks", () => {
@@ -544,7 +599,7 @@ test("the required checks wait for every check job and fail closed", () => {
 
   const notChecks = new Set(["build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
   assert.deepEqual(
-    gates.flatMap((gate) => gate.needs).sort(),
+    [...new Set(gates.flatMap((gate) => gate.needs))].sort(),
     jobs.map((candidate) => candidate.name).filter((name) => !notChecks.has(name)).sort(),
     "every check job must sit behind a required check",
   );
