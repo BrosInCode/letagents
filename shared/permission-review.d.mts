@@ -3,6 +3,8 @@ export const PERMISSION_REVIEW_RISKY_AT_MOST: number;
 export const PERMISSION_REVIEW_MAX_COMMANDS: number;
 export const PERMISSION_REVIEW_MAX_COMMAND_CHARS: number;
 export const PERMISSION_REVIEW_MAX_PROJECT_CHARS: number;
+/** Both `/` and `\\` split a path, so no part hides behind the other separator. */
+export const PATH_SEPARATOR: RegExp;
 
 export type PermissionReviewKind = "read" | "check" | "edit" | "risky";
 export type PermissionReviewAnswers = {

@@ -107,6 +107,87 @@ test("a command that names anything outside the project needs a person", () => {
   }
 });
 
+test("a path written for Windows is read against the project, whichever separator or root it uses", () => {
+  const windows = "C:\\work\\repo";
+  const share = "\\\\nas\\share\\repo";
+  const cases: Array<[project: string, command: string, needsPerson: boolean]> = [
+    // Inside a project on a drive, written either way, with either case of drive letter.
+    [windows, "cat 'C:\\work\\repo\\src\\a.ts'", false], [windows, "cat C:/work/repo/src/a.ts", false], [windows, "cat 'c:\\work\\repo\\src\\a.ts'", false],
+    [windows, "ls 'C:\\work\\repo'", false], [windows, "ls 'C:\\work\\repo\\'", false], [windows, "cat src/a.ts", false], [windows, "cat 'src\\a.ts'", false],
+    [windows, "cat x=C:/work/repo/x", false], [windows, "git -C C:/work/repo log", false], [windows, "git -C 'C:\\work\\repo\\' log", false],
+    [`${windows}\\`, "cat 'C:\\work\\repo\\src\\a.ts'", false], ["C:/work/repo", "cat 'C:\\work\\repo\\src\\a.ts'", false],
+    // Outside it: another folder, another drive, the rest of the folder's name, or another case of it.
+    [windows, "cat 'C:\\work\\other\\x'", true], [windows, "cat 'C:\\work\\repo-other\\x'", true], [windows, "cat 'C:\\work\\Repo\\x'", true],
+    [windows, "cat 'D:\\work\\repo\\x'", true], [windows, "cat D:/work/repo/x", true], [windows, "cat x=C:/work/other/x", true], [windows, "git -C 'C:\\work\\other' log", true],
+    // A drive alone, a drive's current folder, and a path on whichever drive is current.
+    [windows, "cat 'C:\\'", true], [windows, "cat C:x", true], [windows, "cat C:", true], [windows, "cat 'C:\\work\\repo\\'x", true],
+    [windows, "cat '\\work\\repo\\x'", true], [windows, "cat /work/repo/x", true],
+    // Climbing, with either separator, also from inside the project.
+    [windows, "cat '..\\..\\secret'", true], [windows, "cat 'src\\..\\..\\x'", true], [windows, "cat 'C:/work/repo/..\\..\\x'", true], [windows, "cat 'C:\\work\\repo\\..\\x'", true],
+    // A network share.
+    [windows, "cat '\\\\nas\\share\\x'", true], [windows, "cat //nas/share/x", true], [windows, "cat '\\\\nas\\share\\C:\\work\\repo'", true],
+    // Doubled or `.` parts, history, and credentials.
+    [windows, "cat 'C:\\work\\repo\\\\x'", true], [windows, "cat 'C:\\work\\repo\\.\\x'", true], [windows, "cat 'C:\\work\\repo\\.git\\config'", true],
+    [windows, "cat 'C:\\work\\repo\\.GIT\\config'", true], [windows, "cat 'C:\\work\\repo\\.env'", true], [windows, "cat 'C:\\work\\repo\\.ssh\\id_rsa'", true],
+    [windows, "cat 'src\\.env'", true], [windows, "cat 'src\\.git\\config'", true],
+    // Windows drops the dots and spaces at the end of a name, so such a name may climb, or hold history or credentials. Three dots are a plain name.
+    [windows, "ls 'C:\\work\\repo\\.. '", true], [windows, "ls 'C:\\work\\repo\\. '", true], [windows, "cat 'C:\\work\\repo\\...\\x'", false], [windows, "cat '.. \\x'", true],
+    [windows, "cat 'C:\\work\\repo\\.git.\\config'", true], [windows, "cat '.git \\config'", true], [windows, "cat 'C:\\work\\repo\\x. '", true], [windows, "cat 'x. \\y'", true],
+    [windows, "cat 'C:\\work\\repo\\.env '", true], [windows, "cat 'C:\\work\\repo\\.env .'", true], [windows, "cat 'src\\.env '", true], [windows, "ls 'C:\\work\\repo\\.ssh '", true],
+    [windows, "cat 'key.pem '", true], [windows, "cat 'C:\\work\\repo\\.'", false], [windows, "cat 'x.y'", false],
+    // `=`, `:` and `,` may be part of a folder's name: `C:/work/repo,other` is a sibling of the project.
+    [windows, "cat C:/work/repo,other/x", true], [windows, "cat C:/work/repo=other/x", true], [windows, "cat C:/work/repo/x,y", false],
+    // cmd.exe puts a variable's value in place of `%NAME%`, in any word of any program.
+    [windows, "cat %USERPROFILE%/x", true], [windows, "ls %APPDATA%", true], [windows, "git log --format=%h", false], [windows, "git log --format=%h%s", true],
+    [windows, "echo %AWS_SECRET_ACCESS_KEY%", true], [windows, "date +%X%", true], [windows, "echo '%X%'", true], [windows, "echo \"%X%\"", true], [windows, "echo 100%", false],
+    [windows, "echo %AWS_SECRET_ACCESS_KEY:x= y%", true], [windows, "echo %X; echo Y%", true],
+    // cmd.exe quotes nothing with single quotes, and writes `/dev/null` as a file on the current drive.
+    [windows, "echo 'ok & del victim.txt'", true], [windows, "echo 'a | b'", true], [windows, "echo '!X!'", true], [windows, "echo 'x^y'", true], [windows, "echo 'a\"b'", true],
+    [windows, "echo 'ok > x'", true], [windows, "echo ok > /dev/null", true], [windows, "npm test >/dev/null 2>&1", true], [windows, "git status 2>&1", false],
+    [windows, "git log --format='ok & del victim.txt'", true], [windows, "echo x='ok > victim.txt'", true], [windows, "git log --format='!X!'", true], [windows, "git log --format='%h %s'", true],
+    [windows, "grep -rn 'parse Date' src", false], [windows, "echo \"a b\"", false], [windows, "git log -1 --format='%h'", false],
+    // A stream of a file (`file::$DATA` is the file itself) is not another file.
+    [windows, "cat 'C:/work/repo/.npmrc::$DATA'", true], [windows, "cat '.env:x'", true], [windows, "cat '.ssh=x'", true], [windows, "cat 'C:\\work\\repo\\.git::$INDEX_ALLOCATION'", true],
+    [windows, "cat 'C:\\work\\repo\\x\\..:y'", true],
+    // A project on a share.
+    [share, "cat '\\\\nas\\share\\repo\\x'", false], [share, "cat //nas/share/repo/x", false], [share, "ls '\\\\nas\\share\\repo'", false],
+    [share, "cat '\\\\nas\\share\\other\\x'", true], [share, "cat '\\\\nas\\other\\repo\\x'", true], [share, "cat '\\\\nas\\share'", true], [share, "cat 'C:\\work\\repo\\x'", true],
+    [share, "cat //nas/share/repo,other/x", true],
+    // A POSIX project reads no Windows path at all.
+    [project, "cat '\\Users\\dev\\shop-api\\x'", true], [project, "cat 'C:\\Users\\dev\\shop-api\\x'", true], [project, "cat C:/Users/dev/shop-api/x", true],
+    [project, "cat '..\\..\\x'", true], [project, "cat '\\\\nas\\share\\x'", true], [project, "cat 'src\\a.ts'", true], [project, "cat a:/etc/passwd", true],
+    // On a POSIX project a one-letter name before `:` is not a drive, as `grep 'key: value'` and Git formats write it.
+    [project, "grep -rn 'y: string' src", false], [project, "git log -1 --format=x:%s", false], [project, "git log --author=a:b", false], [project, "cat C:x", false],
+    [project, "git log --format=%h%s", false], [project, "cat /Users/dev/shop-api/a:/Users/dev/shop-api/b", false], [project, "cat /Users/dev/shop-api/x,y", false],
+    // A sibling folder whose name holds `:`, `=` or `,` is not the project and a relative name.
+    [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true],
+    // On POSIX a name that ends in a dot or a space is that name.
+    [project, "cat '/Users/dev/shop-api/.. '", false], [project, "cat './. '", false], [project, "cat 'x.env '", false], [project, "echo %X%", false],
+    [project, "echo 'ok & del x'", false], [project, "echo ok > /dev/null", false], [project, "git log --format='ok & x'", false],
+    // `\` is part of a name on POSIX, so `/Users/dev\shop-api` is another folder.
+    [project, "git -C '/Users/dev\\shop-api' log", true], [project, "git -C '/Users/dev/shop-api\\' log", true], [project, "cat '/Users/dev\\shop-api/x'", true],
+    // A Git pathspec that starts with `:` carries an instruction: `:(top)` reads from the repository's top, which may be above the project.
+    [project, "git grep -l -e x ':(top)README.md'", true], [project, "git grep -e x -- ':(top)x'", true], [project, "git log -- ':/x'", true], [project, "git grep -e x ':!x'", true],
+    [project, "git grep -e x -- ':(glob)src/*.ts'", true], [project, "git show 'HEAD:(top)x'", false], [project, "git show :README.md", true],
+    // A pathspec with `*`, `?` or `[` is matched by Git itself, so `.[e]nv` names `.env`. A pattern given to `-e` is not a pathspec.
+    [project, "git grep -e . -- '.[e]nv'", true], [project, "git grep -l -e . '.[e]nv'", true], [project, "git log -- '*'", true], [project, "git ls-files '?.env'", true],
+    [project, "git grep -e 'a.*b' src", false], [project, "git grep -e '.[e]nv' src", false], [project, "git log --grep='x*'", false],
+    // A pattern, a delimiter, or a format that starts with `:` is not a pathspec.
+    [project, "grep -rn ':' src", false], [project, "rg -e ':foo' src", false], [project, "sort -t : x", false], [project, "git grep -e ':' src", false],
+    [project, "git log --grep=':x'", false], [project, "git log --format=':%h'", false], [project, "git log -L :func:file", false], [project, "find . -name ':x'", false],
+  ];
+  for (const [root, command, needs] of cases) {
+    assert.equal(commandNeedsPerson(command, root), needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+    assert.equal(commandOnlyReads(command, root), !needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+  }
+  // A drive, a share, or a folder on whichever drive is current is not a project.
+  for (const root of ["C:\\", "C:", "C:/", "C:work", "\\\\nas\\share", "\\\\nas\\share\\", "//nas", "//nas/share", "\\work\\repo", "C:\\work\\..\\repo", "C:\\work\\\\repo",
+    "C:\\work\\repo.", "C:\\work\\repo\\.. ", "/tmp/repo\\", "/tmp/repo\\/", "//tmp/repo/sub\\", "\\\\nas\\share/repo", "//nas/share/repo\\x"]) {
+    assert.equal(commandNeedsPerson("ls", root), true, root);
+  }
+  assert.deepEqual(buildPermissionReviewRequest({ commands: ["ls"], project: "C:\\work\\repo\\" })?.state, { commands: ["ls"], project: "C:\\work\\repo" });
+});
+
 test("credentials and the repository's own history store need a person", () => {
   needsPerson([
     "cat .env", "cat .env.local", "cat config/.env", "cat src/.ENV", "cat .envrc", "cat .env_production", "ls .ssh", "cat .aws/credentials", "cat .npmrc", "cat .netrc", "cat .pgpass",
