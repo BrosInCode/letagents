@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, parse } from "node:path";
+
+import { spawnCodex } from "./codex-executable.mjs";
 
 // A Codex app-server that LetAgents launches works for a room, not as the
 // owner, yet it shares the owner's CODEX_HOME so Codex sign-in keeps working.
@@ -113,7 +114,8 @@ export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TI
     // timeout must stop both: run it in its own process group (execFile ignores
     // `detached`, so spawn) and stop the whole group.
     const group = process.platform !== "win32";
-    const child = spawn(codexBin, args, {
+    // spawnCodex runs a Windows codex.cmd through its node script and hides the console window.
+    const child = spawnCodex(codexBin, args, {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],

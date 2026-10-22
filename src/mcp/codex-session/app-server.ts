@@ -1,6 +1,6 @@
-import { spawn } from "child_process";
 import { createServer } from "net";
 
+import { spawnCodex } from "../../../shared/codex-executable.mjs";
 import { codexOwnerIsolationOverrides } from "../../../shared/codex-owner-isolation.mjs";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -92,7 +92,8 @@ export async function launchAppServer(
   options: { cwd?: string } = {},
 ): Promise<number | null> {
   const overrides = await codexOwnerIsolationOverrides(codexBin, { cwd: options.cwd, env: process.env });
-  const child = spawn(codexBin, codexAppServerArgs(serverUrl, overrides), {
+  // spawnCodex runs a Windows codex.cmd through its node script and hides the console window.
+  const child = spawnCodex(codexBin, codexAppServerArgs(serverUrl, overrides), {
     // Start where the servers were listed, so the project config matches.
     ...(options.cwd ? { cwd: options.cwd } : {}),
     detached: true,
