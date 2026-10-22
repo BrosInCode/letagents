@@ -81,6 +81,7 @@
                 :name="workOwner(card)"
                 :agent="Boolean(card.agent?.agent_key)"
                 :agent-key="card.agent?.agent_key"
+                :provider="card.agent?.provider"
               />
               <div>
                 <strong>{{ workOwner(card) }}</strong
@@ -140,7 +141,9 @@
             data-testid="my-work-detail-ticket"
           >
             <h3>
-              {{ card.provider ? trackerProviderLabel(card.provider) : "Linked" }}
+              {{
+                card.provider ? trackerProviderLabel(card.provider) : "Linked"
+              }}
               ticket
             </h3>
             <dl class="work-details-grid">
@@ -273,7 +276,10 @@
 </template>
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from "vue";
-import { trackerProviderLabel, type MyWorkCard } from "../../ticket-connectors.mjs";
+import {
+  trackerProviderLabel,
+  type MyWorkCard,
+} from "../../ticket-connectors.mjs";
 import ChatAvatar from "../ChatAvatar.vue";
 import WorkIcon from "./WorkIcon.vue";
 import type { MyWorkApi, WorkMention } from "./types";

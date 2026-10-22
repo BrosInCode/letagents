@@ -1,8 +1,6 @@
 /* Ask for an agent: the ask sheet, the giver's screen, and the room bar. */
-.agent-ask-dialog,
-.agent-give-dialog { display: flex; flex-direction: column; gap: 14px; width: min(460px, calc(100vw - 32px)); }
+.agent-ask-dialog { display: flex; flex-direction: column; gap: 14px; width: min(460px, calc(100vw - 32px)); }
 .agent-ask-header h3 { margin: 0; }
-.agent-give-meta { margin: 4px 0 0; color: var(--text-secondary); font-size: 13px; }
 .agent-ask-field { display: flex; flex-direction: column; gap: 6px; border: 0; margin: 0; padding: 0; font-size: 13px; }
 .agent-ask-field > span,
 .agent-ask-field > legend { color: var(--text-secondary); padding: 0; margin-bottom: 6px; }
@@ -12,18 +10,10 @@
 .agent-ask-field textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; }
 .agent-ask-field textarea { resize: vertical; }
 .agent-ask-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.agent-ask-chips button,
-.agent-give-model { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
-.agent-ask-chips button[aria-pressed="true"],
-.agent-give-model[aria-pressed="true"] { border-color: var(--blue); background: var(--blue-dim); color: var(--blue-text); }
+.agent-ask-chips button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+.agent-ask-chips button[aria-pressed="true"] { border-color: var(--blue); background: var(--blue-dim); color: var(--blue-text); }
 .agent-ask-custom { width: 96px; }
 .agent-ask-hint { color: var(--text-tertiary); }
-.agent-give-models { display: flex; flex-direction: column; gap: 6px; }
-.agent-give-model { display: flex; justify-content: space-between; align-items: center; text-align: left; }
-.agent-give-model small { color: var(--text-tertiary); }
-.agent-give-model:disabled { cursor: not-allowed; opacity: 0.55; }
-.agent-give-note { margin: 0; padding: 8px 12px; border-left: 3px solid var(--border-accent); color: var(--text-secondary); }
-.agent-give-terms,
 .agent-ask-ready-copy { margin: 0; color: var(--text-secondary); font-size: 13px; }
 .agent-ask-link-row { display: flex; gap: 8px; align-items: center; }
 .agent-ask-link-row code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 8px 10px; border-radius: 8px; background: var(--bg-card); font-family: var(--font-mono); font-size: 12px; }

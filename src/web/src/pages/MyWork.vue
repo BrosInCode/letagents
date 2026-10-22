@@ -5,6 +5,7 @@
       <nav aria-label="Workspace">
         <RouterLink to="/my-work" aria-current="page">My work</RouterLink
         ><RouterLink to="/messages">Messages</RouterLink
+        ><RouterLink to="/connectors">Connectors</RouterLink
         ><RouterLink to="/">Home</RouterLink>
       </nav>
     </header>
@@ -16,7 +17,6 @@
       :connected="connected"
       @open-card="openCard"
       @open-thread="openThread"
-      @open-trackers="trackers?.showModal()"
     />
     <div v-else class="web-work-signin">
       <h1>My work</h1>
@@ -25,18 +25,6 @@
         {{ isSigningIn ? "Opening…" : "Sign in with GitHub" }}
       </button>
     </div>
-    <dialog
-      ref="trackers"
-      class="web-work-trackers"
-      aria-labelledby="work-trackers-title"
-    >
-      <h2 id="work-trackers-title">Connectors</h2>
-      <p>
-        Manage your Jira, Linear and GitHub Issues connections in the desktop
-        app’s Settings → Connectors. Your connected tickets appear here in My work.
-      </p>
-      <button type="button" @click="trackers?.close()">Done</button>
-    </dialog>
   </div>
 </template>
 <script setup lang="ts">
@@ -48,7 +36,6 @@ import { useAuth } from "../composables/useAuth";
 import { apiFetch, roomPath } from "../composables/room/api";
 const { isSignedIn, user, isSigningIn, signIn, checkSession } = useAuth();
 const router = useRouter();
-const trackers = ref<HTMLDialogElement>();
 const stamps = ref<Record<string, string | null>>({}),
   connected = ref(false);
 const api: MyWorkApi = {
@@ -190,6 +177,21 @@ onScopeDispose(() => {
 .web-work-nav [aria-current] {
   color: var(--text);
 }
+@media (max-width: 600px) {
+  .web-work-nav {
+    gap: 12px;
+    padding: 10px 16px;
+    font-size: 11px;
+  }
+  .web-work-nav nav {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px 14px;
+  }
+  .web-work-nav a {
+    white-space: nowrap;
+  }
+}
 .web-work-signin {
   margin: auto;
   padding: 24px;
@@ -203,8 +205,7 @@ onScopeDispose(() => {
   color: var(--text-secondary);
   font-size: 14px;
 }
-.web-work-signin button,
-.web-work-trackers button {
+.web-work-signin button {
   border: 0;
   border-radius: 7px;
   padding: 11px 16px;
@@ -212,26 +213,5 @@ onScopeDispose(() => {
   background: var(--text);
   color: var(--bg);
   cursor: pointer;
-}
-.web-work-trackers {
-  margin: auto;
-  padding: 28px;
-  max-width: min(440px, calc(100vw - 32px));
-  background: var(--bg-card);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-}
-.web-work-trackers h2 {
-  font-size: 20px;
-}
-.web-work-trackers p {
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--text-secondary);
-  margin: 16px 0 24px;
-}
-.web-work-trackers::backdrop {
-  background: #0006;
 }
 </style>

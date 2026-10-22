@@ -117,6 +117,13 @@ export async function personName(accountId: string | null): Promise<string> {
   return (await person(accountId)).name;
 }
 
+/** Receiver image comes from the account that owns this request, never its display name. */
+export async function personAvatarUrl(accountId: string): Promise<string | null> {
+  const [account] = await db.select({ avatar: accounts.avatar_url }).from(accounts)
+    .where(eq(accounts.id, accountId)).limit(1);
+  return account?.avatar ?? null;
+}
+
 // State first, then authority: a change that loses its race must not end someone's live agent.
 export async function cancelAsk(ask: AgentAsk) {
   const cancelled = await move(ask.id, ["open", "claimed"], { state: "cancelled", ended_at: now() });
