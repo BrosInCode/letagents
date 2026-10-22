@@ -9,6 +9,8 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { childProcessEnv } from "./support/platform.js";
+
 async function until<T>(read: () => T | undefined | false, what: string, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -87,9 +89,9 @@ test("a process holds its connection open, learns when its session is ended, and
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
       args: ["--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
-      env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
+      env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
-        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
+        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
     transport.stderr?.resume();
     const client = new Client({ name: "process-connection-test", version: "1" });
     clients.push(client);

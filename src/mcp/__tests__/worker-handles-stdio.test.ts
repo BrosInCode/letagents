@@ -13,9 +13,11 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { childProcessEnv, posixSignalsOnly } from "./support/platform.js";
+
 // Real MCP processes and schemas; the HTTP fixture controls response loss and
 // response ordering. The companion DB tests verify server auth and allocation.
-test("worker handles isolate chats and workspace captures, survive process loss, and fence delayed replies", { timeout: 60_000 }, async () => {
+test("worker handles isolate chats and workspace captures, survive process loss, and fence delayed replies", { timeout: 60_000, skip: posixSignalsOnly }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "letagents-worker-stdio-"));
   const statePath = join(temp, "state.json");
   const pauseFlag = join(temp, 'pause-capture'), pauseReady = join(temp, 'capture-paused');
@@ -127,9 +129,9 @@ test("worker handles isolate chats and workspace captures, survive process loss,
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
       args: ["--require", preload, "--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
-      env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
+      env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
-        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
+        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
     transport.stderr?.resume();
     const client = new Client({ name: "identity-test", version: "1" });
     clients.push(client);

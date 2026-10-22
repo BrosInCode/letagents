@@ -2,6 +2,7 @@ import { createLocalTaskStore } from "../../../shared/local-task-store.mjs";
 import { runWithLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { withRegisteredWorkerStateFence } from "../../../shared/local-worker-state-fence.mjs";
 import { DaemonControlSocket } from "../../../apps/desktop/daemon/control-socket.js";
+import { unixSocketOnly } from "./support/platform.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -80,8 +81,9 @@ const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_P
     return operation(...input.args);
   }));
 await runWithLocalBoardOwner(() => {}, () => getLocalKnowledgeDatabase());
-await boardSocket.start();
-test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+// The board socket is a Unix socket; the tests that need it carry the same skip.
+if (!unixSocketOnly) await boardSocket.start();
+test.after(async () => { if (!unixSocketOnly) await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 type SendToolHandler = (
   input: Record<string, unknown>,
@@ -449,7 +451,7 @@ test("MCP local activation uses indexed membership beyond display and for prompt
   assert.match(plan.map((row) => String(row.detail || "")).join("\n"), /local_chat_thread_routing_alias_root_lookup_v2_idx/);
 });
 
-test("MCP local legacy activation resolves aliases against the complete active population", async () => {
+test("MCP local legacy activation resolves aliases against the complete active population", { skip: unixSocketOnly }, async () => {
   const room = "local_global_routing_authority";
   const timestamp = new Date().toISOString();
   const session = (
@@ -2355,7 +2357,7 @@ test("MCP post_reasoning stores milestones locally for local rooms", async () =>
   assert.deepEqual(page.messages.map((message) => message.text), ["local milestone"]);
 });
 
-test("MCP local task state supports board create, list, and update", async () => {
+test("MCP local task state supports board create, list, and update", { skip: unixSocketOnly }, async () => {
   const task = await addLocalTask("board_room", {
     title: "Local board task",
     description: "Stored in SQLite",
@@ -2414,7 +2416,7 @@ test("MCP local task state supports board create, list, and update", async () =>
   );
 });
 
-test("MCP local task lease actions stay local", async () => {
+test("MCP local task lease actions stay local", { skip: unixSocketOnly }, async () => {
   writeFileSync(settingsPath, JSON.stringify({
     mode: "cloud",
     defaultMode: "cloud",
@@ -2528,7 +2530,7 @@ test("MCP local task lease actions stay local", async () => {
   assert.equal(release.task.assignee_agent_key, null);
 });
 
-test("MCP local activation context ignores bare human assignees", async () => {
+test("MCP local activation context ignores bare human assignees", { skip: unixSocketOnly }, async () => {
   const bareTask = await addLocalTask("bare_assignee_room", {
     title: "Bare human assignment",
     created_by: "Agent",

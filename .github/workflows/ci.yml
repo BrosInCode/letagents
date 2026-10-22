@@ -402,18 +402,25 @@ jobs:
         run: npm rebuild
 
       - name: Build the MCP server
+        id: build
         shell: bash
         run: npm run build
 
+      # Each suite below runs once the build passed, whether or not an earlier
+      # suite failed, so one run reports every failure. The job still fails
+      # when any step fails.
       - name: Test the npm launcher resolver
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: node --test scripts/npm-command.test.mjs
 
       - name: Test MCP helpers
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: npm run test:mcp
 
       - name: Test packed MCP runtime
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: npm run test:package-runtime
 
@@ -422,10 +429,12 @@ jobs:
       # installed; their lifecycle scripts (the Electron download among them)
       # are not needed by these suites.
       - name: Install desktop dependencies without lifecycle scripts
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Test the shared modules the MCP server depends on
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: node --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
 
