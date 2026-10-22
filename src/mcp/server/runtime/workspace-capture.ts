@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
 import { REVIEW_LIMIT, REVIEW_PAGE_SIZE } from '../../../../shared/workspace-review.mjs';
+import { GIT_TIMEOUT_MS } from '../../../../shared/workspace-change-capture.mjs';
 import { captureRemoteTips, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 import { getLocalStatePath, readLocalStateSnapshot, updateLocalState } from '../../local-state/storage.js';
 import type { StoredAgentSessionState, StoredWorkspaceCapture } from '../../local-state/types.js';
@@ -88,7 +89,7 @@ export async function beginWorkspaceCapture(input: { room_id: string; agent_sess
     if (captureWorkerActive) throw new Error('Another workspace is being captured. Retry shortly before editing.');
     const cwd = await realpath(resolve(input.cwd || prior?.workspace || getRuntimeWorkingDirectory()));
     const git = async (args: string[]) => (await execute('git', ['--no-optional-locks', ...args], {
-      cwd, timeout: 5_000, maxBuffer: 16 * 1024,
+      cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 16 * 1024,
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
     })).stdout.trim();
     const workspace = await realpath(await git(['rev-parse', '--show-toplevel']));
