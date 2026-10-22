@@ -11,7 +11,13 @@ export function codexHomeDirectory(env: NodeJS.ProcessEnv): string;
 export function codexPersonalSkillFiles(env: NodeJS.ProcessEnv): Promise<string[]>;
 export function codexSkillDisableOverride(skillFiles: readonly string[]): string | null;
 export function codexMcpServerDisableOverride(serverNames: readonly string[]): string | null;
-export const runCodexMcpList: CodexMcpListRunner;
+/** Runs `codex mcp list`; on timeout it stops Codex's whole process group, not just an npm wrapper. */
+export function runCodexMcpList(
+  codexBin: string,
+  args: string[],
+  options: { cwd?: string; env: NodeJS.ProcessEnv },
+  timeoutMs?: number,
+): Promise<string>;
 export type CodexMcpServerEntry = { name: string; enabled?: boolean; transport?: unknown; [key: string]: unknown };
 export function listCodexMcpServers(
   codexBin: string,
