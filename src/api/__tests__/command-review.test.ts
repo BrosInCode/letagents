@@ -42,6 +42,7 @@ test("a Windows path that leaves the project is reserved for a person, and one i
     [project, "cat '\\Users\\dev\\shop-api\\x'", "needs_person"], [project, "cat 'C:\\Users\\dev\\shop-api\\x'", "needs_person"], [project, "cat '..\\..\\x'", "needs_person"],
     [windows, "cat C:/work/repo,other/x", "needs_person"], [windows, "ls 'C:\\work\\repo\\.. '", "needs_person"], [project, "cat /Users/dev/shop-api:other/x", "needs_person"],
     [project, "grep -rn 'y: string' src", "reviewed"], [windows, "echo %AWS_SECRET_ACCESS_KEY%", "needs_person"], [windows, "cat 'C:/work/repo/.npmrc::$DATA'", "needs_person"],
+    [windows, "echo 'ok & del x'", "needs_person"], [windows, "echo ok > /dev/null", "needs_person"], [project, "git grep -e x ':(top)x'", "needs_person"],
   ];
   for (const [root, command, reason] of cases) {
     const result = await reviewCommands({ commands: [command], project: root }, { endpoint, evaluate });
