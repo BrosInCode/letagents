@@ -149,7 +149,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, reactive, ref } from "vue";
 import type {
   TrackerConnectionView,
   TrackerRuleInput,
@@ -174,7 +174,9 @@ import {
 } from "../connector-rules";
 import type { SettingsFeedback } from "../types";
 
-const props = defineProps<{ connection: TrackerConnectionView }>();
+const props = defineProps<{ connection: TrackerConnectionView; rulesApi?: import("../../../../../../../../shared/ui/connectors/types").TrackerApi["rules"] }>();
+let live = true;
+onBeforeUnmount(() => { live = false; });
 
 const rules = ref<TrackerRuleView[]>([]);
 const rooms = ref<string[]>([]);
@@ -186,7 +188,7 @@ const confirmRemoveId = ref<string | null>(null);
 const history = reactive<Record<string, TrackerRuleVersionView[]>>({});
 const draft = ref<RuleDraft | null>(null);
 
-const api = () => window.letagentsDesktop.connectors.rules;
+const api = () => props.rulesApi ?? (window as unknown as { letagentsDesktop: { connectors: { rules: NonNullable<typeof props.rulesApi> } } }).letagentsDesktop.connectors.rules;
 const message = (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback;
 const fields = computed(() => draft.value ? ruleFieldsFor(draft.value.event, draft.value.action) : ruleFieldsFor("pull_request", "opened"));
 
@@ -204,6 +206,7 @@ function replace(rule: TrackerRuleView) {
 async function load() {
   try {
     const list = await api().list(props.connection.id);
+    if (!live) return;
     rules.value = list.rules;
     rooms.value = list.rooms;
   } catch (error) {

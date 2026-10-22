@@ -130,7 +130,7 @@ test("zero-connector mode lists native cards assigned to me or my agent", option
     owner_label: "solo", ide_label: "desktop", created_at: now, updated_at: now, last_seen_at: now,
   });
   await client!.db.insert(schema!.room_agent_presence).values({
-    room_id: roomId, actor_label: "MapleRidge", agent_key: "agent:maple", display_name: "MapleRidge", status: "working",
+    room_id: roomId, actor_label: "MapleRidge", agent_key: "agent:maple", display_name: "MapleRidge", status: "working", runtime: "claude", ide_label: "desktop",
     status_text: "Running the proration tests", last_heartbeat_at: now, created_at: now, updated_at: now,
   });
   const byAgent = await card(roomId, "My agent's card", { updatedMinute: 2, agentKey: "agent:maple", assignee: "MapleRidge" });
@@ -144,9 +144,14 @@ test("zero-connector mode lists native cards assigned to me or my agent", option
   assert.equal(page.cards[0]!.ticket_state, null);
   assert.equal(page.cards[0]!.assigned_via, "native");
   assert.deepEqual(page.cards[0]!.agent, {
-    label: "MapleRidge", agent_key: "agent:maple", display_name: "MapleRidge", status: "working",
+    provider: "claude", label: "MapleRidge", agent_key: "agent:maple", display_name: "MapleRidge", status: "working",
     status_text: "Running the proration tests", last_heartbeat_at: page.cards[0]!.agent!.last_heartbeat_at,
   });
+
+  assert.equal(page.cards[1]!.agent!.provider, null, "human assignee does not receive an agent provider");
+  await client!.pool.query("UPDATE room_agent_presence SET runtime = $1, ide_label = $2 WHERE room_id = $3 AND agent_key = $4", ["unknown", "Codex", roomId, "agent:maple"]);
+  const fallback = await myWork!.listMyWork({ accountId: me.id, login: me.login });
+  assert.equal(fallback.cards[0]!.agent!.provider, "Codex", "recorded IDE supplies a fallback for unknown runtime");
 
   // Paging: one card a page, newest first, then nothing.
   const first = await myWork!.listMyWork({ accountId: me.id, login: me.login, limit: 1 });
