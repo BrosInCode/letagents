@@ -131,20 +131,28 @@ export class ProviderUsageTracker {
     if (data?.session_id !== this.value.providerContinuationId || data.parent_tool_use_id != null) return;
     if (data.type === "rate_limit_event") {
       const info = row(data.rate_limit_info);
-      const utilization = typeof info?.utilization === "number" ? info.utilization : null;
-      const usedPercent = utilization === null ? null : percent(utilization * 100);
       const key = typeof info?.rateLimitType === "string" ? info.rateLimitType : null;
-      if (usedPercent === null && ["allowed", "allowed_warning", "rejected"].includes(String(info?.status))) {
+      // Newer CLIs report every window under unifiedWindows; older ones report one at the top level.
+      const measured = new Map<string, { usedPercent: number; resetsAt: unknown }>();
+      const topPercent = typeof info?.utilization === "number" ? percent(info.utilization * 100) : null;
+      if (key && topPercent !== null) measured.set(key, { usedPercent: topPercent, resetsAt: info?.resetsAt });
+      for (const [id, value] of Object.entries(row(info?.unifiedWindows) ?? {})) {
+        const window = row(value);
+        const usedPercent = typeof window?.utilization === "number" ? percent(window.utilization * 100) : null;
+        if (usedPercent !== null) measured.set(id, { usedPercent, resetsAt: window?.resetsAt });
+      }
+      if (!measured.size && ["allowed", "allowed_warning", "rejected"].includes(String(info?.status))) {
         // A status-only update supersedes confidence in the previous number,
         // but cannot establish 0% or 100% utilization.
         this.accountFailed();
         const resetsAt = epoch(info?.resetsAt);
         if (key && resetsAt) this.value.account.windows = this.value.account.windows.map(window => window.id === key ? { ...window, resetsAt } : window);
       }
-      if (key && usedPercent !== null) {
+      if (measured.size) {
         const labels: Record<string, string> = { five_hour: "5 hours", seven_day: "Weekly", seven_day_opus: "Opus · Weekly", seven_day_sonnet: "Sonnet · Weekly", overage: "Extra usage" };
-        this.value.account = { state: "available", windows: [...this.value.account.windows.filter(window => window.id !== key),
-          { id: key.slice(0, 160), label: (labels[key] ?? key.replaceAll("_", " ")).slice(0, 160), usedPercent, resetsAt: epoch(info?.resetsAt), observedAt: at }].slice(0, 16) };
+        const ids = new Set([...measured.keys()].map(id => id.slice(0, 160)));
+        this.value.account = { state: "available", windows: [...this.value.account.windows.filter(window => !ids.has(window.id)),
+          ...[...measured].map(([id, { usedPercent, resetsAt }]) => ({ id: id.slice(0, 160), label: (labels[id] ?? id.replaceAll("_", " ")).slice(0, 160), usedPercent, resetsAt: epoch(resetsAt), observedAt: at }))].slice(0, 16) };
       }
     }
     if (data.type === "system" && data.subtype === "compact_boundary") {
