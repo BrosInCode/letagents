@@ -238,3 +238,47 @@ export const tracker_rule_runs = pgTable(
     ),
   }),
 );
+
+/**
+ * One question LetAgents asked Jev for a tracker connection (ticket
+ * connectors PR6): link a pull request (`link`), read a pull request closed
+ * without a merge (`exception`), who a card waits on (`needs_me`), or a rule
+ * drafted from a sentence (`rule_draft`). Unique per kind, room, subject and
+ * revision: one question per pull request head, per closed pull request, and
+ * per card and last message. The rows are the metrics, and `resolution`
+ * records a person's accept or reject of a link. Jev never writes a ticket.
+ */
+export const tracker_jev_questions = pgTable(
+  "tracker_jev_questions",
+  {
+    id: text("id").primaryKey(),
+    connection_id: text("connection_id")
+      .notNull()
+      .references(() => tracker_connections.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    room_id: text("room_id")
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    kind: text("kind").notNull(),
+    /** The pull request URL (`link`, `exception`), the card id (`needs_me`), or a random id (`rule_draft`). */
+    subject: text("subject").notNull(),
+    /** The head SHA (`link`), `closed:<sha>` (`exception`), the last message id (`needs_me`). */
+    revision: text("revision").notNull(),
+    task_id: text("task_id"),
+    outcome: text("outcome").notNull().default("pending"),
+    answer: jsonb("answer").$type<Record<string, unknown>>(),
+    latency_ms: integer("latency_ms"),
+    resolution: text("resolution"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    subject_unique: uniqueIndex("tracker_jev_questions_subject_uq")
+      .on(table.kind, sql`coalesce(${table.room_id}, '')`, table.subject, table.revision),
+    room_kind_created_idx: index("tracker_jev_questions_room_kind_created_idx").on(table.room_id, table.kind, table.created_at),
+    connection_created_idx: index("tracker_jev_questions_connection_created_idx").on(table.connection_id, table.created_at),
+    kind_check: check("tracker_jev_questions_kind_check", sql`${table.kind} IN ('link', 'exception', 'needs_me', 'rule_draft')`),
+    resolution_check: check(
+      "tracker_jev_questions_resolution_check",
+      sql`${table.resolution} IS NULL OR ${table.resolution} IN ('accepted', 'rejected')`,
+    ),
+  }),
+);

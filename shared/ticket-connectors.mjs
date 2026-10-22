@@ -35,11 +35,36 @@ export const DEFAULT_STATUS_MAPS = {
   },
 };
 
-/** Shown next to the Jev linking switch; the switch defaults to off. */
-export const JEV_LINKING_DISCLOSURE = "When this is on, LetAgents asks Jev to link pull requests that name no ticket. "
-  + "For each such pull request, its title, a shortened description, commit subjects, and the titles and keys of "
-  + "up to 20 open tickets from this connection are sent to Jev's model provider. Jev only suggests links; it never "
-  + "changes a ticket by itself. Turn this off to stop sending.";
+/**
+ * Shown next to the Jev switch; the switch defaults to off (invariant 7). It
+ * names everything that leaves the server for each kind of Jev question.
+ */
+export const JEV_LINKING_DISCLOSURE = "When this is on, LetAgents sends text to Jev's model provider for the rooms that "
+  + "import with this connection. To link a pull request that names no ticket: its title, the start of its description "
+  + "(up to 2,000 characters), up to 20 commit subjects, and the keys and titles of up to 20 open tickets assigned to "
+  + "its author. When a linked pull request closes without a merge: its title, the start of its description, and the "
+  + "ticket's key and title. When you ask who a My work card waits on: the card's title and key and up to 6 recent "
+  + "room messages about it. When you draft a rule from a sentence: the sentence and this connection's status names. "
+  + "Text that looks like a secret is removed first. Jev only suggests: a person approves every ticket change. "
+  + "Turn this off to stop sending.";
+
+/**
+ * Jev questions (PR6). Each is one bounded Choice question; a timeout or an
+ * invalid answer means "do nothing" (invariant 5).
+ */
+export const JEV_LINK_MAX_CANDIDATES = 20;
+export const JEV_PR_BODY_MAX_CHARS = 2_000;
+export const JEV_COMMIT_SUBJECTS_MAX = 20;
+export const JEV_NEEDS_ME_MESSAGES_MAX = 6;
+export const JEV_QUESTION_TIMEOUT_MS = 10_000;
+/** At or above: the link is attached as a suggestion and each rule that would fire becomes a board intent. */
+export const JEV_LINK_HIGH_CONFIDENCE = 0.8;
+/** At or above (and below high): the link is attached as a suggestion only. Below: nothing. */
+export const JEV_LINK_LOW_CONFIDENCE = 0.4;
+export const JEV_QUESTION_KINDS = ["link", "exception", "needs_me", "rule_draft"];
+export const JEV_NEEDS_ME_STATES = ["waiting_on_human", "waiting_on_agent", "nothing"];
+export const JEV_EXCEPTION_KINDS = ["abandoned", "superseded", "moved"];
+export const JEV_RULE_DRAFT_MAX_CHARS = 500;
 
 export const STATUS_MAP_MAX_ENTRIES = 100;
 export const STATUS_NAME_MAX_LENGTH = 200;

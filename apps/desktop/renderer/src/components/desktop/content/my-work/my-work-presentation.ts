@@ -132,3 +132,11 @@ export function myWorkRefreshDelay(
   const gap = changedRooms.some((roomId) => loadedRooms.has(roomId)) ? MY_WORK_REFRESH_GAP_MS : MY_WORK_OTHER_ROOM_GAP_MS;
   return Math.max(0, lastReadAt + gap - now);
 }
+
+/** PR6: Jev's reading of who a card waits on. Advice only; nothing changes. */
+export function jevNeedsMeLabel(state: "waiting_on_human" | "waiting_on_agent" | "nothing" | "unavailable"): string {
+  if (state === "waiting_on_human") return "Jev: this waits on a person.";
+  if (state === "waiting_on_agent") return "Jev: this waits on an agent.";
+  if (state === "nothing") return "Jev: nothing waits on this card.";
+  return "Jev could not tell. Try again after the next message.";
+}

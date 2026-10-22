@@ -15,6 +15,11 @@ export interface RepoRoomEventTaskResolution {
   matchedByWorkflowArtifact: boolean;
   /** The card's `external_ref` names a ticket key found in the branch, PR title or PR body. */
   matchedByTicketKey?: boolean;
+  /**
+   * PR6: the pull request is on the card through a Jev link, suggested or
+   * accepted by a person. Only an accepted link lets a rule fire.
+   */
+  jevLink?: "jev_suggested" | "jev_confirmed";
 }
 
 /** The texts a ticket key may appear in. */
@@ -85,13 +90,15 @@ export function getBranchWorkflowRef(event: RepoRoomEvent): string | null {
 }
 
 /**
- * True when a ticket key, not a lease or an explicit link, put this pull
- * request on the card. Later events for it match by URL and keep the key's
- * quiet handling.
+ * How a ticket key or a Jev link, not a lease or an explicit link, put this
+ * pull request on the card. Later events for it match by URL and keep the
+ * key's quiet handling.
  */
-function linkedByTicketKey(task: Task, pullRequestUrl: string): boolean {
-  return task.workflow_artifacts.some((artifact) =>
-    artifact.url === pullRequestUrl && artifact.linked_by === "ticket_key");
+function artifactLinkFlags(task: Task, pullRequestUrl: string): Pick<RepoRoomEventTaskResolution, "matchedByTicketKey" | "jevLink"> {
+  const mark = task.workflow_artifacts.find((artifact) => artifact.url === pullRequestUrl && artifact.linked_by)?.linked_by;
+  if (mark === "ticket_key") return { matchedByTicketKey: true };
+  if (mark === "jev_suggested" || mark === "jev_confirmed") return { jevLink: mark };
+  return {};
 }
 
 function taskIdsMatch(left: string | null | undefined, right: string): boolean {
@@ -239,7 +246,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
           task: artifactTask,
           matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
           matchedByWorkflowArtifact: true,
-          ...(linkedByTicketKey(artifactTask, event.pullRequest.url) ? { matchedByTicketKey: true } : {}),
+          ...artifactLinkFlags(artifactTask, event.pullRequest.url),
         };
       }
 
@@ -276,7 +283,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
           task: artifactTask,
           matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
           matchedByWorkflowArtifact: true,
-          ...(linkedByTicketKey(artifactTask, event.pullRequest.url) ? { matchedByTicketKey: true } : {}),
+          ...artifactLinkFlags(artifactTask, event.pullRequest.url),
         };
       }
 

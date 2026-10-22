@@ -211,6 +211,8 @@ interface CandidateRow {
   item_raw_status: string | null;
   item_assignee_label: string | null;
   via_tracker: boolean;
+  /** The ticket's connection has the Jev switch on (PR6: "Ask Jev" on the card). */
+  item_jev: boolean;
 }
 
 interface MyConnection { provider: string; site_key: string; tracker_user_id: string }
@@ -266,7 +268,8 @@ async function readCandidates(input: {
            ${t.workflow_artifacts} AS workflow_artifacts, ${t.updated_at} AS updated_at,
            ${t.updated_at}::text AS cursor_at, ${ei.provider} AS item_provider, ${ei.key} AS item_key, ${ei.url} AS item_url,
            ${ei.raw_status} AS item_raw_status, ${ei.assignee_label} AS item_assignee_label,
-           ${viaTracker} AS via_tracker
+           ${viaTracker} AS via_tracker,
+           coalesce(${ec.jev_linking_enabled} AND ${ec.status} = 'active', FALSE) AS item_jev
       FROM ${t}
       LEFT JOIN ${ei} ON ${ei.id} = ${t.external_item_id}
       LEFT JOIN ${ec} ON ${ec.id} = ${ei.connection_id}
@@ -293,6 +296,7 @@ async function readCandidates(input: {
     item_raw_status: (row.item_raw_status as string | null) ?? null,
     item_assignee_label: (row.item_assignee_label as string | null) ?? null,
     via_tracker: row.via_tracker === true,
+    item_jev: row.item_jev === true,
   }));
 }
 
@@ -574,6 +578,7 @@ async function buildCards(
       pull_requests: pullRequests,
       needs_me: reasons.length > 0,
       needs_me_reasons: reasons,
+      jev_needs_me: row.item_jev,
       updated_at: row.updated_at,
     } satisfies MyWorkCard;
   });
@@ -608,6 +613,15 @@ async function canReadRoom(accountId: string, roomId: string): Promise<boolean> 
 }
 
 const defaultDeps: MyWorkDeps = { listRoomNames, canReadRoom };
+
+/**
+ * PR6: the room is one of the account's My work rooms (its room list, focus
+ * rooms included) and the room's access check allows the account.
+ */
+export async function accountMayReadMyWorkRoom(accountId: string, login: string | null, roomId: string): Promise<boolean> {
+  const names = await listRoomNames(accountId, login);
+  return names.has(roomId) && await canReadRoom(accountId, roomId);
+}
 
 /** One page of the account's work, newest change first. */
 export async function listMyWork(query: MyWorkQuery, overrides: Partial<MyWorkDeps> = {}): Promise<MyWorkPage> {

@@ -1,4 +1,4 @@
-import type { MyWorkPage } from "../../../../../shared/ticket-connectors.mjs";
+import type { MyWorkJevNeedsMe, MyWorkPage } from "../../../../../shared/ticket-connectors.mjs";
 import type { DesktopMyWorkQuery } from "../../ipc-types.js";
 import { apiFetch } from "../auth.js";
 
@@ -14,4 +14,16 @@ export async function getDesktopMyWork(query?: DesktopMyWorkQuery): Promise<MyWo
   if (query?.needsMe === true) params.set("needs_me", "true");
   const search = params.toString();
   return apiFetch<MyWorkPage>(`/account/my-work${search ? `?${search}` : ""}`);
+}
+
+/** PR6: Jev reads who one card waits on (cached on the server per card and last message). */
+export function askDesktopMyWorkNeedsMe(roomId: unknown, taskId: unknown): Promise<MyWorkJevNeedsMe> {
+  if (typeof roomId !== "string" || !roomId.trim() || typeof taskId !== "string" || !/^task_\d{1,10}$/.test(taskId)) {
+    throw new Error("Choose a card.");
+  }
+  return apiFetch<MyWorkJevNeedsMe>("/account/my-work/needs-me", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ room_id: roomId.trim(), task_id: taskId }),
+  }, { timeoutMs: 20_000 });
 }

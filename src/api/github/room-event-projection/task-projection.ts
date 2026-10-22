@@ -30,6 +30,7 @@ import {
   type RepoRoomEvent,
   type TaskWorkflowArtifact,
 } from "../../repo-workflow.js";
+import type { TaskWorkflowArtifactLinkMark } from "../../repo-workflow/types.js";
 import {
   emitTaskAnchoredMessage,
   emitTaskLifecycleStatusMessage,
@@ -82,8 +83,12 @@ function followUpPullRequestArtifacts(
   });
 }
 
-/** The card's artifacts with this event's pull request added, or null when it is already there. */
-function ticketKeyPullRequestArtifacts(task: Task, event: RepoRoomEvent): TaskWorkflowArtifact[] | null {
+/**
+ * The card's artifacts with this event's pull request added, or null when it
+ * is already there. A Jev link keeps its own mark: only a person's accept
+ * turns a suggestion into a confirmed link.
+ */
+function ticketKeyPullRequestArtifacts(task: Task, event: RepoRoomEvent, mark: TaskWorkflowArtifactLinkMark = "ticket_key"): TaskWorkflowArtifact[] | null {
   if (event.kind !== "pull_request") return null;
   return upsertTaskPullRequestArtifact(task.workflow_artifacts, {
     provider: event.provider,
@@ -92,7 +97,7 @@ function ticketKeyPullRequestArtifacts(task: Task, event: RepoRoomEvent): TaskWo
     title: event.pullRequest.title,
     url: event.pullRequest.url,
     state: pullRequestState(event),
-    linked_by: "ticket_key",
+    linked_by: mark,
   });
 }
 
@@ -156,6 +161,8 @@ export async function applyRepoRoomEventToTask(
     githubRoutingContext: FocusGitHubRoutingContext;
     messageIdBase?: string | null;
     matchedByTicketKey?: boolean;
+    /** PR6: the pull request is on the card through a Jev link; it is handled as quietly as a key link. */
+    jevLink?: "jev_suggested" | "jev_confirmed";
   }
 ): Promise<RepoRoomEventTaskProjection> {
   if (!linkedTask) {
@@ -196,11 +203,11 @@ export async function applyRepoRoomEventToTask(
 
     // A pull request that only names the card's ticket was never claimed
     // work: no lease check on GitHub, no "ignored" notice in the room.
-    if (decision.kind === "deny" && input.matchedByTicketKey) {
+    if (decision.kind === "deny" && (input.matchedByTicketKey || input.jevLink)) {
       if (decision.code === "missing_lease") {
         // Nobody holds the card's work lease: show the pull request on the
         // card, keep its state current, and leave the work state alone.
-        const linked = ticketKeyPullRequestArtifacts(linkedTask, event);
+        const linked = ticketKeyPullRequestArtifacts(linkedTask, event, input.jevLink ?? "ticket_key");
         const refreshed = linked ? await updateTask(project.id, linkedTask.id, { workflow_artifacts: linked }) : null;
         return { task: refreshed ?? linkedTask, authoritative: true };
       }

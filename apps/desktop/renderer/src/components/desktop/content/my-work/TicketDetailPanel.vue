@@ -21,6 +21,17 @@
       <li v-for="reason in card.needs_me_reasons" :key="reason">{{ needsMeLabel(reason) }}</li>
     </ul>
 
+    <div v-if="canAskJev" class="my-work-jev" data-testid="my-work-detail-jev">
+      <button
+        type="button"
+        class="desktop-task-detail-button"
+        :disabled="jevBusy"
+        data-testid="my-work-detail-jev-ask"
+        @click="askJev"
+      >{{ jevBusy ? "Asking Jev..." : "Ask Jev who this waits on" }}</button>
+      <span v-if="jevAnswer" class="my-work-jev-answer" role="status" data-testid="my-work-detail-jev-answer">{{ jevAnswer }}</span>
+    </div>
+
     <div class="my-work-detail-columns">
       <section class="desktop-task-detail-section" aria-label="Ticket" data-testid="my-work-detail-ticket">
         <h4>Ticket</h4>
@@ -107,14 +118,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { X } from "@lucide/vue";
 import type { MyWorkCard } from "../../../../../../../../shared/ticket-connectors.mjs";
+import { getRoomBridge } from "../../../../ipc/index.js";
 import { useNow } from "../../../../composables/useNow";
 import TaskLinkedThreads from "../room-board/TaskLinkedThreads.vue";
 import { compactPerson, readableStatus, relativeTime, shortTaskId } from "../room-board/formatters";
 import { ticketRefParts, ticketStateLabel } from "../room-board/ticket-ref";
-import { checkSummaryLabel, needsMeLabel, pullRequestLabel, pullRequestStateLabel, reviewSummaryLabel } from "./my-work-presentation";
+import { checkSummaryLabel, jevNeedsMeLabel, needsMeLabel, pullRequestLabel, pullRequestStateLabel, reviewSummaryLabel } from "./my-work-presentation";
 
 const props = defineProps<{
   card: MyWorkCard;
@@ -130,9 +142,31 @@ const emit = defineEmits<{
 
 const now = useNow(30_000);
 const ticket = computed(() => ticketRefParts(props.card.external_ref));
+
+// Ticket connectors PR6: on request, Jev reads who the card waits on. Only for
+// a card whose ticket's connection has the Jev switch on.
+const canAskJev = computed(() => props.card.jev_needs_me === true && typeof getRoomBridge()?.askMyWorkNeedsMe === "function");
+const jevBusy = ref(false);
+const jevAnswer = ref<string | null>(null);
+watch(() => [props.card.room_id, props.card.task_id] as const, () => { jevAnswer.value = null; });
+
+async function askJev(): Promise<void> {
+  const ask = getRoomBridge()?.askMyWorkNeedsMe;
+  if (!ask || jevBusy.value) return;
+  jevBusy.value = true;
+  try {
+    jevAnswer.value = jevNeedsMeLabel((await ask(props.card.room_id, props.card.task_id)).state);
+  } catch {
+    jevAnswer.value = jevNeedsMeLabel("unavailable");
+  } finally {
+    jevBusy.value = false;
+  }
+}
 </script>
 
 <style scoped>
+.my-work-jev { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.my-work-jev-answer { color: var(--text-secondary); font-size: 12px; }
 .my-work-detail { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-top: 1px solid var(--border-subtle, var(--border-strong)); }
 .my-work-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .my-work-detail-header h3 { margin: 4px 0 0; }

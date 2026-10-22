@@ -95,3 +95,15 @@ export async function getDesktopRoomTaskTicket(roomIdentifier: string, taskId: s
     syncedAt: ticket.synced_at,
   };
 }
+
+const PULL_REQUEST_URL = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d{1,10}$/;
+
+/** PR6: a room admin accepts or rejects a pull request Jev suggested for a card. */
+export async function decideDesktopTaskJevLink(roomIdentifier: string, taskId: string, prUrl: string, decision: unknown): Promise<void> {
+  const path = await cloudRoomPath(roomIdentifier);
+  if (!path) throw new Error("Local rooms have no ticket links.");
+  if (!/^task_\d{1,10}$/.test(String(taskId ?? ""))) throw new Error("Choose a card.");
+  if (typeof prUrl !== "string" || !PULL_REQUEST_URL.test(prUrl)) throw new Error("Choose a pull request.");
+  if (decision !== "accept" && decision !== "reject") throw new Error("Choose accept or reject.");
+  await apiFetch<unknown>(`${path}/tasks/${encodeURIComponent(taskId)}/jev-link/${decision}`, json("POST", { pr_url: prUrl }));
+}

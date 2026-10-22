@@ -263,6 +263,10 @@ export interface DesktopApi {
     getTaskTicket: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskTicket | null>;
     /** Cards that are the account's work across its rooms. Optional so a newer renderer degrades on an older main process. */
     getMyWork?: (query?: DesktopMyWorkQuery) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkPage>;
+    /** PR6: Jev reads who a My work card waits on. Optional so a newer renderer degrades on an older main process. */
+    askMyWorkNeedsMe?: (roomId: string, taskId: string) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkJevNeedsMe>;
+    /** PR6: accept or reject a Jev suggestion on a card (a room admin). */
+    decideTaskJevLink?: (roomIdentifier: string, taskId: string, prUrl: string, decision: "accept" | "reject") => Promise<void>;
     /** Room ticket filters (ticket connectors). Local rooms have none. */
     listTrackerFilters: (roomIdentifier: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
     saveTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
@@ -440,7 +444,11 @@ export interface DesktopApi {
       /** Saves an earlier version's content as the newest version. */
       rollback: (id: string, ruleId: string, version: number) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
       remove: (id: string, ruleId: string) => Promise<void>;
+      /** PR6: Jev turns a sentence into a rule for the editor; nothing is saved. */
+      draft?: (id: string, sentence: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleDraftResult>;
     };
+    /** PR6: count, outcome and latency of Jev questions for the account's connections. */
+    jevMetrics?: () => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerJevMetrics>;
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;
