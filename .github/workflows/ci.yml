@@ -349,11 +349,88 @@ jobs:
               ;;
           esac
 
+  # The npm MCP server (`npx -y letagents`) and the shared modules it loads
+  # must run on Windows. This job runs their suites on a Windows runner; the
+  # desktop app's own suites stay on ubuntu above.
+  #
+  # The dependency gates (cooldown, registry signatures, advisories) ran once
+  # in dependency-audit, on ubuntu, over the same lockfiles this job installs,
+  # so this job only installs them and runs the verified lifecycle scripts.
+  # The workflow policy test forbids a `defaults:` block, so each step names
+  # bash itself instead of the runner's PowerShell.
+  mcp-tests-windows:
+    needs: dependency-audit
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # The MCP and desktop tests write under the home directory. Node's
+      # os.homedir() reads USERPROFILE on Windows and HOME under Git Bash, so
+      # both point at a scratch folder inside the runner's temp directory.
+      HOME: ${{ runner.temp }}/home
+      USERPROFILE: ${{ runner.temp }}/home
+      # Pin the API base URL to an unroutable local address so no test can
+      # reach the production API. Nothing listens on port 9.
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      # The Windows runner's git converts LF to CRLF on checkout. The npm
+      # package ships the committed LF bytes, so the tests run against those.
+      - name: Keep committed line endings
+        shell: bash
+        run: |
+          mkdir -p "${HOME}"
+          git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Run verified dependency lifecycle scripts
+        shell: bash
+        run: npm rebuild
+
+      - name: Build the MCP server
+        shell: bash
+        run: npm run build
+
+      - name: Test the npm launcher resolver
+        shell: bash
+        run: node --test scripts/npm-command.test.mjs
+
+      - name: Test MCP helpers
+        shell: bash
+        run: npm run test:mcp
+
+      - name: Test packed MCP runtime
+        shell: bash
+        run: npm run test:package-runtime
+
+      # The shared capture and permission-review modules live beside the
+      # desktop daemon and are tested there. Only the desktop dependencies are
+      # installed; their lifecycle scripts (the Electron download among them)
+      # are not needed by these suites.
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Test the shared modules the MCP server depends on
+        shell: bash
+        run: node --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
+
   # The required "build" check. GitHub counts a skipped check as passing, so
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [dependency-audit, build-checks, desktop-tests]
+    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

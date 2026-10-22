@@ -15,7 +15,7 @@
     "README.md"
   ],
   "scripts": {
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean && tsc",
     "build:web": "npm --prefix src/web run build",
     "build:desktop": "npm --prefix apps/desktop run build",
@@ -25,7 +25,7 @@
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "test:dependency-age": "node --test scripts/verify-dependency-age.test.mjs",
     "test:docker-context": "node --test scripts/verify-docker-context.test.mjs",
-    "test:workflow-supply-chain": "node --test scripts/verify-workflow-supply-chain.test.mjs scripts/verify-dependency-advisories.test.mjs scripts/retry-command.test.mjs",
+    "test:workflow-supply-chain": "node --test scripts/verify-workflow-supply-chain.test.mjs scripts/verify-dependency-advisories.test.mjs scripts/retry-command.test.mjs scripts/npm-command.test.mjs",
     "test:notifications": "node --import tsx --test src/api/notifications/__tests__/*.test.ts",
     "verify:dependency-age": "node scripts/verify-dependency-age.mjs",
     "db:generate": "drizzle-kit generate",
