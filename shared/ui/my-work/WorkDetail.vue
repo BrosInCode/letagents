@@ -15,7 +15,7 @@
       <div class="work-source-label">
         {{
           card.provider
-            ? `${card.provider === "jira" ? "Jira" : "Linear"} ticket`
+            ? `${trackerProviderLabel(card.provider)} ticket`
             : "Room task"
         }}
         <span>·</span> {{ workKey(card) }}
@@ -140,13 +140,7 @@
             data-testid="my-work-detail-ticket"
           >
             <h3>
-              {{
-                card.provider === "jira"
-                  ? "Jira"
-                  : card.provider === "linear"
-                    ? "Linear"
-                    : "Linked"
-              }}
+              {{ card.provider ? trackerProviderLabel(card.provider) : "Linked" }}
               ticket
             </h3>
             <dl class="work-details-grid">
@@ -279,7 +273,7 @@
 </template>
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from "vue";
-import type { MyWorkCard } from "../../ticket-connectors.mjs";
+import { trackerProviderLabel, type MyWorkCard } from "../../ticket-connectors.mjs";
 import ChatAvatar from "../ChatAvatar.vue";
 import WorkIcon from "./WorkIcon.vue";
 import type { MyWorkApi, WorkMention } from "./types";

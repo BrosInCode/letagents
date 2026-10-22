@@ -1,6 +1,6 @@
 import { and, eq, lte, sql } from "drizzle-orm";
 
-import type { TrackerConnectionStatus, TrackerProvider } from "../../../shared/ticket-connectors.mjs";
+import type { TrackerAuthKind, TrackerConnectionStatus, TrackerProvider } from "../../../shared/ticket-connectors.mjs";
 import { db } from "../db/client.js";
 import { tracker_connections, tracker_oauth_states } from "../db/schema.js";
 
@@ -13,7 +13,7 @@ export interface TrackerConnectionWrite {
   display_name: string;
   site_key: string;
   site_url: string | null;
-  auth_kind: "oauth" | "api_token";
+  auth_kind: TrackerAuthKind;
   credentials_ciphertext: string;
   credentials_iv: string;
   credentials_version: number;

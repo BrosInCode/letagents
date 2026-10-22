@@ -52,7 +52,7 @@ What the server guarantees:
 
 The app gets the same access as an owner token, on `/mcp` only. Access tokens last 1 hour and the client refreshes
 them; a connection unused for 30 days ends. To end a connection at once, open the desktop app's Settings →
-Connections → Remote connector and click Disconnect.
+Connectors → Remote sign-ins and click Disconnect. That page also shows these steps with the server's own `/mcp` URL.
 
 **Fallback: owner token.** For a client that cannot do OAuth but can send a request header:
 

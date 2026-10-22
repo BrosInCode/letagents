@@ -27,6 +27,7 @@ import {
   JEV_LINK_LOW_CONFIDENCE,
   JEV_LINK_MAX_CANDIDATES,
   JEV_PR_BODY_MAX_CHARS,
+  trackerProviderLabel,
   type TrackerProvider,
 } from "../../../shared/ticket-connectors.mjs";
 import type { BoardIntent, Task } from "../db/types.js";
@@ -147,7 +148,7 @@ export interface JevLinkIntentPayload {
 }
 
 function providerName(provider: TrackerProvider): string {
-  return provider === "jira" ? "Jira" : "Linear";
+  return trackerProviderLabel(provider);
 }
 
 /** "Move HT-1234 to In Review?" (or "Comment on HT-1234?" for a rule with only comments). */

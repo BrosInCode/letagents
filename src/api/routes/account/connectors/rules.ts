@@ -151,6 +151,10 @@ export function registerTrackerRuleRoutes(app: Express, deps: TrackerRuleRouteDe
   app.post("/account/connectors/:id/rules", async (req: AuthenticatedRequest, res) => {
     const owned = await ownedConnection(req, res);
     if (!owned) return;
+    if (owned.connection.provider === "github") {
+      res.status(400).json({ error: "Rules do not write to GitHub Issues yet." });
+      return;
+    }
     const input = await parseBody(req, res, owned.connection.id);
     if (!input) return;
     try {

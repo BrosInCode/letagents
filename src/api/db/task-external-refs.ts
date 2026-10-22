@@ -13,7 +13,8 @@ import {
 import { db } from "./client.js";
 import { toTask } from "./mappers.js";
 import { visibleMessageCondition } from "./messages/visibility.js";
-import { messages, task_mentions, tasks } from "./schema.js";
+import { githubReposInFilter } from "../connectors/room-filters.js";
+import { messages, room_tracker_filters, task_mentions, tasks, tracker_connections } from "./schema.js";
 import { formatMessageId, formatTaskId, parseScopedId } from "./utils.js";
 import type { MessageRow, Task, TaskRow } from "./types.js";
 
@@ -56,6 +57,8 @@ const NO_EXTERNAL_REFS: RoomExternalRefScope = { hasExternalRefs: false, detecto
  * One probe on the partial unique index. It tells whether the room has any
  * card with an external ref, and which Linear team keys its cards name: the
  * only Linear keys the detector may match until connections supply them.
+ * When a card names a GitHub issue, a second query reads the repositories the
+ * room's GitHub Issues filters name: GitHub keys match only for those.
  */
 export async function getRoomExternalRefScope(
   roomId: string,
@@ -65,19 +68,29 @@ export async function getRoomExternalRefScope(
     SELECT DISTINCT CASE
       WHEN ${tasks.external_ref} LIKE 'linear:%'
       THEN split_part(split_part(${tasks.external_ref}, ':', 2), '-', 1)
-    END AS linear_team_key
+    END AS linear_team_key,
+    ${tasks.external_ref} LIKE 'github:%' AS github
     FROM ${tasks}
     WHERE ${tasks.room_id} = ${roomId} AND ${tasks.external_ref} IS NOT NULL
     LIMIT 200
   `);
-  const rows = result.rows as Array<{ linear_team_key: string | null }>;
+  const rows = result.rows as Array<{ linear_team_key: string | null; github: boolean | null }>;
   if (rows.length === 0) return NO_EXTERNAL_REFS;
-  return {
-    hasExternalRefs: true,
-    detectorOptions: {
-      linearTeamKeys: rows.map((row) => row.linear_team_key).filter((key): key is string => Boolean(key)),
-    },
+  const detectorOptions: KeyDetectorOptions = {
+    linearTeamKeys: rows.map((row) => row.linear_team_key).filter((key): key is string => Boolean(key)),
   };
+  if (rows.some((row) => row.github)) {
+    const filters = await executor.select({ filter: room_tracker_filters.filter }).from(room_tracker_filters)
+      .innerJoin(tracker_connections, eq(tracker_connections.id, room_tracker_filters.connection_id))
+      .where(and(
+        eq(room_tracker_filters.room_id, roomId),
+        eq(room_tracker_filters.provider, "github"),
+        eq(room_tracker_filters.enabled, true),
+        eq(tracker_connections.status, "active"),
+      ));
+    detectorOptions.githubRepos = [...new Set(filters.flatMap((row) => githubReposInFilter(row.filter)))];
+  }
+  return { hasExternalRefs: true, detectorOptions };
 }
 
 // In-process memo of each room's scope, so a room with no ticket cards pays no

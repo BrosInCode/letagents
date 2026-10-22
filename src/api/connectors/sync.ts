@@ -32,11 +32,13 @@ import {
   claimDueRoomTrackerFilters,
   finishRoomTrackerFilterSync,
   getCachedRoomTrackerScope,
+  requestMatchingRoomTrackerFilterSync,
   requestRoomTrackerFilterSync,
   roomIdsWithTrackerFilter,
   type RoomTrackerFilterRow,
   type RoomTrackerSource,
 } from "./room-filters.js";
+import { githubFilterAllows } from "./providers/github.js";
 import { jiraFilterClause } from "./providers/jira.js";
 import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnectionStore } from "./store.js";
 import { recordTrackerTicketEvent } from "./tracker-events.js";
@@ -92,10 +94,23 @@ export interface ApplyTrackerItemOptions {
   roomIds?: readonly string[];
 }
 
+export interface WebhookSyncOptions {
+  /**
+   * For a ticket LetAgents does not hold yet: poll early only the filters this
+   * accepts, at most once per `minGapMs`. Without it, every filter of the
+   * connection polls early (Jira and Linear, whose webhooks the owner set up).
+   */
+  earlyPoll?: { accept: (filter: string) => boolean; minGapMs: number };
+}
+
 export interface TrackerSync {
   applyItem(connection: TrackerConnectionRow, item: ExternalItem, options?: ApplyTrackerItemOptions): Promise<ApplyTrackerItemResult>;
   syncFilter(filter: RoomTrackerFilterRow, intervalMs?: number): Promise<{ seen: number; changed: number; error: string | null }>;
-  handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]): Promise<{ applied: number }>;
+  handleWebhook(
+    connection: TrackerConnectionRow,
+    changes: readonly ExternalItemChange[],
+    options?: WebhookSyncOptions,
+  ): Promise<{ applied: number }>;
   importTicketForRoom(roomId: string, matches: readonly TicketKeyMatch[]): Promise<Task | undefined>;
   /** After a person links a card to a ticket: bind it if the room's filter matches the ticket. */
   refreshLinkedCard(roomId: string, externalRef: string): Promise<void>;
@@ -359,7 +374,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const startedAt = now().toISOString();
     const connection = await deps.store.get(filter.connection_id);
     if (!connection || connection.status !== "active") {
-      const error = connection ? "The tracker connection needs attention in Settings → Ticket trackers." : "The tracker connection was removed.";
+      const error = connection ? "The tracker connection needs attention in Settings → Connectors." : "The tracker connection was removed.";
       await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: false, error, failed: { intervalMs } });
       return { seen: 0, changed: 0, error };
     }
@@ -413,7 +428,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     }
   }
 
-  async function handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[]) {
+  async function handleWebhook(connection: TrackerConnectionRow, changes: readonly ExternalItemChange[], options: WebhookSyncOptions = {}) {
     if (connection.status !== "active") return { applied: 0 };
     const provider = deps.providers[connection.provider as TrackerProvider];
     const named = [...new Set(changes.filter((change) => !change.deleted).map((change) => change.key))].slice(0, MAX_WEBHOOK_KEYS);
@@ -437,7 +452,13 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
       }
     }
     // A ticket new to LetAgents may match a room's filter: poll soon.
-    if (named.length > keys.length) await requestRoomTrackerFilterSync(connection.id, now());
+    if (named.length > keys.length) {
+      if (options.earlyPoll) {
+        await requestMatchingRoomTrackerFilterSync(connection.id, options.earlyPoll.accept, options.earlyPoll.minGapMs, now());
+      } else {
+        await requestRoomTrackerFilterSync(connection.id, now());
+      }
+    }
     return { applied };
   }
 
@@ -460,7 +481,8 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
 
   /**
    * The ticket, only if it matches the source's filter. Jira asks the tracker
-   * with the filter's JQL; Linear compares the ticket's team and project.
+   * with the filter's JQL; Linear compares the ticket's team and project;
+   * GitHub Issues compares the issue's repository.
    */
   async function fetchMatchingItem(source: RoomTrackerSource, connection: TrackerConnectionRow, key: string): Promise<ExternalItem | null> {
     const open = deps.connections.open(connection);
@@ -469,6 +491,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const item = await deps.providers[source.provider].getItem(open, key);
     if (!item) return null;
     if (source.provider === "linear") return linearFilterAllows(source.filter, item) ? item : null;
+    if (source.provider === "github") return githubFilterAllows(source.filter, item) ? item : null;
     const base = jiraFilterClause(source.filter.trim() || null);
     if (!base) return item;
     try {

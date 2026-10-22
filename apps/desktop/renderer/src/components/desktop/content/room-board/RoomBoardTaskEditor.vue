@@ -6,7 +6,7 @@
     <label v-if="ticketKeys" class="desktop-task-create-field">
       <span>Ticket key (optional)</span>
       <input v-model="externalRef" type="text" placeholder="jira:HT-1234" spellcheck="false" autocomplete="off" :disabled="busy" :aria-invalid="externalRefInvalid" />
-      <small v-if="externalRefInvalid" class="desktop-task-dialog-error">Use a key such as HT-1234, jira:HT-1234 or linear:ENG-12.</small>
+      <small v-if="externalRefInvalid" class="desktop-task-dialog-error">Use a key such as HT-1234, linear:ENG-12 or github:owner/repo#12.</small>
     </label>
     <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
     <footer class="desktop-task-create-actions">

@@ -18,7 +18,7 @@
           type="button"
           :disabled="busy || diagnosticsPane?.busy"
           data-testid="settings-refresh"
-          @click="activePane === 'system:diagnostics' ? diagnosticsPane?.refresh() : $emit('refresh')"
+          @click="refresh"
         >
           <RefreshCw aria-hidden="true" />
           <span>{{ busy || diagnosticsPane?.busy ? "Refreshing" : "Refresh" }}</span>
@@ -27,7 +27,8 @@
 
       <nav v-if="subsections.length" class="settings-subsections" aria-label="Settings pages">
         <button v-for="item in subsections" :key="item.id" type="button"
-          :data-active="activePane === item.id" :aria-current="activePane === item.id ? 'page' : undefined"
+          :data-active="activeSubsection === item.id" :aria-current="activeSubsection === item.id ? 'page' : undefined"
+          :data-testid="`settings-subsection-${item.id}`"
           @click="selectPane(item.id)">{{ item.title }}</button>
       </nav>
 
@@ -44,8 +45,32 @@
         :auth-status="authStatus"
       />
 
-      <SettingsConnectorsPane v-else-if="activePane === 'account:connectors'" />
-      <SettingsRemoteMcpPane v-else-if="activePane === 'system:remote-mcp'" />
+      <template v-else-if="isConnectorsPane">
+        <SettingsConnectorsList :mcp-install-state="mcpInstallState" @open="selectPane" />
+        <SettingsConnectorsPane v-if="activePane === 'account:connectors'" />
+        <SettingsMcpPane
+          v-else-if="activePane === 'account:connectors-agents'"
+          :mcp-install-state="mcpInstallState"
+          @connect="selectPane('account:connectors-setup')"
+        />
+        <SettingsSetupPane
+          v-else-if="activePane === 'account:connectors-setup'"
+          :mcp-install-state="mcpInstallState"
+          :selected-mcp-target-ids="selectedMcpTargetIds"
+          :mcp-wizard-step="mcpWizardStep"
+          :mcp-install-busy="mcpInstallBusy"
+          :mcp-install-feedback="mcpInstallFeedback"
+          :setup-api-available="setupApiAvailable"
+          @select-mcp-target="$emit('select-mcp-target', $event)"
+          @select-all-mcp-targets="$emit('select-all-mcp-targets')"
+          @clear-mcp-target-selection="$emit('clear-mcp-target-selection')"
+          @continue-mcp="$emit('continue-mcp')"
+          @back-mcp="$emit('back-mcp')"
+          @install-mcp-targets="$emit('install-mcp-targets')"
+          @finish-mcp="$emit('finish-mcp')"
+        />
+        <SettingsRemoteMcpPane v-else :api-url="appInfo?.apiUrl ?? null" />
+      </template>
       <SettingsStoragePane
         v-else-if="isStoragePane"
         :account-rooms="accountRooms"
@@ -73,23 +98,6 @@
         @toggle-pin-room="$emit('toggle-pin-room', $event)"
       />
 
-      <SettingsSetupPane
-        v-else-if="activePane === 'system:setup'"
-        :mcp-install-state="mcpInstallState"
-        :selected-mcp-target-ids="selectedMcpTargetIds"
-        :mcp-wizard-step="mcpWizardStep"
-        :mcp-install-busy="mcpInstallBusy"
-        :mcp-install-feedback="mcpInstallFeedback"
-        :setup-api-available="setupApiAvailable"
-        @select-mcp-target="$emit('select-mcp-target', $event)"
-        @select-all-mcp-targets="$emit('select-all-mcp-targets')"
-        @clear-mcp-target-selection="$emit('clear-mcp-target-selection')"
-        @continue-mcp="$emit('continue-mcp')"
-        @back-mcp="$emit('back-mcp')"
-        @install-mcp-targets="$emit('install-mcp-targets')"
-        @finish-mcp="$emit('finish-mcp')"
-      />
-
       <SettingsAppAgentPane
         v-else-if="activePane === 'system:app-agent'"
         :app-agent-actions="appAgentActions"
@@ -113,11 +121,6 @@
         :update-status="updateStatus"
         @check="$emit('check-update')"
         @install="$emit('install-update')"
-      />
-
-      <SettingsMcpPane
-        v-else-if="activePane === 'system:mcp'"
-        :mcp-install-state="mcpInstallState"
       />
 
       <SettingsAgentsPane
@@ -155,6 +158,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import SettingsAgentsPane from "../settings/panes/SettingsAgentsPane.vue";
 import SettingsAppAgentPane from "../settings/panes/SettingsAppAgentPane.vue";
+import SettingsConnectorsList from "../settings/panes/SettingsConnectorsList.vue";
 import SettingsConnectorsPane from "../settings/panes/SettingsConnectorsPane.vue";
 import SettingsDiagnosticsPane from "../settings/panes/SettingsDiagnosticsPane.vue";
 import SettingsMcpPane from "../settings/panes/SettingsMcpPane.vue";
@@ -168,8 +172,16 @@ import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
 import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
 import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGrantPane.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
-import type { SettingsFeedback, SettingsPaneId } from "../settings/types";
-import { settingsNavGroups, settingsSubsections, settingsSectionFor } from "../settings/navigation";
+import { loadRemoteSignIns, loadTrackerConnections } from "../settings/connectors-store";
+import type { LegacySettingsPaneId, SettingsFeedback, SettingsPaneId } from "../settings/types";
+import {
+  resolveSettingsPane,
+  settingsNavGroups,
+  settingsSectionFor,
+  settingsSubsectionFor,
+  settingsSubsections,
+  visibleSettingsSubsections,
+} from "../settings/navigation";
 import type { DesktopMcpWizardStep } from "../setup/types";
 import type { AttentionNavigationIntent } from "./room-shell/types";
 
@@ -184,7 +196,8 @@ const props = defineProps<{
   busy: boolean;
   chatStorageAvailable: boolean;
   feedback: SettingsFeedback | null;
-  initialPane: SettingsPaneId;
+  /** An old pane id opens the page that replaced it. */
+  initialPane: SettingsPaneId | LegacySettingsPaneId;
   chatStorageBusy: boolean;
   chatStorageFeedback: SettingsFeedback | null;
   chatStorageSettings: DesktopChatStorageSettings | null;
@@ -201,7 +214,7 @@ const props = defineProps<{
   updateStatus: DesktopUpdateStatus | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "back-mcp": [];
   "back-to-app": [];
   "clear-mcp-target-selection": [];
@@ -226,11 +239,13 @@ defineEmits<{
   "start-auth": [];
 }>();
 
-const activePane = ref<SettingsPaneId>(props.initialPane);
+const activePane = ref<SettingsPaneId>(resolveSettingsPane(props.initialPane));
 const diagnosticsPane = ref<{ refresh: () => Promise<void>; busy: boolean } | null>(null);
 
 const activeSection = computed(() => settingsSectionFor(activePane.value));
-const subsections = computed(() => settingsSubsections[activeSection.value] ?? []);
+const subsections = computed(() => visibleSettingsSubsections(activeSection.value));
+const activeSubsection = computed(() => settingsSubsectionFor(activePane.value));
+const isConnectorsPane = computed(() => activeSection.value === "account:connectors");
 
 const isRoomPane = computed(() => activePane.value.startsWith("rooms:"));
 const isStoragePane = computed(() => activePane.value.startsWith("storage:"));
@@ -251,15 +266,28 @@ const activePaneDescription = computed(() => {
   if (activePane.value === "storage:chat") return "Choose where room messages are stored.";
   if (activePane.value === "rooms:danger") return "Review actions that remove access or delete rooms you created.";
   if (activePane.value === "system:app-agent") return "Configure the app assistant and see what it can do in the app.";
-  return subsections.value.find(item => item.id === activePane.value)?.description ?? activePaneItem.value.description;
+  return (settingsSubsections[activeSection.value] ?? []).find(item => item.id === activePane.value)?.description
+    ?? activePaneItem.value.description;
 });
 
 watch(
   () => props.initialPane,
   (nextPane) => {
-    activePane.value = nextPane;
+    activePane.value = resolveSettingsPane(nextPane);
   }
 );
+
+function refresh(): void {
+  if (activePane.value === "system:diagnostics") {
+    void diagnosticsPane.value?.refresh();
+    return;
+  }
+  if (isConnectorsPane.value) {
+    void loadTrackerConnections();
+    void loadRemoteSignIns();
+  }
+  emit("refresh");
+}
 
 function selectPane(paneId: SettingsPaneId): void {
   activePane.value = paneId;

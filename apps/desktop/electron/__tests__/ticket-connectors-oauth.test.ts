@@ -8,6 +8,7 @@ const authorizeState = "s".repeat(43);
 
 mock.module("../main/auth.js", {
   namedExports: {
+    DesktopApiError: class DesktopApiError extends Error {},
     apiFetch: async (path: string, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : null;
       calls.push({ path, body });

@@ -2,8 +2,8 @@
   <section class="settings-panel" data-testid="settings-connectors-panel">
     <div class="settings-control-list">
       <SettingsRow
-        title="Ticket trackers"
-        description="Connect Jira or Linear once. Board cards can then carry ticket keys and show each ticket's state from the tracker."
+        title="Trackers"
+        description="Connect Jira, Linear or GitHub Issues once. Board cards can then carry ticket keys and show each ticket's state from the tracker."
       />
 
       <p v-if="feedback" class="settings-feedback" :data-state="feedback.state" role="status">{{ feedback.message }}</p>
@@ -25,7 +25,7 @@
               <button class="ghost-button" type="button" :disabled="busyId === connection.id" @click="test(connection)">
                 {{ busyId === connection.id && busyAction === "test" ? "Testing" : "Test connection" }}
               </button>
-              <button class="ghost-button" type="button" :disabled="busyId === connection.id" @click="toggleWebhook(connection)">
+              <button v-if="connection.provider !== 'github'" class="ghost-button" type="button" :disabled="busyId === connection.id" @click="toggleWebhook(connection)">
                 {{ webhooks[connection.id] ? "Hide webhook" : "Webhook" }}
               </button>
               <button
@@ -100,23 +100,52 @@
           </template>
         </SettingsRow>
 
-        <SettingsConnectorRules :connection="connection" />
+        <SettingsConnectorRules v-if="connection.provider !== 'github'" :connection="connection" />
+        <p v-else class="settings-control-description">
+          GitHub Issues changes reach the board through the LetAgents GitHub App. Rules do not write to GitHub Issues yet.
+        </p>
       </article>
 
       <SettingsRow
-        v-if="loaded && !connections.length && !unavailable"
+        v-if="state.loaded && !connections.length && !unavailable"
         title="No trackers connected"
-        description="Add Jira or Linear to see ticket states on your boards."
+        description="Add Jira, Linear or GitHub Issues to see ticket states on your boards."
       />
 
       <div v-if="!unavailable" class="settings-connector-actions">
         <button class="primary-button" type="button" data-testid="settings-connector-add-jira" @click="openForm('jira')">Add Jira</button>
         <button class="primary-button" type="button" data-testid="settings-connector-add-linear" @click="openForm('linear')">Add Linear</button>
+        <button
+          class="primary-button"
+          type="button"
+          data-testid="settings-connector-add-github"
+          :disabled="!githubAvailable"
+          :title="githubAvailable ? undefined : 'This server has no GitHub App.'"
+          @click="openForm('github')"
+        >
+          Add GitHub Issues
+        </button>
       </div>
 
-      <form v-if="form" class="settings-form settings-connector-form" data-testid="settings-connector-form" @submit.prevent="saveToken">
+      <form v-if="form === 'github'" class="settings-form settings-connector-form" data-testid="settings-connector-github-form" @submit.prevent="connectGitHub">
+        <p class="settings-control-title">Add GitHub Issues</p>
+        <p class="settings-control-description">
+          LetAgents reads issues with its GitHub App, so there is no token to paste. Name one repository where the App is
+          installed and that you can open on GitHub. The connection covers that installation. Each room filter then names
+          the repositories to import, and LetAgents reads only repositories you can read.
+        </p>
+        <label class="settings-field"><span>Repository</span>
+          <input v-model.trim="githubRepository" type="text" placeholder="owner/repo" autocomplete="off" required />
+        </label>
+        <div class="settings-connector-actions">
+          <button class="primary-button" type="submit" :disabled="busyAction === 'save' || !githubRepository">{{ busyAction === "save" ? "Connecting" : "Connect" }}</button>
+          <button class="ghost-button" type="button" @click="closeForm">Cancel</button>
+        </div>
+      </form>
+
+      <form v-else-if="form" class="settings-form settings-connector-form" data-testid="settings-connector-form" @submit.prevent="saveToken">
         <p class="settings-control-title">Add {{ trackerLabel(form) }}</p>
-        <template v-if="providers?.[form]?.oauth">
+        <template v-if="state.providers?.[form]?.oauth">
           <p class="settings-control-description">Sign in with {{ trackerLabel(form) }} in your browser, then return here.</p>
           <div class="settings-connector-actions">
             <button class="primary-button" type="button" :disabled="busyAction === 'oauth'" @click="startOAuth(form)">
@@ -151,14 +180,14 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import type {
   TrackerConnectionView,
   TrackerItemSummary,
   TrackerWebhookSetup,
   TrackerProvider,
-  TrackerProviderAvailability,
 } from "../../../../../../../../shared/ticket-connectors.mjs";
+import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import SettingsRow from "../SettingsRow.vue";
 import SettingsConnectorRules from "./SettingsConnectorRules.vue";
@@ -172,13 +201,14 @@ import {
   trackerLabel,
   type StatusMapRow,
 } from "../connectors";
+import { trackerConnectionsChanged, trackerConnectionsState as state } from "../connectors-store";
 import type { SettingsFeedback } from "../types";
 
-const connections = ref<TrackerConnectionView[]>([]);
-const providers = ref<Record<TrackerProvider, TrackerProviderAvailability> | null>(null);
-const disclosure = ref("");
-const loaded = ref(false);
-const unavailable = ref(false);
+// The Connectors list loads these; this pane shows and changes them.
+const connections = computed(() => state.connections);
+const disclosure = computed(() => state.disclosure);
+const unavailable = computed(() => state.notConfigured || Boolean(state.error));
+const githubAvailable = computed(() => state.providers?.github?.github_app === true);
 const feedback = ref<SettingsFeedback | null>(null);
 const busyId = ref<string | null>(null);
 const busyAction = ref<"test" | "save" | "oauth" | "update" | null>(null);
@@ -191,9 +221,10 @@ const form = ref<TrackerProvider | null>(null);
 const siteUrl = ref("");
 const email = ref("");
 const apiToken = ref("");
+const githubRepository = ref("");
 
 const api = () => window.letagentsDesktop.connectors;
-const message = (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback;
+const message = (error: unknown, fallback: string) => safeUserVisibleErrorDetail(error, fallback);
 
 function connectionDescription(connection: TrackerConnectionView): string {
   const who = connection.tracker_user_label ? `Signed in as ${connection.tracker_user_label}` : "Signed in";
@@ -202,27 +233,17 @@ function connectionDescription(connection: TrackerConnectionView): string {
 }
 
 function replace(connection: TrackerConnectionView) {
-  const index = connections.value.findIndex((entry) => entry.id === connection.id);
-  if (index >= 0) connections.value.splice(index, 1, connection);
-  else connections.value.push(connection);
+  trackerConnectionsChanged();
+  const index = state.connections.findIndex((entry) => entry.id === connection.id);
+  if (index >= 0) state.connections.splice(index, 1, connection);
+  else state.connections.push(connection);
   mapDrafts[connection.id] = statusMapRows(connection);
 }
 
-async function load() {
-  try {
-    const list = await api().list();
-    connections.value = list.connections;
-    providers.value = list.providers;
-    disclosure.value = list.jev_linking_disclosure;
-    for (const connection of list.connections) mapDrafts[connection.id] = statusMapRows(connection);
-    unavailable.value = false;
-  } catch (error) {
-    unavailable.value = true;
-    feedback.value = { state: "error", message: message(error, "Ticket trackers are not available. Sign in, then try again.") };
-  } finally {
-    loaded.value = true;
-  }
-}
+// A reload replaces the list: give each connection a draft it does not have yet.
+watch(() => state.connections, (list) => {
+  for (const connection of list) mapDrafts[connection.id] ??= statusMapRows(connection);
+}, { immediate: true, deep: false });
 
 async function run(id: string | null, action: NonNullable<typeof busyAction.value>, task: () => Promise<void>) {
   busyId.value = id;
@@ -269,7 +290,8 @@ function remove(connection: TrackerConnectionView) {
   confirmRemoveId.value = null;
   return run(connection.id, "update", async () => {
     await api().remove(connection.id);
-    connections.value = connections.value.filter((entry) => entry.id !== connection.id);
+    trackerConnectionsChanged();
+    state.connections = state.connections.filter((entry) => entry.id !== connection.id);
     feedback.value = { state: "success", message: `${trackerLabel(connection.provider)} connection removed.` };
   });
 }
@@ -299,6 +321,7 @@ function openForm(provider: TrackerProvider) {
   siteUrl.value = "";
   email.value = "";
   apiToken.value = "";
+  githubRepository.value = "";
 }
 
 function closeForm() {
@@ -306,9 +329,24 @@ function closeForm() {
   apiToken.value = "";
 }
 
+// The Add catalog on the Connectors list chose a tracker.
+watch(() => state.requestedForm, (provider) => {
+  if (!provider) return;
+  state.requestedForm = null;
+  openForm(provider);
+}, { immediate: true });
+
+function connectGitHub() {
+  return run(null, "save", async () => {
+    replace(await api().connectGitHub(githubRepository.value));
+    closeForm();
+    feedback.value = { state: "success", message: "GitHub Issues connected. Use Test connection to see your issues, then add a room filter." };
+  });
+}
+
 function saveToken() {
   const provider = form.value;
-  if (!provider) return;
+  if (!provider || provider === "github") return;
   return run(null, "save", async () => {
     const connection = await api().saveApiToken(provider === "jira"
       ? { provider, site_url: siteUrl.value, email: email.value, api_token: apiToken.value }
@@ -333,13 +371,6 @@ function cancelOAuth() {
   void api().cancelOAuth();
 }
 
-// Another window or device may have changed the connections; refresh when the app is back.
-const onFocus = () => { if (loaded.value && !busyAction.value) void load(); };
-onMounted(() => {
-  void load();
-  window.addEventListener("focus", onFocus);
-});
-onBeforeUnmount(() => window.removeEventListener("focus", onFocus));
 </script>
 
 <style scoped>

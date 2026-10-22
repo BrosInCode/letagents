@@ -3,6 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Express, Response } from "express";
 
 import {
+  CONNECTORS_NOT_CONFIGURED_CODE,
+  CONNECTORS_NOT_CONFIGURED_MESSAGE,
   JEV_LINKING_DISCLOSURE,
   isTrackerProvider,
   type TrackerConnectionList,
@@ -27,11 +29,14 @@ import {
   listAtlassianResources,
   trackerOAuthMissingBaseUrl,
 } from "../../../connectors/oauth.js";
+import { normalizeGitHubRepo } from "../../../connectors/key-detectors.js";
+import { defaultGitHubAppDirectory, GitHubAccessRefusedError, type GitHubAppDirectory } from "../../../connectors/providers/github.js";
 import { createWorkItemProviders, type WorkItemProviders } from "../../../connectors/providers/index.js";
 import { TrackerProviderError, type TrackerCredentials } from "../../../connectors/providers/types.js";
 import { isAtlassianCloudId, normalizeJiraSiteUrl, TrackerSiteUrlError } from "../../../connectors/site-url.js";
 import { parseStatusMap, remainingUnmapped } from "../../../connectors/status-map.js";
 import { trackerConnectionStore, type TrackerConnectionStore } from "../../../connectors/store.js";
+import { hasGitHubAppConfig } from "../../../github/config.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import { parseBearerAuthorization } from "../../../request/bearer-authorization.js";
 
@@ -51,6 +56,10 @@ export interface ConnectorRouteDeps {
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  /** Where GitHub Issues finds the App's installations; defaults to the server's records. */
+  githubDirectory?: Pick<GitHubAppDirectory, "repositoryInstallation">;
+  /** Whether the server has a GitHub App to read GitHub Issues with. */
+  githubAppConfigured?: () => Promise<boolean>;
 }
 
 export function defaultConnectorRouteDeps(): ConnectorRouteDeps {
@@ -61,13 +70,16 @@ export function defaultConnectorRouteDeps(): ConnectorRouteDeps {
   };
 }
 
+const GITHUB_APP_WEBHOOK_TEXT = "GitHub Issues uses the LetAgents GitHub App's own webhook. There is nothing to set up.";
+
 export function hashOAuthState(state: string): string {
   return createHash("sha256").update(state, "utf8").digest("hex");
 }
 
+/** A tracker that signs in with OAuth. GitHub Issues uses the GitHub App, so it is unknown here. */
 function providerParam(req: AuthenticatedRequest): TrackerProvider | null {
   const value = (req.params as Record<string, string>).provider;
-  return isTrackerProvider(value) ? value : null;
+  return isTrackerProvider(value) && value !== "github" ? value : null;
 }
 
 function idParam(req: AuthenticatedRequest): string {
@@ -88,7 +100,7 @@ function boundedString(value: unknown, max: number): string | null {
 export function requireAccount(req: AuthenticatedRequest, res: Response): string | null {
   const bearer = parseBearerAuthorization(req.headers.authorization).kind === "token";
   if (!req.sessionAccount || !bearer || req.authKind !== "session") {
-    res.status(req.authKind ? 403 : 401).json({ error: "Sign in to the LetAgents app to manage ticket connections." });
+    res.status(req.authKind ? 403 : 401).json({ error: "Sign in to the LetAgents app to manage connectors." });
     return null;
   }
   return req.sessionAccount.account_id;
@@ -120,6 +132,8 @@ function parseLoopbackPort(value: unknown): number | null {
 function sendProviderError(res: Response, error: unknown): void {
   if (error instanceof TrackerSiteUrlError) {
     res.status(400).json({ error: error.message });
+  } else if (error instanceof GitHubAccessRefusedError) {
+    res.status(403).json({ error: error.message });
   } else if (error instanceof TrackerProviderError && error.outcome === "auth") {
     res.status(400).json({ error: "The tracker refused these credentials. Check them and try again." });
   } else if (error instanceof TrackerProviderError) {
@@ -190,7 +204,7 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
   const env = deps.env ?? process.env;
   const now = deps.now ?? (() => new Date());
   if (!deps.cipher) {
-    console.warn("LETAGENTS_CONNECTOR_SECRET_KEY is not set or invalid; ticket connector routes answer 503.");
+    console.warn("LETAGENTS_CONNECTOR_SECRET_KEY is not set or invalid; connector routes answer 503.");
   }
   const allowAttempt = createAttemptLimiter(CONNECT_ATTEMPTS_PER_WINDOW, CONNECT_ATTEMPT_WINDOW_MS);
   const service: ConnectionService | null = deps.cipher
@@ -200,11 +214,14 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
   /** The service, or a 503 when the server has no connector key. */
   function ready(res: Response): ConnectionService | null {
     if (!service) {
-      res.status(503).json({ error: "Ticket connectors are not configured on this server." });
+      res.status(503).json({ error: CONNECTORS_NOT_CONFIGURED_MESSAGE, code: CONNECTORS_NOT_CONFIGURED_CODE });
       return null;
     }
     return service;
   }
+
+  const githubDirectory = deps.githubDirectory ?? defaultGitHubAppDirectory;
+  const githubAppConfigured = deps.githubAppConfigured ?? hasGitHubAppConfig;
 
   async function ownedRow(req: AuthenticatedRequest, res: Response, accountId: string) {
     const row = await deps.store.get(idParam(req));
@@ -225,6 +242,7 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
       providers: {
         jira: { oauth: Boolean(getTrackerOAuthConfig("jira", env)), api_token: true },
         linear: { oauth: Boolean(getTrackerOAuthConfig("linear", env)), api_token: true },
+        github: { oauth: false, api_token: false, github_app: await githubAppConfigured().catch(() => false) },
       },
       jev_linking_disclosure: JEV_LINKING_DISCLOSURE,
     };
@@ -285,7 +303,7 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
   // code to their computer, where no app waits for this state.
   app.get("/account/connectors/oauth/:provider/callback", async (req: AuthenticatedRequest, res) => {
     if (!service) {
-      sendCallbackPage(res, 503, "Ticket connectors are off", "This LetAgents server is not configured for ticket connectors.");
+      sendCallbackPage(res, 503, "Connectors are off", CONNECTORS_NOT_CONFIGURED_MESSAGE);
       return;
     }
     const provider = providerParam(req);
@@ -350,6 +368,10 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     const body = (req.body ?? {}) as Record<string, unknown>;
     const provider = isTrackerProvider(body.provider) ? body.provider : null;
     const token = boundedString(body.api_token, MAX_SECRET_LENGTH);
+    if (provider === "github") {
+      res.status(400).json({ error: "GitHub Issues connects through the LetAgents GitHub App, not an API token." });
+      return;
+    }
     if (!provider || !token) {
       res.status(400).json({ error: "Choose a tracker and enter an API token." });
       return;
@@ -383,6 +405,82 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     }
   });
 
+  /**
+   * Connect GitHub Issues: the LetAgents GitHub App installation that holds
+   * the named repository, for the signed-in person's GitHub login. Nothing
+   * secret is stored. The person must be able to read that repository on
+   * GitHub; every later read checks the repository it reads the same way.
+   */
+  app.post("/account/connectors/github-app", async (req: AuthenticatedRequest, res) => {
+    const connections = ready(res);
+    if (!connections) return;
+    const accountId = requireAccount(req, res);
+    if (!accountId) return;
+    const account = req.sessionAccount!;
+    if (account.provider !== "github" || !account.login) {
+      res.status(400).json({ error: "Sign in to LetAgents with GitHub to connect GitHub Issues." });
+      return;
+    }
+    const repo = normalizeGitHubRepo(String(((req.body ?? {}) as Record<string, unknown>).repository ?? ""));
+    if (!repo) {
+      res.status(400).json({ error: "Enter a repository as owner/repo." });
+      return;
+    }
+    if (!await githubAppConfigured().catch(() => false)) {
+      res.status(409).json({ error: "This server has no GitHub App, so GitHub Issues is not available." });
+      return;
+    }
+    if (!allowAttempt(`github:${accountId}`)) {
+      res.status(429).json({ error: "Too many connection attempts. Wait a few minutes and try again." });
+      return;
+    }
+    // The person is the signed-in GitHub id, checked before anything about the repository.
+    const githubUserId = account.provider_user_id ? String(account.provider_user_id) : null;
+    if (!githubUserId) {
+      res.status(400).json({ error: "Sign in to LetAgents with GitHub to connect GitHub Issues." });
+      return;
+    }
+    const credentials = { kind: "github_app" as const, installation_id: "", login: account.login, repository: repo };
+    try {
+      const holder = await githubDirectory.repositoryInstallation(repo);
+      if (!holder) throw new GitHubAccessRefusedError(account.login, repo);
+      credentials.installation_id = holder.installation_id;
+      // Every read checks the repository; connecting also needs the person's own
+      // access (not only public read), and the permission answer must name this
+      // GitHub id, so an outsider or a renamed login cannot attach to an installation.
+      await deps.providers.github.assertMember({
+        id: "probe_github",
+        provider: "github",
+        auth_kind: "github_app",
+        status_map: {},
+        tracker_user_id: githubUserId,
+        credentials,
+        async saveCredentials() { return true; },
+      }, repo);
+    } catch (error) {
+      // One answer for "not installed", "cannot read" and any GitHub error on
+      // the way (a mint 404 or 422, a timeout): no probe for private names.
+      if (!(error instanceof TrackerProviderError)) throw error;
+      console.warn("GitHub Issues connect refused:", connectorErrorText(error));
+      const refused = new GitHubAccessRefusedError(account.login, repo);
+      res.status(403).json({ error: refused.message });
+      return;
+    }
+    try {
+      const row = await connections.connect({
+        account_id: accountId,
+        provider: "github",
+        auth_kind: "github_app",
+        credentials,
+        site: null,
+        tracker_user_id: githubUserId,
+      });
+      res.status(201).json({ connection: toConnectionView(row) });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+
   app.post("/account/connectors/:id/test", async (req: AuthenticatedRequest, res) => {
     const connections = ready(res);
     if (!connections) return;
@@ -390,6 +488,11 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     if (!accountId) return;
     const row = await ownedRow(req, res, accountId);
     if (!row) return;
+    // GitHub Issues spends the organization's App budget (the search API is 30 a minute).
+    if (row.provider === "github" && !allowAttempt(`github-test:${accountId}`)) {
+      res.status(429).json({ error: "Too many tests. Wait a few minutes and try again." });
+      return;
+    }
     let result: TrackerConnectionTestResult;
     try {
       const conn = connections.open(row);
@@ -427,6 +530,10 @@ export function registerConnectorRoutes(app: Express, deps: ConnectorRouteDeps =
     if (!accountId) return;
     const row = await ownedRow(req, res, accountId);
     if (!row) return;
+    if (row.provider === "github") {
+      res.status(409).json({ error: GITHUB_APP_WEBHOOK_TEXT });
+      return;
+    }
     const base = connectorPublicBaseUrl(env);
     if (!base) {
       res.status(503).json({ error: "Set LETAGENTS_BASE_URL to an https URL to receive tracker webhooks." });

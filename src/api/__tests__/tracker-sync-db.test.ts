@@ -284,7 +284,7 @@ test("a room without a filter runs no sync and gets no ticket state", options, a
   const bare = await db!.createProjectWithName(unique("tickets-zero-room"));
   const native = await db!.createTask(bare.id, "Native card", "human", undefined, undefined, { externalRef: "jira:HT-6" });
 
-  assert.deepEqual(await filters!.getRoomTrackerScope(bare.id), { sources: [], linearTeamKeys: [] });
+  assert.deepEqual(await filters!.getRoomTrackerScope(bare.id), { sources: [], linearTeamKeys: [], githubRepos: [] });
   let imports = 0;
   const plain = await db!.createProjectWithName(unique("tickets-zero-plain"));
   assert.equal(await keys!.findTaskByTicketKeys(plain.id, { branchRef: "HT-6-x", title: null, body: null }, {
@@ -514,4 +514,73 @@ test("a sync that throws is counted, backs off, and gives up its claim", options
   assert.ok(claimedHere.backoff_until, "it backs off");
   assert.ok(Date.parse(claimedHere.sync_finished_at!) >= Date.parse(claimedHere.sync_claimed_at!), "the claim is finished");
   assert.equal(claimedHere.last_error, "Sync failed on the server. It retries at the next poll.");
+});
+
+test("a GitHub issue imports through the same sync path; messages match only the filter's repositories", options, async () => {
+  const { eq } = await import("drizzle-orm");
+  const refs = await import("../db/task-external-refs.js");
+  const { detectKeysInMessage } = await import("../connectors/key-detectors.js");
+  const now = new Date().toISOString();
+  const accountId = unique("acct-github");
+  await client!.db.insert(schema!.accounts).values({
+    id: accountId, provider: "github", provider_user_id: accountId, login: accountId, display_name: accountId,
+    avatar_url: null, created_at: now, updated_at: now,
+  });
+  const connectionId = `tcon_${crypto.randomUUID()}`;
+  // Migration 0127 widened the provider and auth kind checks; no token is stored.
+  const [connection] = await client!.db.insert(schema!.tracker_connections).values({
+    id: connectionId, account_id: accountId, provider: "github", display_name: "acme", site_key: unique("installation"),
+    site_url: "https://github.com/acme", auth_kind: "github_app", credentials_ciphertext: "sealed", credentials_iv: "iv",
+    credentials_version: 1, tracker_user_id: "31524469", tracker_user_label: "EmmyMay", status_map: {},
+  }).returning();
+  const room = await db!.createProjectWithName(unique("github-issues"));
+  await filters!.upsertRoomTrackerFilter({ room_id: room.id, connection_id: connectionId, provider: "github", filter: "acme/api", enabled: true, account_id: accountId });
+  const [filter] = await client!.db.select().from(schema!.room_tracker_filters).where(eq(schema!.room_tracker_filters.room_id, room.id));
+  const issue: ExternalItem = {
+    provider: "github",
+    key: "acme/api#12",
+    title: "Ship the Connectors page",
+    ticket_state: "in_progress",
+    raw_status: "Open (assigned)",
+    unmapped: false,
+    assignee_id: "31524469",
+    assignee_label: "EmmyMay",
+    url: "https://github.com/acme/api/issues/12",
+    tracker_updated_at: now,
+    payload: { repo: "acme/api", number: 12 },
+  };
+  const filtersSeen: Array<string | null> = [];
+  const github = {
+    name: "github",
+    async listItems(_conn: ProviderConnection, text: string | null) { filtersSeen.push(text); return [issue]; },
+    async getItem() { return issue; },
+  } as unknown as WorkItemProvider;
+  const service = sync!.createTrackerSync({
+    providers: { jira: github, linear: github, github } as never,
+    connections: { open: () => ({ id: connectionId } as ProviderConnection), recordFailure: async (_row, error) => String(error) },
+    store: { get: async (id) => (id === connectionId ? connection! : null), addUnmapped: async () => undefined },
+  });
+
+  const result = await service.syncFilter(filter!);
+  assert.equal(result.error, null);
+  assert.deepEqual(filtersSeen, ["acme/api"]);
+  const [card] = await roomTasks(room.id);
+  assert.equal(card?.external_ref, "github:acme/api#12");
+  assert.equal(card?.ticket_state, "in_progress");
+  assert.equal(card?.created_by, "tracker:github");
+
+  refs.invalidateRoomExternalRefScope(room.id);
+  const scope = await refs.getRoomExternalRefScope(room.id);
+  assert.deepEqual(scope.detectorOptions.githubRepos, ["acme/api"]);
+  assert.deepEqual(detectKeysInMessage("Fixes #12, and other/repo#3", scope.detectorOptions).map((match) => match.ref), ["github:acme/api#12"]);
+  assert.deepEqual((await filters!.getRoomTrackerScope(room.id)).githubRepos, ["acme/api"]);
+
+  // An issue event polls early only filters naming its repository, at most once per gap.
+  const other = await db!.createProjectWithName(unique("github-other"));
+  await filters!.upsertRoomTrackerFilter({ room_id: other.id, connection_id: connectionId, provider: "github", filter: "acme/web", enabled: true, account_id: accountId });
+  const accept = (text: string) => filters!.githubReposInFilter(text).includes("acme/api");
+  assert.equal(await filters!.requestMatchingRoomTrackerFilterSync(connectionId, accept, 60_000), 1);
+  assert.equal(await filters!.requestMatchingRoomTrackerFilterSync(connectionId, accept, 60_000), 0, "not again within the gap");
+  const [web] = await client!.db.select().from(schema!.room_tracker_filters).where(eq(schema!.room_tracker_filters.room_id, other.id));
+  assert.equal(web?.sync_requested_at, null);
 });

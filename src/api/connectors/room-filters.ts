@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
-import type { RoomTrackerFilterView, TrackerProvider } from "../../../shared/ticket-connectors.mjs";
+import { trackerProviderLabel, type RoomTrackerFilterView, type TrackerProvider } from "../../../shared/ticket-connectors.mjs";
 import { db } from "../db/client.js";
 import { room_tracker_filters, tracker_connections } from "../db/schema.js";
+import { normalizeGitHubRepo } from "./key-detectors.js";
 
 export type RoomTrackerFilterRow = typeof room_tracker_filters.$inferSelect;
 
@@ -18,7 +19,7 @@ export interface RoomTrackerFilterWithConnection extends RoomTrackerFilterRow {
 export class RoomTrackerFilterProviderTakenError extends Error {
   readonly code = "tracker_filter_provider_taken";
   constructor(provider: TrackerProvider) {
-    super(`This room already imports ${provider === "jira" ? "Jira" : "Linear"} tickets through another connection. Remove that filter first.`);
+    super(`This room already imports ${trackerProviderLabel(provider)} tickets through another connection. Remove that filter first.`);
     this.name = "RoomTrackerFilterProviderTakenError";
   }
 }
@@ -259,6 +260,30 @@ export async function requestRoomTrackerFilterSync(connectionId: string, now = n
   return rows.length;
 }
 
+/**
+ * Asks for an early poll of only the connection's filters that `accept` names,
+ * and not again within `minGapMs` of the last ask. GitHub Issues uses it: any
+ * GitHub user can open an issue on a public repository, so an event must not
+ * poll every repository of the installation.
+ */
+export async function requestMatchingRoomTrackerFilterSync(
+  connectionId: string,
+  accept: (filter: string) => boolean,
+  minGapMs: number,
+  now = new Date(),
+): Promise<number> {
+  const f = room_tracker_filters;
+  const rows = await db.select({ id: f.id, filter: f.filter }).from(f)
+    .where(and(eq(f.connection_id, connectionId), eq(f.enabled, true)));
+  const ids = rows.filter((row) => accept(row.filter)).map((row) => row.id);
+  if (ids.length === 0) return 0;
+  const cutoff = new Date(now.getTime() - minGapMs).toISOString();
+  const updated = await db.update(f).set({ sync_requested_at: now.toISOString() })
+    .where(and(inArray(f.id, ids), sql`(${f.sync_requested_at} IS NULL OR ${f.sync_requested_at} < ${cutoff})`))
+    .returning({ id: f.id });
+  return updated.length;
+}
+
 /** Rooms that import from the connection: where its ticket states belong. */
 export async function roomIdsWithTrackerFilter(connectionId: string, executor: Pick<typeof db, "select"> = db): Promise<string[]> {
   const rows = await executor.select({ room_id: room_tracker_filters.room_id }).from(room_tracker_filters)
@@ -277,9 +302,16 @@ export interface RoomTrackerScope {
   sources: RoomTrackerSource[];
   /** Linear team keys the room's filters name (`team:ENG`). */
   linearTeamKeys: string[];
+  /** Repositories the room's GitHub Issues filters name (`owner/repo`, lower case). */
+  githubRepos: string[];
 }
 
-const NO_TRACKER: RoomTrackerScope = { sources: [], linearTeamKeys: [] };
+const NO_TRACKER: RoomTrackerScope = { sources: [], linearTeamKeys: [], githubRepos: [] };
+
+/** The `owner/repo` terms of a GitHub Issues filter, lower case; invalid terms are skipped. */
+export function githubReposInFilter(filter: string): string[] {
+  return [...new Set(filter.split(/[\s,]+/).map(normalizeGitHubRepo).filter((repo): repo is string => Boolean(repo)))];
+}
 
 /** Linear `team:<KEY>` terms in a filter. */
 export function linearTeamKeysInFilter(filter: string): string[] {
@@ -307,6 +339,8 @@ export async function getRoomTrackerScope(roomId: string): Promise<RoomTrackerSc
     sources,
     linearTeamKeys: [...new Set(sources.filter((source) => source.provider === "linear")
       .flatMap((source) => linearTeamKeysInFilter(source.filter)))],
+    githubRepos: [...new Set(sources.filter((source) => source.provider === "github")
+      .flatMap((source) => githubReposInFilter(source.filter)))],
   };
 }
 

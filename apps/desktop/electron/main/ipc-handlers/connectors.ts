@@ -14,6 +14,7 @@ import {
   removeTrackerRule,
   rollbackTrackerRule,
   saveTrackerApiToken,
+  connectGitHubIssues,
   setTrackerRuleEnabled,
   testTrackerConnection,
   updateTrackerConnection,
@@ -31,7 +32,7 @@ import {
 import { askDesktopMyWorkNeedsMe, getDesktopMyWork } from "../rooms/my-work.js";
 import { disconnectRemoteMcpConnection, listRemoteMcpConnections } from "../mcp-connections.js";
 
-/** Ticket connectors: the account's Jira and Linear connections, room ticket filters, and My work. */
+/** Connectors: the account's tracker connections (Jira, Linear, GitHub Issues), room ticket filters, and My work. */
 export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:connectors:list", () => listTrackerConnections());
   targetIpcMain.handle("desktop:mcp-connections:list", () => listRemoteMcpConnections());
@@ -39,6 +40,7 @@ export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void
   targetIpcMain.handle("desktop:connectors:connect-oauth", (_event, provider) => connectTrackerWithOAuth(provider));
   targetIpcMain.handle("desktop:connectors:cancel-oauth", () => cancelTrackerOAuth());
   targetIpcMain.handle("desktop:connectors:save-api-token", (_event, input) => saveTrackerApiToken(input));
+  targetIpcMain.handle("desktop:connectors:connect-github", (_event, repository) => connectGitHubIssues(repository));
   targetIpcMain.handle("desktop:connectors:test", (_event, id) => testTrackerConnection(id));
   targetIpcMain.handle("desktop:connectors:update", (_event, id, patch) => updateTrackerConnection(id, patch));
   targetIpcMain.handle("desktop:connectors:remove", (_event, id) => removeTrackerConnection(id));

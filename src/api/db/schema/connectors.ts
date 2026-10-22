@@ -35,8 +35,8 @@ export const tracker_connections = pgTable(
   (table) => ({
     account_site_unique: uniqueIndex("tracker_connections_account_site_uq")
       .on(table.account_id, table.provider, table.site_key),
-    provider_check: check("tracker_connections_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
-    auth_kind_check: check("tracker_connections_auth_kind_check", sql`${table.auth_kind} IN ('oauth', 'api_token')`),
+    provider_check: check("tracker_connections_provider_check", sql`${table.provider} IN ('jira', 'linear', 'github')`),
+    auth_kind_check: check("tracker_connections_auth_kind_check", sql`${table.auth_kind} IN ('oauth', 'api_token', 'github_app')`),
     status_check: check("tracker_connections_status_check", sql`${table.status} IN ('active', 'needs_reauth', 'error')`),
   }),
 );
@@ -64,7 +64,7 @@ export const external_items = pgTable(
   (table) => ({
     connection_key_unique: uniqueIndex("external_items_connection_key_uq").on(table.connection_id, table.key),
     connection_assignee_idx: index("external_items_connection_assignee_idx").on(table.connection_id, table.assignee_id),
-    provider_check: check("external_items_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
+    provider_check: check("external_items_provider_check", sql`${table.provider} IN ('jira', 'linear', 'github')`),
     ticket_state_check: check(
       "external_items_ticket_state_check",
       sql`${table.ticket_state} IN ('todo', 'in_progress', 'in_review', 'done')`,
@@ -137,7 +137,7 @@ export const room_tracker_filters = pgTable(
   (table) => ({
     room_connection_unique: uniqueIndex("room_tracker_filters_room_connection_uq").on(table.room_id, table.connection_id),
     room_provider_unique: uniqueIndex("room_tracker_filters_room_provider_uq").on(table.room_id, table.provider),
-    provider_check: check("room_tracker_filters_provider_check", sql`${table.provider} IN ('jira', 'linear')`),
+    provider_check: check("room_tracker_filters_provider_check", sql`${table.provider} IN ('jira', 'linear', 'github')`),
     connection_idx: index("room_tracker_filters_connection_idx").on(table.connection_id),
     enabled_idx: index("room_tracker_filters_enabled_idx").on(table.sync_claimed_at).where(sql`${table.enabled}`),
   }),

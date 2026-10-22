@@ -85,7 +85,7 @@ export function registerTaskBoardTools(server: McpServer): void {
       source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
       external_ref: externalRefSchema
         .optional()
-        .describe("Optional ticket the card names, e.g. 'jira:HT-1234' or 'linear:ENG-12'. A bare key means Jira."),
+        .describe("Optional ticket the card names, e.g. 'jira:HT-1234', 'linear:ENG-12' or 'github:owner/repo#12'. A bare key means Jira."),
       ...workerTaskIdentitySchema,
       ...boardIntentApprovalSchema,
     },

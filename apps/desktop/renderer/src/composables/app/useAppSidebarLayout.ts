@@ -48,7 +48,7 @@ export function useAppSidebarLayout(context: unknown) {
   const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
     if (requestedSettingsPane.value) return requestedSettingsPane.value;
     if (app.activeEntry.value.type !== "system") return "storage:chat";
-    if (app.activeEntry.value.id === "system:setup") return "system:setup";
+    if (app.activeEntry.value.id === "system:setup") return "account:connectors-setup";
     if (app.activeEntry.value.id === "system:app-agent") return "system:app-agent";
     if (app.activeEntry.value.id === "system:repos") return "system:runtime";
     if (app.activeEntry.value.id === "system:workers") return "system:agents";

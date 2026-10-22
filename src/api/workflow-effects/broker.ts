@@ -107,10 +107,10 @@ export interface WorkflowEffectBrokerDeps {
 
 const unconfiguredTrackerExecutor: WorkflowEffectExecutor = {
   async create() {
-    return { kind: "definite_failure", error: "Ticket connectors are not configured on this server; the tracker was not changed." };
+    return { kind: "definite_failure", error: "Connectors are not enabled on this server; the tracker was not changed." };
   },
   async lookup() {
-    throw new Error("Ticket connectors are not configured on this server; the tracker cannot be checked.");
+    throw new Error("Connectors are not enabled on this server; the tracker cannot be checked.");
   },
 };
 

@@ -533,7 +533,7 @@ test("a pull request from branch HT-1234-proration resolves to the card that nam
   assert.equal(resolution.task?.id, "task_7");
   assert.equal(resolution.matchedByWorkflowArtifact, true);
   assert.equal(resolution.matchedByTicketKey, true);
-  assert.deepEqual(keyCalls, [{ branchRef: "HT-1234-proration", title: "Round proration", body: "Fixes the rounding." }]);
+  assert.deepEqual(keyCalls, [{ branchRef: "HT-1234-proration", title: "Round proration", body: "Fixes the rounding.", pullRequestUrl: "https://github.com/BrosInCode/letagents/pull/88" }]);
 });
 
 test("a URL or lease match wins over a key match, so existing links do not move", async () => {

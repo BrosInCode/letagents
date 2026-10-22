@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   isTicketState,
   type TicketState,
+  type TrackerAuthKind,
   type TrackerConnectionView,
   type TrackerProvider,
 } from "../../../shared/ticket-connectors.mjs";
@@ -60,6 +61,8 @@ export function connectorErrorText(error: unknown, secrets: ReadonlyArray<string
 }
 
 function credentialSecrets(credentials: TrackerCredentials): string[] {
+  // A GitHub App connection stores no secret; its tokens are minted per request.
+  if (credentials.kind === "github_app") return [];
   if (credentials.kind === "api_token") {
     return "api_token" in credentials ? [credentials.api_token] : [credentials.api_key];
   }
@@ -76,9 +79,11 @@ export interface ConnectionService {
   connect(input: {
     account_id: string;
     provider: TrackerProvider;
-    auth_kind: "oauth" | "api_token";
+    auth_kind: TrackerAuthKind;
     credentials: TrackerCredentials;
     site: { key: string; url: string | null; name: string } | null;
+    /** The tracker user id the caller already proved (GitHub Issues: the signed-in GitHub id). */
+    tracker_user_id?: string | null;
   }): Promise<TrackerConnectionRow>;
   /** Record what a provider error means for the connection. */
   recordFailure(row: TrackerConnectionRow, error: unknown): Promise<string>;
@@ -103,7 +108,7 @@ export function createConnectionService(deps: {
     const connection: ProviderConnection = {
       id: row.id,
       provider: row.provider as TrackerProvider,
-      auth_kind: row.auth_kind as "oauth" | "api_token",
+      auth_kind: row.auth_kind as TrackerAuthKind,
       status_map: row.status_map ?? {},
       tracker_user_id: row.tracker_user_id,
       credentials: decrypt(row),
@@ -135,7 +140,7 @@ export function createConnectionService(deps: {
         provider: input.provider,
         auth_kind: input.auth_kind,
         status_map: defaultStatusMap(input.provider),
-        tracker_user_id: null,
+        tracker_user_id: input.tracker_user_id ?? null,
         credentials: input.credentials,
         async saveCredentials(next) { probe.credentials = next; return true; },
       };

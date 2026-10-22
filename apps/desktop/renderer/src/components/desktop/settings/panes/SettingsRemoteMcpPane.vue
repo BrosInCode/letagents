@@ -2,11 +2,22 @@
   <section class="settings-panel" data-testid="settings-remote-mcp-panel">
     <div class="settings-control-list">
       <SettingsRow
-        title="Remote connector"
+        title="Remote sign-ins"
         description="Apps that signed in to your LetAgents account through the remote MCP connector. Each one has the same access as an owner token on that connector. Disconnect an app to end its access at once."
       />
 
+      <section class="settings-remote-steps" aria-labelledby="settings-remote-steps-title" data-testid="settings-remote-steps">
+        <p id="settings-remote-steps-title" class="settings-control-title">Add the remote connector to an app</p>
+        <ol>
+          <li>In the app (for example the Claude app), add a custom connector with the URL <code>{{ connectorUrl }}</code>.</li>
+          <li>Click Connect. Leave the OAuth client ID and secret empty.</li>
+          <li>In the browser, sign in with GitHub if you are asked to, then check the app name and click Approve.</li>
+          <li>In a chat, call <code>join_room</code>, then <code>register_agent_session</code>. The app then shows here.</li>
+        </ol>
+      </section>
+
       <p v-if="feedback" class="settings-feedback" :data-state="feedback.state" role="status">{{ feedback.message }}</p>
+      <p v-else-if="state.error" class="settings-feedback" data-state="error" role="status">{{ state.error }}</p>
 
       <SettingsRow
         v-for="connection in connections"
@@ -38,21 +49,28 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, ref } from "vue";
+import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
+import { remoteConnectorUrl } from "../connectors";
+import { remoteSignInsChanged, remoteSignInsState as state } from "../connectors-store";
 import SettingsRow from "../SettingsRow.vue";
 import type { SettingsFeedback } from "../types";
 
 type RemoteMcpConnectionView = Awaited<ReturnType<Window["letagentsDesktop"]["mcpConnections"]["list"]>>["connections"][number];
 
-const connections = ref<RemoteMcpConnectionView[]>([]);
-const loaded = ref(false);
-const unavailable = ref(false);
+const props = defineProps<{ apiUrl?: string | null }>();
+
+// The Connectors list loads these; this pane shows and changes them.
+const connections = computed(() => state.connections);
+const loaded = computed(() => state.loaded);
+const unavailable = computed(() => Boolean(state.error));
+const connectorUrl = computed(() => remoteConnectorUrl(props.apiUrl));
 const feedback = ref<SettingsFeedback | null>(null);
 const busyId = ref<string | null>(null);
 const confirmId = ref<string | null>(null);
 
 const api = () => window.letagentsDesktop.mcpConnections;
-const message = (error: unknown, fallback: string) => error instanceof Error && error.message ? error.message : fallback;
+const message = (error: unknown, fallback: string) => safeUserVisibleErrorDetail(error, fallback);
 
 function day(value: string): string {
   const date = new Date(value);
@@ -64,17 +82,6 @@ function describe(connection: RemoteMcpConnectionView): string {
   return `Returns to ${hosts}. Connected ${day(connection.created_at)}, last used ${day(connection.last_used_at)}.`;
 }
 
-async function load() {
-  try {
-    connections.value = (await api().list()).connections;
-    unavailable.value = false;
-  } catch (error) {
-    unavailable.value = true;
-    feedback.value = { state: "error", message: message(error, "Connected apps are not available. Sign in, then try again.") };
-  } finally {
-    loaded.value = true;
-  }
-}
 
 async function disconnect(connection: RemoteMcpConnectionView) {
   if (confirmId.value !== connection.id) {
@@ -85,7 +92,8 @@ async function disconnect(connection: RemoteMcpConnectionView) {
   feedback.value = null;
   try {
     await api().disconnect(connection.id);
-    connections.value = connections.value.filter((entry) => entry.id !== connection.id);
+    remoteSignInsChanged();
+    state.connections = state.connections.filter((entry) => entry.id !== connection.id);
     feedback.value = { state: "success", message: `${connection.client_name ?? "The app"} is disconnected.` };
   } catch (error) {
     feedback.value = { state: "error", message: message(error, "The app could not be disconnected. Try again.") };
@@ -94,6 +102,30 @@ async function disconnect(connection: RemoteMcpConnectionView) {
     confirmId.value = null;
   }
 }
-
-onMounted(load);
 </script>
+
+<style scoped>
+.settings-remote-steps {
+  display: grid;
+  gap: 6px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-remote-steps p {
+  margin: 0;
+}
+
+.settings-remote-steps ol {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-secondary);
+}
+
+.settings-remote-steps code {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+</style>

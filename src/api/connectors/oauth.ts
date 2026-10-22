@@ -54,6 +54,8 @@ export function connectorPublicBaseUrl(env: NodeJS.ProcessEnv): string | null {
 }
 
 function clientCredentials(provider: TrackerProvider, env: NodeJS.ProcessEnv) {
+  // GitHub Issues signs in through the GitHub App installation, never tracker OAuth.
+  if (provider !== "jira" && provider !== "linear") return null;
   const prefix = provider === "jira" ? "LETAGENTS_JIRA" : "LETAGENTS_LINEAR";
   const clientId = env[`${prefix}_CLIENT_ID`]?.trim();
   const clientSecret = env[`${prefix}_CLIENT_SECRET`]?.trim();

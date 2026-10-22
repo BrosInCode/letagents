@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createGitHubKeyDetector,
   createLinearKeyDetector,
   detectKeysInBranch,
   detectKeysInMessage,
@@ -9,6 +10,8 @@ import {
   detectTicketKeys,
   linearTeamKeyOf,
   normalizeExternalRef,
+  parseExternalRef,
+  parseGitHubIssueKey,
 } from "../connectors/key-detectors.js";
 import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
 
@@ -20,6 +23,7 @@ const {
   peekRoomExternalRefScope,
   recordTaskMentionsForMessage,
 } = await import("../db/task-external-refs.js");
+const { repositoryOfPullRequestUrl } = await import("../connectors/key-task-resolution.js");
 
 test("Jira keys are found in the usual branch forms", () => {
   assert.deepEqual(detectTicketKeys("jira", "feature/HT-12-x"), ["HT-12"]);
@@ -86,6 +90,59 @@ test("typed external refs are normalized or rejected", () => {
   assert.equal(normalizeExternalRef(""), null);
   assert.equal(linearTeamKeyOf("linear:ENG-12"), "ENG");
   assert.equal(linearTeamKeyOf("jira:HT-1"), null);
+});
+
+test("GitHub keys match only repositories the room's filter names", () => {
+  const repos = ["BrosInCode/letagents"];
+  assert.deepEqual(detectTicketKeys("github", "See #123 and brosincode/letagents#7.", { githubRepos: repos }),
+    ["brosincode/letagents#123", "brosincode/letagents#7"]);
+  assert.deepEqual(detectTicketKeys("github", "Fixes #123"), [], "no filter names a repository: nothing matches");
+  assert.deepEqual(detectTicketKeys("github", "acme/api#5 and other/repo#9", { githubRepos: repos }), [],
+    "a repository the filter does not name never matches, even written in full");
+  assert.deepEqual(detectTicketKeys("github", "acme/api#5", { githubRepos: [...repos, "acme/api"] }), ["acme/api#5"]);
+});
+
+test("a bare #123 names the pull request's repository, or in a message the only filtered one", () => {
+  const two = ["brosincode/letagents", "acme/api"];
+  assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: two }), [], "two repositories and no default: ambiguous");
+  assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: two, githubDefaultRepo: "Acme/API" }), ["acme/api#12"]);
+  assert.deepEqual(detectTicketKeys("github", "Revert #12", { githubRepos: ["brosincode/letagents"], githubDefaultRepo: "acme/api" }),
+    [], "a pull request in acme/api means acme/api#12, never the filtered repository's #12");
+  assert.deepEqual(detectTicketKeys("github", "#12", { githubRepos: ["brosincode/letagents"] }), ["brosincode/letagents#12"],
+    "a room message names the only filtered repository");
+  assert.equal(repositoryOfPullRequestUrl("https://github.com/BrosInCode/letagents/pull/1729"), "brosincode/letagents");
+  assert.equal(repositoryOfPullRequestUrl("https://example.com/x/y/pull/1"), null);
+});
+
+test("GitHub keys are not read inside words, paths, URLs or HTML entities", () => {
+  const detect = createGitHubKeyDetector(["brosincode/letagents"]);
+  assert.deepEqual(detect("abc#12 x/#12 &#123; https://github.com/brosincode/letagents#12 #0 #12a"), []);
+  assert.deepEqual(detect("(#12) and \"#13\", #12 again"), ["brosincode/letagents#12", "brosincode/letagents#13"]);
+  assert.deepEqual(createGitHubKeyDetector([])("#12"), []);
+  assert.deepEqual(detect("color: #333; background:#999999 and border-color: #111"), [], "CSS colours are not issues");
+  assert.deepEqual(detect("see #333 in prose"), ["brosincode/letagents#333"], "in prose a number stays an issue");
+});
+
+test("pull requests link GitHub issues by branch, title, or a closing keyword in the body", () => {
+  const options = { githubRepos: ["brosincode/letagents"], githubDefaultRepo: "brosincode/letagents" };
+  assert.deepEqual(detectKeysInPullRequest({ body: "Fixes #123\nCloses brosincode/letagents#124\nfollow-up to #125" }, options)
+    .map((match) => match.ref), ["github:brosincode/letagents#123", "github:brosincode/letagents#124"]);
+  assert.deepEqual(detectKeysInPullRequest({ title: "Connectors page (#41)", body: "Resolves HT-9" }, options).map((match) => match.ref),
+    ["jira:HT-9", "github:brosincode/letagents#41"]);
+  assert.deepEqual(detectKeysInMessage("Fixes #123", {}), [], "a room whose filter names no repository links nothing");
+});
+
+test("GitHub refs normalize to lower case and keep their form", () => {
+  assert.equal(normalizeExternalRef("github:BrosInCode/LetAgents#12"), "github:brosincode/letagents#12");
+  assert.equal(normalizeExternalRef(" github: acme/api.v2#3 "), "github:acme/api.v2#3");
+  assert.equal(normalizeExternalRef("github:#12"), null);
+  assert.equal(normalizeExternalRef("github:acme/api#0"), null);
+  assert.equal(normalizeExternalRef("github:acme/api.git#3"), null);
+  assert.equal(normalizeExternalRef("#12"), null, "a bare number has no repository and is not a Jira key");
+  const long = `github:${"a".repeat(39)}/${"b".repeat(100)}#123456789`;
+  assert.equal(normalizeExternalRef(long), long, "the longest GitHub ref fits");
+  assert.deepEqual(parseExternalRef("github:acme/api#3"), { provider: "github", key: "acme/api#3", ref: "github:acme/api#3" });
+  assert.deepEqual(parseGitHubIssueKey("Acme/Api#3"), { repo: "acme/api", number: 3 });
 });
 
 test("a room with no external refs runs no detector on messages", async () => {

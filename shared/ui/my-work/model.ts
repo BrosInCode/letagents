@@ -1,11 +1,12 @@
-import type {
-  MyWorkCard,
-  MyWorkNeedsMeReason,
-  MyWorkPage,
-  MyWorkPullRequest,
+import {
+  TRACKER_PROVIDER_LABELS,
+  type MyWorkCard,
+  type MyWorkNeedsMeReason,
+  type MyWorkPage,
+  type MyWorkPullRequest,
 } from "../../ticket-connectors.mjs";
 
-export type MyWorkTrackerFilter = "" | "jira" | "linear" | "native";
+export type MyWorkTrackerFilter = "" | "jira" | "linear" | "github" | "native";
 
 export interface MyWorkFilters {
   tracker: MyWorkTrackerFilter;
@@ -18,7 +19,7 @@ export function myWorkTrackerOptions(
   page: Pick<MyWorkPage, "providers"> | null,
 ): Array<{ id: MyWorkTrackerFilter; label: string }> {
   if (!page?.providers.length) return [];
-  const labels: Record<string, string> = { jira: "Jira", linear: "Linear" };
+  const labels: Readonly<Record<string, string>> = TRACKER_PROVIDER_LABELS;
   return [
     { id: "", label: "All sources" },
     ...page.providers.map((provider) => ({
