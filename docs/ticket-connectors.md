@@ -777,7 +777,7 @@ with an expired or revoked one, gets `401` with
 `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp", scope="mcp"`
 (plus `error="invalid_token"` when a token was sent).
 
-**OAuth endpoints** (code in `src/api/routes/mcp/oauth.ts`, tables from migration 0125):
+**OAuth endpoints** (code in `src/api/routes/mcp/oauth.ts`, tables from migration 0126):
 
 | Path | What it does |
 |---|---|

@@ -6,7 +6,7 @@ import type { OwnerTokenAccount } from "./types/auth.js";
 
 /**
  * Storage for the remote MCP endpoint's OAuth 2.1 authorization server
- * (migration 0125). Callers pass hashes, never raw secrets.
+ * (migration 0126). Callers pass hashes, never raw secrets.
  */
 
 export type McpOAuthAuthMethod = "none" | "client_secret_post" | "client_secret_basic";

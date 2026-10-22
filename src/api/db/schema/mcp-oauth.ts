@@ -4,7 +4,7 @@ import { check, index, jsonb, pgTable, text, timestamp, uniqueIndex } from "driz
 import { accounts } from "./core.js";
 
 /**
- * OAuth 2.1 for the remote MCP endpoint (migration 0125). Every secret here
+ * OAuth 2.1 for the remote MCP endpoint (migration 0126). Every secret here
  * (client secrets, consent tokens, codes, grant secrets, access and refresh
  * tokens) is stored only as its SHA-256 hex.
  */
