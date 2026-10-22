@@ -251,7 +251,7 @@ export async function captureWorkspaceTree(workspace, identity, deadline = undef
         await rm(scratch, { recursive: true, force: true });
     }
 }
-/** `timeout` is shorter when the settle's deadline has already passed: the release must not extend it. */
+/** A ref deletion is a tiny command; the settled turn's release gets `timeout` so that it cannot extend the settle budget. */
 export async function releaseWorkspaceTree(workspace, identity, timeout = GIT_TIMEOUT_MS) {
     try {
         await git(workspace, ['update-ref', '-d', reviewRef(identity)], AbortSignal.timeout(timeout));
@@ -443,6 +443,6 @@ export async function captureWorkspacePair(workspace, startingRevision, baseline
             review: { version: 1, workspace: full, contribution: changes } };
     }
     finally {
-        await releaseWorkspaceTree(workspace, `${identity}:settled`, deadline.aborted ? 5_000 : GIT_TIMEOUT_MS);
+        await releaseWorkspaceTree(workspace, `${identity}:settled`, 5_000);
     }
 }
