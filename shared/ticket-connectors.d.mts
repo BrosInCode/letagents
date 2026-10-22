@@ -318,6 +318,8 @@ export interface MyWorkCard {
   /** `tracker`: the ticket is assigned to you. `native`: the card is assigned to you or your agent. */
   assigned_via: "tracker" | "native";
   agent: {
+    /** Recorded agent runtime/provider; absent on older servers. */
+    provider?: string | null;
     label: string;
     agent_key: string | null;
     display_name: string | null;

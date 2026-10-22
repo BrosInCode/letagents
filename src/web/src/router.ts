@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
+  { path: "/connectors", name: "connectors", component: () => import("./pages/Connectors.vue") },
   { path: "/my-work", name: "my-work", component: () => import("./pages/MyWork.vue") },
   { path: "/messages", name: "messages", component: () => import("./pages/Messages.vue") },
   {

@@ -367,15 +367,39 @@ test("real cards render grouped rows, custom filters and no removed demo labels"
     assert.equal(byTestId(root, "my-work-row").length, 2);
     const text = textOf(root);
     assert.match(text, /Needs you/);
-    assert.match(text, /Recently completed/);
+    assert.match(text, /Completed/);
     assert.match(text, /Proration rounding/);
-    assert.doesNotMatch(text, /YOUR WORKSPACE|Assigned to you & your agents/);
+    assert.doesNotMatch(text, /YOUR WORKSPACE|Assigned to you & your agents|Loaded work|Connectors|across every room|A review, answer, or decision/);
+    assert.equal(find(root, n => n.type === "h1" && textOf(n) === "My work").length, 1);
+    const refresh = byTestId(root, "my-work-refresh");
+    assert.equal(refresh.length, 1);
+    assert.equal(find(root, n => n.type === "header").some(n => find(n, child => child === refresh[0]).length), true);
     assert.equal(find(root, (n) => n.type === "select").length, 0);
     assert.equal(find(root, (n) => n.props.popover === "auto").length, 2);
   } finally {
     unmount();
   }
 });
+test("provider images use agent metadata in both rows and details, with honest unknown and human fallbacks", async () => {
+  for (const [provider, image] of [["codex", "codex.png"], ["Claude Code", "claude-code.png"], ["Cursor", "cursor.png"], ["antigravity", "antigravity.png"], [null, null], ["other", null]] as const) {
+    const value = card({ agent: { ...card().agent!, provider, display_name: "Codex", label: "Codex" } });
+    const api: MyWorkApi = { ...emptyApi, read: async () => page({ cards: [value] }) };
+    const list = await mount(MyWork, () => ({ api }));
+    const detail = await mount(WorkDetail, () => ({ card: value, api, hasConnections: true, titleId: "avatar-detail" }));
+    try {
+      const rowImages = find(byTestId(list.root, "my-work-row")[0]!, n => n.type === "img");
+      const detailImages = find(detail.root, n => n.type === "img");
+      assert.equal(rowImages.length, image ? 2 : 0);
+      assert.equal(detailImages.length, image ? 1 : 0);
+      for (const img of [...rowImages, ...detailImages]) assert.ok(String(img.props.src).includes(image!));
+    } finally { list.unmount(); detail.unmount(); }
+  }
+  const human = card({ agent: { ...card().agent!, agent_key: null, label: "Codex", provider: "codex" } });
+  const view = await mount(MyWork, () => ({ api: { ...emptyApi, read: async () => page({ cards: [human] }) } }));
+  try { assert.equal(find(byTestId(view.root, "my-work-row")[0]!, n => n.type === "img").length, 0); }
+  finally { view.unmount(); }
+});
+
 test("new arrivals in an earlier group stay behind Show updates; existing nodes and open groups stay stable", async () => {
   const active = card({
     needs_me: false,

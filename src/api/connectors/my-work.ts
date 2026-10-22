@@ -318,12 +318,12 @@ function pageTuples(rows: readonly CandidateRow[], roomColumn: unknown, numberCo
 
 async function readPresence(rows: readonly CandidateRow[]) {
   const withAgent = rows.filter((row) => row.assignee_agent_key);
-  const result = new Map<string, { display_name: string; status: string; status_text: string | null; last_heartbeat_at: string }>();
+  const result = new Map<string, { provider: string | null; display_name: string; status: string; status_text: string | null; last_heartbeat_at: string }>();
   if (!withAgent.length) return result;
   const p = room_agent_presence;
   const found = await db.execute(sql`
     SELECT DISTINCT ON (${p.room_id}, ${p.agent_key})
-           ${p.room_id} AS room_id, ${p.agent_key} AS agent_key, ${p.display_name} AS display_name,
+           ${p.room_id} AS room_id, ${p.agent_key} AS agent_key, ${p.display_name} AS display_name, ${p.runtime} AS runtime, ${p.ide_label} AS ide_label,
            ${p.status} AS status, ${p.status_text} AS status_text, ${p.last_heartbeat_at} AS last_heartbeat_at
       FROM ${p}
      WHERE (${p.room_id}, ${p.agent_key}) IN (${sql.join(withAgent.map((row) => sql`(${row.room_id}, ${row.assignee_agent_key})`), sql`, `)})
@@ -331,6 +331,7 @@ async function readPresence(rows: readonly CandidateRow[]) {
   `);
   for (const row of found.rows as Array<Record<string, unknown>>) {
     result.set(`${row.room_id}\n${row.agent_key}`, {
+      provider: row.runtime && row.runtime !== "unknown" ? String(row.runtime) : (row.ide_label as string | null) ?? null,
       display_name: String(row.display_name),
       status: String(row.status),
       status_text: (row.status_text as string | null) ?? null,
@@ -570,6 +571,7 @@ async function buildCards(
       work_state: row.status,
       assigned_via: row.via_tracker ? "tracker" : "native",
       agent: label ? {
+        provider: agentPresence?.provider ?? null,
         label,
         agent_key: row.assignee_agent_key,
         display_name: agentPresence?.display_name ?? null,
