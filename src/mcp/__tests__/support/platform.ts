@@ -1,3 +1,6 @@
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
 // Platform facts the MCP test suites share. The suites run on Windows in CI;
 // what cannot run there is skipped through these constants, in one place,
 // with the reason beside it.
@@ -39,4 +42,22 @@ export function childProcessEnv(variables: Record<string, string>): Record<strin
     if (value !== undefined) env[name] = value;
   }
   return { ...env, ...variables };
+}
+
+/**
+ * Connects a client to a spawned MCP server. When the server exits before it
+ * answers, the SDK reports only "Connection closed"; this keeps what the
+ * server wrote to stderr and puts it in the error, so a start-up failure on
+ * another platform names its cause.
+ */
+export async function connectOrExplain(client: Client, transport: StdioClientTransport): Promise<void> {
+  let stderr = "";
+  transport.stderr?.setEncoding("utf8");
+  transport.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+  try {
+    await client.connect(transport);
+  } catch (error) {
+    const detail = stderr.trim();
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${detail ? `\nserver stderr:\n${detail}` : " (the server wrote nothing to stderr)"}`, { cause: error });
+  }
 }

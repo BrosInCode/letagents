@@ -436,7 +436,17 @@ jobs:
       - name: Test the shared modules the MCP server depends on
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
-        run: node --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
+        run: node --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-capture-git-for-windows.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
+
+      # TEMPORARY diagnostic: the file's tests all pass under the runner on
+      # Windows, yet its process exits 1. Running it directly shows why.
+      - name: Diagnose local-chat-state exit status on Windows
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          node --import tsx src/mcp/__tests__/local-chat-state.test.ts > "${RUNNER_TEMP}/local-chat-state.out" 2> "${RUNNER_TEMP}/local-chat-state.err" || echo "exit status $?"
+          echo "--- last stdout lines"; tail -n 40 "${RUNNER_TEMP}/local-chat-state.out"
+          echo "--- stderr"; cat "${RUNNER_TEMP}/local-chat-state.err"
 
   # The required "build" check. GitHub counts a skipped check as passing, so
   # this gate runs even after a failure or cancellation, and passes only when
