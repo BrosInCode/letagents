@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
@@ -180,6 +180,19 @@ test("on Windows a stop ends the process tree with the system taskkill; elsewher
   assert.equal(terminateCodexProcessTree(null, { platform: "win32", runSync }), false);
   assert.equal(terminateCodexProcessTree(Number.NaN, { platform: "win32", runSync }), false);
   assert.equal(calls.length, 1);
+});
+
+test("once the spawned child has exited, its pid may be someone else's and taskkill is not run", async () => {
+  const calls: string[][] = [];
+  const runSync = (_file: string, args: string[]) => { calls.push(args); return { error: undefined }; };
+  const child = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+  const pid = child.pid!;
+  // Still running (or at least not yet observed as exited): the tree is ended.
+  assert.equal(terminateCodexProcessTree(pid, { platform: "win32", runSync, child }), true);
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  assert.notEqual(child.exitCode, null);
+  assert.equal(terminateCodexProcessTree(pid, { platform: "win32", runSync, child }), false);
+  assert.deepEqual(calls, [["/pid", String(pid), "/T", "/F"]]);
 });
 
 test("Windows resolution walks PATH with PATHEXT and finds codex.cmd, not npm's extensionless sh script", () => {

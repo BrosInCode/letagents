@@ -53,6 +53,8 @@ export function terminateCodexProcessTree(
   options?: {
     platform?: NodeJS.Platform;
     env?: NodeJS.ProcessEnv;
+    /** The spawned child when there is one: after it has exited, nothing is killed. */
+    child?: Pick<ChildProcess, "exitCode" | "signalCode">;
     runSync?: (file: string, args: string[]) => Pick<SpawnSyncReturns<Buffer>, "error"> | undefined;
   },
 ): boolean;

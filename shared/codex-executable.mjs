@@ -224,10 +224,18 @@ export function spawnCodex(executable, args, spawnOptions = {}, launchOptions = 
  * the shim's node.exe or cmd.exe and killing it alone leaves the native
  * Codex running, so the whole tree is ended with taskkill. Elsewhere the
  * caller's own group or pid signal is used. Returns true when taskkill ran.
+ *
+ * Pass the ChildProcess as `child` when there is one: while Node holds its
+ * process handle Windows does not reuse the pid, and once the child has
+ * exited the pid may belong to a stranger, so taskkill is then not run.
+ * A caller that only has a stored pid (an app-server from an earlier run
+ * of this process) cannot make that check and says so at its call.
  */
 export function terminateCodexProcessTree(pid, options = {}) {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32" || !pid) return false;
+  const child = options.child;
+  if (child && (child.exitCode !== null || child.signalCode !== null)) return false;
   const run = options.runSync ?? ((file, args) => spawnSync(file, args, { stdio: "ignore", windowsHide: true }));
   const result = run(windowsSystemExecutable("taskkill.exe", options.env ?? process.env), ["/pid", String(pid), "/T", "/F"]);
   return !result?.error;

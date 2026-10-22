@@ -124,7 +124,7 @@ export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TI
     const stop = () => {
       try { if (group && child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ }
       // On Windows the child is a shim wrapper; taskkill ends the native Codex below it too.
-      terminateCodexProcessTree(child.pid);
+      terminateCodexProcessTree(child.pid, { child });
       child.kill("SIGKILL");
     };
     let stdout = "";
