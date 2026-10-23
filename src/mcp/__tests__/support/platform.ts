@@ -1,3 +1,7 @@
+import assert from "node:assert/strict";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
+
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -64,4 +68,23 @@ export async function connectOrExplain(client: Client, transport: StdioClientTra
     const detail = stderr.trim();
     throw new Error(`${error instanceof Error ? error.message : String(error)}${detail ? `\nserver stderr:\n${detail}` : " (the server wrote nothing to stderr)"}`, { cause: error });
   }
+}
+
+/**
+ * A file that holds the owner's LetAgents token. On POSIX its mode must be
+ * exactly 0600. Windows keeps no POSIX mode (stat reports 0o666 for every
+ * file); there the protection is the per-user profile ACL of the directory
+ * the product writes into, so the check is that a regular file exists and
+ * resolves inside the test's private root. An explicit ACL check belongs to
+ * the tier 3 owner-private helper.
+ */
+export function assertOwnerPrivateFile(filePath: string, privateRoot: string): void {
+  const stats = statSync(filePath);
+  assert.ok(stats.isFile(), `${filePath} is a regular file`);
+  if (process.platform !== "win32") {
+    assert.equal(stats.mode & 0o777, 0o600, `${filePath} is readable by its owner only`);
+    return;
+  }
+  const inside = relative(realpathSync.native(privateRoot), realpathSync.native(filePath));
+  assert.ok(inside && !inside.startsWith("..") && !isAbsolute(inside), `${filePath} resolves inside ${privateRoot}`);
 }

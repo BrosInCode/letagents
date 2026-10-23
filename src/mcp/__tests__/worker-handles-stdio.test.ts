@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from 'node:timers/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -14,7 +14,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
+import { assertOwnerPrivateFile, childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
 
 // Real MCP processes and schemas; the HTTP fixture controls response loss and
 // response ordering. The companion DB tests verify server auth and allocation.
@@ -163,8 +163,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(new Set(messages.map((m) => m.agent_session_id)).size, 2);
     assert.doesNotMatch(JSON.stringify(one), /session_token|owner-test-token|unused-bearer-secret/);
     assert.doesNotMatch(readFileSync(statePath, "utf8"), /unused-bearer-secret/);
-    // Windows has no POSIX permission bits (stat reports 0o666 for every file).
-    if (process.platform !== "win32") assert.equal(statSync(statePath).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(statePath, temp);
 
     assert.match(one.workspace_instructions, /begin_workspace_capture before editing/);
     assert.ok(tools.tools.find(t => t.name === 'begin_workspace_capture')?.inputSchema.properties?.worker_id);
