@@ -20,6 +20,8 @@ type ConfigurationInput = {
   permissionProfileId: string | null;
   launchPolicy: unknown;
   configurationRevision: number;
+  /** Trusted manifest identity when deriving a native launch, including guest restrictions. */
+  supervisorEntryId?: string;
 };
 
 /**
@@ -337,7 +339,10 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   }
   const stored = plainPolicy(input.launchPolicy, provider);
   const policy = withoutHomeHarness(stored);
-  const homeHarness = storedHomeHarness(stored) && homeHarnessProviders.has(provider);
+  // Every rental is a guest here, as in the adapter's attestation: an agent that
+  // works for someone else gets no local tools, whether given (`_ask_`) or rented.
+  const guest = input.supervisorEntryId?.startsWith("supervised_rental_") === true;
+  const homeHarness = !guest && storedHomeHarness(stored) && homeHarnessProviders.has(provider);
   const homeHarnessField = homeHarness ? { homeHarness: true as const } : {};
   const normalizedModel = input.model?.trim() ?? null;
 
@@ -410,6 +415,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   if (provider === "claude-code" || provider === "claude") {
     scalarCliPolicy(policy, "Claude");
     const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "auto_review", "full_access"]);
+    if (guest && profile !== "read_only") throw new Error("claude-code launch refused: a guest agent runs Read-only with no local tools.");
     const authority = profile === "read_only"
       ? {
         permissionMode: "dontAsk",
@@ -418,7 +424,8 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
         // to keep an unsandboxed CLI read-only. The strict daemon-owned MCP
         // config is the boundary behind this wildcard: adding a tool there
         // deliberately widens what a read-only Claude agent may do.
-        tools: ["Read", "Glob", "Grep"],
+        // A guest works through the room's tools and must not read this Mac.
+        tools: guest ? [] : ["Read", "Glob", "Grep"],
         allowedTools: ["mcp__letagents__*"],
         settingSources: claudeSettingSources(homeHarness),
       }

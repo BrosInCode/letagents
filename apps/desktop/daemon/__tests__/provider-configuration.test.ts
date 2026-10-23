@@ -227,6 +227,31 @@ test("trusted profile selection replaces only native authority and preserves pro
   }, { mode: "ask", force: false, workspace: "elsewhere" }), /unsupported native option 'workspace'/);
 });
 
+test("Claude guest policy derivation keeps local tools and owner setup disabled", () => {
+  for (const provider of ["claude-code", "claude"]) {
+    const selection = {
+      provider, model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 1,
+      supervisorEntryId: "supervised_rental_ask_0123",
+    };
+    for (const stored of [{}, { tools: [], allowedTools: ["mcp__letagents__*"] }, {
+      tools: ["Read", "Glob", "Grep"], ...HOME_HARNESS_ON,
+    }]) {
+      const snapshot = deriveProviderConfigurationSnapshot(selection, stored);
+      assert.deepEqual(snapshot.launchPolicy, {
+        permissionMode: "dontAsk", dangerouslySkipPermissions: false,
+        tools: [], allowedTools: ["mcp__letagents__*"], settingSources: "",
+      });
+      assert.equal(snapshot.homeHarness, undefined);
+    }
+    assert.throws(() => resolveProviderConfigurationSnapshot({
+      ...selection, launchPolicy: { tools: ["Read", "Glob", "Grep"] },
+    }), /conflicts with permission-profile authority at 'tools'/);
+    for (const permissionProfileId of ["ask_before_write", "auto_review", "full_access"]) {
+      assert.throws(() => deriveProviderConfigurationSnapshot({ ...selection, permissionProfileId }, {}), /guest agent runs Read-only/);
+    }
+  }
+});
+
 test("provider configuration rejects unsupported and conflicting native settings", () => {
   assert.throws(() => resolveProviderConfigurationSnapshot({
     provider: "claude-code",
