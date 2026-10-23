@@ -96,6 +96,15 @@ function updateJournal(change: (journal: Journal) => void): Promise<void> {
   return next;
 }
 
+/**
+ * Tests only: empty the journal through the same queue as every other write,
+ * so an update already queued by a still-running watcher cannot write an
+ * older journal back over the reset.
+ */
+export function resetAgentGiftJournalForTests(): Promise<void> {
+  return updateJournal(journal => { journal.gifts = {}; });
+}
+
 /** The window a gift counts against: the longest one the provider reports (weekly before 5-hour). */
 /**
  * The limits this model runs against. Another model's own limit doesn't apply
