@@ -108,8 +108,9 @@ test("the pre-check counts what other gifts from the same app may still use", as
   await second.coordinator.give({ ...give, amountPercent: 20 });
   second.coordinator.stopWatching();
   await second.coordinator.pauseForQuit();
-  // Through the journal queue: a raw file write here raced a watcher's queued
-  // update, which could write this test's 20% gift back into the next test.
+  // Through the journal queue: a raw file write here raced an update that
+  // `first`'s still-running watcher had already queued, which could write
+  // its 50% gift (token "b"*32) back and make the next test see 0% left.
   await resetAgentGiftJournalForTests();
 });
 

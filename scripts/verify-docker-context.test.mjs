@@ -43,16 +43,24 @@ function desktopImportsOfSharedUi() {
   visit("shared/ui");
   const seen = new Set();
   const desktop = new Set();
-  const specifier = /(?:import|from)\s*(?:[^'";]*?from\s*)?['"](\.{1,2}\/[^'"]+)['"]/g;
+  const specifier = /(?:import|from)\s*(?:\(\s*)?(?:[^'";()]*?from\s*)?['"](\.{1,2}\/[^'"]+)['"]/g;
   while (pending.length) {
     const file = pending.pop();
     if (seen.has(file) || !existsSync(file)) continue;
     seen.add(file);
     if (!/\.(vue|ts|mjs|js)$/.test(file)) continue;
-    for (const [, relative] of readFileSync(file, "utf8").matchAll(specifier)) {
+    for (const [, specifierText] of readFileSync(file, "utf8").matchAll(specifier)) {
+      // Vite query suffixes (?raw, ?url, ?vue&type=...) name the same file.
+      const relative = specifierText.replace(/\?.*$/, "");
       const base = normalize(join(dirname(file), relative));
-      const target = [base, `${base}.ts`, `${base}.vue`, `${base}.js`, `${base}.mjs`, join(base, "index.ts")].find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
-      if (!target) continue;
+      const candidates = [base, `${base}.ts`, `${base}.vue`, `${base}.js`, `${base}.mjs`, join(base, "index.ts")];
+      // TypeScript ESM sources import "./x.js" for "./x.ts", and a type-only
+      // import may name a module that exists only as a declaration file.
+      if (/\.js$/.test(base)) candidates.push(base.replace(/\.js$/, ".ts"), base.replace(/\.js$/, ".d.ts"));
+      if (/\.mjs$/.test(base)) candidates.push(base.replace(/\.mjs$/, ".d.mts"));
+      const target = candidates.find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
+      // An import the walk cannot follow would hide a missing COPY, so it fails instead.
+      assert.ok(target, `${file} imports "${specifierText}", which the walk cannot resolve`);
       const path = target.split(sep).join("/");
       if (path.startsWith("apps/")) desktop.add(path);
       if (path.startsWith("apps/") || path.startsWith("shared/")) pending.push(target);
