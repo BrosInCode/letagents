@@ -384,7 +384,11 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
         // makes an untouched file look changed; the plain comparison is kept for it all the
         // same, until the base-update rule is proven under it. Neither can make a changed
         // file look untouched.
-        if (/ (?:true|yes|on|1)$/im.test(await git(root, ['config', '--get-regexp', '^core\\.(autocrlf|sparsecheckout)$'], signal).catch(() => '')))
+        // `--get-regexp` lists the key from every scope (Git for Windows ships core.autocrlf=true
+        // in its system scope); the last line for a key is the value in effect.
+        const effective = new Map((await git(root, ['config', '--get-regexp', '^core\\.(autocrlf|sparsecheckout)$'], signal).catch(() => ''))
+            .split('\n').filter(Boolean).map(line => [line.slice(0, line.indexOf(' ')), line.slice(line.indexOf(' ') + 1)]));
+        if ([...effective.values()].some(value => /^(?:true|yes|on|1)$/i.test(value)))
             return start;
         const incoming = await changedEntries(root, `${old}^{tree}`, `${base}^{tree}`, signal);
         const touched = await changedEntries(root, `${old}^{tree}`, `${start}^{tree}`, signal);

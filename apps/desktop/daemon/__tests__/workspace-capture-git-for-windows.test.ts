@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { captureWorkspaceChanges } from '../../../../shared/workspace-change-capture.mjs';
-import { captureWorkspacePair, captureWorkspaceTree, escapesWorkspace, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
+import { captureRemoteTips, captureWorkspacePair, captureWorkspaceTree, escapesWorkspace, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 
 // A Git for Windows checkout stores files differently from what is on disk: text files
 // have CRLF on disk and LF in HEAD (core.autocrlf), no file has an exec bit
@@ -254,4 +254,33 @@ test('a settled turn has one deadline that ends its tree capture and its compari
   const pair = await captureWorkspacePair(f.directory, f.head, baseline, 'live');
   assert.equal(pair.contribution.changes.state, 'ready', 'a deadline that is not reached changes nothing');
   await releaseWorkspaceTree(f.directory, 'live');
+});
+
+test('the base-update rule reads the core.autocrlf value in effect, not every scope', async t => {
+  // Git for Windows writes core.autocrlf=true into its system scope. A repository that turns
+  // it off itself has the rule: a commit the remote already held when the capture began is a
+  // base update, not this worker's change. Only the value in effect may switch the rule off.
+  const scratch = mkdtempSync(join(tmpdir(), 'workspace-config-scopes-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const upstream = join(scratch, 'upstream.git'), teammate = join(scratch, 'teammate'), workspace = join(scratch, 'workspace');
+  git(scratch, 'init', '-q', '--bare', upstream);
+  git(scratch, 'clone', '-q', upstream, teammate);
+  writeFileSync(join(teammate, 'app.txt'), 'base\n'); git(teammate, 'add', '.'); git(teammate, 'commit', '-qm', 'base'); git(teammate, 'push', '-q', 'origin', 'HEAD');
+  git(scratch, 'clone', '-q', upstream, workspace);
+  writeFileSync(join(teammate, 'landed.txt'), 'landed before the capture\n'); git(teammate, 'add', '.'); git(teammate, 'commit', '-qm', 'landed'); git(teammate, 'push', '-q', 'origin', 'HEAD');
+  // The outer scope the capture's own git reads is the home directory; the repository overrides it.
+  const home = join(scratch, 'home'); mkdirSync(home); writeFileSync(join(home, '.gitconfig'), '[core]\n\tautocrlf = true\n');
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  process.env.HOME = home; process.env.USERPROFILE = home; delete process.env.XDG_CONFIG_HOME;
+  git(workspace, 'config', 'core.autocrlf', 'false');
+  const startingHead = git(workspace, 'rev-parse', 'HEAD');
+  const remoteTips = await captureRemoteTips(workspace);
+  const baseline = await captureWorkspaceTree(workspace, 'scopes'); assert.ok(baseline);
+  git(workspace, 'pull', '-q', '--ff-only', 'origin', git(workspace, 'branch', '--show-current'));
+  writeFileSync(join(workspace, 'own.txt'), 'own work\n');
+  const pair = await captureWorkspacePair(workspace, startingHead, baseline, 'scopes', startingHead, remoteTips);
+  await releaseWorkspaceTree(workspace, 'scopes');
+  assert.deepEqual(pair.contribution.changes.files.map(file => file.path), ['own.txt'], 'the pulled commit is the base, not the work');
+  assert.deepEqual(pair.workspace.files.map(file => file.path).sort(), ['landed.txt', 'own.txt']);
 });
