@@ -15,7 +15,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { resolveNpmCommand } from "./npm-command.mjs";
+
 const defaultRepoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const defaultNpm = resolveNpmCommand();
 const LOCK_WAIT_MS = 100;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -107,7 +110,7 @@ function runNpm(npmCommand, npmCommandArgs, args, options) {
   return result;
 }
 
-function dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs }) {
+function dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell }) {
   const check = runNpm(
     npmCommand,
     npmCommandArgs,
@@ -122,6 +125,7 @@ function dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandAr
     ],
     {
       cwd: repoRoot,
+      shell: npmShell,
       stdio: "ignore",
     },
   );
@@ -139,8 +143,12 @@ export function ensureDesktopDependencies({
   repoRoot = defaultRepoRoot,
   desktopRoot = join(repoRoot, "apps", "desktop"),
   lockRoot = tmpdir(),
-  npmCommand = process.platform === "win32" ? "npm.cmd" : "npm",
-  npmCommandArgs = [],
+  // npm runs as `node npm-cli.js`: `spawn("npm")` finds nothing on Windows,
+  // and `spawn("npm.cmd")` without a shell is refused by Node 20.12+/22.
+  npmCommand = defaultNpm.command,
+  npmCommandArgs = defaultNpm.args,
+  // A shell is only ever needed for the `npm.cmd` fallback, never for a caller's own command.
+  npmShell = npmCommand === defaultNpm.command ? defaultNpm.shell : false,
   lockTimeoutMs = LOCK_TIMEOUT_MS,
   onLockContention,
 } = {}) {
@@ -151,7 +159,7 @@ export function ensureDesktopDependencies({
   const installedTreeIsCurrent = () => {
     if (!existsSync(dependencyRoot) || !existsSync(installStampPath)) return false;
     if (readFileSync(installStampPath, "utf8").trim() !== dependencyFingerprint(desktopLockPath)) return false;
-    return dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs });
+    return dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell });
   };
 
   if (installedTreeIsCurrent()) {
@@ -185,6 +193,7 @@ export function ensureDesktopDependencies({
       ],
       {
         cwd: repoRoot,
+        shell: npmShell,
         stdio: "inherit",
       },
     );
@@ -194,7 +203,7 @@ export function ensureDesktopDependencies({
     if (digestFile(desktopLockPath) !== beforeInstallDigest) {
       throw new Error("Desktop dependency install changed apps/desktop/package-lock.json; refusing to stamp it as current.");
     }
-    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs })) {
+    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell })) {
       // npm install may consider the package graph current even when a prior
       // interrupted lifecycle script left esbuild's platform binary absent.
       const rebuild = runNpm(
@@ -203,6 +212,7 @@ export function ensureDesktopDependencies({
         ["rebuild", "--prefix", desktopRoot, "esbuild"],
         {
           cwd: repoRoot,
+          shell: npmShell,
           stdio: "inherit",
         },
       );
@@ -210,7 +220,7 @@ export function ensureDesktopDependencies({
         throw new Error(`Desktop esbuild repair failed with status ${rebuild.status ?? "unknown"}.`);
       }
     }
-    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs })) {
+    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell })) {
       throw new Error(
         "Desktop dependency install completed without the required development binaries or lifecycle artifacts. " +
           "If npm ignore-scripts is enabled, install these dependencies under your chosen policy before retrying.",

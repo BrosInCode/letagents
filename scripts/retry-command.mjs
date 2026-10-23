@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
 
+import { resolveNpmCommand } from "./npm-command.mjs";
+
 // CI runs `npm ci` and `npm audit signatures` through this script so one
 // dropped registry connection does not fail a whole job. npm retries a reset that happens before a response,
 // but not one that happens while a tarball streams in; that surfaces as
@@ -21,11 +23,11 @@ function sleep(ms) {
 export function runWithRetries(
   command,
   args,
-  { attempts = DEFAULT_ATTEMPTS, baseDelayMs = DEFAULT_BASE_DELAY_MS, log = console.error } = {},
+  { attempts = DEFAULT_ATTEMPTS, baseDelayMs = DEFAULT_BASE_DELAY_MS, log = console.error, shell = false } = {},
 ) {
   let status = 1;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const result = spawnSync(command, args, { stdio: "inherit" });
+    const result = spawnSync(command, args, { stdio: "inherit", shell });
     if (result.error) {
       throw result.error;
     }
@@ -52,5 +54,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     console.error("Usage: node scripts/retry-command.mjs <command> [args...]");
     process.exit(2);
   }
-  process.exit(runWithRetries(command, args));
+  // `npm` is the launcher's name, not a program `spawn` finds on Windows.
+  const npm = command === "npm" ? resolveNpmCommand() : { command, args: [], shell: false };
+  process.exit(runWithRetries(npm.command, [...npm.args, ...args], { shell: npm.shell }));
 }

@@ -89,6 +89,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
     "desktop-tests": checks,
     build: gate,
     "integration-db-tests": checks,
+    "mcp-tests-windows": checks,
     "integration-tests": gate,
     "npm-publish": staging,
     docker: staging,
@@ -98,6 +99,11 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   for (const [name, condition] of Object.entries(conditions)) {
     assert.equal(workflow.jobs[name].if, condition, name);
   }
+  // The Windows test job is a check like the ubuntu ones: it is off on the
+  // manual evaluation, reads the repository only and is given no secret.
+  const windows = workflow.jobs["mcp-tests-windows"];
+  assert.deepEqual(windows.permissions, { contents: "read" });
+  assert.doesNotMatch(JSON.stringify(windows), /secrets\./);
   const job = workflow.jobs["room-ack-evaluation"];
   assert.equal(job.if, "github.event_name == 'workflow_dispatch' && inputs.purpose == 'room-ack-evaluation'");
   assert.deepEqual(job.permissions, { contents: "read" });

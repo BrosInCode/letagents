@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import test from "node:test";
 
 import { spawn } from "node:child_process";
@@ -17,6 +17,7 @@ import {
 } from "../codex-session/app-server.js";
 import { RpcClient } from "../codex-session/rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../shared/codex-owner-isolation.mjs";
+import { npmShim } from "./support/npm-shim.js";
 
 // Every launch here reads a scratch HOME and CODEX_HOME, never the owner's.
 const scratch = mkdtempSync(join(tmpdir(), "letagents-mcp-codex-launch-"));
@@ -54,19 +55,31 @@ const agentsSkill = writeSkill(join(home, ".agents", "skills", "owner-agents-ski
 /** A stand-in Codex: lists the owner's MCP servers and records each call. */
 function fakeCodex(listing: unknown[] | null, inProjectListing: unknown[] | null = listing) {
   const directory = fixture("fake-codex");
-  const bin = join(directory, "codex");
   const report = join(directory, "calls.jsonl");
-  writeFileSync(bin, [
-    "#!/usr/bin/env node",
+  const program = [
     "const args = process.argv.slice(2);",
     `require("node:fs").appendFileSync(${JSON.stringify(report)}, JSON.stringify({ args, cwd: process.cwd() }) + "\\n");`,
+    // The owner's own servers are listed from the filesystem root ("/" or "C:\\").
+    'const atRoot = require("node:path").parse(process.cwd()).root === process.cwd();',
     "if (args[0] === 'mcp') {",
     listing
-      ? `  process.stdout.write(process.cwd() === "/" ? ${JSON.stringify(JSON.stringify(listing))} : ${JSON.stringify(JSON.stringify(inProjectListing))});`
+      ? `  process.stdout.write(atRoot ? ${JSON.stringify(JSON.stringify(listing))} : ${JSON.stringify(JSON.stringify(inProjectListing))});`
       : "  process.exit(3);",
     "}",
     "",
-  ].join("\n"), { mode: 0o755 });
+  ];
+  let bin: string;
+  if (process.platform === "win32") {
+    // Windows runs no shebang. An npm-installed Codex is the cmd-shim
+    // `codex.cmd` beside its script, which the launcher resolves to
+    // `node <script>`; the fixture is that shim, byte for byte.
+    writeFileSync(join(directory, "fake-codex.js"), program.join("\n"));
+    bin = join(directory, "codex.cmd");
+    writeFileSync(bin, npmShim("fake-codex.js"));
+  } else {
+    bin = join(directory, "codex");
+    writeFileSync(bin, ["#!/usr/bin/env node", ...program].join("\n"), { mode: 0o755 });
+  }
   return {
     bin,
     calls: () => existsSync(report)
@@ -91,7 +104,9 @@ test("a local Codex session turns off the owner's extensions, personal skills an
 
   const lists = codex.calls().filter((call) => call.args[0] === "mcp");
   const server = codex.calls().find((call) => call.args[0] === "app-server");
-  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(cwd), "/"].sort(),
+  // Outside any project means the filesystem root: "/" here, the drive root on Windows.
+  const outsideAnyProject = parse(realpathSync(cwd)).root;
+  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(cwd), outsideAnyProject].sort(),
     "listed in the session's project and outside any project");
   for (const list of lists) assert.deepEqual(overridesOf(list.args), [...CODEX_OWNER_FEATURE_OVERRIDES]);
   assert.equal(realpathSync(server!.cwd), realpathSync(cwd), "the app-server starts where its servers were listed");

@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from 'node:timers/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { decodeWorkspaceReview } from '../../../shared/workspace-review.mjs';
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+import { assertOwnerPrivateFile, childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
 
 // Real MCP processes and schemas; the HTTP fixture controls response loss and
 // response ordering. The companion DB tests verify server auth and allocation.
@@ -126,14 +129,13 @@ test("worker handles isolate chats and workspace captures, survive process loss,
   const apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: ["--require", preload, "--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
-      env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
+      args: ["--require", preload, "--import", pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href, resolve("src/mcp/server.ts")], cwd: temp,
+      env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
-        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
-    transport.stderr?.resume();
+        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
     const client = new Client({ name: "identity-test", version: "1" });
     clients.push(client);
-    await client.connect(transport);
+    await connectOrExplain(client, transport);
     if (transport.pid) processIds.push(transport.pid);
     return { client, transport };
   };
@@ -161,7 +163,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(new Set(messages.map((m) => m.agent_session_id)).size, 2);
     assert.doesNotMatch(JSON.stringify(one), /session_token|owner-test-token|unused-bearer-secret/);
     assert.doesNotMatch(readFileSync(statePath, "utf8"), /unused-bearer-secret/);
-    assert.equal(statSync(statePath).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(statePath, temp);
 
     assert.match(one.workspace_instructions, /begin_workspace_capture before editing/);
     assert.ok(tools.tools.find(t => t.name === 'begin_workspace_capture')?.inputSchema.properties?.worker_id);
@@ -241,10 +243,14 @@ test("worker handles isolate chats and workspace captures, survive process loss,
 
     // Freeze process A after its worker has written files but before it can
     // commit that preparation. B reconnects and wins; A must never replace B.
-    writeFileSync(pauseFlag, 'pause');
-    const stalePublish = raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Old process summary.' });
-    for (let i = 0; i < 300 && !existsSync(pauseReady); i++) await delay(10);
-    assert.ok(existsSync(pauseReady), 'old process reached the preparation boundary');
+    // (Windows has no SIGSTOP: there A simply stays idle and this race is not run.)
+    let stalePublish: Promise<any> | null = null;
+    if (!posixSignalsOnly) {
+      writeFileSync(pauseFlag, 'pause');
+      stalePublish = raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Old process summary.' });
+      for (let i = 0; i < 300 && !existsSync(pauseReady); i++) await delay(10);
+      assert.ok(existsSync(pauseReady), 'old process reached the preparation boundary');
+    }
 
     directoryFailure = "unavailable";
     const second = await openClient();
@@ -279,9 +285,11 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(resumedCapture.status, 'published');
     assert.deepEqual(work.get(resumedCapture.source_message_id).summary.contribution.changes.files.map((file: any) => file.path), ['resumed.txt']);
     const immutable = JSON.stringify(work.get(resumedCapture.source_message_id));
-    process.kill(first.transport.pid!, 'SIGCONT');
-    assert.ok((await stalePublish).isError, 'old preparation cannot install after reconnect');
-    assert.equal(JSON.stringify(work.get(resumedCapture.source_message_id)), immutable);
+    if (stalePublish) {
+      process.kill(first.transport.pid!, 'SIGCONT');
+      assert.ok((await stalePublish).isError, 'old preparation cannot install after reconnect');
+      assert.equal(JSON.stringify(work.get(resumedCapture.source_message_id)), immutable);
+    }
     assert.equal(work.get(resumedCapture.source_message_id).summary.contribution.summary, 'Finished after reconnect.');
     assert.ok((await raw(first.client, "send_message", { worker_id: one.worker_id, text: "stale" })).isError);
     assert.ok((await raw(first.client, "send_message", { agent_session_id: one.agent_session.session_id, room_id: "room_shared", text: "stale legacy id" })).isError);

@@ -24,6 +24,7 @@ import {
   resolveCurrentSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
 } from "../server/runtime/supervisor-bridge.js";
+import { unixSocketOnly } from "./support/platform.js";
 
 const session: StoredAgentSessionState = {
   session_id: "agent_session_exact",
@@ -41,7 +42,7 @@ const session: StoredAgentSessionState = {
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };
 
-test("custodial wait negotiates receipts and release retains exact invocation, binding and generation", async () => {
+test("custodial wait negotiates receipts and release retains exact invocation, binding and generation", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "custodial-gate-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -166,7 +167,7 @@ test("Open Model supervised coordinates resolve without a Codex context file", a
   });
 });
 
-test("Cursor credential borrowing carries the exact rotating provider-turn capability", async () => {
+test("Cursor credential borrowing carries the exact rotating provider-turn capability", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-turn-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -203,7 +204,7 @@ test("Cursor credential borrowing carries the exact rotating provider-turn capab
   }
 });
 
-test("bounded effect completion survives a real handoff socket unlink and delayed successor listen", async () => {
+test("bounded effect completion survives a real handoff socket unlink and delayed successor listen", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-handoff-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -275,7 +276,7 @@ test("bounded effect completion survives a real handoff socket unlink and delaye
   }
 });
 
-test("daemon-owned tool execution has a bounded handshake but no correctness timeout", async () => {
+test("daemon-owned tool execution has a bounded handshake but no correctness timeout", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-daemon-execute-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -326,7 +327,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
   const operationResult = { state: "completed", room_id: "room_exact", result: { sent: true } };
   const negotiationResult = { protocol_version: 2, generation: 41, pid: 123, started_at: "2026-09-22T00:00:00.000Z" };
 
-  test(`${operationName} waits through an absent daemon socket with its original invocation`, async () => {
+  test(`${operationName} waits through an absent daemon socket with its original invocation`, { skip: unixSocketOnly }, async () => {
     const root = await mkdtemp(join(tmpdir(), "la-prewrite-gap-"));
     const socketPath = join(root, "daemon.sock");
     const requests: any[] = [];
@@ -377,7 +378,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
     }
   });
 
-  test(`${operationName} renegotiates when the socket disappears before its write`, async () => {
+  test(`${operationName} renegotiates when the socket disappears before its write`, { skip: unixSocketOnly }, async () => {
     const root = await mkdtemp(join(tmpdir(), "la-prewrite-unlink-"));
     const socketPath = join(root, "daemon.sock");
     const requests: any[] = [];
@@ -429,7 +430,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
 
   for (const failure of ["post-write close", "authoritative rejection", "negotiation rejection", "post-write timeout"] as const) {
     if (operationName === "execute" && failure === "post-write timeout") continue; // Admitted execution has no correctness timer.
-    test(`${operationName} does not retry ${failure}`, async () => {
+    test(`${operationName} does not retry ${failure}`, { skip: unixSocketOnly }, async () => {
       const root = await mkdtemp(join(tmpdir(), "la-prewrite-no-replay-"));
       const socketPath = join(root, "daemon.sock");
       const requests: any[] = [];
@@ -478,7 +479,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
   });
 }
 
-test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", async () => {
+test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-old-daemon-"));
   const socketPath = join(root, "daemon.sock");
   const server = createServer((socket) => {
@@ -515,7 +516,7 @@ test("daemon-owned tool execution recognizes an old daemon and permits compatibi
   }
 });
 
-test("bounded effect preparation preserves a daemon-owned uncertain mutation outcome", async () => {
+test("bounded effect preparation preserves a daemon-owned uncertain mutation outcome", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-uncertain-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -554,7 +555,7 @@ test("bounded effect preparation preserves a daemon-owned uncertain mutation out
   }
 });
 
-test("bounded effect preparation fails closed without valid daemon room authority", async () => {
+test("bounded effect preparation fails closed without valid daemon room authority", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-room-authority-"));
   const socketPath = join(root, "daemon.sock");
   const roomAuthorities: unknown[] = [undefined, "   ", "room\u0000escape"];
@@ -597,7 +598,7 @@ test("bounded effect preparation fails closed without valid daemon room authorit
   }
 });
 
-test("bounded effect preparation fails closed on unknown daemon states and actions", async () => {
+test("bounded effect preparation fails closed on unknown daemon states and actions", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-protocol-drift-"));
   const socketPath = join(root, "daemon.sock");
   const responses = [
@@ -633,7 +634,7 @@ test("bounded effect preparation fails closed on unknown daemon states and actio
   }
 });
 
-test("bounded effect completion does not retry an authoritative non-handoff rejection", async () => {
+test("bounded effect completion does not retry an authoritative non-handoff rejection", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-reject-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -667,7 +668,7 @@ test("bounded effect completion does not retry an authoritative non-handoff reje
   }
 });
 
-test("bounded effect completion surfaces an authoritative successor failure after transient handoff retry", async () => {
+test("bounded effect completion surfaces an authoritative successor failure after transient handoff retry", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-double-failure-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -707,7 +708,7 @@ test("bounded effect completion surfaces an authoritative successor failure afte
   }
 });
 
-test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", async () => {
+test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-credential-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -748,7 +749,7 @@ test("credential borrowing requires the negotiated daemon generation and defers 
   }
 });
 
-test("bounded MCP identity and credential borrowing follow a daemon room move instead of stale launch context", async () => {
+test("bounded MCP identity and credential borrowing follow a daemon room move instead of stale launch context", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-current-credential-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -820,7 +821,7 @@ test("bounded MCP borrowing rejects absent identity before contacting the daemon
   }
 });
 
-test("Codex supervisor context binds and checkpoints through an MCP process without supervisor env", async () => {
+test("Codex supervisor context binds and checkpoints through an MCP process without supervisor env", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -885,7 +886,7 @@ test("Codex supervisor context binds and checkpoints through an MCP process with
   }
 });
 
-test("validated supervisor cwd survives MCP restart for bind and cursor checkpoint", async () => {
+test("validated supervisor cwd survives MCP restart for bind and cursor checkpoint", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-persisted-"));
   const unrelated = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-process-cwd-"));
   const socketPath = join(root, "daemon.sock");
@@ -981,7 +982,7 @@ test("Codex supervisor context fails closed for partial, cross-room, and unrelat
   }
 });
 
-test("worktree context cannot redirect a freshly minted worker credential to an attacker socket", async () => {
+test("worktree context cannot redirect a freshly minted worker credential to an attacker socket", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-socket-"));
   const trustedSocketPath = join(root, "trusted.sock");
   const attackerSocketPath = join(root, "attacker.sock");
@@ -1022,7 +1023,7 @@ test("worktree context cannot redirect a freshly minted worker credential to an 
   }
 });
 
-test("supervisor bridge accepts the current daemon protocol and binds only the exact worker session credential", async () => {
+test("supervisor bridge accepts the current daemon protocol and binds only the exact worker session credential", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -1067,7 +1068,7 @@ test("supervisor bridge accepts the current daemon protocol and binds only the e
   }
 });
 
-test("supervisor bridge binds once per exact daemon generation", async () => {
+test("supervisor bridge binds once per exact daemon generation", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-cache-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -1104,7 +1105,7 @@ test("supervisor bridge binds once per exact daemon generation", async () => {
   }
 });
 
-test("confirmed waits bound a wedged exact-binding verification to 250ms or less", async () => {
+test("confirmed waits bound a wedged exact-binding verification to 250ms or less", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-fast-wait-"));
   const socketPath = join(root, "daemon.sock");
   let wedgeNegotiation = false;
@@ -1148,7 +1149,7 @@ test("confirmed waits bound a wedged exact-binding verification to 250ms or less
   }
 });
 
-test("binding cache includes protected room and credential identity", async () => {
+test("binding cache includes protected room and credential identity", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-protected-cache-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -1181,7 +1182,7 @@ test("binding cache includes protected room and credential identity", async () =
   }
 });
 
-test("a daemon without a stable identity is rebound instead of cached across replacements", async () => {
+test("a daemon without a stable identity is rebound instead of cached across replacements", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-no-identity-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -1219,7 +1220,7 @@ test("supervisor transport timeouts are retryable bookkeeping failures", () => {
   assert.equal(isRetryableSupervisorBridgeError(new Error("Worker session room does not match the supervised manifest entry.")), false);
 });
 
-test("supervisor bridge checkpoints the exact worker cursor without sending its session token", async () => {
+test("supervisor bridge checkpoints the exact worker cursor without sending its session token", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -1255,7 +1256,7 @@ test("supervisor bridge checkpoints the exact worker cursor without sending its 
   }
 });
 
-test("scheduled cursor checkpoints retry transient failures and keep the newest acknowledgement", async () => {
+test("scheduled cursor checkpoints retry transient failures and keep the newest acknowledgement", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-retry-"));
   const socketPath = join(root, "daemon.sock");
   const checkpoints: string[] = [];
@@ -1296,7 +1297,7 @@ test("scheduled cursor checkpoints retry transient failures and keep the newest 
   }
 });
 
-test("supervisor bridge fails closed when protocol negotiation is malformed or unsupported", async () => {
+test("supervisor bridge fails closed when protocol negotiation is malformed or unsupported", { skip: unixSocketOnly }, async () => {
   for (const { protocolVersion, responseVersion } of [
     { protocolVersion: "2", responseVersion: 2 },
     { protocolVersion: 4, responseVersion: 4 },
@@ -1327,7 +1328,7 @@ test("supervisor bridge fails closed when protocol negotiation is malformed or u
   }
 });
 
-test("supervisor bridge surfaces negotiation rejection without attempting a bind", async () => {
+test("supervisor bridge surfaces negotiation rejection without attempting a bind", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-reject-"));
   const socketPath = join(root, "daemon.sock");
   let requestCount = 0;
@@ -1352,7 +1353,7 @@ test("supervisor bridge surfaces negotiation rejection without attempting a bind
   }
 });
 
-test("supervisor bridge bounds an unresponsive negotiation", async () => {
+test("supervisor bridge bounds an unresponsive negotiation", { skip: unixSocketOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-timeout-"));
   const socketPath = join(root, "daemon.sock");
   const server = createServer((socket) => socket.resume());
@@ -1364,6 +1365,38 @@ test("supervisor bridge bounds an unresponsive negotiation", async () => {
     );
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Runs on every platform, Windows included. The standalone server reaches the
+// desktop daemon only through this bridge, so with no daemon its calls must
+// end in a classified transport error: at once for a bind, at the startup
+// budget for a bounded tool call. Neither may hang.
+test("without a daemon, bridge calls end in a retryable transport error instead of hanging", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-no-daemon-"));
+  const socketPath = join(root, "daemon.sock");
+  const retryable = (error: unknown) => {
+    assert.ok(error instanceof Error, String(error));
+    const code = (error as NodeJS.ErrnoException).code;
+    assert.equal(isRetryableSupervisorBridgeError(error), true, `${error.message} (code ${code})`);
+    return true;
+  };
+  try {
+    const env = supervisedEnv(socketPath);
+    const bindStartedAt = Date.now();
+    await assert.rejects(bindSupervisedWorkerSession(session, env, { requestTimeoutMs: 5_000 }), retryable);
+    assert.ok(Date.now() - bindStartedAt < 4_000, "an absent socket is refused without waiting for the request timeout");
+
+    const executeStartedAt = Date.now();
+    await assert.rejects(executeCurrentSupervisedTool(
+      { toolName: "send_message", input: { text: "once" }, mcpRequestId: "request_no_daemon" },
+      { ...env, LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "turn_no_daemon" },
+      { requestTimeoutMs: 300 },
+    ), retryable);
+    const elapsed = Date.now() - executeStartedAt;
+    assert.ok(elapsed >= 250 && elapsed < 5_000, `execute gives up at its startup budget, not before and not much after (${elapsed}ms)`);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
