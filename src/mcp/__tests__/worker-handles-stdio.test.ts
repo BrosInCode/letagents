@@ -163,7 +163,8 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(new Set(messages.map((m) => m.agent_session_id)).size, 2);
     assert.doesNotMatch(JSON.stringify(one), /session_token|owner-test-token|unused-bearer-secret/);
     assert.doesNotMatch(readFileSync(statePath, "utf8"), /unused-bearer-secret/);
-    assert.equal(statSync(statePath).mode & 0o777, 0o600);
+    // Windows has no POSIX permission bits (stat reports 0o666 for every file).
+    if (process.platform !== "win32") assert.equal(statSync(statePath).mode & 0o777, 0o600);
 
     assert.match(one.workspace_instructions, /begin_workspace_capture before editing/);
     assert.ok(tools.tools.find(t => t.name === 'begin_workspace_capture')?.inputSchema.properties?.worker_id);
