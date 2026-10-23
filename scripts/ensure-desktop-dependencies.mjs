@@ -147,7 +147,8 @@ export function ensureDesktopDependencies({
   // and `spawn("npm.cmd")` without a shell is refused by Node 20.12+/22.
   npmCommand = defaultNpm.command,
   npmCommandArgs = defaultNpm.args,
-  npmShell = defaultNpm.shell,
+  // A shell is only ever needed for the `npm.cmd` fallback, never for a caller's own command.
+  npmShell = npmCommand === defaultNpm.command ? defaultNpm.shell : false,
   lockTimeoutMs = LOCK_TIMEOUT_MS,
   onLockContention,
 } = {}) {

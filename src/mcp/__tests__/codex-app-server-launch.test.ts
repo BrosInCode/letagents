@@ -17,6 +17,7 @@ import {
 } from "../codex-session/app-server.js";
 import { RpcClient } from "../codex-session/rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../shared/codex-owner-isolation.mjs";
+import { npmShim } from "./support/npm-shim.js";
 
 // Every launch here reads a scratch HOME and CODEX_HOME, never the owner's.
 const scratch = mkdtempSync(join(tmpdir(), "letagents-mcp-codex-launch-"));
@@ -69,12 +70,12 @@ function fakeCodex(listing: unknown[] | null, inProjectListing: unknown[] | null
   ];
   let bin: string;
   if (process.platform === "win32") {
-    // Windows runs no shebang. As npm's cmd-shim does, a codex.cmd beside the
-    // script starts node on it; this is the name a PATHEXT walk finds.
-    const script = join(directory, "fake-codex.js");
-    writeFileSync(script, program.join("\n"));
+    // Windows runs no shebang. An npm-installed Codex is the cmd-shim
+    // `codex.cmd` beside its script, which the launcher resolves to
+    // `node <script>`; the fixture is that shim, byte for byte.
+    writeFileSync(join(directory, "fake-codex.js"), program.join("\n"));
     bin = join(directory, "codex.cmd");
-    writeFileSync(bin, `@"${process.execPath}" "${script}" %*\r\n`);
+    writeFileSync(bin, npmShim("fake-codex.js"));
   } else {
     bin = join(directory, "codex");
     writeFileSync(bin, ["#!/usr/bin/env node", ...program].join("\n"), { mode: 0o755 });
