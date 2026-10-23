@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { resolve } from "path";
+import { resolveCodexExecutable } from "../../../shared/codex-executable.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../shared/codex-thread-history.mjs";
 
 import {
@@ -136,7 +137,9 @@ export async function startLocalCodexSession(
   const serverUrl = await resolveCodexServerUrl(input.server_url);
   const stopPhrase = input.stop_phrase || DEFAULT_STOP_PHRASE;
   const maxMinutes = Number.isFinite(input.max_minutes) ? Math.max(0, input.max_minutes ?? 0) : 0;
-  const codexBin = input.codex_bin || process.env.LETAGENTS_CODEX_BIN || "codex";
+  // The resolved path, not the bare name: on Windows an npm-installed Codex is
+  // codex.cmd, which only a PATHEXT-aware walk finds.
+  const codexBin = input.codex_bin || resolveCodexExecutable();
   const token = makeToken();
   const deadline = formatDeadline(maxMinutes);
   const launchedServer = !(await isServerReady(serverUrl));

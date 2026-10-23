@@ -12,7 +12,7 @@ const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClien
   instanceLock: true, requestSingleInstanceLock() { return this.instanceLock; } };
 const autoUpdater = { on() {} };
 mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
-const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow, usedUpLimit } = await import("../asks/give-coordinator.js");
+const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow, resetAgentGiftJournalForTests, usedUpLimit } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
 const { askLinkFromArgv, claimDesktopInstance, parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
 const { readFileSync } = await import("node:fs");
@@ -108,8 +108,10 @@ test("the pre-check counts what other gifts from the same app may still use", as
   await second.coordinator.give({ ...give, amountPercent: 20 });
   second.coordinator.stopWatching();
   await second.coordinator.pauseForQuit();
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+  // Through the journal queue: a raw file write here raced an update that
+  // `first`'s still-running watcher had already queued, which could write
+  // its 50% gift (token "b"*32) back and make the next test see 0% left.
+  await resetAgentGiftJournalForTests();
 });
 
 test("a used-up short limit refuses the gift, even with weekly room left", async () => {
