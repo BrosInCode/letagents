@@ -243,7 +243,9 @@ test("on Windows, spawnCodex runs another batch file through cmd.exe with argume
   }
 });
 
-test("spawnCodex on this platform runs the executable with the given arguments", { skip: onWindows }, () => {
+test("spawnCodex on this platform runs the executable with the given arguments", {
+  skip: onWindows && "POSIX direct spawn; on Windows the npm shim and cmd.exe batch tests above cover spawnCodex",
+}, () => {
   const directory = mkdtempSync(join(tmpdir(), "letagents-codex-posix-"));
   try {
     const bin = join(directory, "codex");
