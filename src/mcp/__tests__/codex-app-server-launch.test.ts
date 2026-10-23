@@ -6,7 +6,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { codexAppServerArgs, launchAppServer, terminateSpawnedProcess, waitForServer } from "../codex-session/app-server.js";
+import { spawn } from "node:child_process";
+
+import {
+  codexAppServerArgs,
+  launchAppServer,
+  rememberLaunchedAppServerForTest,
+  terminateSpawnedProcess,
+  waitForServer,
+} from "../codex-session/app-server.js";
 import { RpcClient } from "../codex-session/rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../shared/codex-owner-isolation.mjs";
 
@@ -112,6 +120,44 @@ test("a local Codex session does not start when its project changes the LetAgent
   await assert.rejects(launchAppServer("ws://127.0.0.1:1", codex.bin, { cwd: fixture("steered") }),
     /This project's Codex config changes the LetAgents MCP server/);
   assert.equal(codex.calls().some((call) => call.args[0] === "app-server"), false);
+});
+
+test("stopping an app-server: POSIX signals the group even after the leader exited; Windows never taskkills an exited child's pid twice", async () => {
+  const child = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+  const pid = child.pid!;
+  rememberLaunchedAppServerForTest(pid, child);
+  const kills: Array<[number, string]> = [];
+  const taskkills: string[][] = [];
+  const deps = {
+    kill: (target: number, signal: string) => { kills.push([target, signal]); },
+    runSync: (_file: string, args: string[]) => { taskkills.push(args); return { error: undefined }; },
+  };
+
+  // Windows, child still held: the tree is ended once.
+  terminateSpawnedProcess(pid, { ...deps, platform: "win32" });
+  assert.deepEqual(taskkills, [["/pid", String(pid), "/T", "/F"]]);
+  assert.deepEqual(kills, []);
+
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  // Windows, repeated stops after the exit: nothing is killed, the pid may be reused.
+  terminateSpawnedProcess(pid, { ...deps, platform: "win32" });
+  terminateSpawnedProcess(pid, { ...deps, platform: "win32" });
+  assert.equal(taskkills.length, 1);
+  assert.deepEqual(kills, []);
+
+  // POSIX, same exited leader: the group gets SIGTERM, as before this change.
+  terminateSpawnedProcess(pid, { ...deps, platform: "darwin" });
+  assert.deepEqual(kills, [[-pid, "SIGTERM"]]);
+  // POSIX, group gone: the direct pid is tried.
+  const failingGroup = { ...deps, platform: "linux" as const, kill: (target: number, signal: string) => {
+    kills.push([target, signal]);
+    if (target < 0) throw new Error("ESRCH");
+  } };
+  terminateSpawnedProcess(pid, failingGroup);
+  assert.deepEqual(kills.slice(1), [[-pid, "SIGTERM"], [pid, "SIGTERM"]]);
+  // A pid this process never launched: Windows ends it as it is (stored pid from an earlier run).
+  terminateSpawnedProcess(99_999_999, { ...deps, platform: "win32" });
+  assert.deepEqual(taskkills.at(-1), ["/pid", "99999999", "/T", "/F"]);
 });
 
 function installedCodex(): string | null {

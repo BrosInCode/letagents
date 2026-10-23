@@ -10,6 +10,7 @@ import { randomBytes } from "crypto";
 import { homedir } from "os";
 import { dirname, join } from "path";
 
+import { renameWithRetry } from "./rename-retry.js";
 import type { LetagentsLocalState } from "./types.js";
 import { currentSessionScope, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
 
@@ -70,7 +71,8 @@ function writeLocalStateUnlocked(statePath: string, state: LetagentsLocalState):
   const tempPath = `${statePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
     writeFileSync(tempPath, JSON.stringify(state, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
-    renameSync(tempPath, statePath);
+    // A reader may hold the file for a moment on Windows; the rename is retried briefly.
+    renameWithRetry(renameSync, tempPath, statePath);
   } finally {
     rmSync(tempPath, { force: true });
   }
