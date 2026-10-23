@@ -10,7 +10,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { childProcessEnv, connectOrExplain } from "./support/platform.js";
+import { childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
 
 async function until<T>(read: () => T | undefined | false, what: string, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -182,8 +182,11 @@ test("a process holds its connection open, learns when its session is ended, and
       "the connection to open once it is served", 20_000);
 
     // The host stops the process with a signal. It still says it is leaving.
-    third.transport.pid && process.kill(third.transport.pid, "SIGTERM");
-    await until(() => exits.some((exit) => exit.session_id === refusedSessionId), "the exit to be announced on a signal");
+    // (On Windows process.kill ends the process at once; no handler runs.)
+    if (!posixSignalsOnly) {
+      third.transport.pid && process.kill(third.transport.pid, "SIGTERM");
+      await until(() => exits.some((exit) => exit.session_id === refusedSessionId), "the exit to be announced on a signal");
+    }
   } finally {
     await Promise.allSettled(clients.map((client) => client.close()));
     for (const response of held.values()) response.destroy();

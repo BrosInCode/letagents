@@ -126,7 +126,13 @@ test.after(() => {
   delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
   delete process.env.LETAGENTS_LOCAL_CHAT_DB;
   delete process.env.LETAGENTS_STATE_PATH;
-  rmSync(tempDir, { recursive: true, force: true });
+  try {
+    rmSync(tempDir, { recursive: true, force: true });
+  } catch (error) {
+    // Windows keeps the open SQLite database locked until this process exits
+    // (EBUSY); the runner's temp directory is cleaned up with the job.
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+  }
 });
 
 test("MCP local chat state follows setting and supports message wait", async () => {

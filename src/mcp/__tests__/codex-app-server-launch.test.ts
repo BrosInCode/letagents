@@ -46,19 +46,31 @@ const agentsSkill = writeSkill(join(home, ".agents", "skills", "owner-agents-ski
 /** A stand-in Codex: lists the owner's MCP servers and records each call. */
 function fakeCodex(listing: unknown[] | null, inProjectListing: unknown[] | null = listing) {
   const directory = fixture("fake-codex");
-  const bin = join(directory, "codex");
   const report = join(directory, "calls.jsonl");
-  writeFileSync(bin, [
-    "#!/usr/bin/env node",
+  const program = [
     "const args = process.argv.slice(2);",
     `require("node:fs").appendFileSync(${JSON.stringify(report)}, JSON.stringify({ args, cwd: process.cwd() }) + "\\n");`,
+    // The owner's own servers are listed from the filesystem root ("/" or "C:\\").
+    'const atRoot = require("node:path").parse(process.cwd()).root === process.cwd();',
     "if (args[0] === 'mcp') {",
     listing
-      ? `  process.stdout.write(process.cwd() === "/" ? ${JSON.stringify(JSON.stringify(listing))} : ${JSON.stringify(JSON.stringify(inProjectListing))});`
+      ? `  process.stdout.write(atRoot ? ${JSON.stringify(JSON.stringify(listing))} : ${JSON.stringify(JSON.stringify(inProjectListing))});`
       : "  process.exit(3);",
     "}",
     "",
-  ].join("\n"), { mode: 0o755 });
+  ];
+  let bin: string;
+  if (process.platform === "win32") {
+    // Windows runs no shebang. As npm's cmd-shim does, a codex.cmd beside the
+    // script starts node on it; this is the name a PATHEXT walk finds.
+    const script = join(directory, "fake-codex.js");
+    writeFileSync(script, program.join("\n"));
+    bin = join(directory, "codex.cmd");
+    writeFileSync(bin, `@"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    bin = join(directory, "codex");
+    writeFileSync(bin, ["#!/usr/bin/env node", ...program].join("\n"), { mode: 0o755 });
+  }
   return {
     bin,
     calls: () => existsSync(report)

@@ -78,18 +78,21 @@ test('files Git itself would leave alone under core.autocrlf stay HEAD\'s blob',
   assert.equal(await f.capture('crlf in head'), f.tree, 'a CRLF-committed file is unchanged');
   writeFileSync(join(f.directory, 'build.bat'), 'echo one\r\necho three\r\n');
   writeFileSync(join(f.directory, 'mixed.txt'), 'x\r\ny\n');
-  writeFileSync(join(f.directory, 'new line\nin name.txt'), 'odd\r\n');
+  // Windows itself refuses control characters in a file name, so that path exists only elsewhere.
+  const oddName = process.platform === 'win32' ? null : 'new line\nin name.txt';
+  if (oddName) writeFileSync(join(f.directory, oddName), 'odd\r\n');
   const settled = await f.capture('crlf edited');
   assert.equal(f.blob(settled, 'build.bat'), 'echo one\r\necho three\r\n', 'stays CRLF, as git add keeps it');
   assert.equal(f.blob(settled, 'mixed.txt'), 'x\ny\n', 'mixed endings are stored converted; safecrlf does not stop the capture');
-  assert.equal(f.blob(settled, 'new line\nin name.txt'), 'odd\n', 'a path with a newline is converted too');
+  if (oddName) assert.equal(f.blob(settled, oddName), 'odd\n', 'a path with a newline is converted too');
   for (const identity of ['crlf in head', 'crlf edited']) await releaseWorkspaceTree(f.directory, identity);
 });
 
 test('ident, working-tree-encoding and the old crlf attribute are Git\'s conversions too', async t => {
   const cases = [
     { name: 'ident', attributes: '*.c ident\n', files: { 'a.c': '/* $Id$ */\n' }, onDisk: (text: string) => /\$Id: [0-9a-f]{40} \$/.test(text) },
-    { name: 'working-tree-encoding', attributes: '*.ps1 text working-tree-encoding=UTF-16LE\n', files: { 'a.ps1': Buffer.from('Write-Host hi\n', 'utf16le') }, onDisk: (text: string) => text === 'Write-Host hi\n' },
+    // `text` with no core.eol writes the platform's native ending: LF here, CRLF on Windows.
+    { name: 'working-tree-encoding', attributes: '*.ps1 text working-tree-encoding=UTF-16LE\n', files: { 'a.ps1': Buffer.from('Write-Host hi\n', 'utf16le') }, onDisk: (text: string) => text.replace(/\r\n/g, '\n') === 'Write-Host hi\n' },
     { name: 'crlf (old name of text)', attributes: '*.txt crlf\n', config: { 'core.eol': 'crlf' }, files: { 'a.txt': 'one\ntwo\n' }, onDisk: (text: string) => text === 'one\r\ntwo\r\n' },
   ];
   for (const { name, attributes, config, files, onDisk } of cases) {
@@ -155,12 +158,15 @@ test('without an exec bit on disk, core.fileMode=false keeps HEAD\'s mode and gi
     { name: 'core.fileMode=true (POSIX)', config: { 'core.fileMode': 'true' }, modes: { 'run.sh': '100644', 'plain.txt': '100755', 'new.sh': '100755' }, unchanged: false },
   ];
   for (const { name, config, modes, unchanged } of cases) {
+    // Windows stat reports no exec bit on any file, so only the fileMode=false row is observable there.
+    if (process.platform === 'win32' && !unchanged) continue;
     const directory = mkdtempSync(join(tmpdir(), 'workspace-filemode-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     git(directory, 'init', '-q');
     for (const [path, content] of Object.entries(files)) writeFileSync(join(directory, path), content);
     chmodSync(join(directory, 'run.sh'), 0o755);
-    git(directory, 'add', '-A'); git(directory, 'commit', '-qm', 'base');
+    // HEAD's mode through the index as well, which holds where chmod changes nothing.
+    git(directory, 'add', '-A'); git(directory, 'update-index', '--chmod=+x', 'run.sh'); git(directory, 'commit', '-qm', 'base');
     assert.equal(git(directory, 'ls-tree', 'HEAD', 'run.sh').split(' ')[0], '100755');
     for (const [key, value] of Object.entries(config)) git(directory, 'config', key, value);
     // On Windows stat reports no exec bit on any file. Flip both bits here to show which setting decides.
