@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import test from "node:test";
 
 import { spawn } from "node:child_process";
@@ -104,7 +104,9 @@ test("a local Codex session turns off the owner's extensions, personal skills an
 
   const lists = codex.calls().filter((call) => call.args[0] === "mcp");
   const server = codex.calls().find((call) => call.args[0] === "app-server");
-  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(cwd), "/"].sort(),
+  // Outside any project means the filesystem root: "/" here, the drive root on Windows.
+  const outsideAnyProject = parse(realpathSync(cwd)).root;
+  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(cwd), outsideAnyProject].sort(),
     "listed in the session's project and outside any project");
   for (const list of lists) assert.deepEqual(overridesOf(list.args), [...CODEX_OWNER_FEATURE_OVERRIDES]);
   assert.equal(realpathSync(server!.cwd), realpathSync(cwd), "the app-server starts where its servers were listed");
