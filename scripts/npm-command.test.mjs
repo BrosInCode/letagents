@@ -46,14 +46,28 @@ test("a symlinked node binary is followed to its real install", () => {
   assert.deepEqual(resolved.args.map(slashes), ["/opt/node/lib/node_modules/npm/bin/npm-cli.js"]);
 });
 
-test("without npm-cli.js the launcher on PATH is used, through a shell only on Windows", () => {
+test("on Windows an npm.cmd on PATH lends its npm-cli.js to the running node", () => {
+  const onPath = layout("C:/Program Files/nodejs/npm.cmd", "C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js");
+  const resolved = resolveNpmCommand({
+    execPath: "C:\\Tools\\node\\node.exe",
+    platform: "win32",
+    env: { PATH: "C:\\Windows\\system32;C:\\Program Files\\nodejs" },
+    exists: onPath,
+    realpath: (path) => path,
+  });
+  assert.equal(resolved.command, "C:\\Tools\\node\\node.exe");
+  assert.deepEqual(resolved.args.map(slashes), ["C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js"]);
+  assert.equal(resolved.shell, false);
+});
+
+test("without any npm-cli.js the launcher on PATH is used, through a shell only on Windows", () => {
   const none = () => false;
   assert.deepEqual(
     resolveNpmCommand({ execPath: "/opt/node/bin/node", platform: "linux", exists: none, realpath: (p) => p }),
     { command: "npm", args: [], shell: false },
   );
   assert.deepEqual(
-    resolveNpmCommand({ execPath: "C:\\node\\node.exe", platform: "win32", exists: none, realpath: (p) => p }),
+    resolveNpmCommand({ execPath: "C:\\node\\node.exe", platform: "win32", env: { PATH: "C:\\x" }, exists: none, realpath: (p) => p }),
     { command: "npm.cmd", args: [], shell: true },
   );
 });

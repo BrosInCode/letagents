@@ -11,10 +11,11 @@ import { posix, win32 } from "node:path";
 export function resolveNpmCommand({
   execPath = process.execPath,
   platform = process.platform,
+  env = process.env,
   exists = existsSync,
   realpath = realpathSync,
 } = {}) {
-  const { dirname, join } = platform === "win32" ? win32 : posix;
+  const { delimiter, dirname, join } = platform === "win32" ? win32 : posix;
   const binaryDirs = [dirname(execPath)];
   try {
     const realDir = dirname(realpath(execPath));
@@ -22,16 +23,26 @@ export function resolveNpmCommand({
   } catch {
     // The binary itself is running; a failed realpath only loses one candidate.
   }
+  const npmCliIn = (binaryDir) => [
+    // Windows: <node dir>/node_modules/npm/bin/npm-cli.js
+    join(binaryDir, "node_modules", "npm", "bin", "npm-cli.js"),
+    // POSIX: <prefix>/bin/node and <prefix>/lib/node_modules/npm/bin/npm-cli.js
+    join(binaryDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ].find(exists);
   for (const binaryDir of binaryDirs) {
-    for (const candidate of [
-      // Windows: <node dir>/node_modules/npm/bin/npm-cli.js
-      join(binaryDir, "node_modules", "npm", "bin", "npm-cli.js"),
-      // POSIX: <prefix>/bin/node and <prefix>/lib/node_modules/npm/bin/npm-cli.js
-      join(binaryDir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-    ]) {
-      if (exists(candidate)) return { command: execPath, args: [candidate], shell: false };
-    }
+    const npmCli = npmCliIn(binaryDir);
+    if (npmCli) return { command: execPath, args: [npmCli], shell: false };
   }
-  if (platform === "win32") return { command: "npm.cmd", args: [], shell: true };
+  if (platform === "win32") {
+    // A Node installed elsewhere than npm.cmd on PATH: that launcher's own
+    // npm-cli.js still runs under this node without a shell.
+    for (const directory of (env.PATH ?? env.Path ?? "").split(delimiter).filter(Boolean)) {
+      const npmCli = exists(join(directory, "npm.cmd")) ? npmCliIn(directory) : undefined;
+      if (npmCli) return { command: execPath, args: [npmCli], shell: false };
+    }
+    // Last resort. cmd.exe joins the arguments unquoted, so an argument with
+    // a space would split here; every layout above avoids this path.
+    return { command: "npm.cmd", args: [], shell: true };
+  }
   return { command: "npm", args: [], shell: false };
 }

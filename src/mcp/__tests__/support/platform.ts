@@ -15,9 +15,13 @@ export const unixSocketOnly = process.platform === "win32"
   ? "the desktop supervisor bridge uses a Unix socket; Windows named pipes are tier 3"
   : false;
 
-/** Skip reason for a test that freezes a process with SIGSTOP, which Windows does not have. */
+/**
+ * Skip reason for a step that needs POSIX signal semantics: SIGSTOP and
+ * SIGCONT to freeze a process, or SIGTERM as a request a handler can answer.
+ * On Windows process.kill() ends the process at once, whatever the name.
+ */
 export const posixSignalsOnly = process.platform === "win32"
-  ? "freezes the server with SIGSTOP and SIGCONT, which Windows does not have"
+  ? "needs POSIX signals (SIGSTOP/SIGCONT, a handled SIGTERM), which Windows does not have"
   : false;
 
 // Node on Windows needs these to start (DLL search, Winsock), find its temp
