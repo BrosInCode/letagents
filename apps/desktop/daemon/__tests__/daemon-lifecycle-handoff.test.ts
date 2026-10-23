@@ -20,6 +20,7 @@ import { SupervisedAgentDelivery, type SupervisedIngressAgent } from "../supervi
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
+import { STOP_CALLBACKS_DEADLINE_MS } from "../provider-stream-coordinator.js";
 import {
   SupervisorDaemon,
   noWorkLeaseHttp,
@@ -33,10 +34,10 @@ import {
 
 // A handoff teardown or a replacement start awaits only local socket, file and
 // SQLite work, never the retiring daemon or a provider. A start takes ~100 ms on
-// an idle laptop but has exceeded 1 s on loaded CI runners. This bound only
-// catches a hang, and it is longer than SQLite's 5 s busy_timeout so a held
-// lock fails with its own error.
-const DAEMON_LIFECYCLE_HANG_GUARD_MS = 10_000;
+// an idle laptop but has exceeded 1 s on loaded CI runners, so this bound only
+// catches a hang. It stays below the stop path's callback deadline, so a
+// handoff that waited for wedged callbacks still fails the guard.
+const DAEMON_LIFECYCLE_HANG_GUARD_MS = STOP_CALLBACKS_DEADLINE_MS / 2;
 
 test("simulated flock reacquires the persistent lock inode after release", async () => {
   const env = await fixture();
@@ -996,6 +997,7 @@ test("version handoff releases authority without waiting for wedged callbacks an
     const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
     assert.equal(prepared.ok, true);
     await within(handoff, "handoff completion after authority cleanup", DAEMON_LIFECYCLE_HANG_GUARD_MS);
+    assert.equal(internals.providerStreams.callbacks.size, 0, "handoff detaches wedged callbacks instead of waiting for them");
     second = new SupervisorDaemon(paths, "darwin");
     await within((async () => {
       while (true) {
@@ -1049,7 +1051,7 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
     try {
       // Without a busy wait, a write lock still held by the failed daemon fails here at once.
       probe.exec("PRAGMA busy_timeout = 0");
-      probe.exec("BEGIN IMMEDIATE");
+      assert.doesNotThrow(() => probe.exec("BEGIN IMMEDIATE"), "the failed daemon released the SQLite write lock");
       probe.exec("ROLLBACK");
     } finally { probe.close(); }
 
@@ -1187,7 +1189,7 @@ test("prepare_handoff fences a mutation admitted before an asynchronous request 
     const rejected = await lateMutation;
     assert.equal(rejected.ok, false);
     assert.match(rejected.error ?? "", /handoff has fenced new daemon mutations/i);
-    await within(handoff, "barrier-fenced handoff", 1_000);
+    await within(handoff, "barrier-fenced handoff", DAEMON_LIFECYCLE_HANG_GUARD_MS);
 
     const reopened = new ManifestStore(paths.manifestPath);
     try {
@@ -1255,7 +1257,7 @@ test("host approval socket operations require the enrolled signer and remain fen
     for (const rejected of await Promise.all(pending)) {
       assert.equal(rejected.ok, false); assert.match(rejected.error ?? "", /handoff has fenced new daemon mutations/i);
     }
-    await within(handoff, "host approval handoff", 1_000);
+    await within(handoff, "host approval handoff", DAEMON_LIFECYCLE_HANG_GUARD_MS);
   } finally {
     releaseRequests(); await daemon.stop().catch(() => undefined); await env.cleanup();
   }
