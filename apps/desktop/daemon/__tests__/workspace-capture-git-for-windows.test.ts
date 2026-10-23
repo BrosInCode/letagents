@@ -256,31 +256,61 @@ test('a settled turn has one deadline that ends its tree capture and its compari
   await releaseWorkspaceTree(f.directory, 'live');
 });
 
-test('the base-update rule reads the core.autocrlf value in effect, not every scope', async t => {
-  // Git for Windows writes core.autocrlf=true into its system scope. A repository that turns
-  // it off itself has the rule: a commit the remote already held when the capture began is a
-  // base update, not this worker's change. Only the value in effect may switch the rule off.
-  const scratch = mkdtempSync(join(tmpdir(), 'workspace-config-scopes-'));
+/**
+ * A clone whose remote lands a commit before a capture begins, the clone pulls it during the
+ * work and adds one file. The capture must report only that file as the work.
+ * `configure` sets up the clone (and the home directory the capture's own git reads).
+ */
+async function baseUpdateAfterPull(t: TestContext, configure: (workspace: string, home: string) => void) {
+  const scratch = mkdtempSync(join(tmpdir(), 'workspace-base-update-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const upstream = join(scratch, 'upstream.git'), teammate = join(scratch, 'teammate'), workspace = join(scratch, 'workspace');
   git(scratch, 'init', '-q', '--bare', upstream);
   git(scratch, 'clone', '-q', upstream, teammate);
-  writeFileSync(join(teammate, 'app.txt'), 'base\n'); git(teammate, 'add', '.'); git(teammate, 'commit', '-qm', 'base'); git(teammate, 'push', '-q', 'origin', 'HEAD');
+  writeFileSync(join(teammate, 'app.txt'), 'one\ntwo\n'); writeFileSync(join(teammate, 'other.txt'), 'other\n');
+  git(teammate, 'add', '.'); git(teammate, 'commit', '-qm', 'base'); git(teammate, 'push', '-q', 'origin', 'HEAD');
   git(scratch, 'clone', '-q', upstream, workspace);
-  writeFileSync(join(teammate, 'landed.txt'), 'landed before the capture\n'); git(teammate, 'add', '.'); git(teammate, 'commit', '-qm', 'landed'); git(teammate, 'push', '-q', 'origin', 'HEAD');
-  // The outer scope the capture's own git reads is the home directory; the repository overrides it.
-  const home = join(scratch, 'home'); mkdirSync(home); writeFileSync(join(home, '.gitconfig'), '[core]\n\tautocrlf = true\n');
+  writeFileSync(join(teammate, 'landed.txt'), 'landed before the capture\n'); writeFileSync(join(teammate, 'app.txt'), 'one\ntwo\nthree\n');
+  git(teammate, 'add', '.'); git(teammate, 'commit', '-qm', 'landed'); git(teammate, 'push', '-q', 'origin', 'HEAD');
+  const home = join(scratch, 'home'); mkdirSync(home);
   const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
   t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
   process.env.HOME = home; process.env.USERPROFILE = home; delete process.env.XDG_CONFIG_HOME;
-  git(workspace, 'config', 'core.autocrlf', 'false');
+  configure(workspace, home);
+  // What the clone would look like had it been checked out under this configuration.
+  git(workspace, 'rm', '-rq', '--cached', '.'); git(workspace, 'reset', '-q', '--hard');
   const startingHead = git(workspace, 'rev-parse', 'HEAD');
   const remoteTips = await captureRemoteTips(workspace);
-  const baseline = await captureWorkspaceTree(workspace, 'scopes'); assert.ok(baseline);
+  assert.ok(remoteTips && remoteTips.length > 0, 'the remote answered');
+  const baseline = await captureWorkspaceTree(workspace, 'base update'); assert.ok(baseline);
   git(workspace, 'pull', '-q', '--ff-only', 'origin', git(workspace, 'branch', '--show-current'));
-  writeFileSync(join(workspace, 'own.txt'), 'own work\n');
-  const pair = await captureWorkspacePair(workspace, startingHead, baseline, 'scopes', startingHead, remoteTips);
-  await releaseWorkspaceTree(workspace, 'scopes');
+  const eol = git(workspace, 'config', '--default', 'false', '--get', 'core.autocrlf') === 'true' ? '\r\n' : '\n';
+  writeFileSync(join(workspace, 'own.txt'), `own work${eol}`);
+  const pair = await captureWorkspacePair(workspace, startingHead, baseline, 'base update', startingHead, remoteTips);
+  await releaseWorkspaceTree(workspace, 'base update');
+  assert.equal(pair.contribution.changes.state, 'ready');
   assert.deepEqual(pair.contribution.changes.files.map(file => file.path), ['own.txt'], 'the pulled commit is the base, not the work');
-  assert.deepEqual(pair.workspace.files.map(file => file.path).sort(), ['landed.txt', 'own.txt']);
+  assert.equal(pair.contribution.changes.additions, 1);
+  assert.deepEqual(pair.workspace.files.map(file => file.path).sort(), ['app.txt', 'landed.txt', 'own.txt'], 'the whole-workspace view still shows the pull');
+  assert.doesNotMatch(pair.contribution.changes.patch, /\r/);
+}
+
+test('a pulled commit is the base, not the work, under core.autocrlf=true (Git for Windows default)', async t => {
+  await baseUpdateAfterPull(t, (workspace) => git(workspace, 'config', 'core.autocrlf', 'true'));
+});
+
+test('a pulled commit is the base when an outer scope sets core.autocrlf and the repository turns it off', async t => {
+  // Git for Windows writes core.autocrlf=true into its system scope; the capture's own git reads
+  // the home directory as the outer scope here. The value in effect is what Git uses, and the
+  // rule holds either way.
+  await baseUpdateAfterPull(t, (workspace, home) => {
+    writeFileSync(join(home, '.gitconfig'), '[core]\n\tautocrlf = true\n');
+    git(workspace, 'config', 'core.autocrlf', 'false');
+  });
+});
+
+test('a sparse checkout keeps the plain comparison', async t => {
+  // An untouched file left out of a sparse checkout would look deleted against the new base.
+  await assert.rejects(baseUpdateAfterPull(t, (workspace) => git(workspace, 'config', 'core.sparseCheckout', 'true')),
+    /the pulled commit is the base/);
 });
