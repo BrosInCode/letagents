@@ -6,7 +6,8 @@ import test, { beforeEach, mock } from "node:test";
 
 process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH = join(mkdtempSync(join(tmpdir(), "agent-gifts-")), "gifts.json");
 // Rows are keyed by entry id, so a gift one test leaves running would still be found by the next.
-beforeEach(() => { writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} })); });
+// Through the journal queue, so an update a still-running watcher queued cannot write it back.
+beforeEach(() => resetAgentGiftJournalForTests());
 const appEvents = new Map<string, (...args: any[]) => void>();
 const appCalls: string[] = [];
 const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClient() { appCalls.push("scheme"); },
@@ -14,7 +15,7 @@ const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClien
   instanceLock: true, requestSingleInstanceLock() { return this.instanceLock; } };
 const autoUpdater = { on() {} };
 mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
-const { AskGiveCoordinator, GIVE_UP_PURGE_TRIES, countUsage, giftEntryId, giftPermissionProfile, mainWindow, usedUpLimit } = await import("../asks/give-coordinator.js");
+const { AskGiveCoordinator, GIVE_UP_PURGE_TRIES, countUsage, giftEntryId, giftPermissionProfile, mainWindow, resetAgentGiftJournalForTests, usedUpLimit } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
 const { askLinkFromArgv, claimDesktopInstance, parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
 const { readFileSync, writeFileSync } = await import("node:fs");
@@ -160,8 +161,7 @@ test("a retry with the same link keeps the failed attempt's agent on the removal
   await sweeper.coordinator.watchOnce();
   assert.ok(sweeper.calls.includes("purge"), "the failed attempt's agent is removed");
   assert.deepEqual(rows(TOKEN).map(gift => gift.entryId === failedEntry), [false], "and only the running gift stays");
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+  await resetAgentGiftJournalForTests();
 });
 
 test("a gift waiting only for its removal no longer counts against what is left to give", async () => {
@@ -173,8 +173,7 @@ test("a gift waiting only for its removal no longer counts against what is left 
   const next = fakes({ usedPercent: 30 });
   await next.coordinator.give({ ...give, amountPercent: 60 });
   next.coordinator.stopWatching();
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+  await resetAgentGiftJournalForTests();
 });
 
 test("an attempt that died with the app is removed on the next check", async () => {
@@ -213,8 +212,10 @@ test("the pre-check counts what other gifts from the same app may still use", as
   await second.coordinator.give({ ...give, amountPercent: 20 });
   second.coordinator.stopWatching();
   await second.coordinator.pauseForQuit();
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: {} }));
+  // Through the journal queue: a raw file write here raced an update that
+  // `first`'s still-running watcher had already queued, which could write
+  // its 50% gift (token "b"*32) back and make the next test see 0% left.
+  await resetAgentGiftJournalForTests();
 });
 
 test("a used-up short limit refuses the gift, even with weekly room left", async () => {
