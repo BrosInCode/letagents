@@ -31,6 +31,13 @@ import {
   observationDaemonFixture,
 } from "./helpers/daemon-fixture.js";
 
+// A handoff teardown or a replacement start awaits only local socket, file and
+// SQLite work, never the retiring daemon or a provider. A start takes ~100 ms on
+// an idle laptop but has exceeded 1 s on loaded CI runners. This bound only
+// catches a hang, and it is longer than SQLite's 5 s busy_timeout so a held
+// lock fails with its own error.
+const DAEMON_LIFECYCLE_HANG_GUARD_MS = 10_000;
+
 test("simulated flock reacquires the persistent lock inode after release", async () => {
   const env = await fixture();
   const lock = join(env.root, "daemon.lock");
@@ -988,7 +995,7 @@ test("version handoff releases authority without waiting for wedged callbacks an
     const handoff = first.waitForHandoff();
     const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
     assert.equal(prepared.ok, true);
-    await within(handoff, "handoff completion after authority cleanup", 1_000);
+    await within(handoff, "handoff completion after authority cleanup", DAEMON_LIFECYCLE_HANG_GUARD_MS);
     second = new SupervisorDaemon(paths, "darwin");
     await within((async () => {
       while (true) {
@@ -998,7 +1005,7 @@ test("version handoff releases authority without waiting for wedged callbacks an
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
-    })(), "replacement daemon authority after handoff", 1_000);
+    })(), "replacement daemon authority after handoff", DAEMON_LIFECYCLE_HANG_GUARD_MS);
     assert.doesNotThrow(() => process.kill(provider.pid!, 0), "handoff detaches daemon observers without killing provider work");
   } finally {
     await second?.stop();
@@ -1032,10 +1039,22 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
     });
     const handoff = first.waitForHandoff();
     assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
-    await assert.rejects(within(handoff, "failed handoff completion", 1_000), /handoff cleanup did not complete cleanly/i);
+    await assert.rejects(within(handoff, "failed handoff completion", DAEMON_LIFECYCLE_HANG_GUARD_MS), /handoff cleanup did not complete cleanly/i);
+
+    // Check each authority directly once the failed handoff settles, rather
+    // than inferring release from how quickly a replacement daemon starts.
+    assert.throws(() => (first as unknown as { singleton: DaemonSingleton }).singleton.currentGeneration, DaemonFenceLostError);
+    await assert.rejects(stat(paths.socketPath), { code: "ENOENT" });
+    const probe = new DatabaseSync(paths.manifestPath);
+    try {
+      // Without a busy wait, a write lock still held by the failed daemon fails here at once.
+      probe.exec("PRAGMA busy_timeout = 0");
+      probe.exec("BEGIN IMMEDIATE");
+      probe.exec("ROLLBACK");
+    } finally { probe.close(); }
 
     second = new SupervisorDaemon(paths, "darwin");
-    await within(second.start(), "replacement authority after failed observer cleanup", 1_000);
+    await within(second.start(), "replacement authority after failed observer cleanup", DAEMON_LIFECYCLE_HANG_GUARD_MS);
     assert.equal(((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation, 2);
   } finally {
     await second?.stop();
