@@ -502,6 +502,14 @@ test("the dependency gates run once, in dependency-audit, before every check job
         assert.equal(step.condition, null, `${checkJob.name}:${step.name} must not be skipped`);
         assert.equal(step.continueOnError, null, `${checkJob.name}:${step.name} must fail the job`);
         assert.equal(step.shell, null, `${checkJob.name}:${step.name} must use the default shell`);
+        // Verification precedes execution: both checks sit before the build
+        // gate, and every suite runs only when that gate succeeded, so a
+        // failed or skipped check leaves nothing to run the unverified tree.
+        const gate = checkJob.steps.findIndex((candidate) => candidate.name === "Build the MCP server");
+        assert.ok(gate > index, `${checkJob.name}:${step.name} must run before the build gate`);
+        for (const later of checkJob.steps.slice(gate + 1)) {
+          assert.equal(later.condition, "${{ !cancelled() && steps.build.outcome == 'success' }}", `${checkJob.name}:${later.name} must wait for the build gate`);
+        }
         continue;
       }
       assert.ok(!containsDirectNpmAudit(run), `${checkJob.name}:${step.name} must not repeat npm audit`);

@@ -408,6 +408,18 @@ jobs:
         shell: bash
         run: npm rebuild
 
+      # The shared capture and permission-review modules live beside the
+      # desktop daemon and are tested there. Only the desktop dependencies are
+      # installed, and verified, here before the build gate: a failure here
+      # skips the build and so every suite; their lifecycle scripts (the
+      # Electron download among them) are not needed by these suites.
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
       - name: Build the MCP server
         id: build
         shell: bash
@@ -430,18 +442,6 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: npm run test:package-runtime
-
-      # The shared capture and permission-review modules live beside the
-      # desktop daemon and are tested there. Only the desktop dependencies are
-      # installed; their lifecycle scripts (the Electron download among them)
-      # are not needed by these suites.
-      - name: Install desktop dependencies without lifecycle scripts
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
-
-      - name: Verify desktop dependency signatures
-        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
 
       - name: Test the shared modules the MCP server depends on
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

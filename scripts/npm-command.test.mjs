@@ -85,7 +85,7 @@ test("the cmd.exe fallback quotes every argument, so a path with a space arrives
   assert.equal(spawn.command, "C:\\Windows\\System32\\cmd.exe");
   assert.deepEqual(spawn.args.slice(0, 5), ["/d", "/e:on", "/v:off", "/s", "/c"]);
   assert.equal(spawn.args[5], '""npm.cmd" "ci" "--prefix" "C:\\Users\\Jane Doe\\repo\\apps\\desktop" "100%%cd:~0,0%""');
-  assert.equal(spawn.options.windowsVerbatimArguments, true);
+  assert.deepEqual(spawn.options, { argv0: '"C:\\Windows\\System32\\cmd.exe"', windowsVerbatimArguments: true });
   assert.throws(() => npmInvocation(['say "hi"'], fallback, {}), /double quote/);
   const direct = npmInvocation(["--version"], { command: "/opt/node/bin/node", args: ["/opt/node/lib/node_modules/npm/bin/npm-cli.js"], shell: false });
   assert.deepEqual(direct, { command: "/opt/node/bin/node", args: ["/opt/node/lib/node_modules/npm/bin/npm-cli.js", "--version"], options: {} });
