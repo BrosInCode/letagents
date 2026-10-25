@@ -353,11 +353,15 @@ jobs:
   # must run on Windows. This job runs their suites on a Windows runner; the
   # desktop app's own suites stay on ubuntu above.
   #
-  # The dependency gates (cooldown, registry signatures, advisories) ran once
-  # in dependency-audit, on ubuntu, over the same lockfiles this job installs,
-  # so this job only installs them and runs the verified lifecycle scripts.
+  # The dependency gates (cooldown, advisories) ran once in dependency-audit,
+  # on ubuntu, over the same lockfiles this job installs. The registry
+  # signature check there covers the tree ubuntu installs; the Windows-only
+  # optional packages (esbuild's win32 binary among them) are installed and
+  # run only here, so their signatures are verified here, before any
+  # lifecycle script or test runs them.
   # The workflow policy test forbids a `defaults:` block, so each step names
-  # bash itself instead of the runner's PowerShell.
+  # bash itself instead of the runner's PowerShell; the signature checks use
+  # the runner's default shell, as the policy requires of a dependency gate.
   mcp-tests-windows:
     needs: dependency-audit
     if: inputs.purpose != 'room-ack-evaluation'
@@ -397,6 +401,9 @@ jobs:
         shell: bash
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
 
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
       - name: Run verified dependency lifecycle scripts
         shell: bash
         run: npm rebuild
@@ -432,6 +439,9 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
 
       - name: Test the shared modules the MCP server depends on
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

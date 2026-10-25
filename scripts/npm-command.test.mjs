@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { resolveNpmCommand } from "./npm-command.mjs";
+import { npmInvocation, resolveNpmCommand } from "./npm-command.mjs";
 
 // path.join writes the separator of the platform the test runs on, so the
 // fixtures compare with forward slashes everywhere.
@@ -73,8 +73,20 @@ test("without any npm-cli.js the launcher on PATH is used, through a shell only 
 });
 
 test("the resolved command runs the real npm", () => {
-  const { command, args, shell } = resolveNpmCommand();
-  const result = spawnSync(command, [...args, "--version"], { encoding: "utf8", shell });
+  const { command, args, options } = npmInvocation(["--version"]);
+  const result = spawnSync(command, args, { encoding: "utf8", ...options });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout.trim(), /^\d+\.\d+\.\d+/);
+});
+
+test("the cmd.exe fallback quotes every argument, so a path with a space arrives whole", () => {
+  const fallback = { command: "npm.cmd", args: [], shell: true };
+  const spawn = npmInvocation(["ci", "--prefix", "C:\\Users\\Jane Doe\\repo\\apps\\desktop", "100%"], fallback, { ComSpec: "C:\\Windows\\System32\\cmd.exe" });
+  assert.equal(spawn.command, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(spawn.args.slice(0, 5), ["/d", "/e:on", "/v:off", "/s", "/c"]);
+  assert.equal(spawn.args[5], '""npm.cmd" "ci" "--prefix" "C:\\Users\\Jane Doe\\repo\\apps\\desktop" "100%%cd:~0,0%""');
+  assert.equal(spawn.options.windowsVerbatimArguments, true);
+  assert.throws(() => npmInvocation(['say "hi"'], fallback, {}), /double quote/);
+  const direct = npmInvocation(["--version"], { command: "/opt/node/bin/node", args: ["/opt/node/lib/node_modules/npm/bin/npm-cli.js"], shell: false });
+  assert.deepEqual(direct, { command: "/opt/node/bin/node", args: ["/opt/node/lib/node_modules/npm/bin/npm-cli.js", "--version"], options: {} });
 });

@@ -1,6 +1,8 @@
 import { existsSync, realpathSync } from "node:fs";
 import { posix, win32 } from "node:path";
 
+import { quoteCmdBatchArgument, windowsSystemExecutable } from "../shared/codex-executable.mjs";
+
 // npm's own launchers (`npm` on POSIX, `npm.cmd` on Windows) run
 // `node <npm-cli.js>`. This finds that file beside the running Node binary so
 // a script can run npm with the plain `spawn` of a path and arguments: on
@@ -40,9 +42,27 @@ export function resolveNpmCommand({
       const npmCli = exists(join(directory, "npm.cmd")) ? npmCliIn(directory) : undefined;
       if (npmCli) return { command: execPath, args: [npmCli], shell: false };
     }
-    // Last resort. cmd.exe joins the arguments unquoted, so an argument with
-    // a space would split here; every layout above avoids this path.
+    // Last resort: the launcher through cmd.exe. Every layout above avoids
+    // this path; npmInvocation() quotes each argument for it.
     return { command: "npm.cmd", args: [], shell: true };
   }
   return { command: "npm", args: [], shell: false };
+}
+
+/**
+ * The exact spawn for `npm <args>`: `command`, `args` and the spawn options
+ * to spread in, never with `shell: true`. The cmd.exe fallback builds one
+ * quoted command line itself (the product's quoting for batch files), so an
+ * argument with a space or a `%` arrives whole; a double quote in an
+ * argument cannot pass through cmd.exe and is refused.
+ */
+export function npmInvocation(args, resolved = resolveNpmCommand(), env = process.env) {
+  if (!resolved.shell) return { command: resolved.command, args: [...resolved.args, ...args], options: {} };
+  const comSpec = env.ComSpec?.trim() || windowsSystemExecutable("cmd.exe", env);
+  const line = [resolved.command, ...resolved.args, ...args].map(quoteCmdBatchArgument).join(" ");
+  return {
+    command: comSpec,
+    args: ["/d", "/e:on", "/v:off", "/s", "/c", `"${line}"`],
+    options: { argv0: `"${comSpec}"`, windowsVerbatimArguments: true },
+  };
 }

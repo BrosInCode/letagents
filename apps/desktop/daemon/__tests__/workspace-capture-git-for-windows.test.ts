@@ -309,8 +309,13 @@ test('a pulled commit is the base when an outer scope sets core.autocrlf and the
   });
 });
 
-test('a sparse checkout keeps the plain comparison', async t => {
+test('a sparse checkout keeps the plain comparison, however its setting is spelled', async t => {
   // An untouched file left out of a sparse checkout would look deleted against the new base.
   await assert.rejects(baseUpdateAfterPull(t, (workspace) => git(workspace, 'config', 'core.sparseCheckout', 'true')),
+    /the pulled commit is the base/);
+  // A bare key is true to Git, as are yes, on and 1.
+  await assert.rejects(baseUpdateAfterPull(t, (workspace) => { writeFileSync(join(workspace, '.git', 'config'), `${readFileSync(join(workspace, '.git', 'config'), 'utf8')}[core]\n\tsparseCheckout\n`); }),
+    /the pulled commit is the base/);
+  await assert.rejects(baseUpdateAfterPull(t, (workspace) => git(workspace, 'config', 'core.sparseCheckout', 'yes')),
     /the pulled commit is the base/);
 });

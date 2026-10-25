@@ -14,14 +14,17 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { assertOwnerPrivateFile, childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
+import { assertOwnerPrivateFile, childProcessEnv, connectOrExplain } from "./support/platform.js";
 
 // Real MCP processes and schemas; the HTTP fixture controls response loss and
 // response ordering. The companion DB tests verify server auth and allocation.
 test("worker handles isolate chats and workspace captures, survive process loss, and fence delayed replies", { timeout: 60_000 }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "letagents-worker-stdio-"));
   const statePath = join(temp, "state.json");
-  const pauseFlag = join(temp, 'pause-capture'), pauseReady = join(temp, 'capture-paused');
+  // A barrier that freezes the server's main thread at the preparation boundary on every
+  // platform: while the hold file exists, the preload blocks synchronously before the capture
+  // worker's result is delivered. (A stop signal did the same, but Windows has none.)
+  const pauseFlag = join(temp, 'pause-capture'), pauseReady = join(temp, 'capture-paused'), pauseHold = join(temp, 'capture-hold');
   const preload = join(temp, 'pause-worker.cjs');
   writeFileSync(preload, `
     const threads = require('node:worker_threads'), fs = require('node:fs');
@@ -31,7 +34,8 @@ test("worker handles isolate chats and workspace captures, survive process loss,
       emit(event, ...args) {
         if (this.finish && event === 'message' && fs.existsSync(${JSON.stringify(pauseFlag)})) {
           fs.unlinkSync(${JSON.stringify(pauseFlag)}); fs.writeFileSync(${JSON.stringify(pauseReady)}, 'paused');
-          process.kill(process.pid, 'SIGSTOP');
+          const sleeper = new Int32Array(new SharedArrayBuffer(4));
+          while (fs.existsSync(${JSON.stringify(pauseHold)})) Atomics.wait(sleeper, 0, 0, 20);
         }
         return super.emit(event, ...args);
       }
@@ -243,14 +247,11 @@ test("worker handles isolate chats and workspace captures, survive process loss,
 
     // Freeze process A after its worker has written files but before it can
     // commit that preparation. B reconnects and wins; A must never replace B.
-    // (Windows has no SIGSTOP: there A simply stays idle and this race is not run.)
-    let stalePublish: Promise<any> | null = null;
-    if (!posixSignalsOnly) {
-      writeFileSync(pauseFlag, 'pause');
-      stalePublish = raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Old process summary.' });
-      for (let i = 0; i < 300 && !existsSync(pauseReady); i++) await delay(10);
-      assert.ok(existsSync(pauseReady), 'old process reached the preparation boundary');
-    }
+    writeFileSync(pauseHold, 'hold');
+    writeFileSync(pauseFlag, 'pause');
+    const stalePublish = raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Old process summary.' });
+    for (let i = 0; i < 300 && !existsSync(pauseReady); i++) await delay(10);
+    assert.ok(existsSync(pauseReady), 'old process reached the preparation boundary');
 
     directoryFailure = "unavailable";
     const second = await openClient();
@@ -285,11 +286,9 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(resumedCapture.status, 'published');
     assert.deepEqual(work.get(resumedCapture.source_message_id).summary.contribution.changes.files.map((file: any) => file.path), ['resumed.txt']);
     const immutable = JSON.stringify(work.get(resumedCapture.source_message_id));
-    if (stalePublish) {
-      process.kill(first.transport.pid!, 'SIGCONT');
-      assert.ok((await stalePublish).isError, 'old preparation cannot install after reconnect');
-      assert.equal(JSON.stringify(work.get(resumedCapture.source_message_id)), immutable);
-    }
+    rmSync(pauseHold, { force: true });
+    assert.ok((await stalePublish).isError, 'old preparation cannot install after reconnect');
+    assert.equal(JSON.stringify(work.get(resumedCapture.source_message_id)), immutable);
     assert.equal(work.get(resumedCapture.source_message_id).summary.contribution.summary, 'Finished after reconnect.');
     assert.ok((await raw(first.client, "send_message", { worker_id: one.worker_id, text: "stale" })).isError);
     assert.ok((await raw(first.client, "send_message", { agent_session_id: one.agent_session.session_id, room_id: "room_shared", text: "stale legacy id" })).isError);
@@ -367,7 +366,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     }
   } finally {
     releaseDisconnect?.();
-    for (const pid of processIds) { try { process.kill(pid, 'SIGCONT'); } catch { /* already exited */ } }
+    rmSync(pauseHold, { force: true });
     await Promise.allSettled(clients.map((client) => client.close()));
     server.closeAllConnections();
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));

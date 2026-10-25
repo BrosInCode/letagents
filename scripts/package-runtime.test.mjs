@@ -8,11 +8,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { resolveNpmCommand } from "./npm-command.mjs";
+import { npmInvocation, resolveNpmCommand } from "./npm-command.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const npm = resolveNpmCommand();
-const runNpm = (args, options) => execFileSync(npm.command, [...npm.args, ...args], { shell: npm.shell, ...options });
+const runNpm = (args, options) => {
+  const spawn = npmInvocation(args, npm);
+  return execFileSync(spawn.command, spawn.args, { ...spawn.options, ...options });
+};
 
 test("the packed MCP CLI reports its contract and active supervised readiness", { timeout: 120_000 }, async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), "letagents-package-runtime-"));

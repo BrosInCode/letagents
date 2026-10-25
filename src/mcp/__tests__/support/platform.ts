@@ -20,12 +20,12 @@ export const unixSocketOnly = process.platform === "win32"
   : false;
 
 /**
- * Skip reason for a step that needs POSIX signal semantics: SIGSTOP and
- * SIGCONT to freeze a process, or SIGTERM as a request a handler can answer.
- * On Windows process.kill() ends the process at once, whatever the name.
+ * Skip reason for a step that sends SIGTERM as a request a handler can answer.
+ * On Windows process.kill() ends the process at once, whatever the name, so
+ * nothing in the process can announce its exit.
  */
 export const posixSignalsOnly = process.platform === "win32"
-  ? "needs POSIX signals (SIGSTOP/SIGCONT, a handled SIGTERM), which Windows does not have"
+  ? "needs a handled SIGTERM, which Windows does not have"
   : false;
 
 // Node on Windows needs these to start (DLL search, Winsock), find its temp

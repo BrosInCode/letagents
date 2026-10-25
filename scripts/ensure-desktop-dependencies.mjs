@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { resolveNpmCommand } from "./npm-command.mjs";
+import { npmInvocation, resolveNpmCommand } from "./npm-command.mjs";
 
 const defaultRepoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const defaultNpm = resolveNpmCommand();
@@ -105,12 +105,16 @@ function acquireInstallLock(lockPath, timeoutMs = LOCK_TIMEOUT_MS, onContention)
 }
 
 function runNpm(npmCommand, npmCommandArgs, args, options) {
-  const result = spawnSync(npmCommand, [...npmCommandArgs, ...args], options);
+  // The default command may be the cmd.exe fallback, which needs its arguments quoted as one line.
+  const spawn = npmCommand === defaultNpm.command && npmCommandArgs === defaultNpm.args
+    ? npmInvocation(args, defaultNpm)
+    : { command: npmCommand, args: [...npmCommandArgs, ...args], options: {} };
+  const result = spawnSync(spawn.command, spawn.args, { ...spawn.options, ...options });
   if (result.error) throw result.error;
   return result;
 }
 
-function dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell }) {
+function dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs }) {
   const check = runNpm(
     npmCommand,
     npmCommandArgs,
@@ -125,7 +129,6 @@ function dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandAr
     ],
     {
       cwd: repoRoot,
-      shell: npmShell,
       stdio: "ignore",
     },
   );
@@ -147,8 +150,6 @@ export function ensureDesktopDependencies({
   // and `spawn("npm.cmd")` without a shell is refused by Node 20.12+/22.
   npmCommand = defaultNpm.command,
   npmCommandArgs = defaultNpm.args,
-  // A shell is only ever needed for the `npm.cmd` fallback, never for a caller's own command.
-  npmShell = npmCommand === defaultNpm.command ? defaultNpm.shell : false,
   lockTimeoutMs = LOCK_TIMEOUT_MS,
   onLockContention,
 } = {}) {
@@ -159,7 +160,7 @@ export function ensureDesktopDependencies({
   const installedTreeIsCurrent = () => {
     if (!existsSync(dependencyRoot) || !existsSync(installStampPath)) return false;
     if (readFileSync(installStampPath, "utf8").trim() !== dependencyFingerprint(desktopLockPath)) return false;
-    return dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell });
+    return dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs });
   };
 
   if (installedTreeIsCurrent()) {
@@ -193,7 +194,6 @@ export function ensureDesktopDependencies({
       ],
       {
         cwd: repoRoot,
-        shell: npmShell,
         stdio: "inherit",
       },
     );
@@ -203,7 +203,7 @@ export function ensureDesktopDependencies({
     if (digestFile(desktopLockPath) !== beforeInstallDigest) {
       throw new Error("Desktop dependency install changed apps/desktop/package-lock.json; refusing to stamp it as current.");
     }
-    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell })) {
+    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs })) {
       // npm install may consider the package graph current even when a prior
       // interrupted lifecycle script left esbuild's platform binary absent.
       const rebuild = runNpm(
@@ -212,7 +212,6 @@ export function ensureDesktopDependencies({
         ["rebuild", "--prefix", desktopRoot, "esbuild"],
         {
           cwd: repoRoot,
-          shell: npmShell,
           stdio: "inherit",
         },
       );
@@ -220,7 +219,7 @@ export function ensureDesktopDependencies({
         throw new Error(`Desktop esbuild repair failed with status ${rebuild.status ?? "unknown"}.`);
       }
     }
-    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs, npmShell })) {
+    if (!dependencyTreeIsValid({ repoRoot, desktopRoot, npmCommand, npmCommandArgs })) {
       throw new Error(
         "Desktop dependency install completed without the required development binaries or lifecycle artifacts. " +
           "If npm ignore-scripts is enabled, install these dependencies under your chosen policy before retrying.",

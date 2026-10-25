@@ -399,11 +399,9 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
         // new base, so the plain comparison is kept for it. The trees hold text files as Git
         // stores them, so core.autocrlf (on by default in Git for Windows) does not make an
         // untouched file look changed, and the rule holds under it; the Git-for-Windows suite
-        // proves that. `--get-regexp` lists the key from every scope; the last line is the
-        // value in effect.
-        const sparse = (await git(root, ['config', '--get-regexp', '^core\\.sparsecheckout$'], signal).catch(() => ''))
-            .split('\n').filter(Boolean).at(-1)?.slice('core.sparsecheckout '.length) ?? '';
-        if (/^(?:true|yes|on|1)$/i.test(sparse))
+        // proves that.
+        // Git reads the value in effect and its boolean forms (a bare key is true; yes/on/1).
+        if ((await git(root, ['config', '--type=bool', '--get', 'core.sparseCheckout'], signal).catch(() => '')).trim() === 'true')
             return start;
         const incoming = await changedEntries(root, `${old}^{tree}`, `${base}^{tree}`, signal);
         const touched = await changedEntries(root, `${old}^{tree}`, `${start}^{tree}`, signal);

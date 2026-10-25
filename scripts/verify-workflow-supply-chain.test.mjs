@@ -409,6 +409,8 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
     "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures",
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
@@ -488,6 +490,20 @@ test("the dependency gates run once, in dependency-audit, before every check job
     assert.deepEqual(checkJob.needs, ["dependency-audit"], `${checkJob.name} must wait for dependency-audit`);
     for (const step of checkJob.steps) {
       const run = step.run ?? "";
+      // The Windows job installs Windows-only optional packages that the ubuntu
+      // signature check never sees, so it verifies each tree's signatures itself,
+      // right after installing it and before anything runs it.
+      if (checkJob.name === "mcp-tests-windows" && containsDirectNpmAudit(run)) {
+        const index = checkJob.steps.indexOf(step);
+        const install = checkJob.steps[index - 1]?.run ?? "";
+        const suffix = run.endsWith(" --prefix apps/desktop") ? " --prefix apps/desktop" : "";
+        assert.equal(run, `node scripts/retry-command.mjs npm audit signatures${suffix}`, `${checkJob.name}:${step.name}`);
+        assert.equal(install, `node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit${suffix}`, `${checkJob.name}:${step.name} must verify the tree it just installed`);
+        assert.equal(step.condition, null, `${checkJob.name}:${step.name} must not be skipped`);
+        assert.equal(step.continueOnError, null, `${checkJob.name}:${step.name} must fail the job`);
+        assert.equal(step.shell, null, `${checkJob.name}:${step.name} must use the default shell`);
+        continue;
+      }
       assert.ok(!containsDirectNpmAudit(run), `${checkJob.name}:${step.name} must not repeat npm audit`);
       assert.doesNotMatch(run, /verify-dependency-advisories\.mjs/, `${checkJob.name}:${step.name} must not repeat the advisory audit`);
       assert.doesNotMatch(run, /verify:dependency-age|verify-dependency-age\.mjs/, `${checkJob.name}:${step.name} must not repeat the cooldown`);
