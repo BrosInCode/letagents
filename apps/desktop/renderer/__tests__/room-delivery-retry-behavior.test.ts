@@ -305,6 +305,26 @@ test("a deny that covers the agent's other requests says Deny all N, then the ac
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
+test("an unconfirmed Deny all adds no activity line; its card says not confirmed yet", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const two = ["p-1", "p-2"].map(id => ({ ...hostApproval(), id, requestKey: id }));
+  let approvals: DesktopHostApproval[] = two;
+  const notices: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+    decideHostApproval: async () => "uncertain",
+  } } });
+  const { root, app } = mount(RoomComposer, { ...composerProps(), onApprovalNotice: (notice: unknown) => { notices.push(notice); } });
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    await (buttonByText(root, "Deny all 2").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(notices, [], "nothing claims the requests were denied");
+    assert.match(trayText(root), /Denied · not confirmed yet/);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
 test("a single deny or an allow adds no activity line", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const notices: unknown[] = [];
@@ -809,6 +829,32 @@ test("the composer has no history line: an unavailable record no turn waits on s
     await flushHostApprovals();
     assert.equal(trayPosition(root), "1 of 3", "the record is not added to the stack");
     assert.equal(descendants(root).some(node => /unavailable or unconfirmed|StaleAgent/.test(node.text)), false, "and no line offers it");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("Stop turn still works while the approvals service is down", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  let available = true;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => available ? { available: true, approvals: [waitingOnTurn("waiting-1", "LunarAmber")], error: null }
+      : { available: false, approvals: [], error: "Host approvals are unavailable." },
+  } } });
+  const stopped: string[] = [];
+  const { root, app } = mount(RoomComposer, { ...composerProps(),
+    onStopAgentTurn: (agentId: string, approvalId: string) => { stopped.push(`${agentId}:${approvalId}`); } });
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    available = false;
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "LunarAmber is waiting on a request you can't answer here");
+    assert.equal(descendants(root).some(node => /Host approvals|Can't answer right now/.test(node.text)), false);
+    await settleTray(context);
+    assert.equal(stopTurnButton(root)!.props.disabled, false, "the room lists the request again before it stops anything");
+    (stopTurnButton(root)!.props.onClick as () => void)();
+    assert.deepEqual(stopped, ["agent-a:waiting-1"]);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 

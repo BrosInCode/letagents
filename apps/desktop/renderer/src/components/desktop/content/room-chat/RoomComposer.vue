@@ -74,7 +74,9 @@
               @click="checkHostApprovalAgain(currentHostApproval, currentCardView.resend)">{{ checkingApproval ? 'Checking…' : 'Check again' }}</button>
           </div>
           <div v-else-if="currentCardView.kind === 'blocked'" class="desktop-composer-permission-actions desktop-host-approval-stop">
-            <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalDecisionsDisabled"
+            <!-- The room lists the request again before it stops anything, so Stop
+              turn works while the approvals service is down; it still holds. -->
+            <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalBusy !== null || !decisionsArmed"
               data-testid="desktop-host-approval-stop-turn" @click="stopAgentTurnFor(currentHostApproval)">Stop turn</button>
           </div>
           <!-- A permanent rule is never left unlabeled, however narrow the tray. -->
@@ -508,7 +510,8 @@ async function decideRoomHostApproval(approval: DesktopHostApproval, decision: H
   const count = coversAll ? new Set(hostApprovals.value.filter(item => item.status === "pending"
     && item.presentation.agentId === approval.presentation.agentId).map(hostApprovalIdentity)).size : 0;
   const status = await decideHostApproval(props.roomIdentifier, approval.id, decision);
-  if (coversAll && status !== null && status !== "pending") {
+  // Only a confirmed deny is announced; an unconfirmed one stays on its card.
+  if (coversAll && (status === "decision_sent" || status === "resolved")) {
     emit("approval-notice", { icon: "check", ...hostApprovalDeniedAllNotice(count, approval.presentation.displayName) });
   }
 }

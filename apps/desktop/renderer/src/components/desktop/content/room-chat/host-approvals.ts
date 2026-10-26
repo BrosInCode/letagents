@@ -211,7 +211,8 @@ export async function decideHostApproval(roomIdentifier: string, id: string, dec
   mutations.set(roomIdentifier, (mutations.get(roomIdentifier) ?? 0) + 1);
   state.busy = id;
   const decided = state.approvals.find(item => item.id === id);
-  if (decided) state.decisions = { ...state.decisions, [hostApprovalIdentity(decided)]: decision };
+  const identity = decided ? hostApprovalIdentity(decided) : null;
+  if (identity) state.decisions = { ...state.decisions, [identity]: decision };
   try {
     const status = await decide({ id, decision });
     if (epoch !== generation) return null;
@@ -222,9 +223,17 @@ export async function decideHostApproval(roomIdentifier: string, id: string, dec
     }
     return status;
   } catch (error) {
-    if (epoch === generation) state.error = CHANGED_REQUEST.test(error instanceof Error ? error.message : String(error))
-      ? "This request changed. Refresh approvals to see its current state."
-      : "Could not confirm the decision. Refresh approvals to check its recorded state.";
+    const changed = CHANGED_REQUEST.test(error instanceof Error ? error.message : String(error));
+    if (epoch === generation) {
+      state.error = changed
+        ? "This request changed. Refresh approvals to see its current state."
+        : "Could not confirm the decision. Refresh approvals to check its recorded state.";
+      // Main refused before sending: no decision is out there to confirm.
+      if (changed && identity) {
+        const { [identity]: _refused, ...rest } = state.decisions;
+        state.decisions = rest;
+      }
+    }
     return null;
   } finally {
     if (epoch === generation) state.busy = null;

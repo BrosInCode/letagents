@@ -200,7 +200,8 @@
    turn"), so Deny and Allow keep their hit areas from one request to the next. */
 .desktop-host-approval-decisions .desktop-host-approval-deny {
   flex: none;
-  width: 88px;
+  width: 96px;
+  padding: 0 8px;
 }
 
 .desktop-host-approval-decisions .desktop-host-approval-allow {
@@ -215,8 +216,19 @@
   margin-right: calc(136px + 6px);
 }
 
-/* A state in a few plain words, beside its one action. */
+/* A state in a few plain words, beside its one action. The group may shrink,
+   so a narrow tray cuts the words, never the button. */
+.desktop-host-approval-decisions .desktop-host-approval-in-deny-slot {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.desktop-host-approval-in-deny-slot > button {
+  flex: none;
+}
+
 .desktop-host-approval-quiet {
+  min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
   font-size: 0.72rem;

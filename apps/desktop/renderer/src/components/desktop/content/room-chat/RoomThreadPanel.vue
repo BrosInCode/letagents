@@ -229,7 +229,8 @@ const props = defineProps<{
   sendError: string | null;
   attaching: boolean;
   attachmentDrafts: DesktopStagedAttachment[];
-  attachmentError: string | null;
+  /** A plain sentence (attachmentProblemText), never raw error text. */
+  attachmentError?: string | null;
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   hasOlderReplies: boolean;
   loadingOlderReplies: boolean;
