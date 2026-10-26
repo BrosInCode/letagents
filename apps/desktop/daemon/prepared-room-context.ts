@@ -45,13 +45,13 @@ export type PreparedRoomTurnFiles = {
 };
 const ROOM_FILES_KEY = "room_files";
 /**
- * What a conversation received counts only from the agent's latest turns in
- * the room that reached dispatch, before the one being prepared. A provider
- * may compact its history without a new continuation,
+ * A received image counts only from the agent's latest dispatched turns in
+ * the room. A provider may compact its history without a new continuation,
  * and a compacted image is gone from it: an image still in view after this
- * many turns is offered once more.
+ * many turns is offered once more. A refusal for good, or a note that the
+ * agent cannot view images, stays for every turn the inbox still retains.
  */
-const RECENT_TURNS_SEARCHED = 20;
+const RECENT_TURNS_WITH_IMAGES = 20;
 
 /** The prepared context the Inspector reads: room text only, without this turn's file record. */
 export function inspectorPreparedRoomContext(snapshot: unknown): PreparedRoomContext | null {
@@ -66,21 +66,21 @@ export function recordPreparedRoomTurnFiles(database: DatabaseSync, inboxItemId:
     WHERE inbox_item_id=?`).run(JSON.stringify(files), inboxItemId);
 }
 
-/** What the agent's latest turns of this conversation in this room received, as `${messageId}\n${attachmentId}`. */
+/** What earlier dispatched turns of this conversation in this room received or refused, as `${messageId}\n${attachmentId}`. */
 export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
   agentId: string; roomId: string; continuation: string;
-  /** The turn being prepared: only turns before it that reached their provider count. */
+  /** The turn being prepared, which is not one of its own earlier turns. */
   inboxItemId: string;
 }): Map<string, RoomTurnFileOutcome> {
-  const rows = database.prepare(`SELECT json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.files') AS files
-    FROM (SELECT i.inbox_item_id FROM supervised_agent_inbox i
-      JOIN supervised_agent_prepared_context p ON p.inbox_item_id=i.inbox_item_id
-      WHERE i.agent_id=? AND i.room_id=?
-        AND i.rowid < (SELECT rowid FROM supervised_agent_inbox WHERE inbox_item_id=?)
-      ORDER BY i.rowid DESC LIMIT ?) earlier
-    JOIN supervised_agent_prepared_context c ON c.inbox_item_id=earlier.inbox_item_id
-    WHERE json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.continuation')=?`)
-    .all(input.agentId, input.roomId, input.inboxItemId, RECENT_TURNS_SEARCHED, input.continuation) as Array<{ files: unknown }>;
+  // Turns in the order they were prepared for dispatch: a human message can
+  // overtake an older queued one, so the inbox row order is not that order.
+  const rows = database.prepare(`SELECT files,turn FROM (
+      SELECT json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.files') AS files,
+        json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.continuation') AS continuation,
+        ROW_NUMBER() OVER (ORDER BY json_extract(c.snapshot_json,'$.preparedAt') DESC, i.rowid DESC) AS turn
+      FROM supervised_agent_prepared_context c JOIN supervised_agent_inbox i ON i.inbox_item_id=c.inbox_item_id
+      WHERE i.agent_id=? AND i.room_id=? AND i.inbox_item_id<>?
+    ) WHERE continuation=?`).all(input.agentId, input.roomId, input.inboxItemId, input.continuation) as Array<{ files: unknown; turn: number }>;
   const outcomes = new Map<string, RoomTurnFileOutcome>();
   for (const row of rows) {
     let files: unknown;
@@ -90,6 +90,7 @@ export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
       const entry = file && typeof file === "object" ? file as Record<string, unknown> : {};
       if (typeof entry.message_id !== "string" || typeof entry.attachment_id !== "string"
         || !["image", "not_image", "too_large", "provider_unsupported"].includes(String(entry.outcome))) continue;
+      if (entry.outcome === "image" && Number(row.turn) > RECENT_TURNS_WITH_IMAGES) continue;
       const key = `${entry.message_id}\n${entry.attachment_id}`;
       // Shown once is what matters most; a refusal never hides that.
       if (outcomes.get(key) !== "image") outcomes.set(key, entry.outcome as RoomTurnFileOutcome);
