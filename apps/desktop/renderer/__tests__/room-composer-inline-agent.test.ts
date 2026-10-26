@@ -1,0 +1,570 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { after, before, beforeEach, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createRenderer, effectScope, h, nextTick, reactive, ssrContextKey } from 'vue';
+import { createServer, type ViteDevServer } from 'vite';
+
+let vite: ViteDevServer, access: any, launch: any, draftModule: any, Slider: any, AccessDefault: any, Chip: any, Composer: any, entriesContext: any, controller: any;
+const originals = { window: Object.getOwnPropertyDescriptor(globalThis, 'window'), document: Object.getOwnPropertyDescriptor(globalThis, 'document') };
+const fakeDocument = Object.assign(new EventTarget(), { activeElement: null as unknown, visibilityState: 'visible' });
+const storage = new Map<string, string>();
+let ipc: any;
+let uuid = 0;
+
+before(async () => {
+  const fakeWindow = Object.assign(new EventTarget(), {
+    setTimeout: () => 0, clearTimeout: () => undefined,
+    matchMedia: () => ({ matches: false }),
+    crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, '0')}` },
+    localStorage: { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => { storage.set(k, v); }, removeItem: (k: string) => { storage.delete(k); } },
+  });
+  // Each test swaps the bridge, so the window reads it at call time.
+  Object.defineProperty(fakeWindow, 'letagentsDesktop', { get: () => ipc });
+  Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: fakeWindow });
+  Object.defineProperty(globalThis, 'document', { configurable: true, writable: true, value: fakeDocument });
+  vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
+  const base = '/renderer/src/components/desktop/content/';
+  access = await vite.ssrLoadModule(`${base}room-chat/composer-agent-access.ts`);
+  launch = await vite.ssrLoadModule(`${base}room-chat/composer-agent-launch.ts`);
+  draftModule = await vite.ssrLoadModule(`${base}room-chat/useComposerAgentDraft.ts`);
+  entriesContext = await vite.ssrLoadModule(`${base}add-agent/supervisor-entries-context.ts`);
+  controller = await vite.ssrLoadModule(`${base}add-agent/useAddAgentController.ts`);
+  Slider = (await vite.ssrLoadModule(`${base}room-chat/ComposerStepSlider.vue`)).default;
+  AccessDefault = (await vite.ssrLoadModule(`${base}room-chat/RoomComposerAccessDefault.vue`)).default;
+  Chip = (await vite.ssrLoadModule(`${base}room-chat/RoomComposerAgentChip.vue`)).default;
+  Composer = (await vite.ssrLoadModule(`${base}room-chat/RoomComposer.vue`)).default;
+});
+after(async () => {
+  await vite?.close();
+  for (const [name, descriptor] of Object.entries(originals)) {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name);
+  }
+});
+
+const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null });
+const flush = async () => { await nextTick(); await new Promise(resolve => setImmediate(resolve)); };
+const key = (name: string, extra: Record<string, unknown> = {}) => {
+  const event = { key: name, isComposing: false, shiftKey: false, altKey: false, metaKey: false, ctrlKey: false, defaultPrevented: false, target: null as unknown,
+    preventDefault() { event.defaultPrevented = true; }, stopPropagation() {}, ...extra };
+  return event;
+};
+
+function setup(component: any, props: any, t: { after: (fn: () => void) => void }, provides: Array<[unknown, unknown]> = []) {
+  const events: any[] = [];
+  let vm: any;
+  const child = { setup() { vm = component.setup(props, { expose() {}, emit: (...args: any[]) => events.push(args) }); return () => h('div'); } };
+  const app = renderer.createApp({ render: () => h(child) });
+  app.provide(ssrContextKey, { modules: new Set() });
+  for (const [k, value] of provides) app.provide(k as any, value);
+  app.mount({});
+  t.after(() => app.unmount());
+  return { vm, events };
+}
+
+/* ---------- fakes ---------- */
+
+const profile = (id: string, label: string, status = 'available', risk = 'medium') => ({ id, label, description: '', status, risk, detail: null, isDefault: false });
+const PROFILES = {
+  'claude-code': [profile('read_only', 'Read-only'), profile('ask_before_write', 'Ask before writes'), profile('auto_review', 'Auto', 'available', 'high'), profile('full_access', 'Full access', 'available', 'high'), profile('sandboxed_write', 'Sandboxed writes', 'unsupported')],
+  codex: [profile('full_access', 'Full access', 'available', 'high'), profile('ask_before_write', 'Ask before writes'), profile('auto_review', 'Auto', 'available', 'high'), profile('read_only', 'Read-only'), profile('sandboxed_write', 'Sandboxed writes', 'unsupported')],
+  'open-model': [profile('full_access', 'Full access', 'available', 'high'), profile('ask_before_write', 'Ask before writes'), profile('auto_review', 'Auto', 'available', 'high'), profile('read_only', 'Read-only', 'unsupported')],
+  cursor: [profile('read_only', 'Read-only'), profile('ask_before_write', 'Ask before writes', 'unsupported'), profile('sandboxed_write', 'Workspace writes'), profile('full_access', 'Full access', 'available', 'high')],
+} as Record<string, any[]>;
+const provider = (id: string, name: string) => ({ id, name, description: '', capabilities: ['supervised_runtime'], runtimeCommand: null, mcpTargetId: null, permissionProfiles: PROFILES[id], defaultPermissionProfileId: null });
+
+function fakeIpc(overrides: { preflight?: Record<string, any>; openModel?: any; createAgent?: (input: any) => Promise<any>; listAgents?: () => Promise<any[]> } = {}) {
+  const calls = { create: [] as any[], preflight: [] as any[], listAgents: 0 };
+  const ready = { status: 'ready', canStart: true, message: '', detail: null, nextAction: null, version: null, mcpStatus: null };
+  const preflight = { 'claude-code': ready, codex: ready, 'open-model': ready, cursor: { ...ready, status: 'auth_required', canStart: false }, ...overrides.preflight };
+  ipc = {
+    room: { getExpressions: async () => ({ enabled: false }) },
+    workers: {
+      listAgentProviders: async () => [provider('claude-code', 'Claude Code'), provider('codex', 'Codex'), provider('open-model', 'Open Model'), provider('cursor', 'Cursor'), provider('antigravity', 'Antigravity')],
+      runAgentProviderPreflight: async (id: string, input: any) => { calls.preflight.push([id, input]); return { providerId: id, ...preflight[id] }; },
+      listAgentProviderModels: async (id: string) => ({ providerId: id, status: 'ready', defaultModel: id === 'codex' ? 'gpt-5-codex' : null, models: id === 'claude-code' ? [{ id: 'opus', label: 'Opus 5.5', source: 'provider' }, { id: 'sonnet', label: 'Sonnet 5.5', source: 'provider' }] : [] }),
+    },
+    openModel: { getSettingsStatus: async () => overrides.openModel ?? { configured: true, hasApiKey: true, baseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-coder', savedAt: null, settingsPath: '', error: null } },
+    supervisorGrant: { getStorageStatus: async () => ({ available: true, detail: '' }) },
+    supervisor: {
+      createAgent: async (input: any) => { calls.create.push(input); return overrides.createAgent ? overrides.createAgent(input) : { id: `supervised_${input.creationRequestId}`, displayName: 'Juniper', charter: input.charter }; },
+      listAgents: async () => { calls.listAgents++; return overrides.listAgents ? overrides.listAgents() : []; },
+    },
+  };
+  return calls;
+}
+
+function fakeHost(context: Record<string, unknown> = {}) {
+  const opened: any[] = [];
+  const worktrees: string[] = [];
+  return {
+    opened, worktrees,
+    host: {
+      context: () => ({ roomStorageMode: 'cloud', roomGitRoom: null, repoRootPath: '/repo/letagents', repoStatus: { rootPath: '/repo/letagents', branch: 'staging', worktrees: [] }, gitRoomMatchesActiveRepo: true, viewerLogin: 'EmmyMay', ...context }),
+      openAddAgent: (options?: any) => { opened.push(options ?? {}); },
+      chooseWorktree: (root: string) => { worktrees.push(root); },
+    },
+  };
+}
+
+function useDraft(t: any, host: any, room = { id: 'room-a' }) {
+  const scope = effectScope();
+  const refreshes: number[] = [];
+  const draft = scope.run(() => draftModule.useComposerAgentDraft({
+    roomIdentifier: () => room.id, host, supervisorEntries: { refresh: async () => { refreshes.push(1); } },
+  }))!;
+  t.after(() => scope.stop());
+  return { draft, refreshes };
+}
+
+beforeEach(() => storage.clear());
+
+/* ---------- access ladder ---------- */
+
+test('access stops run from least to most permission, over only the levels a provider really has', () => {
+  assert.deepEqual(access.accessStops(PROFILES.codex).map((p: any) => p.id), ['read_only', 'ask_before_write', 'auto_review', 'full_access']);
+  assert.deepEqual(access.accessStops(PROFILES['open-model']).map((p: any) => p.id), ['ask_before_write', 'auto_review', 'full_access']);
+  assert.deepEqual(access.accessStops(PROFILES.cursor).map((p: any) => p.id), ['read_only', 'sandboxed_write', 'full_access']);
+});
+
+test('a provider without the personal default falls back to the next safer level it has', () => {
+  assert.deepEqual(access.resolveAccess(PROFILES.codex, 'auto_review'), { id: 'auto_review', fellBack: false });
+  assert.deepEqual(access.resolveAccess(PROFILES.cursor, 'auto_review'), { id: 'sandboxed_write', fellBack: true });
+  assert.deepEqual(access.resolveAccess(PROFILES.cursor, 'ask_before_write'), { id: 'read_only', fellBack: true });
+  // Nothing safer: the least permission it has.
+  assert.deepEqual(access.resolveAccess(PROFILES['open-model'], 'read_only'), { id: 'ask_before_write', fellBack: true });
+  assert.equal(access.resolveAccess([], 'read_only'), null);
+});
+
+test('raising the default to a high level needs confirmation; lowering it does not', () => {
+  assert.equal(access.accessChangeNeedsConfirmation('ask_before_write', 'auto_review'), true);
+  assert.equal(access.accessChangeNeedsConfirmation('ask_before_write', 'full_access'), true);
+  assert.equal(access.accessChangeNeedsConfirmation('full_access', 'auto_review'), false);
+  assert.equal(access.accessChangeNeedsConfirmation('read_only', 'ask_before_write'), false);
+});
+
+test('the personal default is stored per person and per room, and only on this Mac', () => {
+  assert.equal(access.readPersonalAccess('EmmyMay', 'room-a'), 'ask_before_write', 'the default when nothing is stored');
+  access.rememberPersonalAccess('EmmyMay', 'Room-A', 'read_only');
+  assert.equal(access.readPersonalAccess('emmymay', 'room-a'), 'read_only');
+  assert.equal(access.readPersonalAccess('EmmyMay', 'room-b'), 'ask_before_write', 'another room keeps its own default');
+  assert.equal(access.readPersonalAccess('Shannon', 'room-a'), 'ask_before_write', 'another person on this Mac keeps theirs');
+  storage.set('letagents-desktop:composer-agent-access', '{"emmymay\\u0000room-a":"rm -rf"}');
+  assert.equal(access.readPersonalAccess('EmmyMay', 'room-a'), 'ask_before_write', 'an unknown stored value is ignored');
+  storage.set('letagents-desktop:composer-agent-access', 'not json');
+  assert.equal(access.readPersonalAccess('EmmyMay', 'room-a'), 'ask_before_write');
+});
+
+test('provider checks map to chip, "Not set up" or the Add agent window', () => {
+  const pf = (status: string, canStart = false, nextAction: string | null = null) => ({ status, canStart, nextAction });
+  assert.deepEqual(launch.composerAgentReadiness('codex', null), { state: 'checking' });
+  assert.deepEqual(launch.composerAgentReadiness('codex', pf('ready', true)), { state: 'ready' });
+  assert.deepEqual(launch.composerAgentReadiness('codex', pf('auth_required')), { state: 'setup', word: 'Sign in' });
+  assert.deepEqual(launch.composerAgentReadiness('claude-code', pf('missing_runtime')), { state: 'setup', word: 'Install' });
+  assert.deepEqual(launch.composerAgentReadiness('open-model', pf('config_required')), { state: 'not_set_up' });
+  assert.deepEqual(launch.composerAgentReadiness('open-model', pf('ready', true), { openModelConfigured: false }), { state: 'not_set_up' });
+  assert.deepEqual(launch.composerAgentReadiness('codex', pf('branch_mismatch', false, 'choose_worktree')), { state: 'ready' });
+});
+
+/* ---------- chip lifecycle ---------- */
+
+test('the submenu lists Claude, Codex and Open Model, and Cursor only once it can start', async t => {
+  fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  assert.deepEqual(draft.rows.value.map((row: any) => [row.providerId, row.name]), [['claude-code', 'Claude'], ['codex', 'Codex'], ['open-model', 'Open Model']]);
+  fakeIpc({ preflight: { cursor: { status: 'ready', canStart: true, nextAction: null } } });
+  await draft.refreshProviders();
+  assert.deepEqual(draft.rows.value.map((row: any) => row.providerId), ['claude-code', 'codex', 'open-model', 'cursor']);
+});
+
+test('picking a ready provider adds a chip with the personal default; a provider that needs setup opens the window instead', async t => {
+  fakeIpc({ preflight: { codex: { status: 'auth_required', canStart: false, nextAction: 'authenticate' } } });
+  access.rememberPersonalAccess('EmmyMay', 'room-a', 'read_only');
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  assert.equal(draft.rows.value.find((row: any) => row.providerId === 'codex').hint, 'Sign in');
+
+  assert.equal(draft.pick('codex'), 'setup');
+  assert.deepEqual(opened, [{ providerId: 'codex' }]);
+  assert.equal(draft.chip.value, null);
+
+  assert.equal(draft.pick('claude-code'), 'chip');
+  assert.equal(draft.chip.value.providerId, 'claude-code');
+  assert.equal(draft.chip.value.access, 'read_only');
+  assert.equal(draft.chip.value.model, null, 'the provider default until a model is chosen');
+  await flush();
+  assert.deepEqual(draft.chipModels.value.map((m: any) => m.label), ['Default', 'Opus 5.5', 'Sonnet 5.5'], 'the real catalog, title only');
+  assert.deepEqual(draft.chipEfforts.value, [], 'supervised Claude takes no effort, as in the Add agent window');
+
+  draft.removeChip();
+  assert.equal(draft.chip.value, null);
+});
+
+test('Codex has an effort scale of Default plus its real levels', async t => {
+  fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  assert.deepEqual(draft.chipEfforts.value.map((e: any) => e.label), ['Default', 'Low', 'Medium', 'High', 'Extra high']);
+  assert.deepEqual(draft.chipAccessStops.value.map((p: any) => p.label), ['Read-only', 'Ask before writes', 'Auto', 'Full access']);
+});
+
+test('a new personal default moves a chip the person has not changed, never one they set', async t => {
+  fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  assert.equal(draft.chip.value.access, 'ask_before_write');
+  draft.setPersonalAccess('full_access');
+  assert.equal(draft.chip.value.access, 'full_access');
+  assert.equal(access.readPersonalAccess('EmmyMay', 'room-a'), 'full_access', 'stored for this person and room');
+  draft.setAccess('read_only');
+  draft.setPersonalAccess('auto_review');
+  assert.equal(draft.chip.value.access, 'read_only');
+});
+
+test('the chip falls back to a safer level when the provider lacks the personal default', async t => {
+  fakeIpc({ preflight: { cursor: { status: 'ready', canStart: true, nextAction: null } } });
+  access.rememberPersonalAccess('EmmyMay', 'room-a', 'auto_review');
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('cursor');
+  assert.equal(draft.chip.value.access, 'sandboxed_write');
+  assert.equal(draft.chip.value.fellBack, true);
+});
+
+test('a chip belongs to its room: switching rooms removes it', async t => {
+  fakeIpc();
+  const room = reactive({ id: 'room-a' });
+  const { draft } = useDraft(t, fakeHost().host, room);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  room.id = 'room-b';
+  await flush();
+  assert.equal(draft.chip.value, null);
+});
+
+/* ---------- launch on Enter ---------- */
+
+test('Enter starts the agent through the supervised create, with the draft as its first message', async t => {
+  const calls = fakeIpc();
+  const { draft, refreshes } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  draft.setModel('gpt-5');
+  draft.setEffort('high');
+  draft.setAccess('auto_review');
+  const result = await draft.launch('  Fix the flaky login test  ');
+  assert.equal(result.outcome, 'started');
+  assert.equal(calls.create.length, 1);
+  const input = calls.create[0];
+  assert.equal(input.providerId, 'codex');
+  assert.equal(input.roomIdentifier, 'room-a');
+  assert.equal(input.charter, 'Fix the flaky login test');
+  assert.equal(input.permissionProfileId, 'auto_review');
+  assert.equal(input.model, 'gpt-5');
+  assert.equal(input.reasoningEffort, 'high');
+  assert.equal(input.repoRootPath, '/repo/letagents');
+  assert.equal(input.displayName, '', 'the daemon names the agent');
+  assert.match(input.creationRequestId, /^[0-9a-f-]{36}$/);
+  assert.equal(draft.chip.value, null, 'the chip is spent');
+  assert.equal(refreshes.length, 1, 'the room shell reads the new entry');
+  const preflight = calls.preflight.at(-1);
+  assert.deepEqual([preflight[0], preflight[1].permissionProfileId, preflight[1].model], ['codex', 'auto_review', 'gpt-5'], 'checked again with the final choices');
+});
+
+test('Claude gets the same launch policy the Add agent window sends, and no effort', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  draft.setAccess('read_only');
+  await draft.launch('Review the PR');
+  const input = calls.create[0];
+  assert.equal(input.reasoningEffort, undefined);
+  assert.deepEqual(input.launchPolicy, (await vite.ssrLoadModule('/renderer/src/domain/managed-agents.ts')).supervisedProviderLaunchPolicy('claude-code', 'read_only'));
+});
+
+test('a failed start keeps the chip, says why, and the retry uses a new id', async t => {
+  let fail = true;
+  const calls = fakeIpc({ createAgent: async (input) => { if (fail) throw new Error('daemon unavailable'); return { id: `supervised_${input.creationRequestId}`, charter: input.charter }; } });
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  const first = await draft.launch('Ship it');
+  assert.equal(first.outcome, 'blocked');
+  assert.ok(draft.chip.value, 'the chip stays');
+  assert.match(draft.notice.value, /Couldn't start Codex/);
+  assert.equal(calls.listAgents, 1, 'it checks whether the agent was saved anyway');
+  fail = false;
+  assert.equal((await draft.launch('Ship it')).outcome, 'started');
+  assert.notEqual(calls.create[0].creationRequestId, calls.create[1].creationRequestId);
+});
+
+test('a start that failed after the agent was saved counts as started', async t => {
+  let saved: any = null;
+  fakeIpc({
+    createAgent: async (input) => { saved = { id: `supervised_${input.creationRequestId}`, charter: input.charter }; throw new Error('timeout'); },
+    listAgents: async () => [saved],
+  });
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  const result = await draft.launch('Ship it');
+  assert.equal(result.outcome, 'started');
+  assert.equal(result.entry, saved);
+});
+
+test('when the check on Enter finds setup missing, the window opens at that provider and nothing starts', async t => {
+  const calls = fakeIpc();
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, status: 'auth_required', canStart: false, nextAction: 'authenticate' });
+  assert.equal((await draft.launch('Hello')).outcome, 'setup');
+  assert.deepEqual(opened, [{ providerId: 'claude-code' }]);
+  assert.equal(calls.create.length, 0);
+  assert.ok(draft.chip.value);
+});
+
+test('a project room with no local project explains instead of starting', async t => {
+  const calls = fakeIpc();
+  const { host } = fakeHost({ repoRootPath: null, roomGitRoom: { ref: { type: 'branch', name: 'x' } } });
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  assert.equal((await draft.launch('Hello')).outcome, 'blocked');
+  assert.match(draft.notice.value, /Connect this room to its local project/);
+  assert.equal(calls.create.length, 0);
+});
+
+/* ---------- Open Model gating ---------- */
+
+test('Open Model is always a chip, says "Not set up", and Enter is blocked calmly until it is configured', async t => {
+  const calls = fakeIpc({ openModel: { configured: false, baseUrl: '', model: '', error: null } });
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  const row = draft.rows.value.find((r: any) => r.providerId === 'open-model');
+  assert.equal(row.detail, 'Not set up');
+  assert.equal(draft.pick('open-model'), 'chip', 'a chip even before setup');
+  assert.equal(opened.length, 0);
+  await flush();
+  assert.equal(draft.chipReadiness.value.state, 'not_set_up');
+  assert.deepEqual(draft.chipModels.value, [], 'no model rows before setup');
+  assert.equal((await draft.launch('Summarise the thread')).outcome, 'blocked');
+  assert.equal(draft.notice.value, 'Configure Open Model before this agent can start. Your message is still here.');
+  assert.equal(calls.create.length, 0);
+
+  // After setup in the Add agent window, the same chip starts.
+  ipc.openModel.getSettingsStatus = async () => ({ configured: true, baseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-coder', error: null });
+  assert.equal((await draft.launch('Summarise the thread')).outcome, 'started');
+  assert.equal(calls.create[0].providerId, 'open-model');
+  assert.equal(calls.create[0].reasoningEffort, undefined, 'no Open Model effort until #1754 lands');
+});
+
+/* ---------- stepped slider ---------- */
+
+function mountSlider(t: any, index = 0) {
+  const props = reactive({ kind: 'access', label: 'Access', stops: ['Read-only', 'Ask before writes', 'Auto', 'Full access'], index, note: null });
+  const mounted = setup(Slider, props, t);
+  mounted.vm.track.value = { getBoundingClientRect: () => ({ left: 100, width: 300 }) };
+  mounted.vm.control.value = { focus() {}, setPointerCapture() {} };
+  return { ...mounted, props };
+}
+
+test('the slider follows a drag 1:1, then snaps to the nearest stop on release', t => {
+  const { vm, events } = mountSlider(t);
+  const pointer = (clientX: number) => ({ button: 0, clientX, pointerId: 1, preventDefault() {} });
+  vm.startDrag(pointer(100));
+  vm.moveDrag(pointer(240));
+  assert.ok(Math.abs(vm.position.value - 1.4) < 1e-9, 'the thumb sits between stops while dragging');
+  assert.equal(vm.shownIndex.value, 1);
+  vm.moveDrag(pointer(260));
+  assert.equal(vm.shownIndex.value, 2, 'the label follows the nearest stop');
+  vm.endDrag(pointer(260));
+  assert.equal(vm.dragging.value, false);
+  assert.deepEqual(events, [['update:index', 2]]);
+});
+
+test('a click on the track picks that stop; cancel restores the value', t => {
+  const { vm, events } = mountSlider(t, 1);
+  const pointer = (clientX: number) => ({ button: 0, clientX, pointerId: 1, preventDefault() {} });
+  vm.startDrag(pointer(400));
+  vm.endDrag(pointer(400));
+  assert.deepEqual(events.at(-1), ['update:index', 3]);
+  vm.startDrag(pointer(100));
+  vm.cancelDrag();
+  assert.equal(vm.position.value, 1);
+  assert.equal(events.length, 1);
+});
+
+test('←/→ step, Home and End jump, and ↑/↓ are left to the menu', t => {
+  const { vm, events, props } = mountSlider(t, 1);
+  vm.handleKey(key('ArrowRight'));
+  assert.deepEqual(events.at(-1), ['update:index', 2]);
+  props.index = 2;
+  vm.handleKey(key('ArrowLeft'));
+  assert.deepEqual(events.at(-1), ['update:index', 1]);
+  vm.handleKey(key('End'));
+  assert.deepEqual(events.at(-1), ['update:index', 3]);
+  vm.handleKey(key('Home'));
+  assert.deepEqual(events.at(-1), ['update:index', 0]);
+  props.index = 3;
+  const count = events.length;
+  vm.handleKey(key('ArrowRight'));
+  assert.equal(events.length, count, 'no change past the last stop');
+  const down = key('ArrowDown');
+  vm.handleKey(down);
+  assert.equal(down.defaultPrevented, false);
+});
+
+/* ---------- personal access selector ---------- */
+
+test('the access selector applies a lower level at once and asks before a higher one', t => {
+  const props = reactive({ modelValue: 'ask_before_write', roomHandle: '#letagents' });
+  const { vm, events } = setup(AccessDefault, props, t);
+  vm.choose('read_only');
+  assert.deepEqual(events.at(-2), ['update:modelValue', 'read_only']);
+  vm.choose('full_access');
+  assert.equal(vm.confirming.value.id, 'full_access', 'asks first');
+  assert.equal(events.filter((e: any) => e[0] === 'update:modelValue').length, 1);
+  vm.cancelConfirm();
+  assert.equal(vm.confirming.value, null);
+  vm.choose('full_access');
+  vm.apply('full_access');
+  assert.deepEqual(events.filter((e: any) => e[0] === 'update:modelValue').at(-1), ['update:modelValue', 'full_access']);
+  const source = readFileSync(new URL('../src/components/desktop/content/room-chat/RoomComposerAccessDefault.vue', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /New agents:/, 'shield and level only');
+});
+
+/* ---------- chip popover ---------- */
+
+test('the chip shows no risk pills or descriptions, except Open Model Auto\'s one line', t => {
+  const props = reactive({
+    chip: { id: 1, providerId: 'open-model', model: 'qwen/qwen3-coder', effort: '', access: 'auto_review', accessChosen: false, fellBack: false },
+    providerName: 'Open Model', readiness: { state: 'ready' }, models: [{ id: 'qwen/qwen3-coder', label: 'qwen/qwen3-coder' }], efforts: [],
+    accessStops: PROFILES['open-model'].filter((p: any) => p.status === 'available'), worksIn: 'letagents · staging', worktrees: [], repoRootPath: '/repo',
+    openModelHost: 'openrouter.ai', launching: false, coachVisible: false, wantedAccessLabel: 'Ask before writes',
+  });
+  const { vm } = setup(Chip, props, t);
+  assert.equal(vm.accessNote.value, 'LetAgents and Jev review each command before it runs. Routine commands and project edits run without asking.');
+  assert.equal(vm.spec.value, 'qwen/qwen3-coder · Auto');
+  props.chip = { ...props.chip, access: 'full_access' };
+  assert.equal(vm.accessNote.value, null);
+  props.chip = { ...props.chip, providerId: 'codex', access: 'auto_review' };
+  assert.equal(vm.accessNote.value, null, 'only Open Model\'s own Auto has a line');
+  const source = readFileSync(new URL('../src/components/desktop/content/room-chat/RoomComposerAgentChip.vue', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /risk/i, 'no risk labels');
+  assert.doesNotMatch(source, /@(pointerenter|mouseenter|mouseover|pointerover)=/, 'hover never opens anything');
+});
+
+test('number keys choose a model without closing the popover; Escape closes it', async t => {
+  const props = reactive({
+    chip: { id: 2, providerId: 'claude-code', model: null, effort: '', access: 'read_only', accessChosen: false, fellBack: false },
+    providerName: 'Claude', readiness: { state: 'ready' }, models: [{ id: null, label: 'Default' }, { id: 'opus', label: 'Opus 5.5' }], efforts: [],
+    accessStops: [], worksIn: '', worktrees: [], repoRootPath: null, openModelHost: null, launching: false, coachVisible: true, wantedAccessLabel: null,
+  });
+  const { vm, events } = setup(Chip, props, t);
+  vm.toggle({ detail: 0 });
+  assert.equal(vm.open.value, true);
+  assert.deepEqual(events.at(-1), ['opened']);
+  assert.ok(events.some((e: any) => e[0] === 'coach-dismissed'), 'opening the chip retires the coach hint');
+  vm.menu.value = { querySelectorAll: () => [], contains: () => true };
+  vm.handleMenuKey(key('2', { target: {} }));
+  assert.deepEqual(events.at(-1), ['set-model', 'opus']);
+  assert.equal(vm.open.value, true, 'choosing does not close it');
+  vm.handleMenuKey(key('Tab', { target: {} }));
+  assert.equal(vm.open.value, true, 'Tab does not close it');
+  vm.handleMenuKey(key('Escape', { target: {} }));
+  assert.equal(vm.open.value, false);
+  assert.deepEqual(events.at(-1), ['dismiss']);
+});
+
+/* ---------- composer wiring ---------- */
+
+let sequence = 0;
+function mountComposer(t: any, host: any) {
+  const props = reactive({ attaching: false, attachmentDrafts: [] as any[], attachmentError: null, eventPreviews: [], messageNamespace: `inline-agent-${++sequence}`,
+    participants: [], pendingAttachmentDrafts: [] as any[], replyTo: null, roomIdentifier: 'room-a', roomLabel: 'letagents', roomLoading: false, sendError: null, sending: false });
+  const refreshes: number[] = [];
+  const mounted = setup(Composer, props, t, [[launch.composerAgentLaunchKey, host], [entriesContext.supervisorEntriesKey, { refresh: async () => { refreshes.push(1); } }]]);
+  return { ...mounted, props, refreshes };
+}
+
+test('with a chip, Enter launches the agent instead of posting, and clears the draft only once it started', async t => {
+  const calls = fakeIpc();
+  const { vm, events } = mountComposer(t, fakeHost().host);
+  await vm.agentDraft.refreshProviders();
+  vm.pickAgent('codex', null);
+  assert.equal(vm.agentCoachVisible.value, true, 'the coach hint shows the first time');
+  assert.equal(vm.sendLabel.value, 'Start agent with this message');
+  vm.draft.value = 'Fix the flaky login test';
+  await vm.submitMessage();
+  assert.equal(calls.create.length, 1);
+  assert.equal(calls.create[0].charter, 'Fix the flaky login test');
+  assert.equal(events.some((e: any) => e[0] === 'send-message'), false, 'no plain room post');
+  const started = events.find((e: any) => e[0] === 'agent-started');
+  assert.equal(started[2], 'Fix the flaky login test');
+  assert.equal(vm.draft.value, '');
+  assert.equal(vm.agentChip.value, null);
+});
+
+test('a failed launch keeps the draft and the chip', async t => {
+  fakeIpc({ createAgent: async () => { throw new Error('nope'); } });
+  const { vm, events } = mountComposer(t, fakeHost().host);
+  await vm.agentDraft.refreshProviders();
+  vm.pickAgent('codex', null);
+  vm.draft.value = 'Keep me';
+  await vm.submitMessage();
+  assert.equal(vm.draft.value, 'Keep me');
+  assert.ok(vm.agentChip.value);
+  assert.match(vm.agentNotice.value, /Couldn't start Codex/);
+  assert.equal(events.some((e: any) => e[0] === 'agent-started'), false);
+});
+
+test('attachments cannot ride on a first message', async t => {
+  const calls = fakeIpc();
+  const { vm, props } = mountComposer(t, fakeHost().host);
+  await vm.agentDraft.refreshProviders();
+  vm.pickAgent('codex', null);
+  props.attachmentDrafts = [{ uploadId: 'u1' }];
+  vm.draft.value = 'With a file';
+  await vm.submitMessage();
+  assert.equal(calls.create.length, 0);
+  assert.match(vm.agentNotice.value, /text only/);
+});
+
+test('"Don\'t show again" keeps the coach hint away for the next chip', async t => {
+  fakeIpc();
+  const { vm } = mountComposer(t, fakeHost().host);
+  await vm.agentDraft.refreshProviders();
+  vm.pickAgent('codex', null);
+  vm.dismissAgentCoach(true);
+  vm.removeAgentChip();
+  vm.pickAgent('claude-code', null);
+  assert.equal(vm.agentCoachVisible.value, false);
+});
+
+test('without a launch host the composer keeps the plain Add agent window', t => {
+  fakeIpc();
+  const props = reactive({ attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: `inline-agent-${++sequence}`,
+    participants: [], pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: 'room-a', roomLabel: 'letagents', roomLoading: false, sendError: null, sending: false });
+  const { vm, events } = setup(Composer, props, t);
+  assert.equal(vm.agentHost, null);
+  vm.handleAddMenuSelect('agent');
+  assert.deepEqual(events.at(-1), ['open-add-agent']);
+});
+
+test('the Add agent window sends a Codex effort to the supervised create', async () => {
+  const sent: any[] = [];
+  const client = { createAgent: async (input: any) => { sent.push(input); return input; } };
+  const snapshot = { creationRequestId: 'abc12345', providerName: 'Codex', roomIdentifier: 'room-a', repoRootPath: '/repo', charter: 'go', permissionProfileId: 'full_access', launchPolicy: undefined, model: null };
+  await controller.createSupervisedAgentFromSnapshot(client, { ...snapshot, providerId: 'codex', reasoningEffort: 'xhigh' }, () => true);
+  await controller.createSupervisedAgentFromSnapshot(client, { ...snapshot, providerId: 'claude-code', reasoningEffort: 'high' }, () => true);
+  assert.equal(sent[0].reasoningEffort, 'xhigh');
+  assert.equal('reasoningEffort' in sent[1], false, 'other providers refuse an effort, so none is sent');
+});

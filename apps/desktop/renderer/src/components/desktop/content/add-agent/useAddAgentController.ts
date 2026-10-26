@@ -1,7 +1,8 @@
-import { computed, ref, type ComputedRef } from "vue";
+import { computed, ref, watch, type ComputedRef } from "vue";
 import type {
   DesktopAgentProviderId,
   DesktopGitRoomInfo,
+  DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfileId,
   DesktopSupervisorCreateInput,
   DesktopSupervisorManifestEntry,
@@ -32,6 +33,10 @@ export interface AddAgentModalProps {
   roomDisplayName: string | null;
   repoRootPath: string | null;
   repoStatus: RepoStatus | null;
+  /** Opens on this provider, as when the composer sends a provider that needs setup. */
+  initialProviderId?: DesktopAgentProviderId | null;
+  /** Opens on this section of the provider's settings. */
+  initialSection?: "open-model" | null;
 }
 
 export interface AddAgentModalEvents {
@@ -60,6 +65,8 @@ export interface SupervisedLaunchCreateSnapshot {
   permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
   launchPolicy: unknown;
   model: string | null;
+  /** Codex only. Left out, the agent uses the provider's configured effort. */
+  reasoningEffort?: DesktopManagedAgentEffort | null;
 }
 
 type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "createAgent">;
@@ -91,6 +98,7 @@ export async function createSupervisedAgentFromSnapshot(
     permissionProfileId: snapshot.permissionProfileId,
     launchPolicy: snapshot.launchPolicy,
     model: snapshot.model,
+    ...(snapshot.providerId === "codex" && snapshot.reasoningEffort ? { reasoningEffort: snapshot.reasoningEffort } : {}),
   };
   return client.createAgent(input);
 }
@@ -187,6 +195,13 @@ const {
   selectedPermissionProfileWarning,
 } = useAddAgentPresentation(props, setup, configuration);
 let setupActions!: ReturnType<typeof setup.bind>;
+// Registered before the setup watchers so the provider is chosen before the
+// window loads its providers; that load keeps a provider it still lists.
+watch(() => props.open, (open) => {
+  if (open && props.initialProviderId && selectedProviderId.value !== props.initialProviderId) {
+    selectedProviderId.value = props.initialProviderId;
+  }
+}, { flush: "sync" });
 const {
   loadOpenModelSettings,
   loadProviderModels,
@@ -387,6 +402,7 @@ async function startManagedAgent(
     requestPermissionProfileId,
   );
   const requestModel = selectedModel.value;
+  const requestEffort = requestProviderId === "codex" ? selectedEffort.value || null : null;
   let supervisedCreationRequestId: string | null = null;
   startingAgent.value = true;
   startOperationInFlight = true;
@@ -439,6 +455,7 @@ async function startManagedAgent(
       permissionProfileId: requestPermissionProfileId,
       launchPolicy: requestLaunchPolicy,
       model: requestModel,
+      reasoningEffort: requestEffort,
     };
     // A name is presentation, never identity, and is assigned where the
     // agent is saved. The helper sends every click-time launch input above.

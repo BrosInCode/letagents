@@ -2992,6 +2992,28 @@ test("a supervised launch is saved running unless the caller asks for a paused r
   }
 });
 
+test("a supervised launch saves a Codex reasoning effort and never one for another provider", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 3);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const input = { roomIdentifier: "git-room:github.com:owner/repo", displayName: "", charter: "Fix the test.", repoRootPath: "/tmp/work" };
+    await client.create({ ...input, creationRequestId: "request_codex_effort", providerId: "codex", reasoningEffort: "high" });
+    await client.create({ ...input, creationRequestId: "request_codex_default", providerId: "codex" });
+    await client.create({ ...input, creationRequestId: "request_claude_effort", providerId: "claude-code", reasoningEffort: "high", launchPolicy: { permissionMode: "default" } });
+    const saved = wire.requests.filter((request) => request.method === "manifest.put").map((request) => request.params?.entry);
+    assert.equal(saved[0].reasoning_effort, "high");
+    assert.equal(Object.hasOwn(saved[1], "reasoning_effort"), false, "no effort keeps the provider's own setting");
+    assert.equal(Object.hasOwn(saved[2], "reasoning_effort"), false, "a Claude launch would refuse an effort");
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("desktop and daemon implementation identities stay in lockstep", async () => {
   const daemonTypes = await readFile(daemonTypesPath, "utf8");
   const daemonIdentity = daemonTypes.match(/DAEMON_IMPLEMENTATION_VERSION\s*=\s*"([^"]+)"/)?.[1];

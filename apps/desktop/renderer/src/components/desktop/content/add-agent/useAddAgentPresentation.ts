@@ -365,7 +365,12 @@ export function useAddAgentPresentation(
   };
 }
 
-function managedAgentEffortOptionsForProvider(
+/** Only Codex takes an effort at a supervised launch; the others refuse one. Matches showEffortSelector. */
+export function supervisedProviderTakesEffort(providerId: DesktopAgentProviderId | null | undefined): boolean {
+  return providerId === "codex";
+}
+
+export function managedAgentEffortOptionsForProvider(
   providerId: DesktopAgentProviderId | null,
 ): DesktopSelectOption[] {
   const shared = [

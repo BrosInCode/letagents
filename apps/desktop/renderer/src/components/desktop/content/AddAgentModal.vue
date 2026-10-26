@@ -64,6 +64,7 @@
             >
             <AddAgentOpenModelSettings
               v-if="showOpenModelConfig"
+              ref="openModelSettings"
               v-model:base-url="openModelBaseUrl"
               v-model:model="openModelModel"
               v-model:context-window="openModelContextWindow"
@@ -182,6 +183,7 @@ import {
 const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
 const dialogElement = ref<HTMLElement | null>(null);
+const openModelSettings = ref<InstanceType<typeof AddAgentOpenModelSettings> | null>(null);
 let previousFocusElement: HTMLElement | null = null;
 
 watch(() => props.open, (open) => {
@@ -190,6 +192,16 @@ watch(() => props.open, (open) => {
     void nextTick(() => dialogElement.value?.focus());
   }
 }, { immediate: true });
+
+// Opened from a chip's "Configure Open Model…": bring the Open Model settings into view once they render.
+watch(() => props.open && props.initialSection === "open-model" && Boolean(openModelSettings.value), (show) => {
+  if (!show) return;
+  void nextTick(() => {
+    const element = openModelSettings.value?.$el as HTMLElement | undefined;
+    element?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    element?.querySelector<HTMLElement>("input")?.focus({ preventScroll: true });
+  });
+});
 
 function handleAfterLeave(): void {
   if (props.open) return;

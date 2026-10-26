@@ -719,6 +719,8 @@ export interface DesktopSupervisorCreateInput {
   displayName: string;
   providerId: DesktopAgentProviderId;
   model?: string | null;
+  /** Codex only; other supervised providers refuse an effort at launch. */
+  reasoningEffort?: DesktopManagedAgentEffort | null;
   charter: string;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   /** Opaque, provider-native CLI/app-server options. The daemon forwards this unchanged. */
