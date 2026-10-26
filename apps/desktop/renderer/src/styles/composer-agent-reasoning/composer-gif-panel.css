@@ -1,0 +1,300 @@
+/* GIFs from the "+" menu: a panel beside the menu, in the same material.
+   Quick searches first, live results as you type, more as you scroll. */
+.desktop-composer-add-flyout {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: calc(-1px + 268px + 6px);
+  z-index: 20;
+  display: grid;
+  width: 340px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 86%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  backdrop-filter: blur(24px) saturate(170%);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6), 0 16px 40px rgba(0, 0, 0, 0.5);
+  transform-origin: 0 100%;
+}
+
+/* No room beside the menu: the panel takes the menu's place, with a Back row. */
+.desktop-composer-add-flyout.is-narrow {
+  left: -1px;
+  width: min(340px, calc(100vw - 32px));
+  transform-origin: 17px 100%;
+}
+
+.desktop-composer-add-menu.has-flyout {
+  visibility: hidden;
+}
+
+.desktop-composer-add-flyout[data-animate] {
+  animation: desktop-composer-add-flyout-in 170ms var(--ease-out) both;
+}
+
+@keyframes desktop-composer-add-flyout-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px) scale(0.98);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .desktop-composer-add-flyout {
+    background: var(--bg-elevated);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .desktop-composer-add-flyout {
+    background: var(--bg-elevated);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+.desktop-composer-add-back {
+  margin-bottom: 4px;
+}
+
+.desktop-composer-gif-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.desktop-composer-gif-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 9px;
+  background: var(--accent-hover);
+  color: var(--text-tertiary);
+}
+
+.desktop-composer-gif-search:focus-within {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 40%, transparent);
+}
+
+.desktop-composer-gif-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.desktop-composer-gif-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.desktop-composer-gif-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 2px 0 4px;
+}
+
+.desktop-composer-gif-quick button {
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, transform 140ms var(--ease-out);
+}
+
+.desktop-composer-gif-quick button:active {
+  transform: scale(0.96);
+}
+
+.desktop-composer-gif-quick button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+/* Scrolls without a visible scrollbar; the next page loads near the end. */
+.desktop-composer-gif-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* Rows keep the tiles' 4:3 height; the grid scrolls instead of squeezing them. */
+  grid-auto-rows: max-content;
+  gap: 5px;
+  max-height: 236px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: 9px;
+  scrollbar-width: none;
+}
+
+.desktop-composer-gif-grid::-webkit-scrollbar {
+  display: none;
+}
+
+.desktop-composer-gif-tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: var(--accent-hover);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.desktop-composer-gif-tile img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 160ms var(--ease-out);
+}
+
+.desktop-composer-gif-tile:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.desktop-composer-gif-tile.is-skeleton {
+  cursor: default;
+  animation: desktop-composer-gif-skeleton 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes desktop-composer-gif-skeleton {
+  to {
+    opacity: 0.45;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-composer-gif-quick button:hover {
+    background: var(--accent-hover);
+    color: var(--text);
+  }
+
+  .desktop-composer-gif-tile:hover img {
+    transform: scale(1.03);
+  }
+}
+
+.desktop-composer-gif-more,
+.desktop-composer-gif-message {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.desktop-composer-gif-more {
+  grid-column: 1 / -1;
+  padding: 6px 0;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.desktop-composer-gif-message {
+  margin: 4px 4px 6px;
+}
+
+.desktop-composer-gif-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.desktop-composer-gif-foot .giphy-attribution {
+  display: block;
+  width: 88px;
+  height: auto;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: #202126;
+  object-fit: contain;
+}
+
+/* The chosen GIF in the draft: a small preview, its name and remove. */
+.desktop-composer-gif-draft {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  max-width: 280px;
+  height: 34px;
+  padding: 0 4px 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--accent-hover);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.desktop-composer-gif-draft-preview {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 24px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
+.desktop-composer-gif-draft-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-gif-draft button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.desktop-composer-gif-draft button:hover {
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-composer-add-flyout[data-animate],
+  .desktop-composer-gif-tile.is-skeleton {
+    animation: none;
+  }
+
+  .desktop-composer-gif-quick button,
+  .desktop-composer-gif-tile img {
+    transition: none;
+  }
+}
+
+/* The row whose panel is open stays highlighted. */
+.desktop-composer-add-menu-item[data-open] {
+  background: var(--accent-hover);
+}

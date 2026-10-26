@@ -1,5 +1,5 @@
 <template>
-  <button v-if="enabled" ref="trigger" type="button" class="room-gif-trigger" aria-label="Choose a GIF" title="Choose a GIF" :disabled="disabled" @click="open">GIF</button>
+  <button v-if="enabled && trigger !== false" ref="triggerButton" type="button" class="room-gif-trigger" aria-label="Choose a GIF" title="Choose a GIF" :disabled="disabled" @click="open">GIF</button>
   <Teleport to="body">
     <dialog ref="dialog" class="room-gif-picker" aria-label="Choose a GIF" @close="closed">
       <header><strong>Choose a GIF</strong><button type="button" aria-label="Close GIF picker" @click="dialog?.close()">×</button></header>
@@ -26,10 +26,11 @@ import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { GiphyItem } from "../../../../../../../../shared/giphy-client.mjs";
 import type { RoomGif } from "../../../../../../../../shared/room-expressions.mjs";
 import { desktopIpc } from "../../../../ipc/index";
-const props = defineProps<{ roomIdentifier: string; disabled?: boolean }>();
-const emit = defineEmits<{ select: [gif: RoomGif] }>();
+// Without its own trigger, a host opens the picker with open() and shows its own entry only while `enabled`.
+const props = withDefaults(defineProps<{ roomIdentifier: string; disabled?: boolean; trigger?: boolean }>(), { trigger: true });
+const emit = defineEmits<{ select: [gif: RoomGif]; closed: [] }>();
 const dialog = ref<HTMLDialogElement | null>(null);
-const trigger = ref<HTMLButtonElement | null>(null);
+const triggerButton = ref<HTMLButtonElement | null>(null);
 const query = ref(""); const enabled = ref(false); const busy = ref(false);
 const error = ref(""); const items = ref<GiphyItem[]>([]); const nextOffset = ref<number | null>(null);
 const searched = ref(false); const cooldown = ref(false);
@@ -41,8 +42,8 @@ async function load(): Promise<void> {
   try { const setting = await desktopIpc.room.getExpressions(room); if (room === props.roomIdentifier) enabled.value = setting.enabled && setting.gif_provider_configured; }
   catch { if (room === props.roomIdentifier) enabled.value = false; }
 }
-async function open(): Promise<void> { await load(); if (enabled.value) dialog.value?.showModal(); }
-function closed(): void { generation++; busy.value = false; items.value = []; nextOffset.value = null; searched.value = false; trigger.value?.focus(); }
+async function open(): Promise<void> { if (props.disabled) return; await load(); if (enabled.value && !dialog.value?.open) dialog.value?.showModal(); }
+function closed(): void { generation++; busy.value = false; items.value = []; nextOffset.value = null; searched.value = false; triggerButton.value?.focus(); emit("closed"); }
 async function search(offset: number): Promise<void> {
   if (busy.value || cooldown.value || !query.value.trim()) return;
   const version = ++generation; busy.value = true; error.value = ""; searched.value = true; searchedQuery.value = query.value;
@@ -61,6 +62,7 @@ function choose(item: GiphyItem): void { emit("select", { provider: "giphy", id:
 watch(() => props.roomIdentifier, () => { generation++; dialog.value?.close(); enabled.value = false; void load(); }, { immediate: true });
 onMounted(() => { window.addEventListener("focus", load); window.addEventListener("letagents:expressions-changed", load); });
 onBeforeUnmount(() => { generation++; clearTimeout(cooldownTimer); window.removeEventListener("focus", load); window.removeEventListener("letagents:expressions-changed", load); });
+defineExpose({ open, enabled });
 </script>
 <style scoped>
 .giphy-attribution { width: 100px; height: auto; padding: 2px 4px; border-radius: 3px; background: #202126; object-fit: contain; }

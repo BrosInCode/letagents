@@ -100,6 +100,7 @@
       :composer-event-previews="composerGitHubEventPreviews"
       :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
+      :room-label="room.displayName || room.name"
       :github-events-visible="githubEventsVisible"
       :github-events-available="githubEventsAvailable"
       :room-loading="roomLoading"

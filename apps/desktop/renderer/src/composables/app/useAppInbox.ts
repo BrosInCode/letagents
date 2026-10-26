@@ -1,4 +1,4 @@
-import { computed, watch } from "vue";
+import { computed, provide, watch } from "vue";
 import type { PersonTarget } from "../../domain/person-target";
 import { openConversationWithPerson } from "../../domain/open-conversation-with-person";
 import { inboxRoomOpenReporter, myWorkEntry, needsYouEntry, openInboxRoom } from "../../domain/desktop-navigation";
@@ -13,6 +13,7 @@ import { useInboxRoomFilter } from "../useInboxRoomFilter";
 import { desktopIpc } from "../../ipc/index.js";
 import { roomNotificationPreferences } from "../useRoomNotificationPreferences";
 import type { AppContextOf } from "./context";
+import { composerSuggestedReplyKey, roomSuggestedReply } from "../../components/desktop/content/room-chat/composer-suggested-reply";
 
 /** Inbox, Needs you, and private message navigation. */
 export function useAppInboxActions(context: unknown) {
@@ -87,6 +88,8 @@ export function useAppInboxState(context: unknown) {
   const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
   Object.assign(app, { needsYouError, loadNeedsYou, resetNeedsYou });
   useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
+  // A room's composer offers the recommendation of its open Needs you request as a suggested reply.
+  provide(composerSuggestedReplyKey, (roomIdentifier) => roomSuggestedReply(needsYouData.value, roomIdentifier));
   const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
   Object.assign(app, { refreshAgentApprovals });
   const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
