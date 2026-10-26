@@ -39,7 +39,8 @@ export function parseOpenModelSupportedEfforts(body: unknown): Map<string, OpenM
   return efforts;
 }
 
-type CatalogCacheEntry = { expiresAt: number; efforts: Promise<Map<string, OpenModelReasoningEffort[]>> };
+type EffortCatalog = Map<string, OpenModelReasoningEffort[]>;
+type CatalogCacheEntry = { expiresAt: number; efforts: Promise<EffortCatalog | null> };
 
 const CATALOG_CACHE_MS = 5 * 60_000;
 const CATALOG_ERROR_CACHE_MS = 15_000;
@@ -54,25 +55,25 @@ export function clearOpenModelEffortCatalogCacheForTest(): void {
 /**
  * The efforts the endpoint lists for each of its models, from the same
  * `/models` request the context limits use. An answer is kept for a few
- * minutes per endpoint and key, unless a refresh asks again; a failed one,
- * as no support, for less.
- * Errors are never thrown: an endpoint that cannot be read supports none.
+ * minutes per endpoint and key, unless a refresh asks again; a failed one
+ * for less. Errors are never thrown: an endpoint that cannot be read gives
+ * null, so a caller can tell "not listed" from "not known".
  */
 export async function resolveOpenModelEffortCatalog(
   input: { baseUrl: string; apiKey: string | null; refresh?: boolean },
   fetchModels: (url: string, init?: RequestInit) => Promise<Response> = fetch,
   now: () => number = Date.now,
-): Promise<Map<string, OpenModelReasoningEffort[]>> {
+): Promise<EffortCatalog | null> {
   try {
     assertValidOpenModelBaseUrl(input.baseUrl);
   } catch {
-    return new Map();
+    return null;
   }
   // The key is hashed so the cache never holds it in a readable form.
   const cacheKey = createHash("sha256").update(`${input.baseUrl}\u0000${input.apiKey ?? ""}`).digest("hex");
   const cached = catalogCache.get(cacheKey);
-  if (!input.refresh && cached && cached.expiresAt > now()) return new Map(await cached.efforts);
-  const entry: CatalogCacheEntry = { expiresAt: now() + CATALOG_CACHE_MS, efforts: Promise.resolve(new Map()) };
+  if (!input.refresh && cached && cached.expiresAt > now()) return copyCatalog(await cached.efforts);
+  const entry: CatalogCacheEntry = { expiresAt: now() + CATALOG_CACHE_MS, efforts: Promise.resolve(null) };
   entry.efforts = (async () => {
     const url = new URL(input.baseUrl);
     url.pathname = `${url.pathname.replace(/\/+$/, "")}/models`;
@@ -83,10 +84,10 @@ export async function resolveOpenModelEffortCatalog(
       });
       if (response.ok) return parseOpenModelSupportedEfforts(await response.json());
     } catch {
-      // Endpoint errors can contain credentials; no support is the safe answer.
+      // Endpoint errors can contain credentials; they are not passed on.
     }
     entry.expiresAt = now() + CATALOG_ERROR_CACHE_MS;
-    return new Map();
+    return null;
   })();
   catalogCache.delete(cacheKey);
   for (const key of catalogCache.keys()) {
@@ -94,5 +95,9 @@ export async function resolveOpenModelEffortCatalog(
     catalogCache.delete(key);
   }
   catalogCache.set(cacheKey, entry);
-  return new Map(await entry.efforts);
+  return copyCatalog(await entry.efforts);
+}
+
+function copyCatalog(catalog: EffortCatalog | null): EffortCatalog | null {
+  return catalog && new Map(catalog);
 }

@@ -47,7 +47,7 @@ test("only OpenRouter's reasoning.supported_efforts lists a model's efforts", ()
   assert.deepEqual(parseOpenModelSupportedEfforts({ data: [{ id: "m", reasoning: { supported_efforts: ["xhigh", "low"] } }] }).get("m"), ["low", "xhigh"]);
 });
 
-test("the effort catalog is read once per endpoint and key, and a failure means no support", async () => {
+test("the effort catalog is read once per endpoint and key, and a failure is not known", async () => {
   clearOpenModelEffortCatalogCacheForTest();
   const calls: Array<{ url: string; authorization: string | undefined }> = [];
   let clock = 1_000;
@@ -59,7 +59,7 @@ test("the effort catalog is read once per endpoint and key, and a failure means 
   const endpoint = { baseUrl: "https://openrouter.ai/api/v1", apiKey: "sk-test" };
 
   const first = await resolveOpenModelEffortCatalog(endpoint, fetchModels, () => clock);
-  assert.deepEqual(first.get("openai/gpt-oss-120b"), ["low", "medium", "high"]);
+  assert.deepEqual(first?.get("openai/gpt-oss-120b"), ["low", "medium", "high"]);
   assert.deepEqual(calls, [{ url: "https://openrouter.ai/api/v1/models", authorization: "Bearer sk-test" }]);
 
   await resolveOpenModelEffortCatalog(endpoint, fetchModels, () => clock);
@@ -70,18 +70,18 @@ test("the effort catalog is read once per endpoint and key, and a failure means 
   answer = () => new Response("down", { status: 503 });
   const refreshed = await resolveOpenModelEffortCatalog({ ...endpoint, refresh: true }, fetchModels, () => clock);
   assert.equal(calls.length, 3, "a refresh reads again");
-  assert.equal(refreshed.size, 0, "a failed answer is no support");
+  assert.equal(refreshed, null, "a failed answer is not known, not \"no support\"");
 
   answer = () => Response.json(openRouterModels);
   clock += 16_000;
-  assert.equal((await resolveOpenModelEffortCatalog(endpoint, fetchModels, () => clock)).size, 2, "a failure is kept only briefly");
+  assert.equal((await resolveOpenModelEffortCatalog(endpoint, fetchModels, () => clock))?.size, 2, "a failure is kept only briefly");
 
   const thrown = await resolveOpenModelEffortCatalog(
     { baseUrl: "https://example.test/v1", apiKey: null },
     async () => { throw new Error("Bearer sk-secret refused"); },
   );
-  assert.equal(thrown.size, 0);
-  assert.equal((await resolveOpenModelEffortCatalog({ baseUrl: "not a url", apiKey: null }, fetchModels)).size, 0);
+  assert.equal(thrown, null);
+  assert.equal(await resolveOpenModelEffortCatalog({ baseUrl: "not a url", apiKey: null }, fetchModels), null);
   clearOpenModelEffortCatalogCacheForTest();
 });
 

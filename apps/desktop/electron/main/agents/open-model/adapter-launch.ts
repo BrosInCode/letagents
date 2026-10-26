@@ -123,11 +123,14 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     // The effort was chosen from this model's list, but the saved model can
     // change after that. An effort the endpoint does not list now is left
     // out, and the owner is told, rather than sent to be refused or ignored.
+    // An endpoint that cannot be read now says nothing new, so the effort
+    // checked when it was chosen is kept and every start runs the same way.
     let reasoningEffort: OpenModelReasoningEffort | null = null;
     let effortNotice: string | null = null;
     if (req.reasoningEffort) {
-      const listed = (await resolveOpenModelEffortCatalog(credential, this.deps.fetch)).get(credential.model) ?? [];
-      if (isOpenModelReasoningEffort(req.reasoningEffort) && listed.includes(req.reasoningEffort)) {
+      const catalog = await resolveOpenModelEffortCatalog(credential, this.deps.fetch);
+      const listed = catalog === null ? null : catalog.get(credential.model) ?? [];
+      if (isOpenModelReasoningEffort(req.reasoningEffort) && (listed === null || listed.includes(req.reasoningEffort))) {
         reasoningEffort = req.reasoningEffort;
       } else {
         effortNotice = `Reasoning effort ${req.reasoningEffort} not used: the endpoint does not list it for this model, so the model's default applies.`;

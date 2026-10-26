@@ -352,13 +352,14 @@ async function listOpenModelModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
   const settings = await readOpenModelSettings();
-  return openModelModelsResult(settings, input, settings.baseUrl
+  const efforts = settings.baseUrl
     ? await resolveOpenModelEffortCatalog({
       baseUrl: settings.baseUrl,
       apiKey: settings.apiKey,
       refresh: Boolean(input.refreshModels),
     })
-    : new Map());
+    : null;
+  return openModelModelsResult(settings, input, efforts ?? new Map());
 }
 
 /** The saved model and the agent's own choice, each with the efforts the endpoint lists for it. */

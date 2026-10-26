@@ -545,11 +545,11 @@ test("Open Model launches OpenCode so a denied tool call does not end the turn",
 
 test("Open Model sends the chosen effort only while the endpoint lists it for the model", async () => {
   clearOpenModelEffortCatalogCacheForTest();
-  const efforts = (listed: string[] | null) => {
+  const efforts = (listed: string[] | null | "unreadable") => {
     const harness = createHarness();
     const base = harness.dependencies.fetch!;
     harness.dependencies.fetch = async (input, init) => new URL(input).pathname.endsWith("/models")
-      ? Response.json({ data: [{ id: "openai/gpt-oss-120b", context_length: 131072, ...(listed ? { reasoning: { supported_efforts: listed } } : {}) }] })
+      ? listed === "unreadable" ? new Response("down", { status: 503 }) : Response.json({ data: [{ id: "openai/gpt-oss-120b", context_length: 131072, ...(listed ? { reasoning: { supported_efforts: listed } } : {}) }] })
       : base(input, init);
     return harness;
   };
@@ -574,6 +574,11 @@ test("Open Model sends the chosen effort only while the endpoint lists it for th
   assert.deepEqual(unlisted.handle.launchNotices, [
     "Reasoning effort high not used: the endpoint does not list it for this model, so the model's default applies.",
   ]);
+
+  // A /models read that fails says nothing new: the effort checked when it was chosen is kept.
+  const unreadable = await spawnAdapter(request("https://unreadable.example.test/v1"), efforts("unreadable"));
+  assert.deepEqual(modelOptions(unreadable.harness), { reasoningEffort: "high" });
+  assert.equal(unreadable.handle.launchNotices?.length ?? 0, 0);
   clearOpenModelEffortCatalogCacheForTest();
 });
 
