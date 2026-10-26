@@ -231,13 +231,13 @@ test("the row sits under its first message, or at the agent's start time", () =>
     actorLabel: null, agentIdentity: null, threadRootId: id, threadReplyToId: null, thread: null, replyTo: null,
   });
   const messages = [message("m1", at(0)), message("m2", at(0)), message("m3", at(5_000))];
-  const anchored = buildMessageTimelineEntries(messages, [], [{ entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }]);
+  const anchored = buildMessageTimelineEntries(messages, [], [], [{ entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }]);
   assert.deepEqual(anchored.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "agent-startup:a", "m2", "m3"],
     "right under its first message, even when the next message has the same time");
-  const two = buildMessageTimelineEntries(messages, [], [
+  const two = buildMessageTimelineEntries(messages, [], [], [
     { entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }, { entryId: "b", anchorMessageId: "m1", startedAt: at(1_000) }]);
   assert.deepEqual(two.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "agent-startup:a", "agent-startup:b", "m2", "m3"]);
-  const timed = buildMessageTimelineEntries(messages, [], [{ entryId: "a", anchorMessageId: "gone", startedAt: at(1_000) }]);
+  const timed = buildMessageTimelineEntries(messages, [], [], [{ entryId: "a", anchorMessageId: "gone", startedAt: at(1_000) }]);
   assert.deepEqual(timed.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "m2", "agent-startup:a", "m3"]);
   assert.equal(timed.find((item) => item.type === "agent-startup")?.type === "agent-startup"
     && timed.find((item) => item.type === "agent-startup")!.id, "agent-startup:a");

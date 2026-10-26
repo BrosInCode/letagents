@@ -33,8 +33,11 @@ test('typing renders in the pinned live strip, outside the scrolling list and ou
     const template = read(path).split('</template>\n\n<script')[0]
     const strip = template.indexOf('class="room-live-strip"')
     assert.ok(strip > template.indexOf(list), path)
-    assert.ok(template.indexOf('<TypingIndicator', strip) > strip, path)
-    assert.ok(template.indexOf('class="room-local-agent-work-list"') > strip, 'working agents share the strip')
+    // The desktop strip is its activity line: typing is its lowest-priority pill, beside the working agents.
+    const typingAt = path.includes('apps/desktop') ? template.indexOf(':typing-names=', strip) : template.indexOf('<TypingIndicator', strip)
+    assert.ok(typingAt > strip, path)
+    const workAt = path.includes('apps/desktop') ? template.indexOf(':work=', strip) : template.indexOf('class="room-local-agent-work-list"')
+    assert.ok(workAt > strip, 'working agents share the strip')
     // The strip is a sibling of the scroll container, so no list ancestor is still open at that point.
     const before = template.slice(0, template.lastIndexOf('<div', strip))
     const open = (before.match(/<div\b/g) || []).length - (before.match(/<\/div>/g) || []).length

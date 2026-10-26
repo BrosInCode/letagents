@@ -1,12 +1,15 @@
 import { formatDate, syncTimeZone, timeZoneEpoch } from "../../../../domain/formatters";
 import { contributionChanges } from "../../../../domain/room-contributions";
 import type { DesktopRoomAgentWork, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type { PresenceTimelineLine } from "./room-activity";
 
 const compactContinuationWindowMs = 5 * 60 * 1000;
 
 export type MessageTimelineEntry =
   | { type: "contribution"; id: string; work: DesktopRoomAgentWork }
   | { type: "agent-startup"; id: string; entryId: string }
+  /** A quiet "Juniper joined" or "Juniper left" line, seen in this window only. */
+  | { type: "presence"; id: string; line: PresenceTimelineLine }
   | {
       type: "date";
       id: string;
@@ -27,6 +30,7 @@ interface TimelineItem {
   message?: DesktopRoomMessage;
   work?: DesktopRoomAgentWork;
   startupEntryId?: string;
+  presence?: PresenceTimelineLine;
 }
 
 /** An agent start-up row: under the person's first message to it, or at the time it started. */
@@ -39,6 +43,7 @@ export interface TimelineAgentStartup {
 export function buildMessageTimelineEntries(
   messages: readonly DesktopRoomMessage[],
   work: readonly DesktopRoomAgentWork[] = [],
+  presence: readonly PresenceTimelineLine[] = [],
   startups: readonly TimelineAgentStartup[] = [],
 ): MessageTimelineEntry[] {
   const entries: MessageTimelineEntry[] = [];
@@ -63,6 +68,9 @@ export function buildMessageTimelineEntries(
       const timestamp = Date.parse(source) > Date.parse(captured) ? source : captured;
       ordered.push({ timestamp, time: Date.parse(timestamp), id: `contribution:${entry.attemptId}`, work: entry });
     }
+  }
+  for (const line of presence) {
+    ordered.push({ timestamp: line.timestamp, time: Date.parse(line.timestamp), id: line.id, presence: line });
   }
   const anchoredStartups: Array<{ item: TimelineItem; anchorId: string }> = [];
   if (startups.length) {
@@ -103,6 +111,11 @@ export function buildMessageTimelineEntries(
 
     if (item.startupEntryId) {
       entries.push({ type: "agent-startup", id: item.id, entryId: item.startupEntryId });
+      previousMessage = null;
+      continue;
+    }
+    if (item.presence) {
+      entries.push({ type: "presence", id: item.id, line: item.presence });
       previousMessage = null;
       continue;
     }

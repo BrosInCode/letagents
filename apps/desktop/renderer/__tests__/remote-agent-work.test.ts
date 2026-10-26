@@ -91,41 +91,32 @@ test("the room shell adds remote rows after its local rows", () => {
   assert.match(shell, /\], \[\.\.\.pendingResponseParticipants\.value, [^\n]*\.\.\.remoteAgentWorkIndicators\(props\.presence,\s*supervisorEntries\.value, \[\], workWindowNow\.value\)\], props\.messages\)/);
 });
 
-test("the live strip shows a remote row as a label with the same look, marked data-remote, that opens nothing", async () => {
+test("the activity line counts a remote agent with the local ones, and its row is marked data-remote and opens nothing", async () => {
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
     const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue")).default;
     const localRow: ManagedAgentWorkIndicator = { id: "supervised_1", displayName: "Oak", summary: "Writing a response",
       startedAt: "2026-10-15T09:59:00.000Z", agentSessionId: "session_oak", agentKey: "EmmyMay/oak" };
     const [remoteRow] = remoteAgentWorkIndicators([presence("Birch", { statusText: "Reading `app.ts`" })], [], [], NOW);
-    const rendered = await renderToString(createSSRApp(component, {
+    const render = async (localAgentWork: ManagedAgentWorkIndicator[]) => (await renderToString(createSSRApp(component, {
       active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
       loadingOlderMessages: false, messages: [], threadMessages: [], messageNamespace: "remote-rows",
-      localAgentWork: [localRow, remoteRow], deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+      localAgentWork, deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
       roomIdentifier: "room_1", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
-    }));
-    const html = rendered.replace(/ data-v-[a-f0-9]+/g, "");
-    const rows = [...html.matchAll(/<(button|div)[^>]*data-testid="room-local-agent-work"[^>]*>[\s\S]*?<\/\1>/g)].map(match => match[0]);
-    assert.equal(rows.length, 2);
-    assert.match(rows[0]!, /^<button/);
-    assert.doesNotMatch(rows[0]!, /data-remote/);
-    assert.match(rows[0]!, /aria-label="Oak: Writing a response\. Open live activity"/);
-    const remote = rows[1]!;
-    assert.match(remote, /^<div/, "not a button: this desktop has no live stream to open for it");
-    assert.match(remote, /data-remote="true"/);
-    assert.match(remote, /class="room-local-agent-work"/, "the same row, with the same look");
-    assert.match(remote, /aria-label="Birch is working: Reading `app.ts`"/);
-    assert.doesNotMatch(remote, /Open live activity/);
-    assert.match(remote, /<strong>Birch<\/strong><span>·<\/span><span data-testid="room-local-agent-work-echo">Reading `app.ts`<\/span>/);
+    }))).replace(/ data-v-[a-f0-9]+/g, "");
+    const both = await render([localRow, remoteRow!]);
+    assert.match(both, /<strong>2 agents<\/strong> <span class="room-activity-shimmer">are working<\/span>/);
+    assert.equal(both.match(/class="room-activity-anchor"/g)?.length, 2, "each agent, remote too, has a reply anchor");
+    const remoteOnly = await render([remoteRow!]);
+    assert.match(remoteOnly, /<strong>Birch<\/strong> <span class="room-activity-shimmer" data-testid="room-activity-live-echo">Reading `app.ts`<\/span>/);
   } finally { await vite.close(); }
 });
 
-test("a remote row has no click handler and no hover or press look", () => {
-  const viewport = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/RoomMessageViewport.vue", import.meta.url)), "utf8");
-  const remote = /<div\s+v-if="work\.remote"[\s\S]*?<\/div>/.exec(viewport)?.[0] ?? "";
-  assert.ok(remote);
-  assert.doesNotMatch(remote, /@click|open-agent|workIndicatorAgentTarget/);
-  const css = readFileSync(fileURLToPath(new URL("../../../../shared/ui/room-agent-work.css", import.meta.url)), "utf8");
-  assert.match(css, /\.room-local-agent-work\[data-remote\]\s*\{\s*cursor:\s*default;/);
-  assert.match(css, /\.room-local-agent-work\[data-remote\]:hover\s*\{\s*background:\s*transparent;/);
+test("a remote row has no Open button and no hover look", () => {
+  const line = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/RoomActivityLine.vue", import.meta.url)), "utf8");
+  assert.match(line, /:data-remote="work\.remote \|\| undefined"/);
+  // Open is the row's only way to the agent, and a remote agent has no live stream on this desktop.
+  assert.match(line, /<button\s+v-if="!work\.remote"[\s\S]*?@click="openWork\(work\)"/);
+  const css = readFileSync(fileURLToPath(new URL("../src/styles/room-activity-line.css", import.meta.url)), "utf8");
+  assert.match(css, /\.room-activity-row\[data-remote\]:hover\s*\{\s*background:\s*transparent;/);
 });

@@ -4,19 +4,31 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { repoEnvironmentRoomRefLabel } from "../../../../domain/repo-environment";
 import type { GitHubEventPresentation } from "../desktop-chat-message/types";
-import type { ComposerEventPreview } from "./RoomComposerEventChips.vue";
+
+/** A GitHub update shown for a short time on the room's activity line. */
+export interface ComposerEventPreview {
+  id: string;
+  kind: "pull-request" | "issue" | "review" | "comment" | "check" | "repository" | "generic";
+  tone: "violet" | "amber" | "emerald" | "rose" | "sky" | "slate";
+  kindLabel: string;
+  statusLabel: string | null;
+  headline: string;
+  repositoryLabel: string | null;
+  refLabel: string | null;
+  numberLabel: string | null;
+  stats: { additions: string; deletions: string } | null;
+  actionLabel: string | null;
+  url: string | null;
+}
 
 /**
- * A GitHub update shown in the composer is a short-lived notification. It is
- * never sent with the message, but while someone is writing it reads as
- * attached, so it stays hidden then; its timer keeps running, so it is gone
- * for good once that expires.
+ * A GitHub update on the activity line is a short-lived notification. It is
+ * never sent with a message, but while someone is writing it reads as
+ * attached, so it stays off the line then; its timer keeps running, so it is
+ * gone for good once that expires.
  */
-export function visibleComposerEventPreviews<T>(
-  previews: readonly T[],
-  composer: { draft: string; attachmentCount: number; replying: boolean },
-): readonly T[] {
-  return composer.draft.trim() || composer.attachmentCount > 0 || composer.replying ? [] : previews;
+export function composerDrafting(composer: { draft: string; attachmentCount: number; replying: boolean }): boolean {
+  return Boolean(composer.draft.trim()) || composer.attachmentCount > 0 || composer.replying;
 }
 
 export function buildComposerEventPreview(

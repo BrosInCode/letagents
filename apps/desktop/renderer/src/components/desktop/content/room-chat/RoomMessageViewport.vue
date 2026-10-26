@@ -33,6 +33,12 @@
             @setup="emit('open-add-agent')"
           />
         </template>
+        <p
+          v-else-if="entry.type === 'presence'"
+          class="room-presence-line"
+          :data-kind="entry.line.kind"
+          data-testid="room-presence-line"
+        ><span aria-hidden="true"></span>{{ entry.line.text }}</p>
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <RoomGitHubUpdates v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
@@ -141,84 +147,22 @@
       {{ unreadCount > 0 ? `↓ ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : "↓ Scroll to latest" }}
     </button>
     </div>
-    <!-- Live strip: who is working or typing right now. It sits outside the
-         scrolling list so it stays in view while the reader is in older history. -->
+    <!-- Live strip: one floating activity line, outside the scrolling list, so it
+         stays in view while the reader is in older history and never moves the
+         input. Replies fly out of its work anchors (useRoomMessageMotion). -->
     <div ref="liveStripElement" class="room-live-strip" data-testid="room-live-strip">
-      <div
-        v-if="displayedAgentWork.length && !roomLoading"
-        class="room-local-agent-work-list"
-        data-testid="room-local-agent-work-list"
-      >
-        <div v-for="work in collapsedAgentWork.visible" :key="work.id" class="room-local-agent-work-group">
-          <!-- Another member's agent, known from room presence only: a label, since this desktop has no live stream to open. -->
-          <div
-            v-if="work.remote"
-            data-motion-work=""
-            :data-motion-session="work.agentSessionId"
-            :data-motion-agent="work.agentKey"
-            data-remote="true"
-            role="group"
-            class="room-local-agent-work"
-            :aria-label="`${work.displayName} is working: ${work.summary}`"
-            data-testid="room-local-agent-work"
-          >
-            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-            <span class="room-local-agent-work-copy" aria-hidden="true">
-              <strong>{{ work.displayName }}</strong>
-              <span>·</span>
-              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
-            </span>
-            <span class="room-local-agent-work-dots" aria-hidden="true">
-              <i></i>
-              <i></i>
-              <i></i>
-            </span>
-          </div>
-          <button
-            v-else
-            :data-motion-work="work.awaitingRoomTurn ? undefined : ''"
-            :data-motion-session="work.agentSessionId"
-            :data-motion-agent="work.agentKey"
-            :data-motion-after="work.sourceMessageId"
-            :data-waiting="work.waiting || undefined"
-            type="button"
-            class="room-local-agent-work"
-            :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
-            data-testid="room-local-agent-work"
-            @click="$emit('open-agent', workIndicatorAgentTarget(work))"
-          >
-            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-            <span class="room-local-agent-work-copy">
-              <strong>{{ work.displayName }}</strong>
-              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
-            </span>
-            <span class="room-local-agent-work-dots" aria-hidden="true">
-              <i></i>
-              <i></i>
-              <i></i>
-            </span>
-          </button>
-          <button
-            v-if="work.waitsForBackgroundWork"
-            type="button"
-            class="room-local-agent-work-action"
-            title="Post the answer that the agent has now. A command in the background keeps running. A sub-agent that still runs is stopped. No later result is posted."
-            data-testid="room-local-agent-work-post-now"
-            @click="$emit('post-agent-answer-now', work.id, work.sourceMessageId ?? null)"
-          >
-            Post answer now
-          </button>
-        </div>
-        <p
-          v-if="collapsedAgentWork.hiddenCount > 0"
-          class="room-local-agent-work-overflow"
-          data-testid="room-local-agent-work-overflow"
-          aria-live="polite"
-        >
-          {{ workIndicatorOverflowLabel(collapsedAgentWork) }}
-        </p>
-      </div>
-      <TypingIndicator :key="roomIdentifier ?? ''" :names="roomLoading ? [] : typingNames ?? []" :color-for="typingColor" />
+      <RoomActivityLine
+        :notice="roomLoading ? null : activityNotice ?? null"
+        :steer="steerOffer ?? null"
+        :steer-disabled="steerDisabled"
+        :work="roomLoading ? [] : displayedAgentWork"
+        :typing-names="roomLoading ? [] : typingNames ?? []"
+        @hold="$emit('activity-hold', $event)"
+        @steer="$emit('steer')"
+        @open-agent="$emit('open-agent', workIndicatorAgentTarget($event))"
+        @open-event-preview="$emit('open-event-preview', $event)"
+        @post-agent-answer-now="(agentId, sourceMessageId) => $emit('post-agent-answer-now', agentId, sourceMessageId)"
+      />
     </div>
   </div>
 </template>
@@ -230,7 +174,9 @@ import { createGitHubTimeline } from "../../../../../../../../shared/grouped-git
 import { parseGitHubEvent } from "../desktop-chat-message/github-event";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
-import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
+import RoomActivityLine from "./RoomActivityLine.vue";
+import type { ActivityNotice, ActivitySteerOffer, PresenceTimelineLine } from "./room-activity";
+import type { ComposerEventPreview } from "./composer-event-preview";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, shallowRef, watch } from "vue";
@@ -248,8 +194,6 @@ import type {
 import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
-  collapseWorkIndicators,
-  workIndicatorOverflowLabel,
   workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
@@ -261,7 +205,7 @@ import { useAgentStartupRows } from "./useAgentStartupRows";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
-import { getSenderColor, parseSenderIdentity } from "../desktop-chat-message/identity";
+import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import type { PersonTarget } from "../../../../domain/person-target";
@@ -315,8 +259,15 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
-  /** People typing in this room now; shown as the last row of the live strip. */
+  /** People typing in this room now; the lowest-priority pill on the activity line. */
   typingNames?: readonly string[];
+  /** The short notice on the activity line now (a join, a leave, a GitHub update). */
+  activityNotice?: ActivityNotice | null;
+  /** A draft that names an agent mid-turn: the line offers Steer. */
+  steerOffer?: ActivitySteerOffer | null;
+  steerDisabled?: boolean;
+  /** Quiet join and leave lines in the timeline. */
+  presenceLines?: readonly PresenceTimelineLine[];
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
@@ -343,6 +294,9 @@ const emit = defineEmits<{
   "open-agent": [target: AgentModalTarget];
   "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
+  "activity-hold": [held: boolean];
+  steer: [];
+  "open-event-preview": [preview: ComposerEventPreview];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "reveal-thread": [messageId: string];
@@ -380,7 +334,6 @@ const emptyStateDescription = computed(() => {
 
 const messagesElement = ref<HTMLElement | null>(null);
 const liveStripElement = ref<HTMLElement | null>(null);
-const typingColor = (name: string) => getSenderColor(name, null);
 const unreadRoom = computed(() => props.roomIdentifier);
 provide(unreadMenuKey, { client: roomUnread, room: unreadRoom });
 const revealUnreadMessage = inject(unreadRevealKey, null);
@@ -464,7 +417,7 @@ const { pushActionToast } = useDesktopActionToasts();
 function startupAction(action: (entryId: string) => Promise<void>, entryId: string, failed: string): void {
   action(entryId).catch((error: unknown) => pushActionToast(`${failed} ${safeUserVisibleErrorDetail(error, "Try again.")}`, "error"));
 }
-const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, timelineStartups.value),
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, props.presenceLines, timelineStartups.value),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 // Bounded mount window (see message-window.ts): only a contiguous range of
 // the timeline is mounted.
@@ -765,6 +718,11 @@ const messageMotion = useRoomMessageMotion({
   onInterrupt: () => workHandoff.clear(),
 });
 
+// A join or leave line is added at the bottom: a reader there stays with the latest.
+watch(() => props.presenceLines?.length ?? 0, (count, previous) => {
+  if (count > previous && isScrolledToBottom && !shouldRestoreInitialScroll) followLatestAfterLayout();
+});
+
 // A no-reply turn can add a contribution without adding a chat message.
 watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution').map(entry => entry.id).join('|'), async () => {
   if (shouldRestoreInitialScroll) return;
@@ -828,8 +786,6 @@ watch(
   () => applyEchoCoalescing(),
   { immediate: true, deep: true },
 );
-
-const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value, 0));
 
 watch(
   // Key off the rate-limited displayed set (not raw props) so scroll effects

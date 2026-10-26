@@ -22,6 +22,8 @@ export function useAgentPresenceChips(input: {
   presence: () => readonly DesktopAgentPresence[];
   scope: () => string | null;
   ready: () => boolean;
+  /** Every change, before the visible list drops any: the room's activity line and timeline follow these. */
+  onChanges?: (changes: PresenceChip[]) => void;
 }): { chips: Ref<PresenceChip[]> } {
   const chips = ref<PresenceChip[]>([]);
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -68,6 +70,7 @@ export function useAgentPresenceChips(input: {
       kind,
       id: `${agent.key}:${kind}:${sequence += 1}`,
     }));
+    input.onChanges?.(added);
     const visible = mergePresenceChips(chips.value, added);
     const visibleIds = new Set(visible.map((chip) => chip.id));
     for (const [id, timer] of timers) {
