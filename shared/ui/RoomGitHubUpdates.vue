@@ -51,7 +51,8 @@ const unseen = ref(new Set<string>());
 const scrollers = new Map<string, HTMLElement>();
 const positions = new Map<string, { top: number; bottom: boolean; id?: string; offset?: number }>();
 const instanceId = useId();
-const rows = computed(() => githubUpdateRows(props.messages, props.parseEvent));
+// A plain (ungrouped) message renders through the slot only: it has no rows.
+const rows = computed(() => props.grouped ? githubUpdateRows(props.messages, props.parseEvent) : []);
 // Bounded mode (desktop): a long run of events mounts at most rowLimit rows,
 // and no closed history. A row stays mounted once it has been opened.
 const shownCount = ref(props.rowLimit ?? Number.POSITIVE_INFINITY);
@@ -94,7 +95,11 @@ async function toggleGroup(event: MouseEvent) {
   emit('rowsChanged');
 }
 async function toggle(key: string, event: MouseEvent) { instant.value = event.detail === 0; emit('layoutStart'); const showing = !open.value.has(key); if (showing) { open.value.add(key); rendered.value.add(key); } else open.value.delete(key); await nextTick(); if (showing) restoreHistory(key); emit('rowsChanged'); }
-watch(() => rows.value.map(row => ({ key: row.key, last: row.messages.at(-1)?.id, count: row.messages.length })), async (next, before) => {
+// One string per row set, so the watch runs only when a row really changes.
+const rowSignature = computed(() => JSON.stringify(rows.value.map(row => [row.key, row.messages.at(-1)?.id, row.messages.length])));
+watch(rowSignature, async (signature, beforeSignature) => {
+  const next = rowItems(signature);
+  const before = beforeSignature === undefined ? undefined : rowItems(beforeSignature);
   for (const row of next) {
     const position = positions.get(row.key);
     if (position && !position.bottom && before?.find(item => item.key === row.key)?.last !== row.last) unseen.value.add(row.key);
@@ -104,6 +109,9 @@ watch(() => rows.value.map(row => ({ key: row.key, last: row.messages.at(-1)?.id
   if (!collapsed.value) for (const key of open.value) restoreHistory(key);
   emit('rowsChanged');
 });
+function rowItems(signature: string): Array<{ key: string; last: string | undefined; count: number }> {
+  return (JSON.parse(signature) as Array<[string, string | null, number]>).map(([key, last, count]) => ({ key, last: last ?? undefined, count }));
+}
 // The owning timeline sends this before its existing reveal/scroll path. Keep
 // original message DOM identities inside the history; hidden rows aren't read.
 function reveal(event: Event) {

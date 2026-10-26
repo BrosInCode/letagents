@@ -25,9 +25,9 @@
         </div>
 
         <template v-else-if="entry.type === 'agent-startup'">
-          <RoomAgentStartupRow
-            v-if="startupViews.get(entry.entryId)"
-            :view="startupViews.get(entry.entryId)!"
+          <RoomAgentStartupEntry
+            :entry-id="entry.entryId"
+            :view-for="startupViewFor"
             @retry="startupAction(retryStartup, $event, 'Could not start the agent again.')"
             @cancel="startupAction(cancelStartup, $event, 'Could not cancel the agent.')"
             @setup="emit('open-add-agent')"
@@ -40,7 +40,7 @@
           data-testid="room-presence-line"
         ><span aria-hidden="true"></span>{{ entry.line.text }}</p>
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
-        <RoomGitHubUpdates v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
+        <component :is="entry.type === 'github-group' ? RoomGitHubUpdates : PlainTimelineRow" v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : singleMessageList(entry.message)" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
         <div v-if="message.id === unreadTimeline.dividerId.value && !hiddenPinnedIds.has(message.id)" class="room-explicit-unread" role="separator">New messages</div>
         <DesktopChatMessage
@@ -77,13 +77,9 @@
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
-        >
-          <template v-if="message.id === activeThreadParentId" #thread>
-            <slot name="thread" />
-          </template>
-        </DesktopChatMessage>
+        />
         </template>
-        </RoomGitHubUpdates>
+        </component>
       </template>
       <!-- Newer loaded rows below a detached window mount when this gap nears the view. -->
       <div
@@ -179,7 +175,7 @@ import type { ActivityNotice, ActivitySteerOffer, PresenceTimelineLine } from ".
 import type { ComposerEventPreview } from "./composer-event-preview";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, shallowRef, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, shallowRef, useSlots, watch, type FunctionalComponent } from "vue";
 import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
@@ -199,12 +195,13 @@ import {
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
 import { workIndicatorAgentTarget } from "../../../../domain/agent-inspector-identity";
-import RoomAgentStartupRow from "./RoomAgentStartupRow.vue";
+import RoomAgentStartupEntry from "./RoomAgentStartupEntry.vue";
 import RoomContribution from "./RoomContribution.vue";
 import { useAgentStartupRows } from "./useAgentStartupRows";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
+import { inlineThreadKey } from "../desktop-chat-message/inline-thread";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
@@ -407,8 +404,28 @@ const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
   props.participants, props.presence, props.supervisorEntries,
 ));
 const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
+// The open thread reaches its root row by injection, not a per-row slot.
+const slots = useSlots();
+provide(inlineThreadKey, () => slots.thread?.());
+/*
+ * A plain message row: the message itself, through the same slot a GitHub
+ * group uses. It is stateless, so a list redraw does not run a group's
+ * computed rows and watchers once per message.
+ */
+const PlainTimelineRow: FunctionalComponent<{ messages: readonly DesktopRoomMessage[] }> = (rowProps, { slots }) =>
+  slots.default?.({ message: rowProps.messages[0], history: false });
+PlainTimelineRow.props = ["messages", "grouped", "lazyHistory", "rowLimit", "anchorId", "parseEvent"];
+PlainTimelineRow.emits = ["layoutStart", "layoutSettled"];
+// A plain row gets its message as a one-item list. The same message keeps the
+// same list, so a timeline rebuild leaves the row's props unchanged.
+const singleMessageLists = new WeakMap<DesktopRoomMessage, readonly DesktopRoomMessage[]>();
+function singleMessageList(message: DesktopRoomMessage): readonly DesktopRoomMessage[] {
+  let list = singleMessageLists.get(message);
+  if (!list) singleMessageLists.set(message, list = [message]);
+  return list;
+}
 const {
-  views: startupViews,
+  viewFor: startupViewFor,
   timelineStartups,
   retry: retryStartup,
   cancel: cancelStartup,
@@ -743,13 +760,14 @@ watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution')
 let echoState: WorkIndicatorEchoState = {};
 let echoFlushTimer: number | null = null;
 const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
+// Room and thread messages in room order, sorted once for both readers below.
+const sortedVisibleMessages = computed(() => [...props.messages, ...props.threadMessages].sort(compareRoomMessages));
 const currentLocalAgentWork = computed(() => {
   if (!props.localAgentWork.length) return [];
   // Public room order is the causal clock here. Provider activity timestamps
   // come from the local host while message timestamps come from the server, so
   // comparing them can suppress a genuinely new turn when the clocks differ.
-  const visibleMessages = [...props.messages, ...props.threadMessages].sort(compareRoomMessages);
-  return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, visibleMessages));
+  return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, sortedVisibleMessages.value));
 });
 
 const workHandoff = useRoomWorkHandoff({
@@ -758,7 +776,7 @@ const workHandoff = useRoomWorkHandoff({
   after: work => work.awaitingRoomTurn ? null : work.sourceMessageId,
   // A thread reply retires its source work just like a main-timeline reply.
   // Keep the animation watcher above restricted to rows rendered in this list.
-  messages: () => [...props.messages, ...props.threadMessages].sort(compareRoomMessages).map(toMotionMessage),
+  messages: () => sortedVisibleMessages.value.map(toMotionMessage),
   scope: () => props.messageNamespace,
   enabled: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll && isScrolledToBottom,
 });
@@ -781,10 +799,12 @@ function applyEchoCoalescing(): void {
   }
 }
 
+// The handoff always assigns a new list (and itself watches the work deeply),
+// so a shallow watch sees every change.
 watch(
   workHandoff.work,
   () => applyEchoCoalescing(),
-  { immediate: true, deep: true },
+  { immediate: true },
 );
 
 watch(
