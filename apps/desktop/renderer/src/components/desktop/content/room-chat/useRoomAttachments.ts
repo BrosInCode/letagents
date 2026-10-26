@@ -52,7 +52,11 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
   }
 
   async function stageDroppedAttachments(files: File[]): Promise<void> {
-    if (attaching.value || files.length === 0) return;
+    if (files.length === 0) return;
+    if (attaching.value) {
+      attachmentError.value = "Wait for the current attachment to finish, then add this one again.";
+      return;
+    }
     if (!options.roomIdentifier.value) {
       attachmentError.value = "Choose a room before attaching files.";
       return;

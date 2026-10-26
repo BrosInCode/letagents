@@ -1,18 +1,11 @@
 .desktop-composer-input-row {
   position: relative;
   display: grid;
-  /* add-agent, textarea, trailing actions group. Keep trailing controls
-     inside .desktop-composer-actions so optional buttons never add a track. */
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* "+", the input and send. Everything else lives in the "+" menu, so the
+     bar never grows a track. */
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
   align-items: end;
   gap: 7px;
-}
-
-.desktop-composer-actions {
-  display: flex;
-  align-items: flex-end;
-  gap: 7px;
-  min-width: 0;
 }
 
 .desktop-composer-events {
@@ -223,7 +216,7 @@
 
 .desktop-composer-input {
   width: 100%;
-  min-height: 38px;
+  min-height: 34px;
   max-height: 156px;
   resize: none;
   overflow-y: hidden;
@@ -234,7 +227,19 @@
   font: inherit;
   font-size: 0.88rem;
   line-height: 1.42;
-  padding: 8px 3px;
+  padding: 7px 3px;
+}
+
+.desktop-composer-input::placeholder {
+  color: var(--text-tertiary);
+  opacity: 1;
+}
+
+/* One line of placeholder, so it never makes the empty input taller. */
+.desktop-composer-input:placeholder-shown {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-composer-input:disabled {
@@ -285,32 +290,6 @@
 
 .desktop-composer-send .lucide-loader-circle {
   animation: composer-send-spin 700ms linear infinite;
-}
-
-.desktop-composer-attach {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text-secondary);
-}
-
-.desktop-composer-attach svg {
-  width: 15px;
-  height: 15px;
-}
-
-.desktop-composer-attach:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-  color: var(--text);
-}
-
-.desktop-composer-attach:disabled {
-  cursor: not-allowed;
-  opacity: 0.48;
 }
 
 .desktop-composer-send:disabled {
