@@ -329,7 +329,6 @@ const emit = defineEmits<{
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
 }>();
 
-const maxComposerInputHeight = 156;
 const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
 const typing = useRoomTyping(computed(() => props.roomIdentifier ?? ""));
 watch(draft, value => { if (!value) typing.stop(); });
@@ -686,7 +685,6 @@ watch(
     dismissedHostApprovalIds.value = new Set();
     void refreshRoomHostApprovals();
     mentionQuery.value = null;
-    void nextTick(syncTextareaHeight);
   },
 );
 
@@ -697,14 +695,6 @@ watch(
       void nextTick(() => textareaElement.value?.focus());
     }
   },
-);
-
-watch(
-  draft,
-  () => {
-    void nextTick(syncTextareaHeight);
-  },
-  { flush: "post" },
 );
 
 onMounted(() => {
@@ -719,7 +709,6 @@ onMounted(() => {
     if (props.roomIdentifier && hostApprovalPollDue(props.roomIdentifier)) void refreshRoomHostApprovals();
   }, 3_000);
   stopApprovalPushes = props.roomIdentifier ? watchHostApprovalPushes(props.roomIdentifier) : null;
-  void nextTick(syncTextareaHeight);
 });
 
 // The push subscription follows the visible room; the tick above already follows it.
@@ -904,7 +893,6 @@ function setDraftAndFocus(text: string): void {
   draft.value = text;
   handleDraftInput();
   void nextTick(() => {
-    syncTextareaHeight();
     const input = textareaElement.value;
     input?.focus();
     input?.setSelectionRange(text.length, text.length);
@@ -993,20 +981,10 @@ function focusWithMention(mentionText: string): void {
   draft.value = `${draft.value}${separator}@${mentionText} `;
   mentionQuery.value = null;
   void nextTick(() => {
-    syncTextareaHeight();
     const input = textareaElement.value;
     input?.focus();
     input?.setSelectionRange(draft.value.length, draft.value.length);
   });
-}
-
-function syncTextareaHeight(): void {
-  const input = textareaElement.value;
-  if (!input) return;
-  input.style.height = "auto";
-  const nextHeight = Math.min(input.scrollHeight, maxComposerInputHeight);
-  input.style.height = `${Math.max(nextHeight, 34)}px`;
-  input.style.overflowY = input.scrollHeight > maxComposerInputHeight ? "auto" : "hidden";
 }
 
 defineExpose({ focusWithMention, drafting, steerOffer, steer });

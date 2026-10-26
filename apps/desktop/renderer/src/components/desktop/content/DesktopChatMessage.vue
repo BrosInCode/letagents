@@ -214,7 +214,7 @@
         <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
       </button>
         <ThreadTransition>
-          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
+          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread"><component :is="inlineThread" v-if="inlineThread" /></slot></div>
         </ThreadTransition>
       </div>
 
@@ -405,6 +405,7 @@
 </template>
 
 <script setup lang="ts">
+import { inlineThreadKey } from "./desktop-chat-message/inline-thread";
 import RoomGif from "./room-chat/RoomGif.vue";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
@@ -715,6 +716,7 @@ const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
+const inlineThread = inject(inlineThreadKey, null);
 const replyPreviewText = computed(() => truncate((props.message.replyTo
   ? roomMessageVisibleText(props.message.replyTo, attentionResponseAgentNames?.value)
   : "").replace(/\s+/g, " ").trim(), 160));

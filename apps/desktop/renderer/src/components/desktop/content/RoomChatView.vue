@@ -52,7 +52,7 @@
           :room-delivery-skip-keys="roomDeliverySkipKeys"
           :participants="participants"
           :presence="presence"
-          :supervisor-entries="roomSupervisorEntries"
+          :supervisor-entries="timelineSupervisorEntries"
           @reveal-message="requestMessageReveal"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
@@ -248,6 +248,8 @@ import { useRoomActivity } from "../../../composables/useRoomActivity";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomAskBar from "./asks/RoomAskBar.vue";
 import type { ComposerEventPreview } from "./room-chat/composer-event-preview";
+import { stableSteerOffer, type ActivitySteerOffer } from "./room-chat/room-activity";
+import { supervisorEntriesIgnoringActivity } from "../../../domain/supervisor-entries-resource";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
@@ -322,12 +324,16 @@ provideRoomMessageReactions(useRoomMessageReactions(
  * The manifest is the authoritative local record even when older message and
  * participant snapshots contain only the generic "Supervisor worker" label.
  */
-const roomSupervisorEntries = computed(() => {
+const roomSupervisorEntries = computed<DesktopSupervisorManifestEntry[]>((previous) => {
   const roomIdentifier = normalizeManagedAgentRoomIdentifier(props.roomIdentifier);
-  return (props.supervisorEntries ?? []).filter((entry) =>
+  const next = (props.supervisorEntries ?? []).filter((entry) =>
     normalizeManagedAgentRoomIdentifier(entry.roomId) === roomIdentifier
   );
+  return previous?.length === next.length && next.every((entry, index) => entry === previous[index]) ? previous : next;
 });
+// The timeline's copy changes only when something it renders changes.
+const timelineSupervisorEntries = computed<DesktopSupervisorManifestEntry[]>((previous) =>
+  supervisorEntriesIgnoringActivity(previous, roomSupervisorEntries.value));
 
 const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void, gif?: RoomGif | null];
@@ -376,10 +382,10 @@ const roomActivity = useRoomActivity({
   eventPreviews: () => props.composerEventPreviews,
   drafting: () => roomComposer.value?.drafting ?? false,
 });
-const steerOffer = computed(() => {
-  const offer = roomComposer.value?.steerOffer;
-  return offer ? { entryId: offer.target.entryId, displayName: offer.target.displayName } : null;
-});
+// The same object while the target is the same, so typing more of the draft
+// does not redraw the message list.
+const steerOffer = computed<ActivitySteerOffer | null>((previous) =>
+  stableSteerOffer(previous, roomComposer.value?.steerOffer?.target));
 function steerComposerDraft(): void {
   roomComposer.value?.steer((opened, displayName) => {
     if (opened) roomActivity.confirmSteer(displayName);
