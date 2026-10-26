@@ -26,7 +26,8 @@ export function executionApprovalProjectionPathsAreSafe(paths) {
   });
 }
 
-const SECRET_FOLDERS = new Set([
+/** Folder names that hold credentials or an agent tool's private configuration, wherever they are. */
+export const CREDENTIAL_FOLDER_NAMES = new Set([
   ".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker", ".terraform",
   ".codex", ".claude", ".cursor", ".letagents", ".vscode", ".idea", "secrets", "credentials",
 ]);
@@ -50,7 +51,7 @@ export function workspacePathMayHoldCredentials(parts) {
   // Compare what the file system would open: macOS reads a long s as an s, and ignores case.
   const folded = parts.map((part) => part.normalize("NFKC").toLowerCase());
   const name = folded.at(-1) ?? "";
-  return folded.some((part) => SECRET_FOLDERS.has(part))
+  return folded.some((part) => CREDENTIAL_FOLDER_NAMES.has(part))
     || SECRET_NAMES.some((rule) => rule.test(name))
     || !executionApprovalProjectionPathsAreSafe([folded.join("/")]);
 }

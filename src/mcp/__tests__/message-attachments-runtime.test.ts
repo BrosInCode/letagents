@@ -81,19 +81,22 @@ test("the workspace is the checkout around the start folder, and never a home fo
   }
 });
 
-test("a tool's configuration folder in the home folder is not a project, but its worktrees are", async () => {
+test("a tool's configuration folder in the home folder is not a project, but its worktrees and cloud storage are", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "letagents-attach-config-")));
   const home = join(root, "home");
-  const worktree = join(home, ".cursor", "worktrees", "app", "a1b2");
-  for (const folder of [join(home, ".claude"), join(home, ".letagents"), join(home, ".config", "tool"), join(home, "Library", "Tool"), worktree]) {
-    mkdirSync(folder, { recursive: true });
-  }
-  mkdirSync(join(worktree, ".git"));
+  const refused = [".claude", ".letagents", ".ssh", ".docker", ".m2", join(".config", "tool"), join("Library", "Tool"),
+    join("AppData", "Roaming", "Tool"), join(".cursor", "worktrees"), join(".letagents", "repos")].map((folder) => join(home, folder));
+  const allowed = [join(".cursor", "worktrees", "app", "a1b2"), join(".letagents", "worktrees", "app", "attempt-1"),
+    join("Library", "CloudStorage", "Dropbox", "app"), join("Library", "Mobile Documents", "com~apple~CloudDocs", "app"),
+    ".dotfiles", join("code", ".hidden-project")].map((folder) => join(home, folder));
+  for (const folder of [...refused, ...allowed]) mkdirSync(folder, { recursive: true });
   try {
-    for (const folder of [join(home, ".claude"), join(home, ".letagents"), join(home, ".config", "tool"), join(home, "Library", "Tool"), join(home, ".cursor", "worktrees")]) {
+    for (const folder of refused) {
       await startedIn(home, folder, () => assert.rejects(resolveAttachmentWorkspace(), /inside the tool configuration folder/, folder));
     }
-    await startedIn(home, worktree, async () => assert.equal((await resolveAttachmentWorkspace()).workspace, worktree));
+    for (const folder of allowed) {
+      await startedIn(home, folder, async () => assert.equal((await resolveAttachmentWorkspace()).workspace, folder, folder));
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

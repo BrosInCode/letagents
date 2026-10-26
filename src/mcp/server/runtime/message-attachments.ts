@@ -11,6 +11,7 @@ import {
   type MessageAttachmentTransport,
   type StagedCloudMessageAttachment,
 } from "../../../../shared/message-attachments.mjs";
+import { CREDENTIAL_FOLDER_NAMES } from "../../../../shared/credential-paths.mjs";
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import {
   isFileSystemRoot,
@@ -96,18 +97,26 @@ async function stillTheStartFolder(folder: PinnedFolder): Promise<boolean> {
   return (await realpath(folder.real).catch(() => null)) === folder.real;
 }
 
+/** Folders in a home folder that hold tools' settings and credentials, besides the credential folders. */
+const HOME_CONFIGURATION_FOLDERS = new Set([
+  ".config", ".local", ".m2", ".gradle", ".cargo", ".nuget", ".password-store", ".oci", ".pki", "library", "appdata",
+]);
+/** Folders in ~/Library that hold the owner's own files: Dropbox, Google Drive and OneDrive, and iCloud Drive. */
+const LIBRARY_FILE_STORAGE = new Set(["cloudstorage", "mobile documents"]);
+
 /**
- * Home folders that hold a tool's configuration (`~/.claude`, `~/.ssh`,
- * `~/Library`, `%USERPROFILE%/AppData` …) are not projects, except the
- * `worktrees` folder some tools keep inside theirs (`~/.cursor/worktrees`,
- * `~/.letagents/worktrees`), where each checkout is a project.
+ * A tool's configuration folder in the home folder (`~/.claude`, `~/.ssh`,
+ * `~/.config`, `~/Library`, `AppData` …) is not a project. Two kinds of
+ * folder inside them are: the `worktrees` folder some tools keep there
+ * (`~/.cursor/worktrees`, `~/.letagents/worktrees`), where each checkout is
+ * a project, and cloud storage in `~/Library`.
  */
 function insideHomeConfiguration(folder: string, home: string): string | null {
   if (!contains(home, folder) || folder === home) return null;
   const parts = relative(home, folder).split(sep);
-  const first = parts[0]!.normalize("NFKC").toLowerCase();
-  if (!first.startsWith(".") && first !== "library" && first !== "appdata") return null;
-  if (parts[1]?.normalize("NFKC").toLowerCase() === "worktrees" && parts.length >= 3) return null;
+  const [first, second] = parts.map((part) => part.normalize("NFKC").toLowerCase());
+  if (!first || (!CREDENTIAL_FOLDER_NAMES.has(first) && !HOME_CONFIGURATION_FOLDERS.has(first))) return null;
+  if (parts.length >= 3 && (second === "worktrees" || (first === "library" && LIBRARY_FILE_STORAGE.has(second!)))) return null;
   return join(home, parts[0]!);
 }
 

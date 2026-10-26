@@ -179,7 +179,7 @@ existing automatic capture.
 MCP server's working folder), up to 25 MB each and 100 MB together. The project folder is the
 git checkout around the folder the server started in, so set `cwd` in the MCP configuration. A
 home folder, or a tool's configuration folder in it (`~/.claude`, `~/.ssh`, `~/Library` …), is
-never used; the `worktrees` folders of such tools are. The server refuses files outside that folder, files reached through a
+never used; the `worktrees` folders of such tools, and cloud storage in `~/Library`, are. The server refuses files outside that folder, files reached through a
 link, hard links, and files that may hold credentials (`.env*`, keys, `.git`, `.ssh`,
 `.mcp.json` and similar). If any file is refused or fails to upload, nothing is posted. Uploads
 need a signed-in account (`start_device_auth`) and a cloud room; local rooms and the remote
