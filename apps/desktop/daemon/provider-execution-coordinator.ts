@@ -1739,6 +1739,7 @@ export class ProviderExecutionCoordinator {
           launchConfiguration.permission_profile_id,
         );
     const launchSnapshot = deriveProviderConfigurationSnapshot({
+      supervisorEntryId: entry.id,
       provider: launchConfiguration.provider,
       model: launchConfiguration.model,
       reasoningEffort: launchConfiguration.reasoning_effort ?? null,

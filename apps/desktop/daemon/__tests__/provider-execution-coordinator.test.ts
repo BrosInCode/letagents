@@ -32,6 +32,7 @@ import type { ProviderInstallationToken } from "../provider-stream-coordinator.j
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
+import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -2746,6 +2747,31 @@ test("a launch carries the owner's own setup only for the owner's own agent, and
   assert.ok(rental, "the rental still launches");
   assert.equal(Object.hasOwn(rental, "homeHarness"), false);
   assert.deepEqual(rental.launchPolicy, { force: true, sandbox: "enabled" });
+});
+
+test("a given Claude reaches the adapter with no local tools after the daemon rebuilds its launch policy", async () => {
+  const guestPolicy = {
+    permissionMode: "dontAsk", dangerouslySkipPermissions: false,
+    tools: [], allowedTools: ["mcp__letagents__*"], settingSources: "",
+  };
+  for (const stored of [guestPolicy, { ...guestPolicy, letagentsOwnerIsolation: false }]) {
+    let launched = false;
+    const entry: DaemonManifestEntry = {
+      ...baseEntry(), id: "supervised_rental_ask_0123", provider: "claude-code",
+      delivery_mode: "daemon_inbox", permission_profile_id: "read_only", provider_launch_policy: stored,
+    };
+    const runtime = harness({ entry, provider: provider({ spawn: async (input) => {
+      assert.equal(input.supervisorEntryId, entry.id);
+      assert.equal(input.homeHarness, undefined);
+      assert.deepEqual(attestProviderSpawnPolicy("claude-code", input), guestPolicy);
+      launched = true;
+      return returnedHandle;
+    } }) });
+    runtime.options.inbox.cursor = async () => ({ agent_id: entry.id, room_id: entry.room_id, last_observed_message_id: "1" });
+    await runtime.coordinator.converge(entry.id);
+    assert.equal(launched, true, runtime.entry().last_error ?? "the guest reached the adapter");
+    assert.equal(runtime.installed.length, 1);
+  }
 });
 
 test("a Codex agent set to Read-only launches and reattaches with a read-only sandbox and nobody to ask", async () => {

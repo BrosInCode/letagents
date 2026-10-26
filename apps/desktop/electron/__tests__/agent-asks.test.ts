@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { mock } from "node:test";
+import test, { beforeEach, mock } from "node:test";
 
 process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH = join(mkdtempSync(join(tmpdir(), "agent-gifts-")), "gifts.json");
+// Rows are keyed by entry id, so a gift one test leaves running would still be found by the next.
+// Through the journal queue, so an update a still-running watcher queued cannot write it back.
+beforeEach(() => resetAgentGiftJournalForTests());
 const appEvents = new Map<string, (...args: any[]) => void>();
 const appCalls: string[] = [];
 const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClient() { appCalls.push("scheme"); },
@@ -12,10 +15,10 @@ const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClien
   instanceLock: true, requestSingleInstanceLock() { return this.instanceLock; } };
 const autoUpdater = { on() {} };
 mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
-const { AskGiveCoordinator, countUsage, giftEntryId, giftPermissionProfile, mainWindow, resetAgentGiftJournalForTests, usedUpLimit } = await import("../asks/give-coordinator.js");
+const { AskGiveCoordinator, GIVE_UP_PURGE_TRIES, countUsage, giftEntryId, giftPermissionProfile, mainWindow, resetAgentGiftJournalForTests, usedUpLimit } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
 const { askLinkFromArgv, claimDesktopInstance, parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
-const { readFileSync } = await import("node:fs");
+const { readFileSync, writeFileSync } = await import("node:fs");
 
 const TOKEN = "abcdefghijklmnopqrstuvwxyz012345";
 
@@ -33,8 +36,9 @@ test("on Windows and Linux the link is found among the launch arguments", () => 
 });
 
 test("a given agent is always a guest entry, so every rental safeguard applies", () => {
-  assert.match(giftEntryId("ask_1"), /^supervised_rental_ask_[0-9a-f]{32}$/);
-  assert.equal(giftEntryId("ask_1"), giftEntryId("ask_1"));
+  assert.match(giftEntryId("ask_1", "try_1"), /^supervised_rental_ask_[0-9a-f]{32}$/);
+  assert.equal(giftEntryId("ask_1", "try_1"), giftEntryId("ask_1", "try_1"));
+  assert.notEqual(giftEntryId("ask_1", "try_1"), giftEntryId("ask_1", "try_2"), "each attempt is its own entry");
   assert.equal(giftPermissionProfile("cursor"), "sandboxed_write");
   assert.equal(giftPermissionProfile("claude-code"), "read_only");
   assert.equal(giftPermissionProfile("codex"), "read_only");
@@ -55,8 +59,9 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean } = {}) {
+function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>> } = {}) {
   const calls: string[] = [];
+  const requestIds: string[] = [];
   const api = {
     claim: async () => { calls.push("claim"); if (overrides.claimFails) throw new Error("Someone is adding this agent right now."); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
     release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return overrides.release ?? { ok: true }; },
@@ -65,7 +70,7 @@ function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; rea
     models: async () => [{ providerId: "cursor", model: null, label: "Cursor" }, { providerId: "claude-code", model: "claude-opus-5-5", label: "Claude Opus 5.5" }],
     preview: async () => ({ ask: { state: "active", is_giver: true, ...overrides.preview }, unavailable: null }), end: async () => ({}),
   };
-  const entry = { id: giftEntryId("ask_1"), desiredState: "running", agentSessionId: "s", agentSessionBindingState: "active", readyReachedAt: "now", observedState: "running" };
+  const entry = { id: giftEntryId("ask_1", "try_1"), desiredState: "running", agentSessionId: "s", agentSessionBindingState: "active", readyReachedAt: "now", observedState: "running" };
   let stopped = false;
   const states: string[] = [];
   const daemon = {
@@ -74,12 +79,17 @@ function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; rea
     list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed" } : entry],
     getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 },
       ...(overrides.shortUsedPercent === undefined ? [] : [{ id: "five_hour", label: "5 hours", usedPercent: overrides.shortUsedPercent }])] } } }),
-    setDesiredState: async () => { stopped = true; calls.push("stop"); }, purgeAgent: async () => { calls.push("purge"); return { outcome: "purged" }; },
+    setDesiredState: async () => { stopped = true; calls.push("stop"); },
+    purgeAgent: async () => { calls.push("purge"); return overrides.purgeAnswers?.shift() ?? { outcome: "purged" }; },
   };
-  const grants = { createRentalPausedAndInstall: async () => { calls.push("install"); return { entry, agentKey: "john/helper" }; } };
+  const grants = { createRentalPausedAndInstall: async (input: { creationRequestId: string }) => {
+    calls.push("install"); requestIds.push(input.creationRequestId);
+    entry.id = `supervised_${input.creationRequestId}`;
+    return { entry, agentKey: "john/helper" };
+  } };
   const coordinator = new AskGiveCoordinator(api as any, daemon as any, grants as any, () => "host",
     async () => "john/helper", async () => ({ canStart: true }) as any);
-  return { coordinator, calls, states };
+  return { coordinator, calls, states, requestIds };
 }
 
 const give = { token: TOKEN, providerId: "cursor", model: null, modelLabel: "Cursor", amountPercent: 10 };
@@ -97,6 +107,100 @@ test("any failure before joining stops the agent and gives the link back", async
   await assert.rejects(coordinator.give(give), (error: Error) => error instanceof AskGiveError && /request is still open/.test(error.message));
   assert.ok(calls.includes("purge"));
   assert.equal(calls.at(-1), "release:false");
+});
+
+test("every attempt for the same ask starts its own entry", async () => {
+  const first = fakes({ readyFails: true });
+  await assert.rejects(first.coordinator.give(give), /request is still open/);
+  const second = fakes({ readyFails: true });
+  await assert.rejects(second.coordinator.give({ ...give, providerId: "claude-code", model: "claude-opus-5-5" }), /request is still open/);
+  const requestIds = [...first.requestIds, ...second.requestIds];
+  assert.equal(requestIds.length, 2);
+  assert.notEqual(requestIds[0], requestIds[1], "a failed try never blocks the next one on the daemon's creation id");
+  for (const id of requestIds) assert.match(`supervised_${id}`, /^supervised_rental_ask_[0-9a-f]{32}$/);
+});
+
+const journal = () => JSON.parse(readFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, "utf8"));
+const rows = (token: string) => Object.values(journal().gifts as Record<string, any>).filter(gift => gift.token === token);
+const row = (token: string) => rows(token)[0];
+const refused = { outcome: "invalid", error: "Purge requires a fully stopped durable lifecycle." };
+async function quietly<T>(run: () => Promise<T>): Promise<{ result: T; warnings: unknown[][] }> {
+  const warnings: unknown[][] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args); };
+  try { return { result: await run(), warnings }; } finally { console.warn = warn; }
+}
+
+test("a removal the daemon refuses keeps the gift until a later check removes the agent", async () => {
+  // Refused in the failed attempt and again on the watch tick that attempt starts.
+  const { coordinator, calls } = fakes({ readyFails: true, purgeAnswers: [refused, refused] });
+  const { warnings } = await quietly(() => assert.rejects(coordinator.give(give), /request is still open/));
+  assert.equal(calls.at(-1), "release:false", "the link is given back at once");
+  assert.ok(warnings.some(args => String(args[2]).includes("fully stopped durable lifecycle")), "the daemon's reason is logged");
+  await quietly(() => coordinator.watchOnce());
+  coordinator.stopWatching();
+  assert.equal(row(TOKEN)?.purgePending, true, "the agent is remembered as still to remove");
+  assert.equal(row(TOKEN)?.purgeTries, 2);
+  calls.length = 0;
+  await coordinator.watchOnce();
+  assert.deepEqual(calls, ["stop", "purge"], "the next check removes it without asking the server");
+  assert.equal(row(TOKEN), undefined, "and then forgets it");
+});
+
+test("a retry with the same link keeps the failed attempt's agent on the removal list", async () => {
+  const first = fakes({ readyFails: true, purgeAnswers: [refused, refused] });
+  await quietly(() => assert.rejects(first.coordinator.give(give), /request is still open/));
+  await quietly(() => first.coordinator.watchOnce());
+  first.coordinator.stopWatching();
+  const failedEntry = row(TOKEN).entryId;
+  const second = fakes();
+  await second.coordinator.give(give);
+  second.coordinator.stopWatching();
+  assert.equal(rows(TOKEN).length, 2, "the retry's row sits beside the failed attempt's row");
+  const sweeper = fakes();
+  await sweeper.coordinator.watchOnce();
+  assert.ok(sweeper.calls.includes("purge"), "the failed attempt's agent is removed");
+  assert.deepEqual(rows(TOKEN).map(gift => gift.entryId === failedEntry), [false], "and only the running gift stays");
+  await resetAgentGiftJournalForTests();
+});
+
+test("a gift waiting only for its removal no longer counts against what is left to give", async () => {
+  const failed = fakes({ usedPercent: 30, readyFails: true, purgeAnswers: [refused, refused] });
+  await quietly(() => assert.rejects(failed.coordinator.give({ ...give, token: "d".repeat(32), amountPercent: 60 }), /request is still open/));
+  await quietly(() => failed.coordinator.watchOnce());
+  failed.coordinator.stopWatching();
+  assert.equal(row("d".repeat(32))?.purgePending, true);
+  const next = fakes({ usedPercent: 30 });
+  await next.coordinator.give({ ...give, amountPercent: 60 });
+  next.coordinator.stopWatching();
+  await resetAgentGiftJournalForTests();
+});
+
+test("an attempt that died with the app is removed on the next check", async () => {
+  const { writeFileSync } = await import("node:fs");
+  const token = "e".repeat(32);
+  const entryId = giftEntryId("ask_1", "died");
+  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: { [entryId]: {
+    token, askId: "ask_1", entryId, roomId: "room", providerId: "cursor", model: null, amountPercent: 10,
+    windowId: null, lastUsedPercent: null, consumedPercent: 0, starting: true } } }));
+  const { coordinator, calls } = fakes();
+  await coordinator.watchOnce();
+  assert.deepEqual(calls, ["stop", "purge"], "whatever the dead attempt left in the daemon goes, without a server call");
+  assert.equal(row(token), undefined);
+});
+
+test("after enough refusals the agent is left to the owner, so the other gifts' checks go on", async () => {
+  const { writeFileSync } = await import("node:fs");
+  const token = "f".repeat(32);
+  const entryId = giftEntryId("ask_1", "stuck");
+  // An older journal keyed this row by its link token; it is read all the same.
+  writeFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, JSON.stringify({ version: 1, gifts: { [token]: {
+    token, askId: "ask_1", entryId, roomId: "room", providerId: "cursor", model: null, amountPercent: 10,
+    windowId: null, lastUsedPercent: null, consumedPercent: 0, purgePending: true, purgeTries: GIVE_UP_PURGE_TRIES - 1 } } }));
+  const { coordinator } = fakes({ purgeAnswers: [refused] });
+  const { warnings } = await quietly(() => coordinator.watchOnce());
+  assert.ok(warnings.some(args => String(args[2]).includes("to remove by hand")), "the owner is told where it is");
+  assert.equal(row(token), undefined, "and the journal stops retrying");
 });
 
 test("the pre-check counts what other gifts from the same app may still use", async () => {
@@ -164,7 +268,7 @@ test("a guest Claude launches with no built-in tools and refuses to run with any
   const { GUEST_CLAUDE_LAUNCH_POLICY } = await import("../asks/give-coordinator.js");
   const { guestHasOnlyRoomTools } = await import("../main/agents/claude-code-provider-adapter.js");
   const request = (launchPolicy: unknown, permissionProfileId = "read_only") => ({ launchPolicy: { ...(launchPolicy as object) }, permissionProfileId,
-    supervisorEntryId: giftEntryId("ask_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
+    supervisorEntryId: giftEntryId("ask_1", "try_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
   assert.deepEqual(attestProviderSpawnPolicy("claude-code", request(GUEST_CLAUDE_LAUNCH_POLICY)).tools, []);
   assert.throws(() => attestProviderSpawnPolicy("claude-code", request({ ...GUEST_CLAUDE_LAUNCH_POLICY, tools: ["Read", "Glob", "Grep"] })), /tools/);
   assert.throws(() => attestProviderSpawnPolicy("claude-code", request({ permissionMode: "bypassPermissions" }, "full_access")), /guest agent runs Read-only/);
@@ -176,7 +280,7 @@ test("a guest Claude launches with no built-in tools and refuses to run with any
 test("a guest Codex launch must be Read-only", async () => {
   const { attestProviderSpawnPolicy } = await import("../main/agents/provider-spawn-configuration.js");
   const request = (permissionProfileId: string, launchPolicy: unknown) => ({ launchPolicy, permissionProfileId,
-    supervisorEntryId: giftEntryId("ask_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
+    supervisorEntryId: giftEntryId("ask_1", "try_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
   assert.throws(() => attestProviderSpawnPolicy("codex", request("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } })), /guest agent runs Read-only/);
   assert.equal(attestProviderSpawnPolicy("codex", request("read_only", { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } })).approvalPolicy, "never");
 });
@@ -189,7 +293,7 @@ test("given agents have their own guest list; the rental marketplace stays Curso
   assert.deepEqual(profiles.listGuestSafePermissionProfiles("codex").map(p => p.id), ["read_only"]);
   assert.deepEqual(profiles.listGuestSafePermissionProfiles("cursor").map(p => p.id), ["sandboxed_write"]);
   assert.throws(() => profiles.assertGuestSafePermissionProfile("codex", "full_access"), /can't be given/);
-  assert.equal(profiles.isGivenAgentEntryId(giftEntryId("ask_1")), true);
+  assert.equal(profiles.isGivenAgentEntryId(giftEntryId("ask_1", "try_1")), true);
   assert.equal(profiles.isGivenAgentEntryId("supervised_rental_0123456789abcdef"), false);
 });
 
@@ -231,13 +335,12 @@ test("quitting pauses running gifts and the next start resumes them", async () =
   states.length = 0;
   await coordinator.pauseForQuit();
   assert.deepEqual(states, ["running->paused"]);
-  const journal = () => JSON.parse(readFileSync(process.env.LETAGENTS_AGENT_GIFT_JOURNAL_PATH!, "utf8"));
-  assert.equal(journal().gifts[TOKEN].pausedForQuit, true);
+  assert.equal(row(TOKEN).pausedForQuit, true);
   coordinator.startWatching();
   coordinator.stopWatching();
-  for (let i = 0; i < 50 && journal().gifts[TOKEN].pausedForQuit; i += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  for (let i = 0; i < 50 && row(TOKEN).pausedForQuit; i += 1) await new Promise(resolve => setTimeout(resolve, 10));
   assert.ok(states.includes("paused->running"));
-  assert.equal(journal().gifts[TOKEN].pausedForQuit, false);
+  assert.equal(row(TOKEN).pausedForQuit, false);
 });
 
 test("a dev run leaves the letagents:// scheme alone, and quitting waits for gifts to pause", async () => {
