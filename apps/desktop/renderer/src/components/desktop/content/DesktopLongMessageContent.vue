@@ -37,6 +37,8 @@ import { computed, ref } from "vue";
 
 import MessageReader from "../../../../../../../shared/ui/MessageReader.vue";
 import type { MessageReaderSender } from "../../../../../../../shared/ui/message-reader";
+import type { PersonMenuPosition } from "../../../domain/person-context-menu";
+import { mentionKeyForClick, mentionMenuPosition } from "../../../domain/room-mention-links";
 import { LETAGENTS_ROOM_ORIGIN, resolveSameRoomMessageReference } from "../../../domain/room-urls";
 
 const props = withDefaults(defineProps<{
@@ -56,6 +58,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   "message-reference-click": [messageId: string];
   "task-reference-click": [taskId: string];
+  "mention-click": [mentionKey: string, position: PersonMenuPosition];
 }>();
 
 const expanded = ref(false);
@@ -83,6 +86,17 @@ function closeReader(): void {
 }
 
 function handleInlineReferenceClick(event: MouseEvent): void {
+  const mentionKey = mentionKeyForClick(event, window.getSelection?.()?.toString() ?? "");
+  if (mentionKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    const element = (event.target as Element).closest("[data-mention-key]");
+    const position = mentionMenuPosition(event, element);
+    readerOpen.value = false;
+    emit("mention-click", mentionKey, position);
+    return;
+  }
+
   const anchorTarget = event.target instanceof Element
     ? event.target.closest<HTMLAnchorElement>("a[href]")
     : null;
