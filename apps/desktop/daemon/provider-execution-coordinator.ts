@@ -206,6 +206,8 @@ export type ProviderExecutionCoordinatorOptions = {
     serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   };
   notifyProgressChanged?(): void;
+  /** Start-up progress changed; it carries no receipts, so no capture refresh is needed. */
+  notifyLaunchProgressChanged?(): void;
   /**
    * Called inside the commit lane right after a retiring daemon checkpointed
    * an entry's provider birth outside the manifest lane: batched activity
@@ -1585,7 +1587,7 @@ export class ProviderExecutionCoordinator {
       || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
       || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
     const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
-    launchProgress.begin(initialEntry.id, () => this.options.notifyProgressChanged?.());
+    launchProgress.begin(initialEntry.id, () => (this.options.notifyLaunchProgressChanged ?? this.options.notifyProgressChanged)?.());
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
@@ -2055,6 +2057,8 @@ export class ProviderExecutionCoordinator {
         dispatchReservation.release(fatalReservationError);
       }
     } catch (error) {
+      // Each path below ends this launch: the start-up row says so, whether or not the error is rethrown.
+      if (!(providerPersisted && this.options.authority.isHandoffScheduled())) launchProgress.fail(entry.id, error);
       if (reusesActiveCursorExecution && !providerPersisted) {
         await this.options.host.recordBindingRecoveryFailure(
           entry.id,

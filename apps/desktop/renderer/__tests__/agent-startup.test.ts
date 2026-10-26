@@ -65,7 +65,7 @@ function progress(ended: Array<[DesktopSupervisorLaunchProgress["phases"][number
   });
   if (open) phases.push({ phase: open, startedAt: at(clock), ms: null });
   return {
-    startedAt: at(200), state: open ? "running" : "launched", current: open, phases,
+    attempt: 1, startedAt: at(200), state: open ? "running" : "launched", current: open, phases,
     endedAt: open ? null : at(clock), firstOutputAt: null, failure: null, slotAhead: null, ...extra,
   };
 }
@@ -133,6 +133,26 @@ test("joining waits for the room bind, reading the room waits for the first outp
   assert.equal(joined.fraction, 1);
   assert.equal(joined.timerEndMs, T0 + 4_900);
   assert.deepEqual(joined.stages.map((stage) => stage.ms), [500, 1_210, 1_000, 785, 1_400]);
+});
+
+test("an agent with nothing to say yet counts as joined a minute after it joined", () => {
+  const launched = progress(LAUNCHED, null);
+  const view = agentStartupView(entry({ launchProgress: launched, readyReachedAt: at(3_500) }), context, T0 + 3_500 + 60_000);
+  assert.equal(view.status, "joined");
+  assert.match(view.line, /^Joined in 3\.5s/);
+  assert.equal(view.stages.at(-1)!.ms, null, "no first output was measured");
+});
+
+test("a daemon retry after a failure is timed on its own", () => {
+  const retry = { ...progress([["prepare", 100]], "slot_wait"), attempt: 2, startedAt: at(9_000) };
+  const view = agentStartupView(entry({ launchProgress: retry }), context, T0 + 9_500);
+  assert.equal(view.timerStartMs, T0 + 9_000);
+  assert.equal(view.status, "running");
+});
+
+test("scheduler internals never reach the failure line", () => {
+  const view = agentStartupView(entry({ observedState: "failed", condition: "quarantined", lastError: "convergence scheduler failure: x" }), context, T0);
+  assert.equal(view.line, "Could not start: The start did not finish.");
 });
 
 test("without daemon progress the stages follow the manifest milestones", () => {
@@ -212,7 +232,11 @@ test("the row sits under its first message, or at the agent's start time", () =>
   });
   const messages = [message("m1", at(0)), message("m2", at(0)), message("m3", at(5_000))];
   const anchored = buildMessageTimelineEntries(messages, [], [{ entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }]);
-  assert.deepEqual(anchored.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "m2", "agent-startup:a", "m3"]);
+  assert.deepEqual(anchored.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "agent-startup:a", "m2", "m3"],
+    "right under its first message, even when the next message has the same time");
+  const two = buildMessageTimelineEntries(messages, [], [
+    { entryId: "a", anchorMessageId: "m1", startedAt: at(1_000) }, { entryId: "b", anchorMessageId: "m1", startedAt: at(1_000) }]);
+  assert.deepEqual(two.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "agent-startup:a", "agent-startup:b", "m2", "m3"]);
   const timed = buildMessageTimelineEntries(messages, [], [{ entryId: "a", anchorMessageId: "gone", startedAt: at(1_000) }]);
   assert.deepEqual(timed.filter((item) => item.type !== "date").map((item) => item.id), ["m1", "m2", "agent-startup:a", "m3"]);
   assert.equal(timed.find((item) => item.type === "agent-startup")?.type === "agent-startup"

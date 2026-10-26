@@ -1,4 +1,4 @@
-import { computed, shallowRef, watch } from "vue";
+import { computed, shallowRef, watch, type ComputedRef } from "vue";
 import type { DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
 import { useSecondClock } from "../../../../composables/useSecondClock";
 import {
@@ -42,14 +42,11 @@ export function useAgentStartupRows(options: {
   }, { immediate: true });
 
   const entriesById = computed(() => new Map((options.entries() ?? []).map((entry) => [entry.id, entry])));
-  const anyRunning = () => state.value.rows.some((row) => {
-    const entry = entriesById.value.get(row.entryId);
-    return Boolean(entry && entry.desiredState === "running" && (entry.readyReachedAt == null || !entry.launchProgress?.firstOutputAt));
-  });
-  const now = useSecondClock(anyRunning);
+  // The clock moves only while a row is still starting; its views read it.
+  const now = useSecondClock(() => [...views.value.values()].some((view) => view.status === "running"));
   const roomLabel = computed(() => agentStartupRoomLabel(options.roomIdentifier()));
 
-  const views = computed(() => {
+  const views: ComputedRef<Map<string, AgentStartupView>> = computed(() => {
     const result = new Map<string, AgentStartupView>();
     for (const row of state.value.rows) {
       const entry = entriesById.value.get(row.entryId);

@@ -117,6 +117,9 @@ export function stageForLaunchPhase(phase: DesktopSupervisorLaunchPhase, provide
   }
 }
 
+/** How long "Reading the room" waits for a first output before the agent counts as joined. */
+const READING_MAX_MS = 60_000;
+
 /** How long a retry may wait for the daemon's next launch before an unchanged failure shows again. */
 const RETRY_PENDING_MAX_MS = 20_000;
 
@@ -155,8 +158,13 @@ function failureReason(action: AgentStartupAction, entry: Entry): string {
   const runtime = agentRuntimeLabel(entry.provider);
   if (action === "sign_in") return `${runtime} is not signed in on this Mac.`;
   if (action === "install") return `${runtime} could not be found on this Mac.`;
-  const detail = supervisedLaunchProgress(entry).failureDetail;
-  return detail ?? "The start did not finish.";
+  return safeManifestDetail(supervisedLaunchProgress(entry).failureDetail);
+}
+
+/** Scheduler internals are no reason a person can act on. */
+function safeManifestDetail(detail: string | null): string {
+  if (!detail?.trim() || /convergence scheduler failure|scheduler failure:/i.test(detail)) return "The start did not finish.";
+  return detail;
 }
 
 function manifestFailureAction(entry: Entry): AgentStartupAction {
@@ -171,7 +179,7 @@ type StageFacts = { done: boolean; ms: number | null; startMs: number | null };
  * Per-stage facts from the daemon launch progress and the manifest. A stage is
  * done only on evidence; the first stage that is not done is the current one.
  */
-function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | null): Map<AgentStartupStageKey, StageFacts> {
+function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | null, nowMs: number): Map<AgentStartupStageKey, StageFacts> {
   const facts = new Map<AgentStartupStageKey, StageFacts>();
   const createdMs = time(entry.createdAt);
   const readyMs = time(entry.readyReachedAt);
@@ -207,7 +215,7 @@ function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | nu
   const launchStartMs = time(progress.startedAt);
   const prepare = sumOf("prepare");
   // Before this launch the saved agent's workspace was set up; that counts as preparing.
-  const prepareStartMs = createdMs != null && launchStartMs != null && createdMs <= launchStartMs
+  const prepareStartMs = progress.attempt === 1 && createdMs != null && launchStartMs != null && createdMs <= launchStartMs
     && launchStartMs - createdMs < 10 * 60_000 ? createdMs : launchStartMs;
   const prepareEnd = prepare.closed && prepare.startMs != null && prepare.ms != null ? prepare.startMs + prepare.ms : null;
   set("prepare", {
@@ -231,10 +239,11 @@ function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | nu
     ms: joinEndMs != null && install.startMs != null ? Math.max(0, joinEndMs - install.startMs) : null,
     startMs: install.startMs,
   });
-  const contextDone = joinEndMs != null && firstOutputMs != null;
+  // An agent with nothing to say yet has still joined; the room is read by then.
+  const contextDone = joinEndMs != null && (firstOutputMs != null || nowMs - joinEndMs >= READING_MAX_MS);
   set("context", {
     done: contextDone,
-    ms: contextDone ? Math.max(0, firstOutputMs - joinEndMs) : null,
+    ms: contextDone && firstOutputMs != null ? Math.max(0, firstOutputMs - joinEndMs) : null,
     startMs: joinEndMs,
   });
   return facts;
@@ -266,7 +275,7 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
   if (isClaude(entry.provider)) keys.push("bootstrap");
   keys.push("join", "context");
 
-  const facts = stageFacts(entry, progress);
+  const facts = stageFacts(entry, progress, nowMs);
   const stages: AgentStartupStage[] = keys.map((key) => ({
     key,
     label: stageLabel(key, entry, context.roomLabel),
@@ -294,7 +303,7 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
   } else if (!allDone && manifest.failed && !manifest.recoverableBlocked && !retryPending) {
     status = "failed";
     const action = manifestFailureAction(entry);
-    failure = { reason: action === "retry" ? manifest.failureDetail ?? "The start did not finish." : failureReason(action, entry), action };
+    failure = { reason: action === "retry" ? safeManifestDetail(manifest.failureDetail) : failureReason(action, entry), action };
   }
   if (!allDone) {
     for (let index = currentIndex + 1; index < stages.length; index += 1) {
@@ -305,7 +314,9 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
   }
 
   const createdMs = time(entry.createdAt) ?? nowMs;
-  const timerStartMs = retryAt != null && retryAt > createdMs ? retryAt : createdMs;
+  // A retry, by the person or by the daemon after a failure, is timed on its own.
+  const autoRetryMs = progress && progress.attempt > 1 ? time(progress.startedAt) : null;
+  const timerStartMs = Math.max(createdMs, retryAt ?? createdMs, autoRetryMs ?? createdMs);
   const joinedAtMs = allDone ? endOfStartup(entry, entry.launchProgress ?? null) : null;
   const failedAtMs = status === "failed" ? time(entry.launchProgress?.endedAt) ?? nowMs : null;
   const timerEndMs = joinedAtMs ?? failedAtMs ?? (status === "cancelled" ? nowMs : null);
@@ -344,6 +355,7 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
   };
 }
 
+/** The first output after joining, or the moment it joined when it had nothing to say. */
 function endOfStartup(entry: Entry, progress: DesktopSupervisorLaunchProgress | null): number | null {
   const candidates = [time(entry.readyReachedAt), time(progress?.endedAt), time(progress?.firstOutputAt)]
     .filter((value): value is number => value != null);

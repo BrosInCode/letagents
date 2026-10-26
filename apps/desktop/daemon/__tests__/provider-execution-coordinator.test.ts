@@ -825,6 +825,15 @@ test("live launch progress follows the launch phases, records a failure kind, an
   assert.deepEqual(failed.failure, { phase: "process", action: "install" });
   assert.equal(JSON.stringify(failed).includes("ENOENT"), false, "no error text leaves the daemon");
 
+  let recorded = 0;
+  const unbound = harness({ provider: provider({ spawn: async () => returnedHandle }) });
+  unbound.options.streams.install = async () => { throw new Error("stream install failed"); };
+  unbound.options.host.recordBindingRecoveryFailure = async () => { recorded += 1; };
+  await new ProviderExecutionCoordinator(unbound.options).converge("agent-1");
+  assert.equal(recorded, 1, "the saved process's failure is recorded, not thrown");
+  assert.deepEqual(launchProgress.view("agent-1")!.failure, { phase: "install", action: "retry" },
+    "a launch that ends without a throw still ends its start-up row");
+
   let admit: (() => void) | null = null;
   const stopped = harness({ provider: provider({ spawn: async () => returnedHandle }) });
   const coordinator = new ProviderExecutionCoordinator({

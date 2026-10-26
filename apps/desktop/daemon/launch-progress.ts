@@ -15,6 +15,8 @@ import { firstOutputKind, type LaunchPhase } from "./turn-start-latency.js";
 export type LaunchFailureAction = "sign_in" | "install" | "retry";
 
 export type LaunchProgressView = {
+  /** 1, or one more than the failed launch this one retries. */
+  attempt: number;
   started_at: string;
   state: "running" | "launched" | "failed";
   /** The phase in progress; null once the launch ended. */
@@ -30,6 +32,7 @@ export type LaunchProgressView = {
 };
 
 type Run = {
+  attempt: number;
   startedAt: number;
   state: LaunchProgressView["state"];
   phases: Array<{ phase: LaunchPhase; startedAt: number; ms: number | null }>;
@@ -52,7 +55,7 @@ const NEXT: Record<LaunchPhase, LaunchPhase | null> = {
 };
 
 const INSTALL_PATTERN = /\bspawn\b[^\n]{0,200}\bENOENT\b|command not found|executable not found|not installed/i;
-const SIGN_IN_PATTERN = /\b40[13]\b|unauthori[sz]ed|invalid api key|not (?:signed|logged) in|sign[ -]?in required|log ?in required|please (?:run|use) [^\n]{0,40}login|authentication (?:failed|required|error)/i;
+const SIGN_IN_PATTERN = /\b(?:HTTP|status|error|code)[ :=]*40[13]\b|\b40[13] (?:Unauthorized|Forbidden)\b|unauthori[sz]ed|invalid api key|not (?:signed|logged) in|sign[ -]?in required|log ?in required|please (?:run|use) [^\n]{0,40}login|authentication (?:failed|required|error)/i;
 
 /** One recovery kind from a launch error. The error text itself never leaves the daemon. */
 export function launchFailureAction(error: unknown): LaunchFailureAction {
@@ -85,11 +88,18 @@ export class LaunchProgress {
   begin(agentId: string, onChange: () => void = () => {}): void {
     try {
       const now = this.wallNow();
+      const previous = this.runs.get(agentId);
       this.runs.delete(agentId);
       this.runs.set(agentId, {
+        attempt: previous?.state === "failed" ? previous.attempt + 1 : 1,
         startedAt: now, state: "running", phases: [{ phase: "prepare", startedAt: now, ms: null }],
         endedAt: null, firstOutputAt: null, failure: null, onChange,
       });
+      // Ended launches go first; a running one is dropped only when every remembered launch is running.
+      for (const [key, run] of this.runs) {
+        if (this.runs.size <= MAX_REMEMBERED_AGENTS) break;
+        if (run.state !== "running") this.runs.delete(key);
+      }
       while (this.runs.size > MAX_REMEMBERED_AGENTS) this.runs.delete(this.runs.keys().next().value!);
       this.changed(agentId);
     } catch { /* Progress never changes a launch. */ }
@@ -148,10 +158,6 @@ export class LaunchProgress {
     this.changed(agentId);
   }
 
-  forget(agentId: string): void {
-    this.runs.delete(agentId);
-  }
-
   view(agentId: string, launchQueue?: { active: number; queued: readonly string[] } | null): LaunchProgressView | null {
     const run = this.runs.get(agentId);
     if (!run) return null;
@@ -163,6 +169,7 @@ export class LaunchProgress {
       if (index >= 0) slotAhead = launchQueue.active + index;
     }
     return {
+      attempt: run.attempt,
       started_at: iso(run.startedAt),
       state: run.state,
       current,

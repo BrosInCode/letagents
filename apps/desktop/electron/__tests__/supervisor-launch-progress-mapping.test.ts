@@ -19,6 +19,7 @@ const wire = {
 
 test("daemon launch progress maps to the renderer shape", () => {
   assert.deepEqual(projectLaunchProgress(wire), {
+    attempt: 1,
     startedAt: "2026-10-26T10:00:00.000Z",
     state: "failed",
     current: null,
@@ -32,6 +33,7 @@ test("daemon launch progress maps to the renderer shape", () => {
     slotAhead: null,
   });
   assert.equal(projectLaunchProgress({ ...wire, state: "running", current: "slot_wait", failure: null, slot_ahead: 3 })!.slotAhead, 3);
+  assert.equal(projectLaunchProgress({ ...wire, attempt: 2 })!.attempt, 2);
 });
 
 test("malformed launch progress is shown as none, never partly", () => {
@@ -39,6 +41,7 @@ test("malformed launch progress is shown as none, never partly", () => {
     null,
     "running",
     { ...wire, state: "starting" },
+    { ...wire, attempt: 0 },
     { ...wire, current: "warming_up" },
     { ...wire, started_at: "yesterday" },
     { ...wire, phases: [{ phase: "prepare", started_at: wire.started_at, ms: -1 }] },

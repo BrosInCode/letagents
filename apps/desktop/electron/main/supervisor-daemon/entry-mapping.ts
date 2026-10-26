@@ -174,7 +174,9 @@ export function projectLaunchProgress(value: unknown): DesktopSupervisorManifest
     failure = { phase, action };
   }
   const slotAhead = root.slot_ahead === null || root.slot_ahead === undefined ? null : wireCount(root.slot_ahead);
-  return { startedAt, state, current, phases, endedAt, firstOutputAt, failure, slotAhead };
+  const attempt = root.attempt === undefined ? 1 : wireCount(root.attempt);
+  if (!attempt) return null;
+  return { attempt, startedAt, state, current, phases, endedAt, firstOutputAt, failure, slotAhead };
 }
 
 function projectDeliveryAttention(value: unknown): DesktopSupervisorManifestEntry["deliveryAttention"] {

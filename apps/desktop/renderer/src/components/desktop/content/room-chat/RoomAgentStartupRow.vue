@@ -104,7 +104,7 @@ function stageStateText(state: AgentStartupStageState): string {
   return "";
 }
 
-/** One click at a time; the parent's promise settles the state. */
+/** Ignores repeat clicks for a moment; the row's next state comes from the daemon. */
 function run(action: () => void): void {
   if (busy.value) return;
   busy.value = true;

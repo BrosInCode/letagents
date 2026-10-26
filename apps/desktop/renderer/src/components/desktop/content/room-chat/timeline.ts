@@ -64,12 +64,16 @@ export function buildMessageTimelineEntries(
       ordered.push({ timestamp, time: Date.parse(timestamp), id: `contribution:${entry.attemptId}`, work: entry });
     }
   }
+  const anchoredStartups: Array<{ item: TimelineItem; anchorId: string }> = [];
   if (startups.length) {
     const sources = new Map(messages.map(message => [message.id, message.timestamp]));
     for (const startup of startups) {
-      // Pushed after the messages, so an equal time keeps the row under its anchor (the sort is stable).
-      const timestamp = (startup.anchorMessageId && sources.get(startup.anchorMessageId)) || startup.startedAt;
-      ordered.push({ timestamp, time: Date.parse(timestamp), id: `agent-startup:${startup.entryId}`, startupEntryId: startup.entryId });
+      const anchor = startup.anchorMessageId && sources.has(startup.anchorMessageId) ? startup.anchorMessageId : null;
+      const timestamp = anchor ? sources.get(anchor)! : startup.startedAt;
+      const item: TimelineItem = { timestamp, time: Date.parse(timestamp), id: `agent-startup:${startup.entryId}`, startupEntryId: startup.entryId };
+      // A row with its first message goes right under that message, after the sort.
+      if (anchor) anchoredStartups.push({ item, anchorId: anchor });
+      else ordered.push(item);
     }
   }
   // Messages usually arrive in order. A sorted list (with no unparsable time,
@@ -79,6 +83,11 @@ export function buildMessageTimelineEntries(
     if (!(ordered[index - 1]!.time <= ordered[index]!.time)) { sorted = false; break; }
   }
   if (!sorted) ordered.sort((a, b) => a.time - b.time);
+  for (const { item, anchorId } of anchoredStartups) {
+    let index = ordered.findIndex(candidate => candidate.message?.id === anchorId) + 1;
+    while (ordered[index]?.startupEntryId) index += 1;
+    ordered.splice(index, 0, item);
+  }
   for (const item of ordered) {
     const dayKey = messageDayKey(item.timestamp);
     if (dayKey !== previousDayKey) {

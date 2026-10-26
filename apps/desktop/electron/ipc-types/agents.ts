@@ -624,6 +624,8 @@ export type DesktopSupervisorLaunchPhase = "prepare" | "slot_wait" | "admission"
  * daemon. Memory only: absent after a daemon restart. No content or error text.
  */
 export interface DesktopSupervisorLaunchProgress {
+  /** 1, or one more than the failed launch this one retries. */
+  attempt: number;
   startedAt: string;
   state: "running" | "launched" | "failed";
   /** The phase in progress; null once the launch ended. */

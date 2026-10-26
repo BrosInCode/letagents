@@ -89,6 +89,11 @@ test("a launch that returned without finishing or failing is forgotten; a finish
   progress.fail("agent", "x");
   progress.settle("agent");
   assert.equal(progress.view("agent")!.state, "failed");
+  progress.begin("agent");
+  assert.equal(progress.view("agent")!.attempt, 2, "a launch after a failure is a retry");
+  progress.mark("agent", "prepare");
+  progress.begin("agent");
+  assert.equal(progress.view("agent")!.attempt, 1, "a launch after one that did not fail starts over");
 });
 
 test("the slot queue position is shown only while this launch waits for a slot", () => {
@@ -105,8 +110,13 @@ test("a listener failure never reaches the launch, and memory stays bounded", ()
   progress.begin("agent", () => { throw new Error("sink"); });
   progress.mark("agent", "prepare");
   assert.equal(progress.view("agent")!.current, "slot_wait");
-  for (let index = 0; index < 200; index += 1) progress.begin(`agent-${index}`);
-  assert.equal(progress.view("agent"), null);
+  for (let index = 0; index < 200; index += 1) {
+    progress.begin(`agent-${index}`);
+    if (index > 0) progress.fail(`agent-${index}`, "x");
+  }
+  assert.ok(progress.view("agent"), "a running launch outlives ended ones");
+  assert.ok(progress.view("agent-0"));
+  assert.equal(progress.view("agent-1"), null);
   assert.ok(progress.view("agent-199"));
 });
 
@@ -116,5 +126,7 @@ test("launch errors map to one recovery kind", () => {
   assert.equal(launchFailureAction(new Error("wrapped", { cause: new Error("401 Unauthorized") })), "sign_in");
   assert.equal(launchFailureAction(new Error("Not logged in · Please run /login")), "sign_in");
   assert.equal(launchFailureAction(new Error("Provider launch did not attest the complete configuration snapshot.")), "retry");
+  assert.equal(launchFailureAction(new Error("listen EADDRINUSE 127.0.0.1:4013 pid 401")), "retry", "a bare 401 is not a sign-in");
+  assert.equal(launchFailureAction(new Error("request failed with status 403")), "sign_in");
   assert.equal(launchFailureAction(null), "retry");
 });
