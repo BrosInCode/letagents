@@ -5,6 +5,7 @@ import {
   createActivityNoticeQueue,
   presenceTimelineText,
   type ActivityNotice,
+  type CalmNoticeInput,
   type PresenceTimelineLine,
 } from "../components/desktop/content/room-chat/room-activity";
 import { useAgentPresenceChips } from "./useAgentPresenceChips";
@@ -13,8 +14,8 @@ import { useAgentPresenceChips } from "./useAgentPresenceChips";
 export const PRESENCE_TIMELINE_LIMIT = 50;
 
 /**
- * The notices on a room's activity line: agents joining and leaving, and
- * GitHub updates. Joins and leaves also leave a quiet line in the timeline,
+ * The notices on a room's activity line: agents joining and leaving, GitHub
+ * updates, and calm lines about the person's own actions. Joins and leaves also leave a quiet line in the timeline,
  * which this window keeps until the room changes. A GitHub update stays off
  * the line while someone is writing, as it did in the composer.
  */
@@ -30,6 +31,7 @@ export function useRoomActivity(input: {
   pause(): void;
   resume(): void;
   confirmSteer(displayName: string): void;
+  calm(notice: CalmNoticeInput): void;
 } {
   const notice = shallowRef<ActivityNotice | null>(null);
   const presenceLines = shallowRef<readonly PresenceTimelineLine[]>([]);
@@ -86,6 +88,10 @@ export function useRoomActivity(input: {
     resume: () => queue.resume(),
     confirmSteer(displayName) {
       queue.pushFirst({ kind: "steered", id: `steered:${sequence += 1}`, displayName });
+    },
+    /** A calm line about the person's own action: an approval outcome or a file that did not attach. */
+    calm(notice) {
+      queue.pushFirst({ ...notice, kind: "calm", id: `calm:${sequence += 1}` });
     },
   };
 }

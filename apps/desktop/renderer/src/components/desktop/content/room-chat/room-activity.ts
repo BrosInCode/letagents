@@ -9,12 +9,44 @@ export const ACTIVITY_JOIN_MERGE_MS = 1_500;
 export const ACTIVITY_RESUME_GRACE_MS = 800;
 /** Notices waiting their turn; older ones leave first. */
 export const ACTIVITY_NOTICE_LIMIT = 6;
+/** A calm line with an action stays longer, so there is time to use it. */
+export const ACTIVITY_ACTION_NOTICE_MS = 6_000;
+
+/** What a calm line's one button does. */
+export type CalmNoticeActionKey = "choose-attachment" | "retry-attachment";
+
+/**
+ * One calm line in plain words: "<lead><name><tail>", with the name in bold and
+ * at most one action. Approval outcomes and attachment problems use it.
+ */
+export interface CalmNoticeInput {
+  icon: "check" | "attach";
+  lead: string;
+  name?: string;
+  tail?: string;
+  action?: { key: CalmNoticeActionKey; label: string };
+}
 
 export type ActivityNotice =
   | { kind: "join"; id: string; agents: PresenceChipAgent[] }
   | { kind: "leave"; id: string; agent: PresenceChipAgent }
   | { kind: "github"; id: string; preview: ComposerEventPreview }
-  | { kind: "steered"; id: string; displayName: string };
+  | { kind: "steered"; id: string; displayName: string }
+  | ({ kind: "calm"; id: string } & CalmNoticeInput);
+
+/** The words of a calm line, as one sentence for a screen reader. */
+export function calmNoticeText(notice: CalmNoticeInput): string {
+  return `${notice.lead}${notice.name ?? ""}${notice.tail ?? ""}`;
+}
+
+function noticeMs(notice: ActivityNotice): number {
+  return notice.kind === "calm" && notice.action ? ACTIVITY_ACTION_NOTICE_MS : ACTIVITY_NOTICE_MS;
+}
+
+/** A confirmation of something already done; a newer one replaces it instead of queueing it again. */
+function isConfirmation(notice: ActivityNotice): boolean {
+  return notice.kind === "steered" || (notice.kind === "calm" && !notice.action);
+}
 
 export interface ActivityTimers {
   now(): number;
@@ -73,7 +105,7 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
     shown = index < 0 ? null : queue.splice(index, 1)[0]!;
     if (shown) {
       shownAt = timers.now();
-      arm(ACTIVITY_NOTICE_MS);
+      arm(noticeMs(shown));
     }
     onChange();
   }
@@ -114,7 +146,7 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
   /** Show a notice before the others, now (a confirmation of the person's own action). */
   function pushFirst(notice: ActivityNotice): void {
     // The covered notice shows again after it, unless it is an older confirmation.
-    if (shown && shown.kind !== "steered") queue = [shown, ...queue].slice(0, ACTIVITY_NOTICE_LIMIT);
+    if (shown && !isConfirmation(shown)) queue = [shown, ...queue].slice(0, ACTIVITY_NOTICE_LIMIT);
     queue = [notice, ...queue.filter((item) => item.id !== notice.id)];
     advance();
   }

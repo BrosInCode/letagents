@@ -40,6 +40,7 @@
           :steer-disabled="sending"
           :presence-lines="roomActivity.presenceLines.value"
           @activity-hold="(held) => held ? roomActivity.pause() : roomActivity.resume()"
+          @activity-calm-action="runCalmAction"
           @steer="steerComposerDraft"
           @open-event-preview="openEventPreview"
           :delivery-receipts-by-message="deliveryReceiptsByMessage"
@@ -97,7 +98,7 @@
               :send-error="sendError"
               :attaching="threadAttaching"
               :attachment-drafts="threadAttachmentDrafts"
-              :attachment-error="threadAttachmentError"
+              :attachment-error="attachmentProblemText(threadAttachmentProblem)"
               :pending-attachment-drafts="threadPendingAttachmentDrafts"
               :has-older-replies="activeThreadHasOlder"
               :loading-older-replies="loadingOlderThreadReplies"
@@ -158,7 +159,6 @@
           :active="active"
           :attaching="attaching"
           :attachment-drafts="attachmentDrafts"
-          :attachment-error="attachmentError"
           :message-namespace="messageNamespace"
           :participants="participants"
           :pending-attachment-drafts="pendingAttachmentDrafts"
@@ -176,6 +176,7 @@
           @stage-attachments="stageDroppedAttachments"
           @remove-attachment="removeAttachment"
           @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
+          @approval-notice="roomActivity.calm"
           @send-message="handleComposerSend"
           @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
         />
@@ -258,6 +259,8 @@ import {
 import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher";
 import { useRoomTypingNames } from "../../../composables/useRoomTyping";
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
+import { attachmentProblemNotice, attachmentProblemText } from "./room-chat/attachment-problems";
+import type { CalmNoticeActionKey } from "./room-chat/room-activity";
 import { useRoomImages } from "./room-chat/useRoomImages";
 import { desktopIpc } from "../../../ipc/index.js";
 import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
@@ -445,7 +448,7 @@ const {
 const {
   attaching,
   attachmentDrafts,
-  attachmentError,
+  attachmentProblem,
   handleAttachmentDragEnter,
   handleAttachmentDragLeave,
   handleAttachmentDragOver,
@@ -454,16 +457,26 @@ const {
   pendingAttachmentDrafts,
   pickAttachments,
   removeAttachment,
+  retryAttachments,
   stageDroppedAttachments,
 } = useRoomAttachments({
   roomIdentifier: toRef(props, "roomIdentifier"),
   discardAttachment: (uploadId) => emit("discard-attachment", uploadId),
 });
 
+// A file that did not attach gets one calm line above the composer, never raw error text.
+watch(attachmentProblem, (problem) => {
+  if (problem) roomActivity.calm(attachmentProblemNotice(problem));
+});
+function runCalmAction(key: CalmNoticeActionKey): void {
+  if (key === "choose-attachment") void pickAttachments();
+  else if (key === "retry-attachment") void retryAttachments();
+}
+
 const {
   attaching: threadAttaching,
   attachmentDrafts: threadAttachmentDrafts,
-  attachmentError: threadAttachmentError,
+  attachmentProblem: threadAttachmentProblem,
   clearAttachmentDrafts: clearThreadAttachmentDrafts,
   pendingAttachmentDrafts: threadPendingAttachmentDrafts,
   pickAttachments: pickThreadAttachments,
