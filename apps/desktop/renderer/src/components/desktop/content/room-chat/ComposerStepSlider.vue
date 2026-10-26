@@ -67,8 +67,11 @@ const position = computed(() => dragPosition.value ?? clampedIndex.value);
 const shownIndex = computed(() => Math.round(position.value));
 const percent = computed(() => last.value > 0 ? (position.value / last.value) * 100 : 0);
 
+// The track's box, read once per drag: a read on every move would force a layout after each thumb move.
+let dragRect: DOMRect | null = null;
+
 function positionAt(clientX: number): number {
-  const rect = track.value?.getBoundingClientRect();
+  const rect = dragRect ?? track.value?.getBoundingClientRect();
   if (!rect || rect.width <= 0) return clampedIndex.value;
   return Math.min(last.value, Math.max(0, ((clientX - rect.left) / rect.width) * last.value));
 }
@@ -83,6 +86,7 @@ function startDrag(event: PointerEvent): void {
   event.preventDefault();
   control.value?.focus({ preventScroll: true });
   control.value?.setPointerCapture?.(event.pointerId);
+  dragRect = track.value?.getBoundingClientRect() ?? null;
   dragPosition.value = positionAt(event.clientX);
 }
 
@@ -94,11 +98,13 @@ function endDrag(event: PointerEvent): void {
   if (dragPosition.value === null) return;
   const index = Math.round(positionAt(event.clientX));
   dragPosition.value = null;
+  dragRect = null;
   commit(index);
 }
 
 function cancelDrag(): void {
   dragPosition.value = null;
+  dragRect = null;
 }
 
 function handleKey(event: KeyboardEvent): void {

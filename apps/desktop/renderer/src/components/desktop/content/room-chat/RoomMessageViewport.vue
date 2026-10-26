@@ -436,8 +436,19 @@ const { pushActionToast } = useDesktopActionToasts();
 function startupAction(action: (entryId: string) => Promise<void>, entryId: string, failed: string): void {
   action(entryId).catch((error: unknown) => pushActionToast(`${failed} ${safeUserVisibleErrorDetail(error, "Try again.")}`, "error"));
 }
+// The same list while its rows show the same text, so a start-up progress
+// update of an entry does not rebuild the timeline.
+const firstMessages = computed<DesktopSupervisorManifestEntry[]>((previous) => {
+  const next = firstMessageAgents(props.supervisorEntries ?? [], props.messages, props.hasOlderMessages);
+  const same = previous?.length === next.length && next.every((agent, index) => {
+    const before = previous[index]!;
+    return agent.id === before.id && agent.createdAt === before.createdAt
+      && agent.charter === before.charter && agent.displayName === before.displayName;
+  });
+  return same ? previous! : next;
+});
 const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, props.presenceLines, timelineStartups.value,
-  firstMessageAgents(props.supervisorEntries ?? [], props.messages, props.hasOlderMessages)),
+  firstMessages.value),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 // Bounded mount window (see message-window.ts): only a contiguous range of
 // the timeline is mounted.
