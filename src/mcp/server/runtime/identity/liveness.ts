@@ -57,9 +57,9 @@ export function getSessionLivenessRegistration(runtime = detectAgentRuntimeLabel
     host_id: hostId,
     host_kind: currentSessionScope() ? "remote_mcp" : process.platform === "darwin" ? "macos" : process.platform,
     host_label: null,
-    liveness_capability: normalizedRuntime === "codex"
-      ? "codex_app_server_runtime_stream"
-      : "session_activity",
+    // The package streamed Codex app-server activity only for a local Codex live
+    // session, which letagents 0.12.46 removed; every session reports its own activity.
+    liveness_capability: "session_activity",
     tool_bridge_id: `${hostId}:${normalizedRuntime}:${agentInstanceUuid()}`,
   };
 }

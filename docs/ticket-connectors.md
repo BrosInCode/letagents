@@ -955,9 +955,8 @@ other credential gets `404` and must initialize its own session. `DELETE` remove
 
 **Tools.** The remote tool list is an explicit allow list (`REMOTE_ALLOWED_TOOLS` in
 `src/mcp/server/remote-tool-surface.ts`). Excluded, with reasons in the same file: workspace capture, `check_repo`,
-`check_repo_visibility`, `initialize_repo`, the local Codex session tools, the device-auth and onboarding tools,
-`resume_room_session` and the rental provider tools. `cwd` inputs are removed, and `join_room` refuses
-`session_mode: "live"`. A remote agent registers its worker with `register_agent_session` before it writes, as an
+`check_repo_visibility`, `initialize_repo`, the device-auth and onboarding tools,
+`resume_room_session` and the rental provider tools. `cwd` inputs are removed. A remote agent registers its worker with `register_agent_session` before it writes, as an
 npm-package agent does.
 
 **Limits.** All values are server environment variables.

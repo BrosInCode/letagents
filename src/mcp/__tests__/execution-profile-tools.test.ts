@@ -30,9 +30,6 @@ test("supervised room turns retain product tools but do not discover execution m
     "wait_for_messages",
     "register_agent_session",
     "disconnect_agent_session",
-    "start_local_codex_session",
-    "status_local_codex_session",
-    "stop_local_codex_session",
     "start_device_auth",
     "poll_device_auth",
     "clear_saved_auth",
@@ -274,5 +271,18 @@ test("the daemon, which runs every supervised tool call, has the ask tool handle
     for (const name of ["ask_list_files", "ask_read_file", "ask_search", "ask_propose_change"]) assert.equal(names.has(name), true, name);
   } finally {
     if (previous !== undefined) process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previous;
+  }
+});
+
+test("no profile offers the local Codex session tools that letagents 0.12.46 removed", () => {
+  const profiles: Array<[LetAgentsExecutionProfile, string | null]> = [
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null], ["supervised_mcp_polling", "codex"],
+    ["supervised_room_turn", "codex"], ["supervised_room_turn", "cursor"], ["supervised_room_turn", "claude-code"],
+  ];
+  for (const [profile, provider] of profiles) {
+    const names = discovered(profile, provider);
+    for (const removed of ["start_local_codex_session", "status_local_codex_session", "stop_local_codex_session"]) {
+      assert.equal(names.has(removed), false, `${profile}/${provider} does not offer ${removed}`);
+    }
   }
 });

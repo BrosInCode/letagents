@@ -23,6 +23,7 @@ export const SUPERVISED_READ_ONLY_TOOLS = new Set([
   "list_wake_rules",
   "list_board_intents",
   "get_onboarding_status",
+  // Removed in letagents 0.12.46; kept so a daemon and an older pinned MCP runtime classify it alike.
   "status_local_codex_session",
   "rental_list_requests",
   "ask_list_files",

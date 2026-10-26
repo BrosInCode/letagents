@@ -443,7 +443,7 @@ test("worker bearer mode disables owner-auth onboarding tools without API traffi
   globalThis.fetch = originalFetch;
 });
 
-test("worker bearer mode keeps room inspection off saved owner auth and local Codex data", async () => {
+test("worker bearer mode keeps room inspection off saved owner auth", async () => {
   await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
     rememberRoom(toRoomState({ room_id: "room_inspection", joined_via: "join_room", is_local: true }));
     setRoomInspectionOwnerAuthStoreLoaderForTest(async () => assert.fail("worker room inspection must not load saved auth"));
@@ -454,22 +454,11 @@ test("worker bearer mode keeps room inspection off saved owner auth and local Co
         expires_at: null,
         account: null,
       });
-      assert.equal(result.current_local_codex_session, null);
-      assert.equal(result.local_codex_session_count, 0);
+      assert.equal("current_local_codex_session" in result, false, "letagents 0.12.46 removed local Codex sessions");
+      assert.equal("local_codex_session_count" in result, false);
     } finally {
       setRoomInspectionOwnerAuthStoreLoaderForTest(null);
     }
-  });
-});
-
-test("worker bearer mode disables local Codex session orchestration", async () => {
-  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
-    const start = toolHandler(registerAgentSessionTools, "start_local_codex_session");
-    assert.deepEqual(JSON.parse((await start({ room: "room_1" })).content[0]!.text), {
-      success: false,
-      error: "worker_bearer_mode",
-      message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
-    });
   });
 });
 
