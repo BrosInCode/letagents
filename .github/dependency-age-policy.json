@@ -65,6 +65,21 @@
       "name": "@typescript-eslint/visitor-keys",
       "version": "8.63.0",
       "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "body-parser",
+      "version": "2.4.0",
+      "reason": "Exact patched release required to remediate GHSA-27r3-jxmh-p828 (high: denial of service via trailing bytes after a compressed request body; the public API runs Express) before the normal cooldown expires. Owner-approved 2026-10-26. Published by npm trusted publishing from expressjs/body-parser tag v2.4.0 with SLSA provenance and a registry signature; no install scripts; the diff against 2.3.0 was reviewed. Remove after 2026-10-29 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "electron",
+      "version": "42.11.16",
+      "reason": "Exact patched release required to remediate GHSA-jr5w-w6x2-84p9 (high: compromised eMudhra intermediate certificates) before the normal cooldown expires. Owner-approved 2026-10-26; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-10-27 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "fast-uri",
+      "version": "3.1.9",
+      "reason": "Exact patched release required to remediate GHSA-w74x-v6f9-j3xg, GHSA-xhq7-xmqj-769h, GHSA-wjr9-j795-jxcr and GHSA-333x-w4r6-6crp before the normal cooldown expires. Owner-approved 2026-10-26; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-10-26 when the cooldown is naturally satisfied."
     }
   ]
 }
