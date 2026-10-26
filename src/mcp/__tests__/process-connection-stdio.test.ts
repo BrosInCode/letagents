@@ -4,10 +4,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+import { childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
 
 async function until<T>(read: () => T | undefined | false, what: string, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -86,14 +89,13 @@ test("a process holds its connection open, learns when its session is ended, and
   const clients: Client[] = [];
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: ["--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
-      env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
+      args: ["--import", pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href, resolve("src/mcp/server.ts")], cwd: temp,
+      env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
-        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
-    transport.stderr?.resume();
+        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
     const client = new Client({ name: "process-connection-test", version: "1" });
     clients.push(client);
-    await client.connect(transport);
+    await connectOrExplain(client, transport);
     return { client, transport };
   };
   const call = async (client: Client, name: string, args: Record<string, unknown>) => {
@@ -180,8 +182,11 @@ test("a process holds its connection open, learns when its session is ended, and
       "the connection to open once it is served", 20_000);
 
     // The host stops the process with a signal. It still says it is leaving.
-    third.transport.pid && process.kill(third.transport.pid, "SIGTERM");
-    await until(() => exits.some((exit) => exit.session_id === refusedSessionId), "the exit to be announced on a signal");
+    // (On Windows process.kill ends the process at once; no handler runs.)
+    if (!posixSignalsOnly) {
+      third.transport.pid && process.kill(third.transport.pid, "SIGTERM");
+      await until(() => exits.some((exit) => exit.session_id === refusedSessionId), "the exit to be announced on a signal");
+    }
   } finally {
     await Promise.allSettled(clients.map((client) => client.close()));
     for (const response of held.values()) response.destroy();

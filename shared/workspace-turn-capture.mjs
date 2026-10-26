@@ -281,19 +281,30 @@ const branchTips = (listed) => [...new Set(listed.flatMap(lines => lines.split('
  * tools). A supervisor that must not take the workspace's word asks the remote it
  * recorded itself: captureRecordedRemoteTips.
  */
-export async function captureRemoteTips(workspace) {
+export async function captureRemoteTips(workspace, { onNoAnswer = noteNoAnswer } = {}) {
     const signal = AbortSignal.timeout(5_000);
     try {
         const remotes = (await git(workspace, ['remote'], signal)).split('\n').filter(Boolean);
-        if (!remotes.length)
+        if (!remotes.length) {
+            onNoAnswer('the repository has no remote');
             return null;
+        }
         const ssh = process.env.GIT_SSH_COMMAND || (await git(workspace, ['config', '--get', 'core.sshCommand'], signal).catch(() => '')).trim() || 'ssh';
         return branchTips(await Promise.all(remotes.map(remote => remoteGit(workspace, ['-c', 'credential.interactive=false', 'ls-remote', '--heads', '--', remote], signal, noPrompt(ssh)))));
     }
-    catch {
+    catch (error) {
+        onNoAnswer(noAnswerReason(error, signal));
         return null;
     }
 }
+/** Why the remotes gave no answer: a silent null would hide a capture that is compared plainly for a fixable reason. */
+function noAnswerReason(error, signal) {
+    if (signal.aborted)
+        return 'the remotes did not answer within 5 seconds';
+    const message = error instanceof Error ? error.message.split('\n')[0] : String(error);
+    return `${error?.code ? `${error.code}: ` : ''}${message}`;
+}
+const noteNoAnswer = (reason) => console.error(`[letagents] The remotes could not be asked for their branches; this capture is compared plainly: ${reason}`);
 /**
  * The same question for one remote that the caller recorded itself, with the same
  * bound and the same silence. The remote is asked by URL, and Git runs with no
@@ -307,20 +318,25 @@ export async function captureRemoteTips(workspace) {
  * `directory`, which is not the workspace; with no repository it does not matter
  * where.
  */
-export async function captureRecordedRemoteTips(url, directory = tmpdir()) {
+export async function captureRecordedRemoteTips(url, directory = tmpdir(), { onNoAnswer = noteNoAnswer } = {}) {
     const signal = AbortSignal.timeout(5_000);
     try {
-        if (typeof url !== 'string' || !url)
+        if (typeof url !== 'string' || !url) {
+            onNoAnswer('no remote was recorded');
             return null;
+        }
         const outside = { GIT_DIR: devNull };
         const ssh = process.env.GIT_SSH_COMMAND || (await git(directory, ['config', '--get', 'core.sshCommand'], signal, undefined, undefined, outside).catch(() => '')).trim() || 'ssh';
         const quiet = { ...outside, ...noPrompt(ssh) };
         // An insteadOf rewrite, or a remote that is named like the URL, shows in the address Git would use.
-        if ((await git(directory, ['ls-remote', '--get-url', '--', url], signal, undefined, undefined, quiet)).trim() !== url)
+        if ((await git(directory, ['ls-remote', '--get-url', '--', url], signal, undefined, undefined, quiet)).trim() !== url) {
+            onNoAnswer("the owner's Git configuration sends the recorded remote somewhere else");
             return null;
+        }
         return branchTips([await remoteGit(directory, ['-c', 'credential.interactive=false', 'ls-remote', '--heads', '--', url], signal, quiet)]);
     }
-    catch {
+    catch (error) {
+        onNoAnswer(noAnswerReason(error, signal));
         return null;
     }
 }
@@ -380,11 +396,12 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
         const [base] = newest;
         const old = (await git(root, ['merge-base', startingHead, base], signal)).trim();
         // A sparse checkout leaves files out: an untouched file would look deleted against the
-        // new base. The trees hold text files as Git stores them, so core.autocrlf no longer
-        // makes an untouched file look changed; the plain comparison is kept for it all the
-        // same, until the base-update rule is proven under it. Neither can make a changed
-        // file look untouched.
-        if (/ (?:true|yes|on|1)$/im.test(await git(root, ['config', '--get-regexp', '^core\\.(autocrlf|sparsecheckout)$'], signal).catch(() => '')))
+        // new base, so the plain comparison is kept for it. The trees hold text files as Git
+        // stores them, so core.autocrlf (on by default in Git for Windows) does not make an
+        // untouched file look changed, and the rule holds under it; the Git-for-Windows suite
+        // proves that.
+        // Git reads the value in effect and its boolean forms (a bare key is true; yes/on/1).
+        if ((await git(root, ['config', '--type=bool', '--get', 'core.sparseCheckout'], signal).catch(() => '')).trim() === 'true')
             return start;
         const incoming = await changedEntries(root, `${old}^{tree}`, `${base}^{tree}`, signal);
         const touched = await changedEntries(root, `${old}^{tree}`, `${start}^{tree}`, signal);

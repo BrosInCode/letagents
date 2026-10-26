@@ -1,24 +1,30 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from 'node:timers/promises';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { decodeWorkspaceReview } from '../../../shared/workspace-review.mjs';
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { assertOwnerPrivateFile, childProcessEnv, connectOrExplain } from "./support/platform.js";
+
 // Real MCP processes and schemas; the HTTP fixture controls response loss and
 // response ordering. The companion DB tests verify server auth and allocation.
 test("worker handles isolate chats and workspace captures, survive process loss, and fence delayed replies", { timeout: 60_000 }, async () => {
   const temp = mkdtempSync(join(tmpdir(), "letagents-worker-stdio-"));
   const statePath = join(temp, "state.json");
-  const pauseFlag = join(temp, 'pause-capture'), pauseReady = join(temp, 'capture-paused');
+  // A barrier that freezes the server's main thread at the preparation boundary on every
+  // platform: while the hold file exists, the preload blocks synchronously before the capture
+  // worker's result is delivered. (A stop signal did the same, but Windows has none.)
+  const pauseFlag = join(temp, 'pause-capture'), pauseReady = join(temp, 'capture-paused'), pauseHold = join(temp, 'capture-hold');
   const preload = join(temp, 'pause-worker.cjs');
   writeFileSync(preload, `
     const threads = require('node:worker_threads'), fs = require('node:fs');
@@ -28,7 +34,8 @@ test("worker handles isolate chats and workspace captures, survive process loss,
       emit(event, ...args) {
         if (this.finish && event === 'message' && fs.existsSync(${JSON.stringify(pauseFlag)})) {
           fs.unlinkSync(${JSON.stringify(pauseFlag)}); fs.writeFileSync(${JSON.stringify(pauseReady)}, 'paused');
-          process.kill(process.pid, 'SIGSTOP');
+          const sleeper = new Int32Array(new SharedArrayBuffer(4));
+          while (fs.existsSync(${JSON.stringify(pauseHold)})) Atomics.wait(sleeper, 0, 0, 20);
         }
         return super.emit(event, ...args);
       }
@@ -126,14 +133,13 @@ test("worker handles isolate chats and workspace captures, survive process loss,
   const apiUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: ["--require", preload, "--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
-      env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
+      args: ["--require", preload, "--import", pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href, resolve("src/mcp/server.ts")], cwd: temp,
+      env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
-        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
-    transport.stderr?.resume();
+        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
     const client = new Client({ name: "identity-test", version: "1" });
     clients.push(client);
-    await client.connect(transport);
+    await connectOrExplain(client, transport);
     if (transport.pid) processIds.push(transport.pid);
     return { client, transport };
   };
@@ -161,7 +167,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(new Set(messages.map((m) => m.agent_session_id)).size, 2);
     assert.doesNotMatch(JSON.stringify(one), /session_token|owner-test-token|unused-bearer-secret/);
     assert.doesNotMatch(readFileSync(statePath, "utf8"), /unused-bearer-secret/);
-    assert.equal(statSync(statePath).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(statePath, temp);
 
     assert.match(one.workspace_instructions, /begin_workspace_capture before editing/);
     assert.ok(tools.tools.find(t => t.name === 'begin_workspace_capture')?.inputSchema.properties?.worker_id);
@@ -241,6 +247,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
 
     // Freeze process A after its worker has written files but before it can
     // commit that preparation. B reconnects and wins; A must never replace B.
+    writeFileSync(pauseHold, 'hold');
     writeFileSync(pauseFlag, 'pause');
     const stalePublish = raw(first.client, 'publish_workspace_capture', { ...workspaceArgs(one), capture_id: resumeCapture.capture_id, summary: 'Old process summary.' });
     for (let i = 0; i < 300 && !existsSync(pauseReady); i++) await delay(10);
@@ -279,7 +286,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     assert.equal(resumedCapture.status, 'published');
     assert.deepEqual(work.get(resumedCapture.source_message_id).summary.contribution.changes.files.map((file: any) => file.path), ['resumed.txt']);
     const immutable = JSON.stringify(work.get(resumedCapture.source_message_id));
-    process.kill(first.transport.pid!, 'SIGCONT');
+    rmSync(pauseHold, { force: true });
     assert.ok((await stalePublish).isError, 'old preparation cannot install after reconnect');
     assert.equal(JSON.stringify(work.get(resumedCapture.source_message_id)), immutable);
     assert.equal(work.get(resumedCapture.source_message_id).summary.contribution.summary, 'Finished after reconnect.');
@@ -359,7 +366,7 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     }
   } finally {
     releaseDisconnect?.();
-    for (const pid of processIds) { try { process.kill(pid, 'SIGCONT'); } catch { /* already exited */ } }
+    rmSync(pauseHold, { force: true });
     await Promise.allSettled(clients.map((client) => client.close()));
     server.closeAllConnections();
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));

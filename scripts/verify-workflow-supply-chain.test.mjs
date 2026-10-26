@@ -409,6 +409,8 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
     "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures",
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
@@ -425,6 +427,8 @@ test("dependency advisory checks use the pinned supported audit client", () => {
       "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\nnode scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
@@ -481,11 +485,33 @@ test("the dependency gates run once, in dependency-audit, before every check job
   // scripts, so each waits for the gates and none repeats them.
   const notGated = new Set(["dependency-audit", "build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
   const checkJobs = jobs.filter((candidate) => !notGated.has(candidate.name));
-  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "integration-db-tests"]);
+  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "integration-db-tests", "mcp-tests-windows"]);
   for (const checkJob of checkJobs) {
     assert.deepEqual(checkJob.needs, ["dependency-audit"], `${checkJob.name} must wait for dependency-audit`);
     for (const step of checkJob.steps) {
       const run = step.run ?? "";
+      // The Windows job installs Windows-only optional packages that the ubuntu
+      // signature check never sees, so it verifies each tree's signatures itself,
+      // right after installing it and before anything runs it.
+      if (checkJob.name === "mcp-tests-windows" && containsDirectNpmAudit(run)) {
+        const index = checkJob.steps.indexOf(step);
+        const install = checkJob.steps[index - 1]?.run ?? "";
+        const suffix = run.endsWith(" --prefix apps/desktop") ? " --prefix apps/desktop" : "";
+        assert.equal(run, `node scripts/retry-command.mjs npm audit signatures${suffix}`, `${checkJob.name}:${step.name}`);
+        assert.equal(install, `node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit${suffix}`, `${checkJob.name}:${step.name} must verify the tree it just installed`);
+        assert.equal(step.condition, null, `${checkJob.name}:${step.name} must not be skipped`);
+        assert.equal(step.continueOnError, null, `${checkJob.name}:${step.name} must fail the job`);
+        assert.equal(step.shell, null, `${checkJob.name}:${step.name} must use the default shell`);
+        // Verification precedes execution: both checks sit before the build
+        // gate, and every suite runs only when that gate succeeded, so a
+        // failed or skipped check leaves nothing to run the unverified tree.
+        const gate = checkJob.steps.findIndex((candidate) => candidate.name === "Build the MCP server");
+        assert.ok(gate > index, `${checkJob.name}:${step.name} must run before the build gate`);
+        for (const later of checkJob.steps.slice(gate + 1)) {
+          assert.equal(later.condition, "${{ !cancelled() && steps.build.outcome == 'success' }}", `${checkJob.name}:${later.name} must wait for the build gate`);
+        }
+        continue;
+      }
       assert.ok(!containsDirectNpmAudit(run), `${checkJob.name}:${step.name} must not repeat npm audit`);
       assert.doesNotMatch(run, /verify-dependency-advisories\.mjs/, `${checkJob.name}:${step.name} must not repeat the advisory audit`);
       assert.doesNotMatch(run, /verify:dependency-age|verify-dependency-age\.mjs/, `${checkJob.name}:${step.name} must not repeat the cooldown`);

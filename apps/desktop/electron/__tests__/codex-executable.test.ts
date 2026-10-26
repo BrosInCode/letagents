@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import test from "node:test";
 
 import {
@@ -63,5 +63,5 @@ test("Codex standalone path matches the official Windows installer default", () 
     env: { LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
     homeDirectory: "C:\\Users\\Ada",
     platform: "win32",
-  }), join("C:\\Users\\Ada\\AppData\\Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe"));
+  }), win32.join("C:\\Users\\Ada\\AppData\\Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe"));
 });

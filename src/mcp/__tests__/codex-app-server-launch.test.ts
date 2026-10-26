@@ -3,12 +3,21 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import test from "node:test";
 
-import { codexAppServerArgs, launchAppServer, terminateSpawnedProcess, waitForServer } from "../codex-session/app-server.js";
+import { spawn } from "node:child_process";
+
+import {
+  codexAppServerArgs,
+  launchAppServer,
+  rememberLaunchedAppServerForTest,
+  terminateSpawnedProcess,
+  waitForServer,
+} from "../codex-session/app-server.js";
 import { RpcClient } from "../codex-session/rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../shared/codex-owner-isolation.mjs";
+import { npmShim } from "./support/npm-shim.js";
 
 // Every launch here reads a scratch HOME and CODEX_HOME, never the owner's.
 const scratch = mkdtempSync(join(tmpdir(), "letagents-mcp-codex-launch-"));
@@ -46,19 +55,31 @@ const agentsSkill = writeSkill(join(home, ".agents", "skills", "owner-agents-ski
 /** A stand-in Codex: lists the owner's MCP servers and records each call. */
 function fakeCodex(listing: unknown[] | null, inProjectListing: unknown[] | null = listing) {
   const directory = fixture("fake-codex");
-  const bin = join(directory, "codex");
   const report = join(directory, "calls.jsonl");
-  writeFileSync(bin, [
-    "#!/usr/bin/env node",
+  const program = [
     "const args = process.argv.slice(2);",
     `require("node:fs").appendFileSync(${JSON.stringify(report)}, JSON.stringify({ args, cwd: process.cwd() }) + "\\n");`,
+    // The owner's own servers are listed from the filesystem root ("/" or "C:\\").
+    'const atRoot = require("node:path").parse(process.cwd()).root === process.cwd();',
     "if (args[0] === 'mcp') {",
     listing
-      ? `  process.stdout.write(process.cwd() === "/" ? ${JSON.stringify(JSON.stringify(listing))} : ${JSON.stringify(JSON.stringify(inProjectListing))});`
+      ? `  process.stdout.write(atRoot ? ${JSON.stringify(JSON.stringify(listing))} : ${JSON.stringify(JSON.stringify(inProjectListing))});`
       : "  process.exit(3);",
     "}",
     "",
-  ].join("\n"), { mode: 0o755 });
+  ];
+  let bin: string;
+  if (process.platform === "win32") {
+    // Windows runs no shebang. An npm-installed Codex is the cmd-shim
+    // `codex.cmd` beside its script, which the launcher resolves to
+    // `node <script>`; the fixture is that shim, byte for byte.
+    writeFileSync(join(directory, "fake-codex.js"), program.join("\n"));
+    bin = join(directory, "codex.cmd");
+    writeFileSync(bin, npmShim("fake-codex.js"));
+  } else {
+    bin = join(directory, "codex");
+    writeFileSync(bin, ["#!/usr/bin/env node", ...program].join("\n"), { mode: 0o755 });
+  }
   return {
     bin,
     calls: () => existsSync(report)
@@ -83,7 +104,9 @@ test("a local Codex session turns off the owner's extensions, personal skills an
 
   const lists = codex.calls().filter((call) => call.args[0] === "mcp");
   const server = codex.calls().find((call) => call.args[0] === "app-server");
-  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(cwd), "/"].sort(),
+  // Outside any project means the filesystem root: "/" here, the drive root on Windows.
+  const outsideAnyProject = parse(realpathSync(cwd)).root;
+  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(cwd), outsideAnyProject].sort(),
     "listed in the session's project and outside any project");
   for (const list of lists) assert.deepEqual(overridesOf(list.args), [...CODEX_OWNER_FEATURE_OVERRIDES]);
   assert.equal(realpathSync(server!.cwd), realpathSync(cwd), "the app-server starts where its servers were listed");
@@ -112,6 +135,44 @@ test("a local Codex session does not start when its project changes the LetAgent
   await assert.rejects(launchAppServer("ws://127.0.0.1:1", codex.bin, { cwd: fixture("steered") }),
     /This project's Codex config changes the LetAgents MCP server/);
   assert.equal(codex.calls().some((call) => call.args[0] === "app-server"), false);
+});
+
+test("stopping an app-server: POSIX signals the group even after the leader exited; Windows never taskkills an exited child's pid twice", async () => {
+  const child = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+  const pid = child.pid!;
+  rememberLaunchedAppServerForTest(pid, child);
+  const kills: Array<[number, string]> = [];
+  const taskkills: string[][] = [];
+  const deps = {
+    kill: (target: number, signal: string) => { kills.push([target, signal]); },
+    runSync: (_file: string, args: string[]) => { taskkills.push(args); return { error: undefined }; },
+  };
+
+  // Windows, child still held: the tree is ended once.
+  terminateSpawnedProcess(pid, { ...deps, platform: "win32" });
+  assert.deepEqual(taskkills, [["/pid", String(pid), "/T", "/F"]]);
+  assert.deepEqual(kills, []);
+
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  // Windows, repeated stops after the exit: nothing is killed, the pid may be reused.
+  terminateSpawnedProcess(pid, { ...deps, platform: "win32" });
+  terminateSpawnedProcess(pid, { ...deps, platform: "win32" });
+  assert.equal(taskkills.length, 1);
+  assert.deepEqual(kills, []);
+
+  // POSIX, same exited leader: the group gets SIGTERM, as before this change.
+  terminateSpawnedProcess(pid, { ...deps, platform: "darwin" });
+  assert.deepEqual(kills, [[-pid, "SIGTERM"]]);
+  // POSIX, group gone: the direct pid is tried.
+  const failingGroup = { ...deps, platform: "linux" as const, kill: (target: number, signal: string) => {
+    kills.push([target, signal]);
+    if (target < 0) throw new Error("ESRCH");
+  } };
+  terminateSpawnedProcess(pid, failingGroup);
+  assert.deepEqual(kills.slice(1), [[-pid, "SIGTERM"], [pid, "SIGTERM"]]);
+  // A pid this process never launched: Windows ends it as it is (stored pid from an earlier run).
+  terminateSpawnedProcess(99_999_999, { ...deps, platform: "win32" });
+  assert.deepEqual(taskkills.at(-1), ["/pid", "99999999", "/T", "/F"]);
 });
 
 function installedCodex(): string | null {

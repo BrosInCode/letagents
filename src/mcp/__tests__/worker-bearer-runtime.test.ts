@@ -6,6 +6,8 @@ import { createServer } from "node:net";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { unixSocketOnly } from "./support/platform.js";
+
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_API_URL ??= "http://127.0.0.1:39999";
 
@@ -502,7 +504,7 @@ test("custodial polling borrows authority and cannot fall back to owner or envir
   }
 });
 
-test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", async () => {
+test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", { skip: unixSocketOnly }, async () => {
   const root = mkdtempSync(join(tmpdir(), "custodial-wait-"));
   const socketPath = join(root, "daemon.sock");
   const phases: string[] = [];
