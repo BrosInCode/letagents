@@ -1,0 +1,371 @@
+/* The room's activity line: one pill at a time, floating just above the
+   composer over the bottom of the message list. It has no height of its own,
+   so a pill coming or going never moves the list or the input. */
+.room-live-strip {
+  position: relative;
+  height: 0;
+  min-height: 0;
+  padding: 0;
+}
+
+.room-activity-line {
+  position: absolute;
+  left: max(44px, var(--room-chat-side-gutter));
+  right: var(--room-chat-side-gutter);
+  bottom: 6px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  height: 30px;
+  /* Only the pill takes the pointer; the rest of the line lets clicks reach the messages. */
+  pointer-events: none;
+}
+
+.room-activity-pill {
+  pointer-events: auto;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(100%, 620px);
+  height: 28px;
+  padding: 0 10px 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 0 0 1px var(--border), 0 4px 14px rgba(0, 0, 0, 0.25);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  animation: room-activity-pill-in 220ms var(--ease-out) both;
+}
+
+button.room-activity-pill {
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+button.room-activity-pill:focus-visible,
+.room-activity-action:focus-visible,
+.room-activity-row-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  button.room-activity-pill:hover {
+    background: var(--bg-elevated);
+    color: var(--text);
+  }
+}
+
+.room-activity-pill[data-tone="muted"] {
+  color: var(--text-tertiary);
+}
+
+.room-activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-activity-text strong {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.room-activity-meta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.room-activity-added {
+  color: var(--green-text);
+}
+
+.room-activity-deleted {
+  color: var(--red-text);
+}
+
+.room-activity-icon,
+.room-activity-pulse {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+}
+
+.room-activity-pulse {
+  color: var(--text);
+}
+
+.room-activity-status {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin: 0 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.room-activity-status[data-tone="rose"] { background: var(--red-text); }
+.room-activity-status[data-tone="emerald"] { background: var(--green-text); }
+.room-activity-status[data-tone="amber"] { background: var(--amber-text); }
+
+.room-activity-badges {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.room-activity-badges > * + * {
+  margin-left: -5px;
+}
+
+.room-activity-dot {
+  width: 7px;
+  height: 7px;
+  margin: 0 5px;
+  border-radius: 50%;
+  background: var(--green-text);
+}
+
+.room-activity-pill[data-kind="leave"] .room-activity-dot {
+  background: var(--text-muted);
+}
+
+.room-activity-pill[data-kind="leave"] .room-provider-badge {
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.room-activity-action,
+.room-activity-row-button {
+  flex: 0 0 auto;
+  height: 20px;
+  margin-left: 2px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent-hover);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.room-activity-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.room-activity-action:active:not(:disabled),
+.room-activity-row-button:active {
+  transform: scale(0.97);
+}
+
+.room-activity-caret {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  transform: rotate(180deg);
+  transition: transform 180ms var(--ease-out);
+}
+
+.room-activity-pill[aria-expanded="true"] .room-activity-caret {
+  transform: none;
+}
+
+/* A soft sheen moves across what the agent is doing. */
+.room-activity-shimmer {
+  background: linear-gradient(90deg, var(--text-secondary) 40%, var(--text) 50%, var(--text-secondary) 60%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: room-activity-sheen 1.8s linear infinite;
+}
+
+@keyframes room-activity-sheen {
+  from { background-position: 100% 0; }
+  to { background-position: 0 0; }
+}
+
+/* A counted agent's reply starts from the orb. */
+.room-activity-anchor {
+  position: absolute;
+  left: 6px;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  visibility: hidden;
+}
+
+.room-activity-typing-dots {
+  display: inline-flex;
+  gap: 3px;
+  padding: 0 4px;
+}
+
+.room-activity-typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  animation: room-activity-typing 1.2s ease-in-out infinite;
+}
+
+.room-activity-typing-dots i:nth-child(2) { animation-delay: 150ms; }
+.room-activity-typing-dots i:nth-child(3) { animation-delay: 300ms; }
+
+@keyframes room-activity-typing {
+  30% { transform: translateY(-3px); opacity: 1; }
+  0%, 60%, 100% { opacity: 0.5; }
+}
+
+.room-activity-orb {
+  display: block;
+  flex: 0 0 auto;
+}
+
+/* Who is working, opened from the live pill. */
+.room-activity-list {
+  pointer-events: auto;
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 4px);
+  display: grid;
+  gap: 2px;
+  width: min(440px, 100%);
+  max-height: 260px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 86%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  backdrop-filter: blur(24px) saturate(170%);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+  transform-origin: 20px 100%;
+  animation: room-activity-list-in 180ms var(--ease-out) both;
+}
+
+.room-activity-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 0 6px 0 9px;
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+
+.room-activity-row:hover {
+  background: var(--accent-hover);
+}
+
+/* Another member's agent: nothing here opens it. */
+.room-activity-row[data-remote]:hover {
+  background: transparent;
+}
+
+.room-activity-row-copy {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.room-activity-row-copy strong {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 550;
+}
+
+.room-activity-row-copy span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-activity-row-time {
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.room-activity-row-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.room-activity-row-button {
+  height: 24px;
+  border-radius: 7px;
+}
+
+@keyframes room-activity-list-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.98); }
+}
+
+@keyframes room-activity-pill-in {
+  from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+}
+
+/* The quiet join and leave line in the timeline. */
+.room-presence-line {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  gap: 7px;
+  width: min(var(--room-chat-content-max, 720px), 100%);
+  margin: 4px 0;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+
+.room-presence-line span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green-text);
+  opacity: 0.7;
+}
+
+.room-presence-line[data-kind="disconnected"] {
+  color: var(--text-muted);
+}
+
+.room-presence-line[data-kind="disconnected"] span {
+  background: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-activity-pill,
+  .room-activity-list,
+  .room-activity-typing-dots i,
+  .room-activity-shimmer {
+    animation: none;
+  }
+
+  .room-activity-shimmer {
+    background: none;
+    color: var(--text-secondary);
+  }
+}

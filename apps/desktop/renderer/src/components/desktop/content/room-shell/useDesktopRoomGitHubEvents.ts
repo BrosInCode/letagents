@@ -16,7 +16,7 @@ import { mergeDesktopGitHubEventsPage } from "../../../../domain/desktop-room-sn
 import { roomSupportsGitHubIntegration } from "../../../../domain/git-rooms";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { providePullRequestDiffContext } from "../../../../composables/usePullRequestDiffContext";
-import type { ComposerEventPreview } from "../room-chat/RoomComposerEventChips.vue";
+import type { ComposerEventPreview } from "../room-chat/composer-event-preview";
 import { buildComposerEventPreview } from "../room-chat/composer-event-preview";
 import {
   isLowSignalGitHubCheckMessage,

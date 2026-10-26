@@ -374,6 +374,8 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     [{
       id: "supervised_working",
       displayName: "DawnHarbor",
+      // A tool call: the orb shows work, from the event's kind, not its words.
+      activity: "working",
       summary: "Using a tool",
       startedAt: "2026-07-15T18:00:00.500Z",
       agentSessionId: "agent_session_403",
@@ -404,6 +406,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     [{
       id: "supervised_working",
       displayName: "DawnHarbor",
+      activity: "working",
       summary: "Using a tool",
       startedAt: "2026-07-15T18:00:00.500Z",
       agentSessionId: "agent_session_403",

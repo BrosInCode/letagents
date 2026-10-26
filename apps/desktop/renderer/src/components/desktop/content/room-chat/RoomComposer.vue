@@ -4,33 +4,6 @@
       :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
       {{ hostApprovalHistoryLabel(historyApprovalCount, showApprovalHistory) }}
     </button>
-    <RoomPresenceChips :chips="presenceChips ?? []" />
-    <RoomComposerEventChips
-      :event-previews="visibleEventPreviews"
-      @open-event-preview="openEventPreview"
-      @dismiss-event-preview="emit('dismiss-event-preview', $event)"
-    />
-    <!-- The live region exists before the offer does, so the offer is announced.
-      It sits above the approval tray, so the offer never moves the tray's buttons. -->
-    <div class="desktop-composer-correction-live" aria-live="polite" data-testid="desktop-composer-correction-live">
-      <div
-        v-if="correctionOffer"
-        class="desktop-composer-correction-offer"
-        data-testid="desktop-composer-correction-offer"
-      >
-        <span>
-          <strong>{{ correctionOffer.target.displayName }}</strong> is in the middle of a turn. A room message waits until it ends.
-        </span>
-        <button
-          type="button"
-          :disabled="sending"
-          data-testid="desktop-composer-send-as-correction"
-          @click="sendAsCorrection"
-        >
-          Send as correction…
-        </button>
-      </div>
-    </div>
     <!-- One request at a time. Arrivals join its queue or appear above it, so
       they never move the buttons; details open over the messages on demand. -->
     <section v-if="currentHostApproval" :key="hostApprovalIdentity(currentHostApproval)"
@@ -236,11 +209,8 @@ import RoomGifPicker from "./RoomGifPicker.vue";
 import RoomComposerAddMenu, { type RoomComposerAddMenuItemId } from "./RoomComposerAddMenu.vue";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
-import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
-import RoomPresenceChips from "./RoomPresenceChips.vue";
-import type { PresenceChip } from "../../../../domain/presence-chips";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
-import { visibleComposerEventPreviews } from "./composer-event-preview";
+import { composerDrafting } from "./composer-event-preview";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";
 import {
   mentionedCorrectionTarget,
@@ -262,10 +232,8 @@ const props = defineProps<{
   attaching: boolean;
   attachmentDrafts: DesktopStagedAttachment[];
   attachmentError: string | null;
-  eventPreviews: ComposerEventPreview[];
   messageNamespace?: string;
   participants: DesktopParticipantSummary[];
-  presenceChips?: PresenceChip[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   replyTo: RoomComposerReplyTarget | null;
   roomIdentifier: string | null;
@@ -291,8 +259,6 @@ const emit = defineEmits<{
   "open-ask-agent": [];
   "remove-attachment": [uploadId: string];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
-  "open-event-preview": [event: ComposerEventPreview];
-  "dismiss-event-preview": [messageId: string];
   "stop-agent-turn": [agentId: string, approvalId: string];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
 }>();
@@ -303,11 +269,12 @@ const typing = useRoomTyping(computed(() => props.roomIdentifier ?? ""));
 watch(draft, value => { if (!value) typing.stop(); });
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
-const visibleEventPreviews = computed(() => [...visibleComposerEventPreviews(props.eventPreviews, {
+// Someone is writing: the room's activity line keeps GitHub updates off while this is true.
+const drafting = computed(() => composerDrafting({
   draft: draft.value,
   attachmentCount: props.attachmentDrafts.length + props.pendingAttachmentDrafts.length,
   replying: Boolean(props.replyTo),
-})]);
+}));
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 // Approvals are shared with the Inbox; card visibility stays local to this composer.
@@ -475,9 +442,10 @@ watch(hostApprovals, (approvals) => {
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0))
 );
-// A correction is plain text for one agent's private session, so a reply,
-// a quote or attachments keep the message a room message.
-const correctionOffer = computed(() =>
+// Steering is plain text for one agent's private session, so a reply,
+// a quote or attachments keep the message a room message. The offer shows on
+// the room's activity line: "<agent> is mid-turn · your message waits [Steer]".
+const steerOffer = computed(() =>
   props.correctableAgents?.length && !props.replyTo && !selectedGif.value
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
@@ -656,9 +624,13 @@ function sendRoomMessage(): void {
   );
 }
 
-/** Hand the draft to the Inspector's correction box; it leaves the composer only once that opened. */
-function sendAsCorrection(): void {
-  const offer = correctionOffer.value;
+/**
+ * Steer: hand the draft to the Inspector's correction box for the agent's
+ * live turn; it leaves the composer only once that opened. `done` hears
+ * whether it opened, so the activity line can confirm it.
+ */
+function steer(done?: (opened: boolean, displayName: string) => void): void {
+  const offer = steerOffer.value;
   if (!offer || props.sending) return;
   const handedOver = draft.value;
   const handoff = {
@@ -670,6 +642,7 @@ function sendAsCorrection(): void {
   emit("open-agent-correction", handoff, (opened) => {
     // Opening may have restored an earlier, abandoned hand-over; keep that.
     if (opened) draft.value = draft.value.replace(handedOver, "").trim();
+    done?.(opened, offer.target.displayName);
   });
 }
 
@@ -841,9 +814,5 @@ function syncTextareaHeight(): void {
   input.style.overflowY = input.scrollHeight > maxComposerInputHeight ? "auto" : "hidden";
 }
 
-function openEventPreview(event: ComposerEventPreview): void {
-  emit("open-event-preview", event);
-}
-
-defineExpose({ focusWithMention });
+defineExpose({ focusWithMention, drafting, steerOffer, steer });
 </script>

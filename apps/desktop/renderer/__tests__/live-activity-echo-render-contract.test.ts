@@ -8,18 +8,21 @@ const viewportSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/room-chat/RoomMessageViewport.vue",
   import.meta.url,
 )), "utf8");
+// The live strip is the room's activity line.
+const lineSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/room-chat/RoomActivityLine.vue",
+  import.meta.url,
+)), "utf8");
 
 test("the work indicator renders every participant with the live activity echo", () => {
   assert.match(viewportSource, /coalesceWorkIndicatorEchoes/);
-  assert.match(viewportSource, /collapseWorkIndicators/);
-  // Show every name from the rate-limited displayed set.
-  assert.match(viewportSource, /const collapsedAgentWork = computed\(\(\) => collapseWorkIndicators\(displayedAgentWork\.value, 0\)\)/);
-  assert.match(viewportSource, /v-for="work in collapsedAgentWork\.visible"/);
-  assert.match(viewportSource, /data-testid="room-local-agent-work-echo"/);
-  assert.match(viewportSource, /data-testid="room-local-agent-work-overflow"/);
-  assert.match(viewportSource, /collapsedAgentWork\.hiddenCount/);
-  // What the strip says of the rows that it does not show names them for what they are: working, or waiting to try again.
-  assert.match(viewportSource, /\{\{ workIndicatorOverflowLabel\(collapsedAgentWork\) \}\}/);
+  // The line gets the whole rate-limited displayed set.
+  assert.match(viewportSource, /:work="roomLoading \? \[\] : displayedAgentWork"/);
+  // One agent: its name and echo. Several: a count, and the open list names every one with its echo.
+  assert.match(lineSource, /<strong>\{\{ single\.displayName \}\}<\/strong> <span class="room-activity-shimmer" data-testid="room-activity-live-echo">\{\{ single\.summary \}\}<\/span>/);
+  assert.match(lineSource, /<strong>\{\{ pill\.work\.length \}\} agents<\/strong> <span class="room-activity-shimmer">are working<\/span>/);
+  assert.match(lineSource, /v-for="work in listWork"/);
+  assert.match(lineSource, /<span data-testid="room-local-agent-work-echo">\{\{ work\.summary \}\}<\/span>/);
 });
 
 test("the echo update is rate-limited with a trailing flush and cleaned up on unmount", () => {
@@ -39,7 +42,7 @@ test("scroll effects share the coalesced cadence, not the raw prop", () => {
 test("an agent's visible reply cancels its older coalesced progress echo", () => {
   assert.match(viewportSource, /workIndicatorSupersededByAgentMessage/);
   assert.match(viewportSource, /currentLocalAgentWork/);
-  assert.match(viewportSource, /v-if="displayedAgentWork\.length && !roomLoading"/);
+  assert.match(viewportSource, /:work="roomLoading \? \[\] : displayedAgentWork"/);
 });
 
 const streamCssSource = readFileSync(fileURLToPath(new URL(
@@ -63,9 +66,12 @@ const surfaceSource = readFileSync(fileURLToPath(new URL(
 const shellSource = roomShellSource();
 
 test("the work indicator renders as a clickable button with accessible name and phrasing content", () => {
-  assert.match(viewportSource, /<button[\s\S]*?class="room-local-agent-work"[\s\S]*?:aria-label="`\$\{work\.displayName\}: \$\{work\.summary\}\. Open live activity`"[\s\S]*?@click="\$emit\('open-agent', workIndicatorAgentTarget\(work\)\)"/);
-  assert.match(viewportSource, /<span class="room-local-agent-work-copy">/);
-  assert.doesNotMatch(viewportSource, /<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<div>/);
+  // The live pill is a button that opens the list of who is working.
+  assert.match(lineSource, /<button\s+v-else-if="pill\?\.kind === 'live'"[\s\S]*?:aria-expanded="expanded"\s+:aria-label="liveLabel"[\s\S]*?@click="expanded = !expanded"/);
+  assert.doesNotMatch(lineSource, /<button\s+v-else-if="pill\?\.kind === 'live'"[\s\S]*?<div>[\s\S]*?<\/button>/);
+  // Each row's Open opens that agent's live activity.
+  assert.match(lineSource, /:aria-label="`Open live activity for \$\{work\.displayName\}`"[\s\S]*?@click="openWork\(work\)"/);
+  assert.match(viewportSource, /@open-agent="\$emit\('open-agent', workIndicatorAgentTarget\(\$event\)\)"/);
   assert.match(viewportSource, /import\s*\{\s*[^}]*workIndicatorAgentTarget[^}]*\}\s*from\s*"[^"]*agent-inspector-identity"/);
 });
 
@@ -86,12 +92,13 @@ const chatViewSource = readFileSync(fileURLToPath(new URL(
 )), "utf8");
 
 test("the wait for background work has a button of its own that asks for the existing stop of the turn", () => {
-  // A button beside the indicator, never inside it: the indicator is a button itself.
-  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*(?:<!--[^\n]*-->\s*<div\s+v-if="work\.remote"[\s\S]*?<\/div>\s*)?<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<\/button>\s*<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-local-agent-work-action"/);
+  // A button in the agent's row of the open list, beside Open, never inside another button.
+  assert.match(lineSource, /<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-activity-row-button"/);
   // What the title says is what the adapter's interrupt does: a command goes on, a sub-agent is stopped (each captured).
-  assert.match(viewportSource, /title="Post the answer that the agent has now\. A command in the background keeps running\. A sub-agent that still runs is stopped\. No later result is posted\."/);
+  assert.match(lineSource, /title="Post the answer that the agent has now\. A command in the background keeps running\. A sub-agent that still runs is stopped\. No later result is posted\."/);
   // The click names the turn that the button was shown for, by the room message that started it.
-  assert.match(viewportSource, /@click="\$emit\('post-agent-answer-now', work\.id, work\.sourceMessageId \?\? null\)"\s*>\s*Post answer now\s*<\/button>/);
+  assert.match(lineSource, /@click="emit\('post-agent-answer-now', work\.id, work\.sourceMessageId \?\? null\)"\s*>Post answer now<\/button>/);
+  assert.match(viewportSource, /@post-agent-answer-now="\(agentId, sourceMessageId\) => \$emit\('post-agent-answer-now', agentId, sourceMessageId\)"/);
   assert.match(viewportSource, /"post-agent-answer-now": \[agentId: string, sourceMessageId: string \| null\];/);
   assert.match(chatViewSource, /@post-agent-answer-now="\(agentId, sourceMessageId\) => emit\('post-agent-answer-now', agentId, sourceMessageId\)"/);
   assert.match(chatViewSource, /"post-agent-answer-now": \[agentId: string, sourceMessageId: string \| null\];/);
@@ -99,13 +106,9 @@ test("the wait for background work has a button of its own that asks for the exi
   assert.match(shellSource, /@post-agent-answer-now="postAgentAnswerNow"/);
   // A turn that started since the button was shown is not this request's: the stop of a turn that works would interrupt it.
   assert.match(shellSource, /function postAgentAnswerNow\(entryId: string, sourceMessageId: string \| null\): void \{ \/\/ [^\n]+\n[\s\S]*?candidate\.id === entryId && candidate\.roomId === props\.room\.identifier[\s\S]*?if \(!entry \|\| !sourceMessageId \|\| entry\.roomAgentState\?\.turn\.sourceMessageId !== sourceMessageId\) return;[\s\S]*?openAgentDetailRequest\([\s\S]*?void runAgentInspectorAction\(\{ entryId, roomId: entry\.roomId, kind: "stop_turn" \}\);\s*\}/);
-  assert.match(cssSource, /\.room-local-agent-work-action\s*\{[\s\S]*?cursor:\s*pointer;/);
-  assert.match(cssSource, /\.room-local-agent-work-action:focus-visible\s*\{[\s\S]*?outline:/);
-  // The row of a held turn keeps the look of work, because something runs. Only an agent that waits for the time of
-  // its next attempt has a row at rest: that mark is never set from the wait for background work.
-  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*(?:<!--[^\n]*-->\s*<div\s+v-if="work\.remote"[\s\S]*?<\/div>\s*)?<button[^>]*?:data-waiting="work\.waiting \|\| undefined"[^>]*?class="room-local-agent-work"/);
-  assert.equal(viewportSource.match(/data-waiting/g)?.length, 1);
-  assert.doesNotMatch(cssSource, /waitsForBackgroundWork|room-local-agent-work-action[^{]*data-waiting/);
+  // Only an agent that waits for the time of its next attempt is marked as at rest: the pill and its row.
+  assert.equal(lineSource.match(/:data-waiting="(?:single\?|work)\.waiting \|\| undefined"/g)?.length, 2);
+  assert.doesNotMatch(lineSource, /data-waiting="[^"]*waitsForBackgroundWork/);
 });
 
 test("agent inspector host falls back to composer only when opener row is non-null and disconnected", () => {
@@ -131,12 +134,12 @@ test("DesktopRoomShell line count stays strictly under 3000 lines", () => {
 });
 
 test("an agent that waits to try again has a row at rest in the live strip, and the inspector's line for it follows a clock that moves", () => {
-  // The shell puts the rows that wait in the same list as the rows that work, so they are in the strip that stays in view.
+  // The shell puts the rows that wait in the same list as the rows that work, so they are on the line that stays in view.
   assert.match(shellSource, /const localAgentWork = computed\(\(\) =>\s*mergeRoomResponseParticipants\(\[\s*\.\.\.waitingAgentIndicators\(supervisorEntries\.value, props\.room\.identifier\),/);
-  // The row is the strip's own button, marked as one that waits. Its look is the strip's: the mark only puts it at rest.
-  assert.match(viewportSource, /<button[\s\S]*?:data-waiting="work\.waiting \|\| undefined"[\s\S]*?class="room-local-agent-work"/);
-  assert.match(cssSource, /\.room-local-agent-work\[data-waiting\] \.room-local-agent-work-pulse\s*\{[^}]*animation:\s*none;/);
-  assert.match(cssSource, /\.room-local-agent-work\[data-waiting\] \.room-local-agent-work-dots\s*\{\s*display:\s*none;/);
+  // The pill and the row are marked as ones that wait, and their orb breathes instead of working.
+  assert.match(lineSource, /:data-waiting="single\?\.waiting \|\| undefined"/);
+  assert.match(lineSource, /:data-waiting="work\.waiting \|\| undefined"/);
+  assert.match(lineSource, /<ActivityOrb :state="orbStateForWork\(work\)" \/>/);
   // The inspector reads the wait against the second clock, not against the time of the last state push.
   assert.match(surfaceSource, /const retryClock = useSecondClock\(\(\) => Boolean\(agentScheduledRetry\(props\.projection\.entry\.deliveryReceipts\)\)\);/);
   assert.match(surfaceSource, /const signal = computed\(\(\) => agentInspectorSignal\(props\.projection, retryClock\.value\)\);/);
@@ -150,9 +153,12 @@ test("the work indicator is pinned outside the scrolling list and still feeds th
   const template = viewportSource.split("</template>\n\n<script")[0];
   const strip = template.indexOf('ref="liveStripElement" class="room-live-strip"');
   assert.ok(strip > template.indexOf('class="room-new-messages-pill"'), "the strip follows the list and its pills");
-  assert.ok(template.indexOf('class="room-local-agent-work-list"') > strip);
+  assert.ok(template.indexOf("<RoomActivityLine", strip) > strip, "the activity line lives in the strip");
   const before = template.slice(0, template.lastIndexOf("<div", strip));
   assert.equal((before.match(/<div\b/g) || []).length - (before.match(/<\/div>/g) || []).length, 1, "only the viewport root is open");
   // The reply still grows out of its work row, so the motion must look in the strip.
   assert.match(viewportSource, /useRoomMessageMotion\(\{\s*element: messagesElement,\s*work: liveStripElement,/);
+  // Every working agent has an anchor in the line, also when several are counted as one pill.
+  assert.match(lineSource, /class="room-activity-anchor"\s+:data-motion-work="work\.awaitingRoomTurn \? undefined : ''"/);
+  assert.match(lineSource, /:data-motion-work="single && !single\.awaitingRoomTurn \? '' : undefined"/);
 });
