@@ -691,6 +691,8 @@ function insertNewlineAtCursor(): void {
 const mac = isMacPlatform();
 function handleComposerKey(event: KeyboardEvent): void {
   if (event.isComposing) return;
+  // An Escape that already closed the "+" menu does nothing else.
+  if (event.key === "Escape" && event.defaultPrevented) return;
   if (isAttachShortcut(event)) {
     event.preventDefault();
     requestAttachments();
@@ -704,7 +706,7 @@ function handleComposerKey(event: KeyboardEvent): void {
     moveMentionSelection(event, event.key === "ArrowDown" ? 1 : -1);
   } else if (event.key === "Tab" && !mentionOpen.value && useSuggestion(event)) {
     return;
-  } else if (event.key === "Escape" && !mentionOpen.value && suggestionVisible.value && !event.defaultPrevented) {
+  } else if (event.key === "Escape" && !mentionOpen.value && suggestionVisible.value) {
     event.preventDefault();
     settleSuggestion(visibleSuggestion.value!.recordId);
   } else if (event.key === "Tab" || event.key === "Escape") {
@@ -747,10 +749,16 @@ function requestAttachments(): void {
   if (canAttach.value) emit("pick-attachments");
 }
 
-/** Pasted images and files take the same path as dropped ones; pasted text stays text. */
+/**
+ * Pasted images and files take the same path as dropped ones; pasted text stays
+ * text. Rich text (a spreadsheet range, a document) also carries a picture of
+ * itself; it pastes as text.
+ */
 function handlePaste(event: ClipboardEvent): void {
-  const files = Array.from(event.clipboardData?.files ?? []);
+  const clipboard = event.clipboardData;
+  const files = Array.from(clipboard?.files ?? []);
   if (!files.length || !props.roomIdentifier || props.roomLoading) return;
+  if (clipboard?.getData("text/plain").trim() && clipboard.getData("text/html")) return;
   event.preventDefault();
   emit("stage-attachments", files);
 }

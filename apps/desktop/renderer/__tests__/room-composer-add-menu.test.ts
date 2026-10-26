@@ -207,16 +207,25 @@ test('placeholder and label name the room; loading and no-room keep their labels
 test('pasted files are staged like dropped files; pasted text stays text', t => {
   const { vm, events, props } = mountComposer(t);
   const image = { name: 'image.png', type: 'image/png', size: 10 };
-  const paste = (files: unknown[]) => { const event = { clipboardData: { files }, defaultPrevented: false, preventDefault() { event.defaultPrevented = true; } }; vm.handlePaste(event); return event; };
+  const paste = (files: unknown[], data: Record<string, string> = {}) => {
+    const event = { clipboardData: { files, getData: (type: string) => data[type] ?? '' }, defaultPrevented: false, preventDefault() { event.defaultPrevented = true; } };
+    vm.handlePaste(event);
+    return event;
+  };
   const withImage = paste([image]);
   assert.equal(withImage.defaultPrevented, true);
   assert.deepEqual(events, [['stage-attachments', [image]]]);
   const textOnly = paste([]);
   assert.equal(textOnly.defaultPrevented, false, 'the browser pastes text as usual');
   assert.equal(events.length, 1);
+  const webImage = paste([image], { 'text/html': '<img src="x">' });
+  assert.equal(webImage.defaultPrevented, true, 'a copied web image has no text, so it attaches');
+  const spreadsheet = paste([image], { 'text/plain': 'a\tb', 'text/html': '<table></table>' });
+  assert.equal(spreadsheet.defaultPrevented, false, 'a spreadsheet range pastes as text, not as its picture');
+  assert.equal(events.length, 2);
   props.roomIdentifier = null;
   paste([image]);
-  assert.equal(events.length, 1, 'no room, nothing staged');
+  assert.equal(events.length, 2, 'no room, nothing staged');
 });
 
 test('⌘U (Ctrl+U off macOS) and the menu attach files only when attaching is possible', t => {
@@ -313,6 +322,30 @@ test('Escape dismisses the suggestion; an Escape spent closing the menu does not
   const tab = key('Tab');
   vm.handleComposerKey(tab);
   assert.equal(tab.defaultPrevented, false);
+});
+
+test('an Escape that closed the "+" menu leaves an open command list alone', t => {
+  const { vm } = mountComposer(t);
+  vm.draft.value = '/';
+  assert.equal(vm.slash.open.value, true);
+  const spent = key('Escape');
+  spent.preventDefault();
+  vm.handleComposerKey(spent);
+  assert.equal(vm.slash.open.value, true);
+  vm.handleComposerKey(key('Escape'));
+  assert.equal(vm.slash.open.value, false);
+});
+
+test('a paste or drop while another file is uploading says so instead of vanishing', async t => {
+  const { useRoomAttachments } = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/useRoomAttachments.ts');
+  let attachments: any;
+  const app = renderer.createApp({ setup() { attachments = useRoomAttachments({ roomIdentifier: { value: 'room-a' }, discardAttachment() {} }); return () => h('div'); } });
+  app.mount({});
+  t.after(() => app.unmount());
+  attachments.attaching.value = true;
+  await attachments.stageDroppedAttachments([{ name: 'shot.png', type: 'image/png', size: 10 }]);
+  assert.match(attachments.attachmentError.value, /Wait for the current attachment to finish/);
+  assert.equal(attachments.pendingAttachmentDrafts.value.length, 0);
 });
 
 test('no Needs you provider means no suggestion', t => {
