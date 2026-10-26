@@ -62,7 +62,8 @@ function mountMenu(t: any, overrides: Record<string, unknown> = {}) {
   const items = fakeItems(['attach', 'gif', 'task', 'agent']);
   const inside = { name: 'inside' };
   mounted.vm.root.value = { contains: (node: unknown) => node === inside || items.includes(node) };
-  mounted.vm.menu.value = { querySelectorAll: () => items.filter((item: any) => !item.disabled), contains: (node: unknown) => items.includes(node) };
+  mounted.vm.menu.value = { querySelectorAll: () => items.filter((item: any) => !item.disabled), contains: (node: unknown) => items.includes(node),
+    querySelector: (selector: string) => items.find((item: any) => selector.includes(`"${item.dataset.item}"`)) ?? null };
   return { ...mounted, props, items, inside };
 }
 
@@ -259,12 +260,111 @@ test('Create task starts a /task command and keeps any draft as its title; Add a
   assert.deepEqual(events, [['open-add-agent']]);
 });
 
-test('GIF in the menu opens the existing picker', async t => {
-  const { vm } = mountComposer(t);
-  let opened = 0;
-  vm.gifPicker.value = { enabled: true, open: async () => { opened++; } };
-  vm.handleAddMenuSelect('gif');
-  assert.equal(opened, 1);
+test('GIF opens a panel beside the menu; the menu stays open and Back returns to the GIF row', async t => {
+  const { vm, events, items } = mountMenu(t);
+  vm.toggle({ detail: 1 });
+  await flush();
+  vm.choose(vm.items.value.find((item: any) => item.id === 'gif'), true);
+  await flush();
+  assert.equal(vm.open.value, true, 'the menu stays open');
+  assert.equal(vm.flyout.value, 'gif');
+  assert.equal(vm.flyoutQuery.value, '');
+  assert.equal(vm.flyoutAnimate.value, true, 'a click grows the panel out of its row');
+  assert.equal(events.length, 0, 'GIF is handled inside the menu');
+
+  const search = { name: 'gif search' };
+  vm.flyoutElement.value = { contains: (node: unknown) => node === search, querySelector: () => null };
+  const escape = key('Escape', { target: search });
+  vm.closeOnEscape(escape);
+  assert.equal(vm.open.value, true, 'Escape inside the panel is the panel\'s to handle');
+  assert.equal(escape.defaultPrevented, false);
+
+  vm.backToMenu();
+  await flush();
+  assert.equal(vm.flyout.value, null);
+  assert.equal(vm.open.value, true);
+  assert.equal(fakeDocument.activeElement, items[1], 'focus returns to the GIF row');
+
+  vm.handleMenuKey(key('ArrowRight', { target: items[1] }));
+  await flush();
+  assert.equal(vm.flyout.value, 'gif', 'Right opens it again');
+  assert.equal(vm.flyoutAnimate.value, false, 'a keyboard-opened panel appears at once');
+  vm.closeMenu();
+  assert.equal(vm.flyout.value, null, 'closing the menu closes the panel');
+});
+
+test('openGif opens the menu and the panel with a search; it does nothing when GIFs are off', async t => {
+  const { vm, props } = mountMenu(t);
+  vm.openGif('lgtm');
+  await flush();
+  assert.equal(vm.open.value, true);
+  assert.equal(vm.animate.value, false);
+  assert.equal(vm.flyout.value, 'gif');
+  assert.equal(vm.flyoutQuery.value, 'lgtm');
+  vm.closeMenu();
+  props.gifAvailable = false;
+  vm.openGif('lgtm');
+  await flush();
+  assert.equal(vm.open.value, false);
+  props.gifAvailable = true;
+  props.gifDisabled = true;
+  vm.openGif('lgtm');
+  await flush();
+  assert.equal(vm.open.value, false);
+});
+
+test('/gif <query> and Enter open the GIF panel with that search instead of sending', async t => {
+  const { vm, events } = mountComposer(t);
+  await flush();
+  assert.equal(vm.gifAvailable.value, true);
+  const opened: string[] = [];
+  vm.addMenu.value = { openGif: (query: string) => opened.push(query), close() {}, isOpen: () => false };
+  vm.draft.value = '/gif lgtm';
+  vm.handleComposerKey(key('Enter'));
+  await flush();
+  assert.deepEqual(opened, ['lgtm']);
+  assert.equal(vm.draft.value, '', 'the command leaves the draft');
+  assert.equal(events.filter((event: any) => event[0] === 'send-message').length, 0, 'nothing is sent');
+
+  vm.draft.value = '/gif';
+  await vm.submitMessage();
+  assert.deepEqual(opened, ['lgtm', ''], 'a bare /gif opens the quick searches');
+});
+
+test('/gif in a room without GIFs keeps the draft and says why', async t => {
+  ipc.room.getExpressions = async () => ({ enabled: false, gif_provider_configured: true });
+  t.after(() => { ipc.room.getExpressions = async () => ({ enabled: true, gif_provider_configured: true }); });
+  const { vm, events } = mountComposer(t);
+  await flush();
+  const opened: string[] = [];
+  vm.addMenu.value = { openGif: (query: string) => opened.push(query), close() {}, isOpen: () => false };
+  vm.draft.value = '/gif lgtm';
+  await vm.submitMessage();
+  assert.deepEqual(opened, []);
+  assert.equal(vm.draft.value, '/gif lgtm');
+  assert.equal(events.filter((event: any) => event[0] === 'send-message').length, 0);
+});
+
+test('a picked GIF goes into the draft with its preview, still under reduced motion; sending carries only id and title', async t => {
+  const { vm, events } = mountComposer(t);
+  let closed = 0;
+  vm.addMenu.value = { openGif() {}, close: () => { closed++; }, isOpen: () => false };
+  const item = { provider: 'giphy', id: 'g1', title: 'Ship it', page_url: 'https://giphy.com/gifs/g1', preview_url: 'https://media.giphy.com/g1.gif', still_url: 'https://media.giphy.com/g1_s.gif', image_url: null };
+  vm.pickGif(item);
+  assert.equal(closed, 1, 'one click adds it and closes the panel');
+  assert.deepEqual(vm.selectedGif.value, { provider: 'giphy', id: 'g1', title: 'Ship it' });
+  assert.equal(vm.selectedGifPreview.value, item.preview_url);
+  reducedMotion = true;
+  t.after(() => { reducedMotion = false; });
+  vm.selectedGifItem.value = { ...item };
+  assert.equal(vm.selectedGifPreview.value, item.still_url);
+  assert.equal(vm.canSend.value, true, 'a GIF alone can be sent');
+  vm.sendRoomMessage();
+  const sent = events.find((event: any) => event[0] === 'send-message');
+  assert.deepEqual(sent.at(-1), { provider: 'giphy', id: 'g1', title: 'Ship it' }, 'preview URLs never leave the draft');
+  vm.removeSelectedGif();
+  assert.equal(vm.selectedGif.value, null);
+  assert.equal(vm.selectedGifPreview.value, null);
 });
 
 const suggestionFor = (recordId: string) => ({ recordId, from: 'Ada', text: 'Ship the small fixes now.' });

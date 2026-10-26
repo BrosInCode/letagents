@@ -21,6 +21,7 @@
       :id="menuId"
       ref="menu"
       class="desktop-composer-add-menu"
+      :class="{ 'has-flyout': flyout && flyoutNarrow }"
       role="menu"
       aria-label="Add to message"
       :data-animate="animate || undefined"
@@ -36,10 +37,12 @@
           class="desktop-composer-add-menu-item"
           :disabled="item.disabled"
           :aria-haspopup="item.opensDialog ? 'dialog' : undefined"
+          :aria-expanded="item.id === flyout ? true : item.id === 'gif' ? false : undefined"
+          :data-open="item.id === flyout || undefined"
           :aria-keyshortcuts="item.keyShortcuts"
           :data-item="item.id"
           :data-testid="item.testid"
-          @click="choose(item)"
+          @click="choose(item, $event.detail !== 0)"
           @pointermove="focusItem($event.currentTarget as HTMLElement)"
         >
           <component :is="item.icon" class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
@@ -49,12 +52,26 @@
         </button>
       </template>
     </div>
+    <!-- GIFs open beside the menu; where there is no room beside it, over it with a Back row. -->
+    <div
+      v-if="open && flyout === 'gif'"
+      ref="flyoutElement"
+      class="desktop-composer-add-flyout"
+      :class="{ 'is-narrow': flyoutNarrow }"
+      :data-animate="flyoutAnimate || undefined"
+    >
+      <button v-if="flyoutNarrow" type="button" class="desktop-composer-add-menu-item desktop-composer-add-back" @click="backToMenu">
+        <ChevronLeft class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
+        <span class="desktop-composer-add-menu-label">Back</span>
+      </button>
+      <slot name="gif" :initial-query="flyoutQuery" :back="backToMenu" />
+    </div>
   </span>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
-import { Bot, ChevronRight, ImagePlay, ListTodo, Paperclip, Plus } from "@lucide/vue";
+import { Bot, ChevronLeft, ChevronRight, ImagePlay, ListTodo, Paperclip, Plus } from "@lucide/vue";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 
 export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent";
@@ -90,6 +107,14 @@ const root = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 const menu = ref<HTMLElement | null>(null);
 const open = ref(false);
+const flyoutElement = ref<HTMLElement | null>(null);
+/** The surface open beside the menu. Only GIF has one here. */
+const flyout = ref<"gif" | null>(null);
+const flyoutQuery = ref("");
+const flyoutNarrow = ref(false);
+const flyoutAnimate = ref(false);
+// The menu is 268px wide; the GIF panel, 340px, sits 6px to its right.
+const FLYOUT_SPAN_PX = 268 + 6 + 340 + 8;
 // Only a pointer-opened menu grows out of "+"; a keyboard-opened one appears at once.
 const animate = ref(false);
 
@@ -122,10 +147,44 @@ function openMenu(byPointer: boolean, focusLast = false): void {
 function closeMenu(): void {
   open.value = false;
   animate.value = false;
+  flyout.value = null;
 }
 
-function choose(item: MenuItem): void {
+/** Open GIFs beside the menu, opening the menu first when needed (for `/gif <query>`). */
+function openGif(query = "", byPointer = false): void {
+  if (props.disabled || props.gifDisabled || !props.gifAvailable) return;
+  if (!open.value) animate.value = false;
+  open.value = true;
+  flyoutQuery.value = query;
+  flyoutAnimate.value = byPointer && !prefersReducedMotion();
+  const left = root.value?.getBoundingClientRect?.().left ?? 0;
+  flyoutNarrow.value = typeof window !== "undefined" && left + FLYOUT_SPAN_PX > window.innerWidth;
+  if (flyout.value === "gif") {
+    // Already open: a new query starts a fresh panel; otherwise just return to its search box.
+    if (query) flyout.value = null;
+    else return focusFlyout();
+  }
+  void nextTick(() => {
+    flyout.value = "gif";
+    focusFlyout();
+  });
+}
+
+function focusFlyout(): void {
+  void nextTick(() => flyoutElement.value?.querySelector<HTMLElement>("input")?.focus({ preventScroll: true }));
+}
+
+function backToMenu(): void {
+  flyout.value = null;
+  void nextTick(() => menu.value?.querySelector<HTMLElement>('[data-item="gif"]')?.focus({ preventScroll: true }));
+}
+
+function choose(item: MenuItem, byPointer = false): void {
   if (item.disabled) return;
+  if (item.id === "gif") {
+    openGif("", byPointer);
+    return;
+  }
   closeMenu();
   emit("select", item.id);
 }
@@ -179,7 +238,7 @@ function closeOnOutsidePointer(event: PointerEvent): void {
 }
 // Escape spent on closing the menu does nothing else, such as dismissing a suggestion.
 function closeOnEscape(event: KeyboardEvent): void {
-  if (event.key !== "Escape" || menu.value?.contains(event.target as Node)) return;
+  if (event.key !== "Escape" || menu.value?.contains(event.target as Node) || flyoutElement.value?.contains(event.target as Node)) return;
   event.preventDefault();
   closeMenu();
 }
@@ -191,11 +250,12 @@ function setDocumentListeners(listening: boolean): void {
 }
 watch(open, setDocumentListeners);
 watch(() => props.disabled, (disabled) => { if (disabled) closeMenu(); });
+watch(() => props.gifDisabled || !props.gifAvailable, (off) => { if (off && flyout.value === "gif") flyout.value = null; });
 onBeforeUnmount(() => setDocumentListeners(false));
 
 function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
 }
 
-defineExpose({ close: closeMenu, isOpen: () => open.value });
+defineExpose({ close: closeMenu, isOpen: () => open.value, openGif });
 </script>
