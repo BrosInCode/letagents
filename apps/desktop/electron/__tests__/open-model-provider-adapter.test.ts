@@ -34,7 +34,8 @@ import {
   parseOpenCodePermissionEvent,
   type OpenCodePermissionRequest,
 } from "../main/agents/opencode-server-client.js";
-import { seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
+import { clearOpenModelEffortCatalogCacheForTest } from "../main/agents/open-model-efforts.js";
+import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 
@@ -540,6 +541,45 @@ test("Open Model launches OpenCode so a denied tool call does not end the turn",
   });
   const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
   assert.deepEqual(config.experimental, { continue_loop_on_deny: true });
+});
+
+test("Open Model sends the chosen effort only while the endpoint lists it for the model", async () => {
+  clearOpenModelEffortCatalogCacheForTest();
+  const efforts = (listed: string[] | null | "unreadable") => {
+    const harness = createHarness();
+    const base = harness.dependencies.fetch!;
+    harness.dependencies.fetch = async (input, init) => new URL(input).pathname.endsWith("/models")
+      ? listed === "unreadable" ? new Response("down", { status: 503 }) : Response.json({ data: [{ id: "openai/gpt-oss-120b", context_length: 131072, ...(listed ? { reasoning: { supported_efforts: listed } } : {}) }] })
+      : base(input, init);
+    return harness;
+  };
+  const request = (baseUrl: string): Partial<ProviderSpawnRequest> => ({
+    model: "openai/gpt-oss-120b",
+    reasoningEffort: "high",
+    providerCredential: { apiKey: null, baseUrl, model: "openai/gpt-oss-120b", contextWindow: 131072 },
+  });
+  const modelOptions = (harness: ReturnType<typeof createHarness>) => {
+    const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      provider: Record<string, { models: Record<string, { options: unknown }> }>;
+    };
+    return config.provider[OPEN_MODEL_OPENCODE_PROVIDER_ID]!.models["openai/gpt-oss-120b"]!.options;
+  };
+
+  const listed = await spawnAdapter(request("https://listed.example.test/v1"), efforts(["low", "medium", "high"]));
+  assert.deepEqual(modelOptions(listed.harness), { reasoningEffort: "high" });
+  assert.equal(listed.handle.launchNotices?.length ?? 0, 0);
+
+  const unlisted = await spawnAdapter(request("https://unlisted.example.test/v1"), efforts(null));
+  assert.deepEqual(modelOptions(unlisted.harness), {});
+  assert.deepEqual(unlisted.handle.launchNotices, [
+    "Reasoning effort high not used: the endpoint does not list it for this model, so the model's default applies.",
+  ]);
+
+  // A /models read that fails says nothing new: the effort checked when it was chosen is kept.
+  const unreadable = await spawnAdapter(request("https://unreadable.example.test/v1"), efforts("unreadable"));
+  assert.deepEqual(modelOptions(unreadable.harness), { reasoningEffort: "high" });
+  assert.equal(unreadable.handle.launchNotices?.length ?? 0, 0);
+  clearOpenModelEffortCatalogCacheForTest();
 });
 
 test("Open Model launches ask-before-write with native shell and edit approvals", async () => {

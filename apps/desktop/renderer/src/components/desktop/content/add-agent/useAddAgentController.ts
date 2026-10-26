@@ -65,8 +65,8 @@ export interface SupervisedLaunchCreateSnapshot {
   permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
   launchPolicy: unknown;
   model: string | null;
-  /** Codex only. Left out, the agent uses the provider's configured effort. */
-  reasoningEffort?: DesktopManagedAgentEffort | null;
+  /** Null uses the provider's default; only a provider that shows the effort selector sends one. */
+  reasoningEffort: DesktopManagedAgentEffort | null;
 }
 
 type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "createAgent">;
@@ -98,7 +98,7 @@ export async function createSupervisedAgentFromSnapshot(
     permissionProfileId: snapshot.permissionProfileId,
     launchPolicy: snapshot.launchPolicy,
     model: snapshot.model,
-    ...(snapshot.providerId === "codex" && snapshot.reasoningEffort ? { reasoningEffort: snapshot.reasoningEffort } : {}),
+    reasoningEffort: snapshot.reasoningEffort,
   };
   return client.createAgent(input);
 }
@@ -402,7 +402,7 @@ async function startManagedAgent(
     requestPermissionProfileId,
   );
   const requestModel = selectedModel.value;
-  const requestEffort = requestProviderId === "codex" ? selectedEffort.value || null : null;
+  const requestReasoningEffort = showEffortSelector.value ? selectedEffort.value || null : null;
   let supervisedCreationRequestId: string | null = null;
   startingAgent.value = true;
   startOperationInFlight = true;
@@ -455,7 +455,7 @@ async function startManagedAgent(
       permissionProfileId: requestPermissionProfileId,
       launchPolicy: requestLaunchPolicy,
       model: requestModel,
-      reasoningEffort: requestEffort,
+      reasoningEffort: requestReasoningEffort,
     };
     // A name is presentation, never identity, and is assigned where the
     // agent is saved. The helper sends every click-time launch input above.

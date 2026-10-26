@@ -25,7 +25,6 @@ import type { SupervisorEntriesContext } from "../add-agent/supervisor-entries-c
 import { createSupervisedAgentFromSnapshot } from "../add-agent/useAddAgentController";
 import {
   managedAgentEffortOptionsForProvider,
-  supervisedProviderTakesEffort,
 } from "../add-agent/useAddAgentPresentation";
 import {
   accessStops,
@@ -220,7 +219,8 @@ export function useComposerAgentDraft(options: {
       id: ++chipSequence,
       providerId,
       model: memory?.model ?? null,
-      effort: supervisedProviderTakesEffort(providerId) ? memory?.effort ?? "" : "",
+      // Checked against the model's efforts once its catalog arrives (see the watch below).
+      effort: memory?.effort ?? "",
       access: resolved?.id ?? null,
       accessChosen: false,
       fellBack: resolved?.fellBack ?? false,
@@ -265,11 +265,27 @@ export function useComposerAgentDraft(options: {
     if (current.model && !list.some((option) => option.id === current.model)) list.push({ id: current.model, label: current.model });
     return list;
   });
+  /**
+   * Effort, as the Add agent window offers it: Codex takes every shared level;
+   * an Open Model agent takes exactly the levels its endpoint lists for the
+   * model (the chosen one, or the saved default), so a model without that
+   * list has no slider. Supervised Claude takes none.
+   */
   const chipEfforts = computed(() => {
     const current = chip.value;
-    if (!current || !supervisedProviderTakesEffort(current.providerId)) return [];
+    if (!current || (current.providerId !== "codex" && current.providerId !== "open-model")) return [];
+    const catalog = catalogs[current.providerId];
+    const modelId = current.model ?? catalog?.defaultModel ?? null;
+    const option = catalog?.models.find((candidate) => candidate.id === modelId) ?? null;
+    const levels = managedAgentEffortOptionsForProvider(current.providerId, option);
+    if (!levels.length) return [];
     return [{ value: "" as DesktopManagedAgentEffort | "", label: "Default" },
-      ...managedAgentEffortOptionsForProvider(current.providerId).map((option) => ({ value: option.value as DesktopManagedAgentEffort, label: option.label }))];
+      ...levels.map((level) => ({ value: level.value as DesktopManagedAgentEffort, label: level.label }))];
+  });
+  // A model that does not take the chosen effort gets its own default instead.
+  watch(chipEfforts, (levels) => {
+    const current = chip.value;
+    if (current?.effort && !levels.some((level) => level.value === current.effort)) chip.value = { ...current, effort: "" };
   });
   const chipAccessStops = computed(() => chip.value ? accessStops(profilesFor(chip.value.providerId)) : []);
   /** Where the agent will work, named as the Add agent window names it. */
@@ -412,7 +428,7 @@ export function useComposerAgentDraft(options: {
         permissionProfileId: access,
         launchPolicy,
         model: current.model,
-        reasoningEffort: current.effort || null,
+        reasoningEffort: chipEfforts.value.some((level) => level.value === current.effort) ? current.effort || null : null,
       }, isCurrent);
       if (!entry) {
         forgetAttempt(roomIdentifier, creationRequestId);

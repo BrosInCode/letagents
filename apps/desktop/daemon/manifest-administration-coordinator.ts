@@ -8,6 +8,7 @@ import {
   homeHarnessDiffersFromSaved,
   latestPermissionChange,
   namesHomeHarness,
+  providerAcceptsReasoningEffort,
   storedHomeHarness,
   storedLaunchPolicy,
   withoutHomeHarness,
@@ -197,6 +198,10 @@ export class ManifestAdministrationCoordinator {
     }
     if (entry.delivery_mode !== undefined && !["mcp_polling", "daemon_inbox"].includes(entry.delivery_mode)) {
       throw new Error("Invalid delivery mode.");
+    }
+    // Refused when the agent is saved, not first at its launch.
+    if (!providerAcceptsReasoningEffort(entry.provider, entry.reasoning_effort)) {
+      throw new Error(`Provider '${entry.provider}' does not take reasoning effort '${String(entry.reasoning_effort)}'.`);
     }
   }
 

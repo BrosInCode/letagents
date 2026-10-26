@@ -242,7 +242,8 @@ test("bounded supervised defaults never tell providers to own polling and Claude
     configurationSource,
     /You are part of this room's team\. Work on the tasks assigned to you/,
   );
-  assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\)/);
+  // Codex always; Open Model only for a model whose endpoint lists efforts.
+  assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\|\| \(selectedProviderId\.value === "open-model" && effortOptions\.value\.length > 0\)\s*\)/);
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 

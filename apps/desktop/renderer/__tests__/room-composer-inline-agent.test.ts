@@ -82,7 +82,10 @@ function fakeIpc(overrides: { preflight?: Record<string, any>; openModel?: any; 
     workers: {
       listAgentProviders: async () => [provider('claude-code', 'Claude Code'), provider('codex', 'Codex'), provider('open-model', 'Open Model'), provider('cursor', 'Cursor'), provider('antigravity', 'Antigravity')],
       runAgentProviderPreflight: async (id: string, input: any) => { calls.preflight.push([id, input]); return { providerId: id, ...preflight[id] }; },
-      listAgentProviderModels: async (id: string) => ({ providerId: id, status: 'ready', defaultModel: id === 'codex' ? 'gpt-5-codex' : null, models: id === 'claude-code' ? [{ id: 'opus', label: 'Opus 5.5', source: 'provider' }, { id: 'sonnet', label: 'Sonnet 5.5', source: 'provider' }] : [] }),
+      listAgentProviderModels: async (id: string) => ({ providerId: id, status: 'ready', defaultModel: id === 'codex' ? 'gpt-5-codex' : id === 'open-model' ? 'openai/gpt-oss-120b' : null,
+        models: id === 'claude-code' ? [{ id: 'opus', label: 'Opus 5.5', source: 'provider' }, { id: 'sonnet', label: 'Sonnet 5.5', source: 'provider' }]
+          : id === 'open-model' ? [{ id: 'openai/gpt-oss-120b', label: 'openai/gpt-oss-120b', source: 'provider', supportedEfforts: ['low', 'medium', 'high'] }, { id: 'qwen/qwen3-coder', label: 'qwen/qwen3-coder', source: 'provider' }]
+            : [] }),
     },
     openModel: { getSettingsStatus: async () => overrides.openModel ?? { configured: true, hasApiKey: true, baseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-coder', savedAt: null, settingsPath: '', error: null } },
     supervisorGrant: { getStorageStatus: async () => ({ available: true, detail: '' }) },
@@ -285,7 +288,7 @@ test('Claude gets the same launch policy the Add agent window sends, and no effo
   draft.setAccess('read_only');
   await draft.launch('Review the PR');
   const input = calls.create[0];
-  assert.equal(input.reasoningEffort, undefined);
+  assert.equal(input.reasoningEffort ?? null, null);
   assert.deepEqual(input.launchPolicy, (await vite.ssrLoadModule('/renderer/src/domain/managed-agents.ts')).supervisedProviderLaunchPolicy('claude-code', 'read_only'));
 });
 
@@ -365,7 +368,7 @@ test('Open Model is always a chip, says "Not set up", and Enter is blocked calml
   ipc.openModel.getSettingsStatus = async () => ({ configured: true, baseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-coder', error: null });
   assert.equal((await draft.launch('Summarise the thread')).outcome, 'started');
   assert.equal(calls.create[0].providerId, 'open-model');
-  assert.equal(calls.create[0].reasoningEffort, undefined, 'no Open Model effort until #1754 lands');
+  assert.equal(calls.create[0].reasoningEffort ?? null, null, 'a model without listed efforts sends none');
 });
 
 /* ---------- stepped slider ---------- */
@@ -563,16 +566,6 @@ test('without a launch host the composer keeps the plain Add agent window', t =>
   assert.deepEqual(events.at(-1), ['open-add-agent']);
 });
 
-test('the Add agent window sends a Codex effort to the supervised create', async () => {
-  const sent: any[] = [];
-  const client = { createAgent: async (input: any) => { sent.push(input); return input; } };
-  const snapshot = { creationRequestId: 'abc12345', providerName: 'Codex', roomIdentifier: 'room-a', repoRootPath: '/repo', charter: 'go', permissionProfileId: 'full_access', launchPolicy: undefined, model: null };
-  await controller.createSupervisedAgentFromSnapshot(client, { ...snapshot, providerId: 'codex', reasoningEffort: 'xhigh' }, () => true);
-  await controller.createSupervisedAgentFromSnapshot(client, { ...snapshot, providerId: 'claude-code', reasoningEffort: 'high' }, () => true);
-  assert.equal(sent[0].reasoningEffort, 'xhigh');
-  assert.equal('reasoningEffort' in sent[1], false, 'other providers refuse an effort, so none is sent');
-});
-
 /* ---------- "First message · <name>" in the timeline ---------- */
 
 test('the first message shows in its starter\'s timeline at the agent\'s start time, never the window\'s generic one', async () => {
@@ -713,4 +706,39 @@ test('the Add agent submenu toggles on its row, goes back with ← or Esc, and p
   vm.closeOnOutsidePointer({ target: { outside: true } });
   assert.equal(vm.open.value, false);
   assert.equal(vm.agentMenuOpen.value, false, 'a click outside closes both');
+});
+
+test('Open Model shows Default plus the model\'s listed efforts, none for a model without them, and a model change resets an unsupported effort', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  ipc.openModel.getSettingsStatus = async () => ({ configured: true, baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-oss-120b', error: null });
+  draft.pick('open-model');
+  await flush();
+  // The saved model (gpt-oss-120b) lists low, medium and high.
+  assert.deepEqual(draft.chipEfforts.value.map((e: any) => e.label), ['Default', 'Low', 'Medium', 'High']);
+  draft.setEffort('high');
+  draft.setModel('qwen/qwen3-coder');
+  await flush();
+  assert.deepEqual(draft.chipEfforts.value, [], 'no slider for a model that lists no efforts');
+  assert.equal(draft.chip.value.effort, '', 'the unsupported effort goes back to Default');
+  draft.setModel('openai/gpt-oss-120b');
+  await flush();
+  draft.setEffort('medium');
+  assert.equal((await draft.launch('Summarise the thread')).outcome, 'started');
+  assert.equal(calls.create[0].providerId, 'open-model');
+  assert.equal(calls.create[0].model, 'openai/gpt-oss-120b');
+  assert.equal(calls.create[0].reasoningEffort, 'medium');
+});
+
+test('an effort the model does not list never reaches the create', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('open-model');
+  await flush();
+  draft.setModel('qwen/qwen3-coder');
+  draft.setEffort('xhigh');
+  assert.equal((await draft.launch('Go')).outcome, 'started');
+  assert.equal(calls.create[0].reasoningEffort, null);
 });

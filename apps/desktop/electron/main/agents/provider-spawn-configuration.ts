@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-permission-profiles.js";
+import { isOpenModelReasoningEffort } from "./open-model-efforts.js";
 import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 
 /**
@@ -108,7 +109,8 @@ export function attestProviderSpawnPolicy(
     requireMatch(policy, "sandbox", profile === "sandboxed_write" ? "enabled" : "disabled", provider);
     if (Object.hasOwn(policy, "mode") && policy.mode !== null) throw new Error(`Cursor ${profile} launch retained a read-only mode.`);
   }
-  if (provider !== "codex" && request.reasoningEffort !== null && request.reasoningEffort !== undefined) {
+  if (request.reasoningEffort !== null && request.reasoningEffort !== undefined && provider !== "codex"
+    && !(provider === "open-model" && isOpenModelReasoningEffort(request.reasoningEffort))) {
     throw new Error(`${provider} does not support the selected reasoning effort.`);
   }
   if (!Number.isSafeInteger(request.configurationRevision) || Number(request.configurationRevision) < 1) {

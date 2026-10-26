@@ -2346,6 +2346,7 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
     permissionProfileId: "read-only",
     launchPolicy: { profile: "read-only" },
     model: "gpt-5.6",
+    reasoningEffort: "high" as const,
   };
   const request = createSupervisedAgentFromSnapshot(client as never, {
     creationRequestId: "request-snapshot",
@@ -2361,6 +2362,7 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
   form.permissionProfileId = "full-access";
   form.launchPolicy = { profile: "full-access" };
   form.model = "other-model";
+  form.reasoningEffort = "low" as never;
   const created = await request;
 
   assert.equal(createdInput?.creationRequestId, "request-snapshot");
@@ -2372,6 +2374,7 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
   assert.equal(createdInput?.permissionProfileId, "read-only");
   assert.deepEqual(createdInput?.launchPolicy, { profile: "read-only" });
   assert.equal(createdInput?.model, "gpt-5.6");
+  assert.equal(createdInput?.reasoningEffort, "high", "the effort chosen at the click reaches the saved agent");
   assert.equal(created?.displayName, "CedarPeak", "the saved entry carries the assigned name");
 });
 

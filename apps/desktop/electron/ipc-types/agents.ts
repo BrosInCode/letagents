@@ -128,6 +128,11 @@ export interface DesktopAgentProviderModelOption {
   label: string;
   isDefault?: boolean;
   source: DesktopAgentProviderModelSource;
+  /**
+   * Open Model only: the reasoning efforts the endpoint lists for this exact
+   * model. Absent or empty means the model takes no effort setting.
+   */
+  supportedEfforts?: DesktopManagedAgentEffort[];
 }
 
 export type DesktopAgentProviderModelsStatus =
@@ -745,7 +750,7 @@ export interface DesktopSupervisorCreateInput {
   displayName: string;
   providerId: DesktopAgentProviderId;
   model?: string | null;
-  /** Codex only; other supervised providers refuse an effort at launch. */
+  /** Null or absent uses the provider's own default. */
   reasoningEffort?: DesktopManagedAgentEffort | null;
   charter: string;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
