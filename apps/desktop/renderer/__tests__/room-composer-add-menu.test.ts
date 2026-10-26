@@ -479,7 +479,7 @@ test('a paste or drop while another file is uploading says so instead of vanishi
   t.after(() => app.unmount());
   attachments.attaching.value = true;
   await attachments.stageDroppedAttachments([{ name: 'shot.png', type: 'image/png', size: 10 }]);
-  assert.match(attachments.attachmentError.value, /Wait for the current attachment to finish/);
+  assert.deepEqual(attachments.attachmentProblem.value, { kind: 'busy' }, 'the activity line says a file is still attaching');
   assert.equal(attachments.pendingAttachmentDrafts.value.length, 0);
 });
 
