@@ -5,7 +5,7 @@
         ref="trigger"
         class="desktop-composer-agent-chip-open"
         type="button"
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         :aria-expanded="open"
         :aria-controls="open ? menuId : undefined"
         :aria-label="`New ${providerName} agent settings: ${spec}`"
@@ -34,11 +34,12 @@
       v-if="coachVisible && !open"
       class="desktop-composer-agent-coach"
       role="dialog"
-      aria-label="How to start this agent"
+      :aria-labelledby="`${menuId}-coach-title`"
+      :aria-describedby="`${menuId}-coach-steps`"
       data-testid="desktop-composer-agent-coach"
     >
-      <p class="desktop-composer-agent-coach-title">Two steps to start this agent</p>
-      <ol>
+      <p :id="`${menuId}-coach-title`" class="desktop-composer-agent-coach-title">Two steps to start this agent</p>
+      <ol :id="`${menuId}-coach-steps`">
         <li>Click the chip to choose the model{{ efforts.length ? ", effort" : "" }} and access.</li>
         <li>Type its first task, then press Enter.</li>
       </ol>
@@ -54,7 +55,7 @@
       :id="menuId"
       ref="menu"
       class="desktop-composer-agent-menu"
-      role="menu"
+      role="dialog"
       :aria-label="view === 'where' ? 'Works in' : `New ${providerName} agent settings`"
       :data-animate="animate || undefined"
       data-testid="desktop-composer-agent-menu"
@@ -62,15 +63,16 @@
       @pointermove="focusUnderPointer"
     >
       <template v-if="view === 'where'">
-        <button type="button" role="menuitem" tabindex="-1" class="desktop-composer-agent-menu-item" data-item="back" @click="showMain('where')">
+        <button type="button" tabindex="-1" class="desktop-composer-agent-menu-item" data-item="back" @click="showMain('where')">
           <ChevronLeft :size="14" aria-hidden="true" /><span class="desktop-composer-agent-menu-label">Works in</span>
         </button>
         <div class="desktop-composer-add-menu-separator" role="separator"></div>
+        <div role="radiogroup" aria-label="Works in" class="desktop-composer-agent-group">
         <button
           v-for="worktree in worktrees"
           :key="worktree.rootPath"
           type="button"
-          role="menuitemradio"
+          role="radio"
           tabindex="-1"
           class="desktop-composer-agent-menu-item desktop-composer-agent-pick"
           :aria-checked="worktree.rootPath === repoRootPath"
@@ -80,23 +82,24 @@
           <span class="desktop-composer-agent-menu-label">{{ worktree.label }}</span>
           <Check v-if="worktree.rootPath === repoRootPath" class="desktop-composer-agent-tick" :size="15" aria-hidden="true" />
         </button>
+        </div>
       </template>
       <template v-else>
-        <div class="desktop-composer-agent-menu-head">{{ modelHeading }}</div>
+        <div class="desktop-composer-agent-menu-head" aria-hidden="true">{{ modelHeading }}</div>
         <template v-if="readiness?.state === 'not_set_up'">
           <p class="desktop-composer-agent-menu-note">No endpoint or model yet.</p>
-          <button type="button" role="menuitem" tabindex="-1" class="desktop-composer-agent-menu-item" data-item="configure-open-model"
+          <button type="button" tabindex="-1" class="desktop-composer-agent-menu-item" data-item="configure-open-model"
             data-testid="desktop-composer-agent-configure-open-model" @click="emit('configure-open-model')">
             <span class="desktop-composer-agent-menu-label">Configure Open Model…</span>
             <ChevronRight :size="14" class="desktop-composer-agent-menu-end" aria-hidden="true" />
           </button>
         </template>
-        <template v-else>
+        <div v-else role="radiogroup" :aria-label="modelHeading" class="desktop-composer-agent-group">
         <button
           v-for="(model, index) in models"
           :key="model.id ?? ''"
           type="button"
-          role="menuitemradio"
+          role="radio"
           tabindex="-1"
           class="desktop-composer-agent-menu-item desktop-composer-agent-pick"
           :class="{ 'desktop-composer-agent-mono': chip.providerId === 'open-model' }"
@@ -108,7 +111,7 @@
           <Check v-if="model.id === chip.model" class="desktop-composer-agent-tick" :size="15" aria-hidden="true" />
           <span v-if="index < 9" class="desktop-composer-agent-menu-end">{{ index + 1 }}</span>
         </button>
-        </template>
+        </div>
         <div class="desktop-composer-add-menu-separator" role="separator"></div>
         <ComposerStepSlider
           v-if="efforts.length"
@@ -130,10 +133,9 @@
         <div class="desktop-composer-add-menu-separator" role="separator"></div>
         <button
           type="button"
-          role="menuitem"
           tabindex="-1"
           class="desktop-composer-agent-menu-item"
-          :aria-haspopup="worktrees.length ? 'menu' : undefined"
+          :aria-haspopup="worktrees.length ? 'true' : undefined"
           :aria-disabled="worktrees.length ? undefined : 'true'"
           data-item="where"
           data-testid="desktop-composer-agent-works-in"
@@ -145,7 +147,7 @@
         </button>
         <template v-if="chip.providerId === 'open-model' && readiness?.state !== 'not_set_up'">
           <div class="desktop-composer-add-menu-separator" role="separator"></div>
-          <button type="button" role="menuitem" tabindex="-1" class="desktop-composer-agent-menu-item" data-item="configure-open-model"
+          <button type="button" tabindex="-1" class="desktop-composer-agent-menu-item" data-item="configure-open-model"
             data-testid="desktop-composer-agent-configure-open-model" @click="emit('configure-open-model')">
             <span class="desktop-composer-agent-menu-label">Configure Open Model…</span>
             <span v-if="openModelHost" class="desktop-composer-agent-menu-value">{{ openModelHost }}</span>
@@ -275,7 +277,7 @@ function showMain(from: string): void {
 
 /** Rows and sliders, in order; one of them holds the highlight. */
 function items(): HTMLElement[] {
-  return Array.from(menu.value?.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"]), [role="slider"]') ?? []);
+  return Array.from(menu.value?.querySelectorAll<HTMLElement>('[data-item]:not([aria-disabled="true"]), [role="slider"]') ?? []);
 }
 
 function checkedOrFirst(): HTMLElement | null {
@@ -290,7 +292,7 @@ function focusItem(item: HTMLElement | null): void {
 // The pointer moves the one highlight; it never opens or closes anything.
 function focusUnderPointer(event: PointerEvent): void {
   if ((event.buttons ?? 0) !== 0) return;
-  const item = (event.target as HTMLElement | null)?.closest?.<HTMLElement>('[role^="menuitem"], [role="slider"]');
+  const item = (event.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-item], [role="slider"]');
   if (item && item.getAttribute("aria-disabled") !== "true" && menu.value?.contains(item)) focusItem(item);
 }
 

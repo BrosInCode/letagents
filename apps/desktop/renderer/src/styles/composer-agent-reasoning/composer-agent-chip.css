@@ -687,3 +687,8 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.desktop-composer-agent-group {
+  display: grid;
+  gap: 2px;
+}

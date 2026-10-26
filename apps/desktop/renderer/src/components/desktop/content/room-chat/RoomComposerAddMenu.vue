@@ -67,6 +67,7 @@
         <span class="desktop-composer-add-menu-label">Back</span>
       </button>
       <div class="desktop-composer-agent-flyout-head">Starts with the message you type</div>
+      <p v-if="!agentRows?.length" class="desktop-composer-agent-flyout-head" role="status">Checking your agents…</p>
       <button
         v-for="row in agentRows ?? []"
         :key="row.providerId"
@@ -183,7 +184,9 @@ function closeMenu(): void {
 function choose(item: MenuItem): void {
   if (item.disabled) return;
   if (item.id === "agent" && inlineAgents.value) {
-    openAgentMenu();
+    // A second click on the row closes its submenu again.
+    if (agentMenuOpen.value) closeAgentMenu(true);
+    else openAgentMenu();
     return;
   }
   closeMenu();

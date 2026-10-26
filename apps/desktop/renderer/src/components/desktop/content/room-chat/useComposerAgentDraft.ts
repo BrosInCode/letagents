@@ -20,6 +20,7 @@ import {
 } from "../../../../domain/managed-agents";
 import { refreshSupervisedRuntimeEntry } from "../../../../domain/supervised-recovery";
 import { contextualAddAgentError } from "../add-agent/add-agent-errors";
+import { createSupervisedLaunchAttachments } from "../add-agent/supervised-launch-attachments";
 import type { SupervisorEntriesContext } from "../add-agent/supervisor-entries-context";
 import { createSupervisedAgentFromSnapshot } from "../add-agent/useAddAgentController";
 import {
@@ -96,6 +97,10 @@ export function useComposerAgentDraft(options: {
   let catalogVersion = 0;
   // One id per attempt that never saved, kept only when it is unknown whether it did.
   let pendingCreationRequestId: string | null = null;
+  const launchAttachments = createSupervisedLaunchAttachments();
+  // Provider checks run CLI probes, so the submenu reuses a recent set.
+  let checkedAt = 0;
+  const CHECK_REUSE_MS = 30_000;
 
   function viewerLogin(): string | null {
     return options.host?.context().viewerLogin ?? null;
@@ -135,8 +140,10 @@ export function useComposerAgentDraft(options: {
     };
   }
 
-  /** Lists the providers and checks each one, for the submenu rows. Cheap to call again. */
-  async function refreshProviders(): Promise<void> {
+  /** Lists the providers and checks each one, for the submenu rows. A check younger than 30 s is reused. */
+  async function refreshProviders(options: { force?: boolean } = {}): Promise<void> {
+    if (!options.force && providers.value.length && Date.now() - checkedAt < CHECK_REUSE_MS) return;
+    checkedAt = Date.now();
     const version = ++checkVersion;
     try {
       const listed = visibleDesktopAgentProviders(await desktopIpc.workers.listAgentProviders())
@@ -144,7 +151,10 @@ export function useComposerAgentDraft(options: {
       if (version !== checkVersion) return;
       providers.value = listed;
     } catch {
-      if (version === checkVersion) providers.value = [];
+      if (version === checkVersion) {
+        providers.value = [];
+        checkedAt = 0;
+      }
       return;
     }
     const checks: Promise<void>[] = providers.value.map(async (provider) => {
@@ -313,8 +323,11 @@ export function useComposerAgentDraft(options: {
 
   watch(() => [viewerLogin(), options.roomIdentifier()] as const, ([login, room], previous) => {
     personalAccess.value = readPersonalAccess(login, room);
-    // A chip belongs to the room it was added in.
-    if (previous && previous[1] !== room) removeChip();
+    // A chip belongs to the room it was added in, and provider checks depend on the room.
+    if (previous && previous[1] !== room) {
+      removeChip();
+      checkedAt = 0;
+    }
   });
 
   /**
@@ -327,34 +340,46 @@ export function useComposerAgentDraft(options: {
     const roomIdentifier = options.roomIdentifier();
     const charter = text.trim();
     if (!current || !roomIdentifier || !charter || launching.value) return { outcome: "blocked" };
-    const provider = providerById(current.providerId);
-    const name = composerAgentName(provider);
-    if (!provider || !options.host) {
-      options.host?.openAddAgent({ providerId: current.providerId });
-      return { outcome: "setup" };
-    }
-    if (current.providerId === "open-model" && openModelConfigured.value !== true) {
-      await refreshOpenModelStatus();
-      // The refresh above may have changed it.
-      if ((openModelConfigured.value as boolean | null) !== true) {
-        notice.value = "Configure Open Model before this agent can start. Your message is still here.";
-        return { outcome: "blocked" };
-      }
-    }
-    const launchContext = options.host.context();
-    if (!launchContext.repoRootPath?.trim() && !roomOnly()) {
-      notice.value = "Connect this room to its local project before adding an agent.";
-      return { outcome: "blocked" };
-    }
+    // Set before the first await, so a second Enter cannot start a second launch.
+    launching.value = true;
+    notice.value = null;
     // The click-time choices are sent as they were; only removing the chip or leaving the room cancels.
     const chipId = current.id;
     const isCurrent = () => chip.value?.id === chipId && options.roomIdentifier() === roomIdentifier;
-    launching.value = true;
-    notice.value = null;
+    const provider = providerById(current.providerId);
+    const name = composerAgentName(provider);
     let creationRequestId: string | null = null;
     try {
+      if (!provider || !options.host) {
+        options.host?.openAddAgent({ providerId: current.providerId });
+        return { outcome: "setup" };
+      }
+      if (current.providerId === "open-model" && openModelConfigured.value !== true) {
+        await refreshOpenModelStatus();
+        // The refresh above may have changed it.
+        const configured = openModelConfigured.value as boolean | null;
+        if (configured !== true) {
+          notice.value = configured === false
+            ? "Configure Open Model before this agent can start. Your message is still here."
+            : "Couldn't read the Open Model settings. Your message is still here. Try again.";
+          return { outcome: "blocked" };
+        }
+      }
+      const launchContext = options.host.context();
+      if (!launchContext.repoRootPath?.trim() && !roomOnly()) {
+        notice.value = "Connect this room to its local project before adding an agent.";
+        return { outcome: "blocked" };
+      }
+      // The room may have changed (a project disconnected) since the chip took its level.
+      const stops = accessStops(profilesFor(current.providerId));
+      if (!current.access || !stops.some((profile) => profile.id === current.access)) {
+        notice.value = `${name} can't start with that access here. Choose its access in the chip. Your message is still here.`;
+        return { outcome: "blocked" };
+      }
+      const access = current.access;
+      const launchPolicy = supervisedProviderLaunchPolicy(current.providerId, access);
       const preflight = await desktopIpc.workers.runAgentProviderPreflight(current.providerId,
-        preflightInput(current.providerId, { access: current.access, model: current.model, effort: current.effort }));
+        preflightInput(current.providerId, { access, model: current.model, effort: current.effort }));
       if (!isCurrent()) return { outcome: "blocked" };
       preflights[current.providerId] = preflight;
       if (!preflight.canStart) {
@@ -373,7 +398,10 @@ export function useComposerAgentDraft(options: {
           return { outcome: "blocked" };
         }
       }
+      // A retry after an attempt that may have been saved keeps its id, so the daemon cannot make a second agent.
       creationRequestId = pendingCreationRequestId ||= window.crypto.randomUUID();
+      // Remembered like the window's launches, so its recovery scan can offer this one back after a reload.
+      launchAttachments.remember(roomIdentifier, `supervised_${creationRequestId}`);
       const entry = await createSupervisedAgentFromSnapshot(desktopIpc.supervisor, {
         creationRequestId,
         providerId: current.providerId,
@@ -381,12 +409,15 @@ export function useComposerAgentDraft(options: {
         roomIdentifier,
         repoRootPath: launchContext.repoRootPath,
         charter,
-        permissionProfileId: current.access,
-        launchPolicy: supervisedProviderLaunchPolicy(current.providerId, current.access),
+        permissionProfileId: access,
+        launchPolicy,
         model: current.model,
         reasoningEffort: current.effort || null,
       }, isCurrent);
-      if (!entry) return { outcome: "blocked" };
+      if (!entry) {
+        forgetAttempt(roomIdentifier, creationRequestId);
+        return { outcome: "blocked" };
+      }
       return started(entry);
     } catch (error) {
       if (!creationRequestId) {
@@ -396,7 +427,7 @@ export function useComposerAgentDraft(options: {
       // The create may have been saved before the error reached us.
       const lookup = await refreshSupervisedRuntimeEntry(desktopIpc.supervisor, roomIdentifier, `supervised_${creationRequestId}`);
       if (lookup.entry) return started(lookup.entry);
-      if (!lookup.error) pendingCreationRequestId = null;
+      if (!lookup.error) forgetAttempt(roomIdentifier, creationRequestId);
       notice.value = contextualAddAgentError(`Couldn't start ${name}`, error, "Your message is still here. Try again.");
       return { outcome: "blocked" };
     } finally {
@@ -405,10 +436,17 @@ export function useComposerAgentDraft(options: {
 
     function started(entry: DesktopSupervisorManifestEntry): ComposerAgentLaunchResult {
       pendingCreationRequestId = null;
+      if (creationRequestId) launchAttachments.forget(roomIdentifier!, `supervised_${creationRequestId}`);
       if (chip.value?.id === chipId) chip.value = null;
       void options.supervisorEntries?.refresh();
       return { outcome: "started", entry };
     }
+  }
+
+  /** The attempt surely made no agent, so the next one gets a new id. */
+  function forgetAttempt(roomIdentifier: string, creationRequestId: string): void {
+    pendingCreationRequestId = null;
+    launchAttachments.forget(roomIdentifier, `supervised_${creationRequestId}`);
   }
 
   return {

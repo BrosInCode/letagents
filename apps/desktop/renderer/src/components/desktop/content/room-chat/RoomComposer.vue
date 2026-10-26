@@ -269,7 +269,6 @@ import type {
   DesktopAgentProviderId,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
-  DesktopSupervisorManifestEntry,
 } from "../../../../../../electron/ipc-types";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
 import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
@@ -347,8 +346,6 @@ const emit = defineEmits<{
   "dismiss-event-preview": [messageId: string];
   "stop-agent-turn": [agentId: string, approvalId: string];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
-  /** An agent started from the composer, with the draft as its first message. */
-  "agent-started": [entry: DesktopSupervisorManifestEntry, firstMessage: string];
 }>();
 
 const maxComposerInputHeight = 156;
@@ -546,6 +543,9 @@ const agentChipName = computed(() => composerAgentName(agentDraft.chipProvider.v
 const agentChipKey = ref(0);
 const agentChipFromRect = ref<DOMRect | null>(null);
 const agentCoachVisible = ref(false);
+
+// A notice about the last attempt goes away once the draft changes.
+watch(draft, () => { if (!agentLaunching.value) agentNotice.value = null; });
 
 function pickAgent(providerId: DesktopAgentProviderId, from: DOMRect | null): void {
   if (agentDraft.pick(providerId) !== "chip") return;
@@ -745,7 +745,6 @@ async function startAgentFromDraft(): Promise<void> {
   }
   typing.stop();
   clearSubmittedText();
-  emit("agent-started", result.entry, text);
   focusInput();
 }
 

@@ -175,6 +175,8 @@ test('the submenu lists Claude, Codex and Open Model, and Cursor only once it ca
   assert.deepEqual(draft.rows.value.map((row: any) => [row.providerId, row.name]), [['claude-code', 'Claude'], ['codex', 'Codex'], ['open-model', 'Open Model']]);
   fakeIpc({ preflight: { cursor: { status: 'ready', canStart: true, nextAction: null } } });
   await draft.refreshProviders();
+  assert.equal(draft.rows.value.length, 3, 'a check younger than 30 s is reused, so opening the submenu again runs no CLI probes');
+  await draft.refreshProviders({ force: true });
   assert.deepEqual(draft.rows.value.map((row: any) => row.providerId), ['claude-code', 'codex', 'open-model', 'cursor']);
 });
 
@@ -506,9 +508,7 @@ test('with a chip, Enter launches the agent instead of posting, and clears the d
   await vm.submitMessage();
   assert.equal(calls.create.length, 1);
   assert.equal(calls.create[0].charter, 'Fix the flaky login test');
-  assert.equal(events.some((e: any) => e[0] === 'send-message'), false, 'no plain room post');
-  const started = events.find((e: any) => e[0] === 'agent-started');
-  assert.equal(started[2], 'Fix the flaky login test');
+  assert.equal(events.some((e: any) => e[0] === 'send-message'), false, 'no plain room post: the first message reaches the agent privately');
   assert.equal(vm.draft.value, '');
   assert.equal(vm.agentChip.value, null);
 });
@@ -523,7 +523,10 @@ test('a failed launch keeps the draft and the chip', async t => {
   assert.equal(vm.draft.value, 'Keep me');
   assert.ok(vm.agentChip.value);
   assert.match(vm.agentNotice.value, /Couldn't start Codex/);
-  assert.equal(events.some((e: any) => e[0] === 'agent-started'), false);
+  assert.equal(events.some((e: any) => e[0] === 'send-message'), false);
+  vm.draft.value = 'Keep me, edited';
+  await flush();
+  assert.equal(vm.agentNotice.value, null, 'the notice goes once the draft changes');
 });
 
 test('attachments cannot ride on a first message', async t => {
@@ -533,6 +536,7 @@ test('attachments cannot ride on a first message', async t => {
   vm.pickAgent('codex', null);
   props.attachmentDrafts = [{ uploadId: 'u1' }];
   vm.draft.value = 'With a file';
+  await flush();
   await vm.submitMessage();
   assert.equal(calls.create.length, 0);
   assert.match(vm.agentNotice.value, /text only/);
@@ -587,4 +591,126 @@ test('the first message shows in its starter\'s timeline at the agent\'s start t
   assert.deepEqual(timeline.firstMessageAgents(agents, messages, false).map((a: any) => a.id), ['a-new', 'a-old'], 'with the whole history loaded, an older start belongs at its place');
   const entries = timeline.buildMessageTimelineEntries(messages, [], [agents[0]]).filter((e: any) => e.type !== 'date');
   assert.deepEqual(entries.map((e: any) => e.id), ['m1', 'first-message:a-new', 'm2']);
+});
+
+/* ---------- review follow-ups ---------- */
+
+test('a second Enter while the first launch runs starts nothing more', async t => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const calls = fakeIpc({ openModel: { configured: false, baseUrl: '', model: '', error: null } });
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  ipc.openModel.getSettingsStatus = async () => { await gate; return { configured: true, baseUrl: 'https://openrouter.ai/api/v1', model: 'm', error: null }; };
+  draft.pick('open-model');
+  const first = draft.launch('Go');
+  const second = await draft.launch('Go');
+  assert.equal(second.outcome, 'blocked', 'refused at once, before any await');
+  release();
+  assert.equal((await first).outcome, 'started');
+  assert.equal(calls.create.length, 1);
+});
+
+test('leaving the room during the checks cancels the start and keeps the draft for that room', async t => {
+  const calls = fakeIpc();
+  const room = reactive({ id: 'room-a' });
+  const { draft } = useDraft(t, fakeHost().host, room);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  const original = ipc.workers.runAgentProviderPreflight;
+  ipc.workers.runAgentProviderPreflight = async (id: string, input: any) => { room.id = 'room-b'; return original(id, input); };
+  assert.equal((await draft.launch('Go')).outcome, 'blocked');
+  assert.equal(calls.create.length, 0);
+});
+
+test('locked secure storage blocks the start with its own explanation', async t => {
+  const calls = fakeIpc();
+  ipc.supervisorGrant.getStorageStatus = async () => ({ available: false, detail: 'Unlock your login Keychain, then try again.' });
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  assert.equal((await draft.launch('Go')).outcome, 'blocked');
+  assert.equal(draft.notice.value, 'Unlock your login Keychain, then try again.');
+  assert.equal(calls.create.length, 0);
+});
+
+test('a local room skips the secure-storage check, as the window does', async t => {
+  const calls = fakeIpc();
+  ipc.supervisorGrant.getStorageStatus = async () => { throw new Error('must not be read'); };
+  const { draft } = useDraft(t, fakeHost({ roomStorageMode: 'local' }).host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  assert.equal((await draft.launch('Go')).outcome, 'started');
+  assert.equal(calls.create.length, 1);
+});
+
+test('an access level the provider lacks never reaches the create', async t => {
+  const calls = fakeIpc({ preflight: { cursor: { status: 'ready', canStart: true, nextAction: null } } });
+  const context: any = { repoRootPath: '/repo/letagents' };
+  const { draft } = useDraft(t, fakeHost(context).host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  draft.setAccess('sandboxed_write');
+  assert.equal(draft.chip.value.access, 'ask_before_write', 'a level outside the stops is ignored');
+  draft.pick('cursor');
+  draft.setAccess('sandboxed_write');
+  assert.equal(draft.chip.value.access, 'sandboxed_write');
+  // The project disconnects: Cursor's workspace writes are no longer available here.
+  context.repoRootPath = null;
+  context.roomGitRoom = null;
+  assert.equal((await draft.launch('Go')).outcome, 'blocked');
+  assert.match(draft.notice.value, /can't start with that access here/);
+  assert.equal(calls.create.length, 0);
+});
+
+test('an unreadable Open Model status says so, instead of asking to configure it', async t => {
+  fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  ipc.openModel.getSettingsStatus = async () => { throw new Error('EACCES'); };
+  draft.pick('open-model');
+  await flush();
+  assert.equal((await draft.launch('Go')).outcome, 'blocked');
+  assert.match(draft.notice.value, /Couldn't read the Open Model settings/);
+});
+
+test('the Add agent submenu toggles on its row, goes back with ← or Esc, and picks with a number key', async t => {
+  const Menu = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/RoomComposerAddMenu.vue')).default;
+  const rows = [{ providerId: 'claude-code', name: 'Claude', detail: 'Default', hint: '', readiness: { state: 'ready' } }, { providerId: 'codex', name: 'Codex', detail: 'Default', hint: '', readiness: { state: 'ready' } }];
+  const props = reactive({ disabled: false, attachDisabled: false, gifAvailable: false, gifDisabled: false, agentRows: rows });
+  const { vm, events } = setup(Menu, props, t);
+  const fake = (attrs: Record<string, string>) => { const item: any = { dataset: attrs, disabled: false, focus() { fakeDocument.activeElement = item; }, getBoundingClientRect: () => ({ left: 1, top: 2, width: 3, height: 4 }) }; return item; };
+  const mainItems = ['attach', 'task', 'agent'].map(id => fake({ item: id }));
+  const flyItems = [fake({ agent: 'back' }), fake({ agent: 'claude-code' }), fake({ agent: 'codex' }), fake({ agent: 'setup' })];
+  vm.toggle({ detail: 1 });
+  vm.menu.value = { querySelectorAll: () => mainItems, contains: (n: unknown) => mainItems.includes(n) };
+  vm.agentMenu.value = { querySelectorAll: () => flyItems, contains: (n: unknown) => flyItems.includes(n) };
+  const agentItem = vm.items.value.find((i: any) => i.id === 'agent');
+  vm.choose(agentItem);
+  assert.equal(vm.agentMenuOpen.value, true);
+  assert.deepEqual(events.at(-1), ['agent-menu-opened']);
+  vm.choose(agentItem);
+  assert.equal(vm.agentMenuOpen.value, false, 'a second click closes the submenu');
+  assert.equal(vm.open.value, true, 'and keeps the "+" menu open');
+  vm.choose(agentItem);
+  vm.handleAgentMenuKey(key('ArrowLeft', { target: flyItems[1] }));
+  assert.equal(vm.agentMenuOpen.value, false);
+  vm.choose(agentItem);
+  vm.handleAgentMenuKey(key('Escape', { target: flyItems[1] }));
+  assert.equal(vm.agentMenuOpen.value, false, 'Escape goes back one level');
+  assert.equal(vm.open.value, true);
+  vm.choose(agentItem);
+  vm.handleAgentMenuKey(key('Tab', { target: flyItems[1] }));
+  assert.equal(vm.agentMenuOpen.value, true, 'Tab does not close it');
+  vm.handleAgentMenuKey(key('2', { target: flyItems[1] }));
+  assert.equal(vm.open.value, false);
+  assert.deepEqual(events.at(-1).slice(0, 2), ['select-agent', 'codex']);
+  vm.toggle({ detail: 1 });
+  vm.choose(agentItem);
+  vm.root.value = { contains: (n: unknown) => mainItems.includes(n) || flyItems.includes(n) };
+  vm.closeOnOutsidePointer({ target: flyItems[2] });
+  assert.equal(vm.agentMenuOpen.value, true, 'a click inside the submenu keeps it open');
+  vm.closeOnOutsidePointer({ target: { outside: true } });
+  assert.equal(vm.open.value, false);
+  assert.equal(vm.agentMenuOpen.value, false, 'a click outside closes both');
 });
