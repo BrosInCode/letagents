@@ -265,6 +265,7 @@ import { useRoomImages } from "./room-chat/useRoomImages";
 import { desktopIpc } from "../../../ipc/index.js";
 import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
 import { attentionResponseAgentNames, attentionResponseAgentNamesKey } from "../../../domain/attention-response";
+import { buildRoomMentionDirectory, roomMentionDirectoryKey } from "../../../domain/room-mention-links";
 
 const props = defineProps<{
   active: boolean;
@@ -399,6 +400,8 @@ let transientHighlightTimeout: number | null = null;
 provide(attentionResponseAgentNamesKey, computed(() =>
   attentionResponseAgentNames([...props.participants, ...props.presence])
 ));
+// @mentions in messages open the participant they name.
+provide(roomMentionDirectoryKey, computed(() => buildRoomMentionDirectory(props.participants, props.presence)));
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const activeThreadParent = computed(() =>
