@@ -125,8 +125,10 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
   let image = 0;
   const note = (file: ProviderRoomTurnAttachment): string => {
     const facts = [file.mimeType, formatByteSize(file.sizeBytes)].filter(Boolean).join(", ");
+    const context = file.origin ? [file.origin.inThread ? "in this thread" : "",
+      file.origin.preview ? `its text begins ${JSON.stringify(file.origin.preview)}` : ""].filter(Boolean).join(", ") : "";
     const where = file.origin
-      ? `${file.origin.messageId} by ${JSON.stringify(file.origin.sender)}${file.origin.inThread ? " (in this thread)" : ""}, attachment ${file.index}`
+      ? `${file.origin.messageId} by ${JSON.stringify(file.origin.sender)}${context ? ` (${context})` : ""}, attachment ${file.index}`
       : `Attachment ${file.index}`;
     const name = `${where}: ${JSON.stringify(file.fileName)}${facts ? ` (${facts})` : ""}.`;
     // An image the adapter has nothing to give is described as unavailable, so the numbering matches what is sent.

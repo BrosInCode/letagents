@@ -12,6 +12,7 @@ import {
   declaredRoomAttachments,
   roomTurnFileKey,
   recentRoomImageMessages,
+  rememberedRoomTurnFiles,
   RoomAttachmentDownloadError,
   RoomTurnAttachmentStager,
   ROOM_TURN_IMAGE_MAX_BYTES,
@@ -689,8 +690,14 @@ test("an agent that cannot take images downloads nothing from recent messages ei
     const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ delivery: null,
       recentMessages: [recentFrom("msg_6", [attachment("att_60")])] }, downloads));
     assert.deepEqual(prepared.attachments.map(file => file.status), ["provider_unsupported", "provider_unsupported"]);
-    assert.deepEqual(prepared.outcomes, []);
+    assert.deepEqual(prepared.outcomes.map(file => [file.attachmentId, file.outcome]), [
+      ["att_70", "provider_unsupported"], ["att_60", "provider_unsupported"],
+    ], "the note is given once per conversation");
     assert.equal(downloads.length, 0);
+    const later = await new RoomTurnAttachmentStager(root).prepare(recentInput({ delivery: null, sourceMessage: { id: "msg_8", text: "and now?" },
+      sourceMessageId: "msg_8", earlierOutcomes: new Map([[roomTurnFileKey("msg_6", "att_60"), "provider_unsupported" as const]]),
+      recentMessages: [recentFrom("msg_6", [attachment("att_60")])] }, downloads));
+    assert.deepEqual(later.attachments, [], "a later turn of that conversation is not told again");
   });
 });
 
@@ -749,4 +756,27 @@ test("a thread page is accepted only for its room and root", async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("a message the room context lacks carries the start of its text, since the prompt does not show it", () => {
+  const source = roomMessage("msg_30", { thread_root_id: "msg_2" });
+  const thread = { root: roomMessage("msg_2", { text: "The login page\u202e is broken\nafter the update", sender: "Grace" }), replies: [] };
+  const context = [roomMessage("msg_20", { thread_root_id: "msg_2", text: "in the context" })];
+  const recent = recentRoomImageMessages({ sourceMessage: source, sourceMessageId: "msg_30", context, thread, agentSessionId: "s" });
+  assert.deepEqual(recent.map(item => [item.messageId, item.preview]), [
+    ["msg_2", "The login page is brokenafter the update"], ["msg_20", undefined],
+  ]);
+});
+
+test("an image refused by its recorded size is final, and a Cursor image never counts as received", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ recentMessages: [
+      recentFrom("msg_6", [attachment("att_60", { byte_size: ROOM_TURN_IMAGE_MAX_BYTES + 1 })]),
+    ] }, downloads));
+    assert.deepEqual(prepared.outcomes.map(file => [file.attachmentId, file.outcome]), [["att_70", "image"], ["att_60", "too_large"]]);
+    assert.deepEqual(downloads.map(item => item.attachmentId), ["att_70"]);
+    assert.deepEqual(rememberedRoomTurnFiles("cursor", prepared.outcomes).map(file => file.outcome), ["too_large"]);
+    assert.deepEqual(rememberedRoomTurnFiles("codex", prepared.outcomes), prepared.outcomes);
+  });
 });

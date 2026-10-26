@@ -511,3 +511,11 @@ test("Cursor is asked to open the source message's images, and to open a recent 
     assert.deepEqual(cursorRoomTurnImageFolders(request), [folder], "both live in the one turn folder the sandbox may read");
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
+
+test("a recent message the prompt does not show is named with the start of its text", () => {
+  const lines = formatRoomTurnContext({ sourceMessage: { id: "msg_42", text: "fix" }, activation: {}, attachments: [
+    attachment({ index: 1, origin: { messageId: "msg_2", sender: "Grace", inThread: true, preview: 'The "login" page' },
+      fileName: "bug.png", status: "unavailable" }),
+  ] });
+  assert.equal(lines.at(-1), '- msg_2 by "Grace" (in this thread, its text begins "The \\"login\\" page"), attachment 1: "bug.png" (image/png, 100 bytes). Not shown: it could not be downloaded.');
+});

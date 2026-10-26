@@ -32,16 +32,25 @@ export function prepareRoomContext(messages: readonly unknown[], preparedAt: str
   return { preparedAt, totalMessages: messages.length, omittedMessages: messages.length - retained.length, messages: retained };
 }
 
-/** A file outcome a later turn on the same conversation can rely on: shown, or refused for good by its bytes. */
-export type RoomTurnFileOutcome = "image" | "not_image" | "too_large";
+/**
+ * A file outcome a later turn on the same conversation can rely on: shown,
+ * refused for good by its bytes, or noted for a provider that takes no
+ * images (turning images on starts a new conversation).
+ */
+export type RoomTurnFileOutcome = "image" | "not_image" | "too_large" | "provider_unsupported";
 /** The room files a provider turn was given or refused for good, for the conversation that holds them. */
 export type PreparedRoomTurnFiles = {
   continuation: string;
   files: Array<{ message_id: string; attachment_id: string; outcome: RoomTurnFileOutcome }>;
 };
 const ROOM_FILES_KEY = "room_files";
-/** Turns searched for what a conversation already has; older turns are pruned with their inbox history anyway. */
-const RECENT_TURNS_SEARCHED = 200;
+/**
+ * What a conversation received counts only from the agent's latest turns in
+ * the room. A provider may compact its history without a new continuation,
+ * and a compacted image is gone from it: an image still in view after this
+ * many turns is offered once more.
+ */
+const RECENT_TURNS_SEARCHED = 20;
 
 /** The prepared context the Inspector reads: room text only, without this turn's file record. */
 export function inspectorPreparedRoomContext(snapshot: unknown): PreparedRoomContext | null {
@@ -56,14 +65,15 @@ export function recordPreparedRoomTurnFiles(database: DatabaseSync, inboxItemId:
     WHERE inbox_item_id=?`).run(JSON.stringify(files), inboxItemId);
 }
 
-/** What earlier turns of this agent's conversation in this room received, as `${messageId}\n${attachmentId}`. */
+/** What the agent's latest turns of this conversation in this room received, as `${messageId}\n${attachmentId}`. */
 export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
   agentId: string; roomId: string; continuation: string;
 }): Map<string, RoomTurnFileOutcome> {
   const rows = database.prepare(`SELECT json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.files') AS files
-    FROM supervised_agent_prepared_context c JOIN supervised_agent_inbox i ON i.inbox_item_id=c.inbox_item_id
-    WHERE i.agent_id=? AND i.room_id=? AND json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.continuation')=?
-    ORDER BY i.rowid DESC LIMIT ?`).all(input.agentId, input.roomId, input.continuation, RECENT_TURNS_SEARCHED) as Array<{ files: unknown }>;
+    FROM (SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? ORDER BY rowid DESC LIMIT ?) i
+    JOIN supervised_agent_prepared_context c ON c.inbox_item_id=i.inbox_item_id
+    WHERE json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.continuation')=?`)
+    .all(input.agentId, input.roomId, RECENT_TURNS_SEARCHED, input.continuation) as Array<{ files: unknown }>;
   const outcomes = new Map<string, RoomTurnFileOutcome>();
   for (const row of rows) {
     let files: unknown;
@@ -72,7 +82,7 @@ export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
     for (const file of files) {
       const entry = file && typeof file === "object" ? file as Record<string, unknown> : {};
       if (typeof entry.message_id !== "string" || typeof entry.attachment_id !== "string"
-        || !["image", "not_image", "too_large"].includes(String(entry.outcome))) continue;
+        || !["image", "not_image", "too_large", "provider_unsupported"].includes(String(entry.outcome))) continue;
       const key = `${entry.message_id}\n${entry.attachment_id}`;
       // Shown once is what matters most; a refusal never hides that.
       if (outcomes.get(key) !== "image") outcomes.set(key, entry.outcome as RoomTurnFileOutcome);

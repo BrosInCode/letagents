@@ -19,7 +19,9 @@ export function cursorRoomTurnImageLines(request: ProviderRoomTurnRequest): stri
   return [
     ...(own.length ? ["The attached images are files on this machine. Open each one with your file-reading tool to see it before you answer:",
       ...own.map(line)] : []),
-    // Recent images are context: opening each one would cost every turn a read it may not need.
+    // Cursor may leave a path unopened, so the daemon never counts a Cursor
+    // image as received and offers recent ones again on later turns: opening
+    // each one every turn would cost reads it may not need.
     ...(recent.length ? ["Images from recent messages are files on this machine too. Open one with your file-reading tool when it matters to your answer:",
       ...recent.map(line)] : []),
   ];

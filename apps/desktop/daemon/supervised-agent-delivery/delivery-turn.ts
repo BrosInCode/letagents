@@ -2,7 +2,7 @@ import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnImageDelivery } from "../provider-action-port.js";
 import { ReplyTurnCompactionObserver } from "../reply-turn-compaction.js";
 import { RoomLatencyTrace } from "../room-latency-trace.js";
-import { activatingThreadRootId, recentRoomImageMessages, ROOM_TURN_RECENT_MESSAGE_WINDOW, type PreparedRoomTurnAttachments } from "../room-turn-attachments.js";
+import { activatingThreadRootId, recentRoomImageMessages, rememberedRoomTurnFiles, ROOM_TURN_RECENT_MESSAGE_WINDOW, type PreparedRoomTurnAttachments } from "../room-turn-attachments.js";
 import { turnStartLatency } from "../turn-start-latency.js";
 import { SupervisedAgentInboxStore, type SupervisedInboxItem } from "../supervised-agent-inbox-store.js";
 import { SupervisedRoomAuthorizationError } from "./constants.js";
@@ -642,8 +642,9 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
         // Remembering them is optional and never fails the turn.
         const continuation = ("providerContinuationId" in providerResult ? providerResult.providerContinuationId : null)
           ?? agent.handle?.providerContinuationId ?? agent.providerContinuationId;
-        if (continuation) {
-          await this.inbox.recordRoomTurnFiles(item.inbox_item_id, { continuation, files: preparedAttachments.outcomes.map(file => ({
+        const files = rememberedRoomTurnFiles(agent.provider, preparedAttachments.outcomes);
+        if (continuation && files.length) {
+          await this.inbox.recordRoomTurnFiles(item.inbox_item_id, { continuation, files: files.map(file => ({
             message_id: file.messageId, attachment_id: file.attachmentId, outcome: file.outcome })) }).catch(() => {});
         }
       }

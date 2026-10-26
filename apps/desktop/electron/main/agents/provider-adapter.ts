@@ -423,6 +423,8 @@ export type RoomTurnAttachmentOrigin = {
   sender: string;
   /** The message belongs to the activating message's thread. */
   inThread: boolean;
+  /** The start of the message's text, when the turn's room context does not show that message. */
+  preview?: string;
 };
 /**
  * One file on the activating room message or on a recent message before it,

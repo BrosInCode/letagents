@@ -162,6 +162,7 @@ test("an agent that cannot see images reads no thread, downloads nothing and is 
     try {
       await delivery.poll(agent);
       assert.deepEqual(summary(seen[0]?.attachments), [["msg_4 by Ada", "provider_unsupported"]]);
+      assert.deepEqual(summary(seen[1]?.attachments), [], "the same conversation is told once");
       assert.equal(threadReads, 0);
       assert.equal(downloads, 0);
     } finally { await delivery.fenceAndDrain(); }
@@ -223,6 +224,46 @@ test("a failure to remember the images never fails the turn", async () => {
       await delivery.poll(agent);
       assert.deepEqual(summary(seen[0]?.attachments), [["msg_4 by Ada", "image"]]);
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    } finally { await delivery.fenceAndDrain(); }
+  });
+});
+
+test("a failed turn still counts its images as received, and an image in view is offered again after 20 turns", async () => {
+  await withStore(async (root, open) => {
+    const messages: Message[] = [shot("msg_4", "att_1"), ask("msg_5", { thread_root_id: "msg_4" })];
+    const statuses: unknown[] = [];
+    let downloads = 0;
+    let fail = true;
+    const port = { ...provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.(`turn:${request.inboxItemId}`);
+      statuses.push(summary(request.attachments));
+      if (fail) {
+        fail = false;
+        return { turnId: `turn:${request.inboxItemId}`, providerContinuationId: "thread", outcome: "failed", text: null,
+          evidence: "stream", error: "The model refused the image." };
+      }
+      return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+    }), roomTurnImageDelivery: async () => "memory" as const } satisfies ProviderActionPort;
+    const store = open();
+    const delivery = withAttachmentStager(store, port, {
+      poll: room(messages),
+      downloadAttachment: async () => { downloads += 1; return STAGED_PNG; },
+      publish: async () => { throw new Error("no reply expected"); },
+    }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+    try {
+      await delivery.poll(agent);
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+      // The thread root stays in view of every reply; it is not sent again for 20 turns, then once more.
+      for (let index = 6; index <= 25; index++) {
+        messages.push(ask(`msg_${index}`, { thread_root_id: "msg_4" }));
+        await delivery.poll(agent);
+      }
+      assert.deepEqual(statuses[0], [["msg_4 by Ada", "image"]]);
+      assert.ok(statuses.slice(1, 20).every(turn => JSON.stringify(turn) === JSON.stringify([["msg_4 by Ada", "earlier_turn"]])),
+        JSON.stringify(statuses.slice(1, 20)));
+      assert.deepEqual(statuses[20], [["msg_4 by Ada", "image"]], "a compacted conversation may have lost it");
+      assert.equal(downloads, 2);
     } finally { await delivery.fenceAndDrain(); }
   });
 });

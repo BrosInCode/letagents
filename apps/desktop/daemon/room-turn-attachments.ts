@@ -174,6 +174,8 @@ export function recentRoomImageMessages(input: {
     const root = text(message.thread_root_id);
     return !root || root === message.id;
   };
+  // A message the room context lacks is not in the prompt; its note carries the start of its text.
+  const inContext = new Set(input.context.map(value => record(value)?.id));
   const quoted = known.get(text(record(record(input.sourceMessage)?.reply_to)?.id));
   const lane = threadRootId
     ? [known.get(threadRootId), ...newestFirst(messages.filter(message => message.id !== threadRootId && inThread(message)))
@@ -185,9 +187,19 @@ export function recentRoomImageMessages(input: {
     seen.add(message.id);
     if (record(message.agent_identity)?.agent_session_id === input.agentSessionId) return [];
     if (!Array.isArray(message.attachments) || !message.attachments.length) return [];
+    const preview = inContext.has(message.id) ? "" : printable(text(message.text), 120);
     return [{ messageId: String(message.id), sender: printable(text(message.sender), 80) || "unknown sender",
-      inThread: inThread(message), message }];
+      inThread: inThread(message), ...(preview ? { preview } : {}), message }];
   });
+}
+
+/**
+ * Of a turn's outcomes, those a provider's conversation keeps. Cursor gets
+ * only a path its agent may leave unopened, and the file is removed with the
+ * turn: a Cursor image never counts as received.
+ */
+export function rememberedRoomTurnFiles(provider: string, outcomes: PreparedRoomTurnAttachments["outcomes"]): PreparedRoomTurnAttachments["outcomes"] {
+  return outcomes.filter(file => provider !== "cursor" || file.outcome !== "image");
 }
 
 /** The key under which a conversation remembers a room file. */
@@ -270,12 +282,13 @@ export class RoomTurnAttachmentStager {
     let recentDescribed = 0;
     let earlierDescribed = 0;
     for (const recent of input.recentMessages ?? []) {
-      const origin = { messageId: recent.messageId, sender: recent.sender, inThread: recent.inThread };
+      const origin = { messageId: recent.messageId, sender: recent.sender, inThread: recent.inThread,
+        ...(recent.preview ? { preview: recent.preview } : {}) };
       for (const file of declaredRoomAttachments(recent.message)) {
         // Only images come from recent messages; their other files stay in the context as metadata.
         if (!DECLARED_IMAGE_TYPES.has(file.mimeType)) continue;
         const earlier = file.id ? input.earlierOutcomes?.get(roomTurnFileKey(recent.messageId, file.id)) : undefined;
-        // A refusal for good was named once, in the turn that found it.
+        // A refusal for good, or a note that this agent cannot view images, was given once already.
         if (earlier && earlier !== "image") continue;
         // A received image never takes the place of a new one in the notes.
         if (earlier ? earlierDescribed++ >= RECENT_DESCRIBED_LIMIT : recentDescribed++ >= RECENT_DESCRIBED_LIMIT) continue;
@@ -315,8 +328,17 @@ export class RoomTurnAttachmentStager {
         const status = (value: ProviderRoomTurnAttachment["status"]) => { attachments.push({ ...base, status: value }); };
         if (!DECLARED_IMAGE_TYPES.has(file.mimeType)) { status("not_image"); continue; }
         if (recent && file.id && input.earlierOutcomes?.get(roomTurnFileKey(file.messageId, file.id)) === "image") { status("earlier_turn"); continue; }
-        if (!input.delivery) { status("provider_unsupported"); continue; }
-        if (file.sizeBytes !== null && file.sizeBytes > ROOM_TURN_IMAGE_MAX_BYTES) { status("too_large"); continue; }
+        if (!input.delivery) {
+          if (file.id) outcomes.push({ messageId: file.messageId, attachmentId: file.id, outcome: "provider_unsupported" });
+          status("provider_unsupported");
+          continue;
+        }
+        if (file.sizeBytes !== null && file.sizeBytes > ROOM_TURN_IMAGE_MAX_BYTES) {
+          // The room records each file's size, so this refusal is as final as one by the bytes.
+          if (file.id) outcomes.push({ messageId: file.messageId, attachmentId: file.id, outcome: "too_large" });
+          status("too_large");
+          continue;
+        }
         if (recent && (recentImages >= ROOM_TURN_RECENT_IMAGE_LIMIT
           || recentBytes + (file.sizeBytes ?? 0) > ROOM_TURN_RECENT_IMAGES_MAX_BYTES)) { status("context_limit"); continue; }
         if (total + (file.sizeBytes ?? 0) > ROOM_TURN_IMAGES_MAX_TOTAL_BYTES) { status("turn_limit"); continue; }
