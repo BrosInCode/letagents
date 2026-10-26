@@ -314,7 +314,9 @@
       :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
       :repo-root-path="managedAgentRepoRootPath"
       :repo-status="managedAgentRepoStatus"
-      @close="addAgentModalOpen = false"
+      :initial-provider-id="addAgentInitialProviderId"
+      :initial-section="addAgentInitialSection"
+      @close="closeAddAgentModal"
       @choose-worktree="openAgentWorktree"
     />
   </section>
@@ -322,7 +324,9 @@
 
 <script setup lang="ts">
 import { GitBranch } from "@lucide/vue";
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, provide, ref } from "vue";
+import type { DesktopAgentProviderId } from "../../../../../electron/ipc-types";
+import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
 import AddAgentModal from "./AddAgentModal.vue";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
@@ -470,4 +474,30 @@ Object.assign(app, useRoomShellInspectorWatchers(app));
 const {
   refreshAgentInspectorDiagnostics, openAgentInspectorWork,
 } = Object.assign(app, useRoomShellInspectorObservations(app));
+
+// The composer starts agents inline and opens the Add agent window, at one
+// provider or on the Open Model settings, when one must be set up first.
+const addAgentInitialProviderId = ref<DesktopAgentProviderId | null>(null);
+const addAgentInitialSection = ref<"open-model" | null>(null);
+function closeAddAgentModal(): void {
+  addAgentModalOpen.value = false;
+  addAgentInitialProviderId.value = null;
+  addAgentInitialSection.value = null;
+}
+provide(composerAgentLaunchKey, {
+  context: () => ({
+    roomStorageMode: props.storage.effectiveMode,
+    roomGitRoom: props.room.gitRoom,
+    repoRootPath: managedAgentRepoRootPath.value,
+    repoStatus: managedAgentRepoStatus.value,
+    gitRoomMatchesActiveRepo: props.gitRoomMatchesActiveRepo,
+    viewerLogin: props.viewerLogin ?? null,
+  }),
+  openAddAgent: (options = {}) => {
+    addAgentInitialProviderId.value = options.providerId ?? null;
+    addAgentInitialSection.value = options.section ?? null;
+    openAddAgentModal();
+  },
+  chooseWorktree: openAgentWorktree,
+});
 </script>

@@ -94,6 +94,37 @@
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
+    <!-- The agent this message will start. The composer text is its first message. -->
+    <div v-if="agentChip" class="desktop-composer-agent-tray">
+      <RoomComposerAgentChip
+        ref="agentChipElement"
+        :key="agentChipKey"
+        :chip="agentChip"
+        :provider-name="agentChipName"
+        :readiness="agentChipReadiness"
+        :models="agentChipModels"
+        :efforts="agentChipEfforts"
+        :access-stops="agentChipAccessStops"
+        :works-in="agentChipWorksIn"
+        :worktrees="agentChipWorktrees"
+        :repo-root-path="agentHost?.context().repoRootPath ?? null"
+        :open-model-host="agentOpenModelHost"
+        :launching="agentLaunching"
+        :coach-visible="agentCoachVisible"
+        :wanted-access-label="personalAccessLevel(agentPersonalAccess).label"
+        :from-rect="agentChipFromRect"
+        @set-model="agentDraft.setModel"
+        @set-effort="agentDraft.setEffort"
+        @set-access="agentDraft.setAccess"
+        @choose-worktree="agentHost?.chooseWorktree($event)"
+        @configure-open-model="agentHost?.openAddAgent({ providerId: 'open-model', section: 'open-model' })"
+        @opened="agentDraft.refreshOpenModelStatus()"
+        @remove="removeAgentChip"
+        @coach-dismissed="dismissAgentCoach"
+        @dismiss="focusInput"
+      />
+    </div>
+    <p v-if="agentNotice" class="desktop-composer-agent-notice" role="status" data-testid="desktop-composer-agent-notice">{{ agentNotice }}</p>
     <div class="desktop-composer-input-row">
       <RoomComposerAddMenu
         ref="addMenu"
@@ -101,8 +132,12 @@
         :attach-disabled="!canAttach"
         :gif-available="gifAvailable"
         :gif-disabled="roomLoading || sending"
+        :agent-rows="agentHost ? agentRows : null"
         @select="handleAddMenuSelect"
         @dismiss="focusInput"
+        @agent-menu-opened="agentDraft.refreshProviders()"
+        @select-agent="pickAgent"
+        @setup-agent="agentHost?.openAddAgent()"
       >
         <template #gif="{ initialQuery, back }">
           <RoomGifPanel :room-identifier="roomIdentifier ?? ''" :initial-query="initialQuery" @select="pickGif" @back="back" />
@@ -135,14 +170,23 @@
       <button
         class="desktop-composer-send"
         type="submit"
-        :aria-label="sending ? 'Sending message' : 'Send message'"
-        :title="sending ? 'Sending message' : 'Send message'"
-        :disabled="roomLoading || sending || slash.busy.value || !canSend"
+        :aria-label="sendLabel"
+        :title="sendLabel"
+        :disabled="roomLoading || sending || agentLaunching || slash.busy.value || !canSend"
         data-testid="desktop-composer-send"
       >
-        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
+        <LoaderCircle v-if="sending || agentLaunching" :size="16" aria-hidden="true" />
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
+    </div>
+    <div v-if="agentHost && roomIdentifier" class="desktop-composer-under">
+      <RoomComposerAccessDefault
+        :model-value="agentPersonalAccess"
+        :room-handle="roomHandle"
+        :disabled="roomLoading"
+        @update:model-value="agentDraft.setPersonalAccess"
+        @dismiss="focusInput"
+      />
     </div>
     <div v-if="selectedGif" class="desktop-composer-gif-draft" data-testid="desktop-composer-gif-draft">
       <img v-if="selectedGifPreview" class="desktop-composer-gif-draft-preview" :src="selectedGifPreview" alt="" referrerpolicy="no-referrer" />
@@ -201,6 +245,7 @@ import { useRoomTyping } from "../../../../composables/useRoomTyping";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, X } from "@lucide/vue";
 import type {
+  DesktopAgentProviderId,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
@@ -215,6 +260,12 @@ import RoomGifPanel from "./RoomGifPanel.vue";
 import { gifCommandQuery, gifPreviewSource, prefersReducedMotion, useRoomGifAvailability } from "./room-gif-search";
 import type { GiphyItem } from "../../../../../../../../shared/giphy-client.mjs";
 import RoomComposerAddMenu, { type RoomComposerAddMenuItemId } from "./RoomComposerAddMenu.vue";
+import RoomComposerAgentChip from "./RoomComposerAgentChip.vue";
+import RoomComposerAccessDefault from "./RoomComposerAccessDefault.vue";
+import { personalAccessLevel, readCoachHintDismissed, rememberCoachHintDismissed } from "./composer-agent-access";
+import { composerAgentLaunchKey, composerAgentName } from "./composer-agent-launch";
+import { useComposerAgentDraft } from "./useComposerAgentDraft";
+import { supervisorEntriesKey } from "../add-agent/supervisor-entries-context";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
@@ -450,9 +501,57 @@ watch(hostApprovals, (approvals) => {
   dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value].filter(id => present.has(id)));
 });
 
-const canSend = computed(() =>
-  Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0))
-);
+// Agents started from the composer. The room shell provides the launch host;
+// without one (a thread panel, a test) "Add agent" opens the Add agent window.
+const agentHost = inject(composerAgentLaunchKey, null);
+const agentDraft = useComposerAgentDraft({
+  roomIdentifier: () => props.roomIdentifier,
+  host: agentHost,
+  supervisorEntries: inject(supervisorEntriesKey, null),
+});
+const {
+  rows: agentRows, chip: agentChip, chipReadiness: agentChipReadiness, chipModels: agentChipModels,
+  chipEfforts: agentChipEfforts, chipAccessStops: agentChipAccessStops, chipWorksIn: agentChipWorksIn,
+  chipWorktrees: agentChipWorktrees, openModelHost: agentOpenModelHost, launching: agentLaunching,
+  notice: agentNotice, personalAccess: agentPersonalAccess,
+} = agentDraft;
+const agentChipElement = ref<InstanceType<typeof RoomComposerAgentChip> | null>(null);
+const agentChipName = computed(() => composerAgentName(agentDraft.chipProvider.value));
+// A new chip is a new element, so it plays its entrance once.
+const agentChipKey = ref(0);
+const agentChipFromRect = ref<DOMRect | null>(null);
+const agentCoachVisible = ref(false);
+
+// A notice about the last attempt goes away once the draft changes.
+watch(draft, () => { if (!agentLaunching.value) agentNotice.value = null; });
+
+function pickAgent(providerId: DesktopAgentProviderId, from: DOMRect | null): void {
+  if (agentDraft.pick(providerId) !== "chip") return;
+  agentChipFromRect.value = from;
+  agentChipKey.value += 1;
+  agentCoachVisible.value = !readCoachHintDismissed();
+  focusInput();
+}
+
+function removeAgentChip(): void {
+  agentCoachVisible.value = false;
+  agentDraft.removeChip();
+  focusInput();
+}
+
+function dismissAgentCoach(dontShowAgain: boolean): void {
+  agentCoachVisible.value = false;
+  if (dontShowAgain) rememberCoachHintDismissed();
+}
+
+const canSend = computed(() => Boolean(!props.roomLoading && props.roomIdentifier && (agentChip.value
+  ? draft.value.trim() && !agentLaunching.value
+  : draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0)));
+const sendLabel = computed(() => {
+  if (agentLaunching.value) return `Starting ${agentChipName.value}`;
+  if (agentChip.value) return "Start agent with this message";
+  return props.sending ? "Sending message" : "Send message";
+});
 // Steering is plain text for one agent's private session, so a reply,
 // a quote or attachments keep the message a room message. The offer shows on
 // the room's activity line: "<agent> is mid-turn · your message waits [Steer]".
@@ -592,8 +691,31 @@ onBeforeUnmount(() => {
 
 async function submitMessage(): Promise<void> {
   if (!canSend.value || props.sending) return;
+  if (agentChip.value) {
+    await startAgentFromDraft();
+    return;
+  }
   if (openGifCommand()) return;
   await slash.submit(sendRoomMessage);
+}
+
+/** Enter with an agent chip starts that agent; the draft is its first message and stays on failure. */
+async function startAgentFromDraft(): Promise<void> {
+  if (props.attachmentDrafts.length || props.pendingAttachmentDrafts.length || selectedGif.value) {
+    agentNotice.value = "An agent's first message is text only. Remove the attachments, or send them after it joins.";
+    return;
+  }
+  agentCoachVisible.value = false;
+  const text = draft.value.trim();
+  const clearSubmittedText = captureSubmittedDraft();
+  const result = await agentDraft.launch(text);
+  if (result.outcome !== "started") {
+    if (result.outcome === "blocked" && agentNotice.value) focusInput();
+    return;
+  }
+  typing.stop();
+  clearSubmittedText();
+  focusInput();
 }
 
 /** `/gif <query>` opens the GIF panel with that search instead of sending. */

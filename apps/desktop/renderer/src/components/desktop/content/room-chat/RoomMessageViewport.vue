@@ -24,6 +24,7 @@
           <span>{{ entry.label }}</span>
         </div>
 
+        <RoomFirstMessage v-else-if="entry.type === 'first-message'" :agent="entry.agent" />
         <template v-else-if="entry.type === 'agent-startup'">
           <RoomAgentStartupEntry
             :entry-id="entry.entryId"
@@ -212,7 +213,8 @@ import { createMessageProviderLabelResolver } from "../../../../domain/agent-pro
 import { useStableIdSet } from "../../../../composables/useStableIdSet";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, createThreadIndicatorMemo, threadParentId, threadQuotePreview } from "./thread-utils";
-import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeline";
+import { buildMessageTimelineEntries, firstMessageAgents, type MessageTimelineEntry } from "./timeline";
+import RoomFirstMessage from "./RoomFirstMessage.vue";
 import {
   anchoredScrollTop,
   firstMessageIdFrom,
@@ -434,7 +436,8 @@ const { pushActionToast } = useDesktopActionToasts();
 function startupAction(action: (entryId: string) => Promise<void>, entryId: string, failed: string): void {
   action(entryId).catch((error: unknown) => pushActionToast(`${failed} ${safeUserVisibleErrorDetail(error, "Try again.")}`, "error"));
 }
-const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, props.presenceLines, timelineStartups.value),
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, props.presenceLines, timelineStartups.value,
+  firstMessageAgents(props.supervisorEntries ?? [], props.messages, props.hasOlderMessages)),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 // Bounded mount window (see message-window.ts): only a contiguous range of
 // the timeline is mounted.

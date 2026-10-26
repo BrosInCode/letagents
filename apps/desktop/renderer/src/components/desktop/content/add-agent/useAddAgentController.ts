@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef } from "vue";
+import { computed, ref, watch, type ComputedRef } from "vue";
 import type {
   DesktopAgentProviderId,
   DesktopGitRoomInfo,
@@ -33,6 +33,10 @@ export interface AddAgentModalProps {
   roomDisplayName: string | null;
   repoRootPath: string | null;
   repoStatus: RepoStatus | null;
+  /** Opens on this provider, as when the composer sends a provider that needs setup. */
+  initialProviderId?: DesktopAgentProviderId | null;
+  /** Opens on this section of the provider's settings. */
+  initialSection?: "open-model" | null;
 }
 
 export interface AddAgentModalEvents {
@@ -191,6 +195,13 @@ const {
   selectedPermissionProfileWarning,
 } = useAddAgentPresentation(props, setup, configuration);
 let setupActions!: ReturnType<typeof setup.bind>;
+// Registered before the setup watchers so the provider is chosen before the
+// window loads its providers; that load keeps a provider it still lists.
+watch(() => props.open, (open) => {
+  if (open && props.initialProviderId && selectedProviderId.value !== props.initialProviderId) {
+    selectedProviderId.value = props.initialProviderId;
+  }
+}, { flush: "sync" });
 const {
   loadOpenModelSettings,
   loadProviderModels,
