@@ -256,14 +256,14 @@ test("one shared clock drives every orb, skips offscreen ones, and stops when th
   clock.add(hostB);
   assert.equal(frames.length, 1, "two orbs, one frame loop");
   assert.deepEqual([a.length, b.length], [1, 1], "each is painted at once, never blank");
-  frames.at(-1)!(16);
-  assert.deepEqual([a.at(-1), b.at(-1)], [0.016, 0.016], "both on the same time");
+  frames.at(-1)!(40);
+  assert.deepEqual([a.at(-1), b.at(-1)], [0.04, 0.04], "both on the same time");
   bVisible = false;
-  frames.at(-1)!(32);
+  frames.at(-1)!(80);
   assert.equal(b.length, 2, "an offscreen orb is not drawn");
   assert.equal(a.length, 3);
   environment.hidden = true;
-  frames.at(-1)!(48);
+  frames.at(-1)!(120);
   assert.equal(clock.running(), false, "a hidden window stops the loop");
   environment.hidden = false;
   clock.refresh();
@@ -273,16 +273,36 @@ test("one shared clock drives every orb, skips offscreen ones, and stops when th
   assert.equal(clock.running(), false);
 });
 
-test("each orb state draws dots in the ink colour only", () => {
-  const fills = new Set<string>();
+test("the orb loop draws at most 30 frames a second, whatever the display rate", () => {
+  const { clock, frames } = orbClock();
+  const drawn: number[] = [];
+  clock.add({ draw: (t) => drawn.push(t), visible: () => true });
+  drawn.length = 0;
+  // One second of a 120 Hz display.
+  for (let index = 1; index <= 120; index += 1) frames.at(-1)!(index * 1000 / 120);
+  assert.equal(drawn.length, 30);
+  assert.equal(clock.running(), true, "the loop keeps going between drawn frames");
+  drawn.length = 0;
+  // One second of a 60 Hz display with frame-time jitter: every second frame.
+  for (let index = 1; index <= 60; index += 1) frames.at(-1)!(1000 + index * 1000 / 60 + (index % 2 ? 0.4 : -0.4));
+  assert.equal(drawn.length, 30);
+});
+
+test("each orb state draws dots in the ink colour only, with one colour per frame", () => {
+  const fills: string[] = [];
+  const alphas = new Set<number>();
   let arcs = 0;
   const context = {
     clearRect() {}, beginPath() {}, fill() {}, arc() { arcs += 1; },
-    set fillStyle(value: string) { fills.add(value.replace(/,[\d.]+\)$/, ")")); },
+    set fillStyle(value: string) { fills.push(value); },
+    set globalAlpha(value: number) { alphas.add(value); },
   } as unknown as CanvasRenderingContext2D;
-  for (const state of ["searching", "working", "composing", "breathing"] as const) drawActivityOrb(context, state, 1.2, 40, "250,250,250");
+  const states = ["searching", "working", "composing", "breathing"] as const;
+  for (const state of states) drawActivityOrb(context, state, 1.2, 40, "250,250,250");
   assert.ok(arcs > 40);
-  assert.deepEqual([...fills], ["rgba(250,250,250)"], "monochrome");
+  assert.deepEqual(fills, states.map(() => "rgb(250,250,250)"), "monochrome, set once per frame");
+  assert.ok(alphas.size > 2, "dots vary by alpha");
+  assert.ok([...alphas].every((alpha) => alpha >= 0 && alpha <= 1));
 });
 
 test("joins and leaves leave a quiet line in the timeline, in time order", () => {
