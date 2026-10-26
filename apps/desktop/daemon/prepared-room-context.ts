@@ -46,7 +46,8 @@ export type PreparedRoomTurnFiles = {
 const ROOM_FILES_KEY = "room_files";
 /**
  * What a conversation received counts only from the agent's latest turns in
- * the room. A provider may compact its history without a new continuation,
+ * the room that reached dispatch, before the one being prepared. A provider
+ * may compact its history without a new continuation,
  * and a compacted image is gone from it: an image still in view after this
  * many turns is offered once more.
  */
@@ -68,12 +69,18 @@ export function recordPreparedRoomTurnFiles(database: DatabaseSync, inboxItemId:
 /** What the agent's latest turns of this conversation in this room received, as `${messageId}\n${attachmentId}`. */
 export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
   agentId: string; roomId: string; continuation: string;
+  /** The turn being prepared: only turns before it that reached their provider count. */
+  inboxItemId: string;
 }): Map<string, RoomTurnFileOutcome> {
   const rows = database.prepare(`SELECT json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.files') AS files
-    FROM (SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? ORDER BY rowid DESC LIMIT ?) i
-    JOIN supervised_agent_prepared_context c ON c.inbox_item_id=i.inbox_item_id
+    FROM (SELECT i.inbox_item_id FROM supervised_agent_inbox i
+      JOIN supervised_agent_prepared_context p ON p.inbox_item_id=i.inbox_item_id
+      WHERE i.agent_id=? AND i.room_id=?
+        AND i.rowid < (SELECT rowid FROM supervised_agent_inbox WHERE inbox_item_id=?)
+      ORDER BY i.rowid DESC LIMIT ?) earlier
+    JOIN supervised_agent_prepared_context c ON c.inbox_item_id=earlier.inbox_item_id
     WHERE json_extract(c.snapshot_json,'$.${ROOM_FILES_KEY}.continuation')=?`)
-    .all(input.agentId, input.roomId, RECENT_TURNS_SEARCHED, input.continuation) as Array<{ files: unknown }>;
+    .all(input.agentId, input.roomId, input.inboxItemId, RECENT_TURNS_SEARCHED, input.continuation) as Array<{ files: unknown }>;
   const outcomes = new Map<string, RoomTurnFileOutcome>();
   for (const row of rows) {
     let files: unknown;

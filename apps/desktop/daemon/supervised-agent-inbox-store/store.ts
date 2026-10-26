@@ -10,8 +10,8 @@ import { readPreparedRoomTurnFiles, recordPreparedRoomTurnFiles, type PreparedRo
 /** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
 export class SupervisedAgentInboxStore extends InboxDeliveryStore {
   /** The room files earlier turns of this conversation received or refused for good, by `${messageId}\n${attachmentId}`. */
-  async roomTurnFileOutcomes(agentId: string, roomId: string, continuation: string): Promise<Map<string, RoomTurnFileOutcome>> {
-    return this.read((database) => readPreparedRoomTurnFiles(database, { agentId, roomId, continuation }));
+  async roomTurnFileOutcomes(agentId: string, roomId: string, continuation: string, inboxItemId: string): Promise<Map<string, RoomTurnFileOutcome>> {
+    return this.read((database) => readPreparedRoomTurnFiles(database, { agentId, roomId, continuation, inboxItemId }));
   }
 
   /** Remember on the turn's own prepared context what its provider received. No observer needs to hear of it. */

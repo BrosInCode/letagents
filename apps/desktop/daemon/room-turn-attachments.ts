@@ -187,7 +187,7 @@ export function recentRoomImageMessages(input: {
     seen.add(message.id);
     if (record(message.agent_identity)?.agent_session_id === input.agentSessionId) return [];
     if (!Array.isArray(message.attachments) || !message.attachments.length) return [];
-    const preview = inContext.has(message.id) ? "" : printable(text(message.text), 120);
+    const preview = inContext.has(message.id) ? "" : printable(text(message.text)?.replace(/\s+/g, " ") ?? null, 120);
     return [{ messageId: String(message.id), sender: printable(text(message.sender), 80) || "unknown sender",
       inThread: inThread(message), ...(preview ? { preview } : {}), message }];
   });

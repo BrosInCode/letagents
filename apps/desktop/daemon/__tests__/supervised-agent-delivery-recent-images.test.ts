@@ -254,16 +254,38 @@ test("a failed turn still counts its images as received, and an image in view is
     try {
       await delivery.poll(agent);
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
-      // The thread root stays in view of every reply; it is not sent again for 20 turns, then once more.
-      for (let index = 6; index <= 25; index++) {
+      // The thread root stays in view of every reply; the 20 turns after it do not get it again, the next one does.
+      for (let index = 6; index <= 26; index++) {
         messages.push(ask(`msg_${index}`, { thread_root_id: "msg_4" }));
         await delivery.poll(agent);
       }
       assert.deepEqual(statuses[0], [["msg_4 by Ada", "image"]]);
-      assert.ok(statuses.slice(1, 20).every(turn => JSON.stringify(turn) === JSON.stringify([["msg_4 by Ada", "earlier_turn"]])),
-        JSON.stringify(statuses.slice(1, 20)));
-      assert.deepEqual(statuses[20], [["msg_4 by Ada", "image"]], "a compacted conversation may have lost it");
+      assert.ok(statuses.slice(1, 21).every(turn => JSON.stringify(turn) === JSON.stringify([["msg_4 by Ada", "earlier_turn"]])),
+        JSON.stringify(statuses.slice(1, 21)));
+      assert.deepEqual(statuses[21], [["msg_4 by Ada", "image"]], "a compacted conversation may have lost it");
       assert.equal(downloads, 2);
+    } finally { await delivery.fenceAndDrain(); }
+  });
+});
+
+test("messages that wait while the agent works do not push its earlier turns out of what it remembers", async () => {
+  await withStore(async (root, open) => {
+    const messages: Message[] = [shot("msg_4", "att_1"), ask("msg_5", { thread_root_id: "msg_4" })];
+    const statuses: unknown[] = [];
+    const port = recordingPort("memory", [], async (request) => { statuses.push(summary(request.attachments)); });
+    const store = open();
+    const delivery = withAttachmentStager(store, port, {
+      poll: room(messages),
+      downloadAttachment: async () => STAGED_PNG,
+      publish: async () => { throw new Error("no reply expected"); },
+    }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+    try {
+      await delivery.poll(agent);
+      // 25 replies arrive at once and wait; each later turn still knows the root was received.
+      for (let index = 6; index <= 30; index++) messages.push(ask(`msg_${index}`, { thread_root_id: "msg_4" }));
+      await delivery.poll(agent);
+      assert.deepEqual(statuses[0], [["msg_4 by Ada", "image"]]);
+      assert.deepEqual(statuses[1], [["msg_4 by Ada", "earlier_turn"]], "queued rows do not count as earlier turns");
     } finally { await delivery.fenceAndDrain(); }
   });
 });

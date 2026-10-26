@@ -287,7 +287,7 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
         // What this conversation already has; a new conversation is offered the images again.
         const continuation = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
         const earlierOutcomes = recentMessages.length && continuation
-          ? await this.inbox.roomTurnFileOutcomes(agent.agentId, agent.roomId, continuation).catch(() => new Map())
+          ? await this.inbox.roomTurnFileOutcomes(agent.agentId, agent.roomId, continuation, item.inbox_item_id).catch(() => new Map())
           : new Map();
         preparedAttachments = await this.roomTurnAttachments.prepare({
           delivery,

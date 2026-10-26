@@ -764,7 +764,7 @@ test("a message the room context lacks carries the start of its text, since the 
   const context = [roomMessage("msg_20", { thread_root_id: "msg_2", text: "in the context" })];
   const recent = recentRoomImageMessages({ sourceMessage: source, sourceMessageId: "msg_30", context, thread, agentSessionId: "s" });
   assert.deepEqual(recent.map(item => [item.messageId, item.preview]), [
-    ["msg_2", "The login page is brokenafter the update"], ["msg_20", undefined],
+    ["msg_2", "The login page is broken after the update"], ["msg_20", undefined],
   ]);
 });
 
