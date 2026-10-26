@@ -18,6 +18,7 @@ import {
   ownerSetupRef,
   permissionChangeKey,
   permissionChangedSince,
+  providerAcceptsReasoningEffort,
   startedWithHomeHarness,
   resolveProviderConfigurationSnapshot,
   storedHomeHarness,
@@ -225,6 +226,21 @@ test("trusted profile selection replaces only native authority and preserves pro
   assert.throws(() => deriveProviderConfigurationSnapshot({
     provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 6,
   }, { mode: "ask", force: false, workspace: "elsewhere" }), /unsupported native option 'workspace'/);
+});
+
+test("an Open Model agent keeps an OpenAI-compatible reasoning effort, never Claude's max", () => {
+  for (const reasoningEffort of ["low", "medium", "high", "xhigh"] as const) {
+    assert.equal(deriveProviderConfigurationSnapshot({
+      provider: "open-model", model: "openai/gpt-oss-120b", reasoningEffort, permissionProfileId: "full_access", configurationRevision: 2,
+    }, { permission: { "*": "allow" } }).reasoningEffort, reasoningEffort);
+  }
+  assert.throws(() => deriveProviderConfigurationSnapshot({
+    provider: "open-model", model: "openai/gpt-oss-120b", reasoningEffort: "max", permissionProfileId: "full_access", configurationRevision: 2,
+  }, { permission: { "*": "allow" } }), /Open Model does not take reasoning effort 'max'/);
+  assert.equal(providerAcceptsReasoningEffort("open-model", null), true);
+  assert.equal(providerAcceptsReasoningEffort("open-model", "minimal"), false);
+  assert.equal(providerAcceptsReasoningEffort("Codex", "max"), true);
+  assert.equal(providerAcceptsReasoningEffort("claude-code", "high"), false);
 });
 
 test("Claude guest policy derivation keeps local tools and owner setup disabled", () => {

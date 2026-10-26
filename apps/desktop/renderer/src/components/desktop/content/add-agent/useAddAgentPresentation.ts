@@ -1,6 +1,7 @@
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import type {
   DesktopAgentProviderId,
+  DesktopAgentProviderModelOption,
   DesktopAgentProviderModelSource,
   DesktopGitRoomInfo,
   RepoStatus,
@@ -223,10 +224,6 @@ export function useAddAgentPresentation(
     : "Runs on this Mac and keeps working after you quit LetAgents. Room messages are shared in the cloud.");
   const showOpenModelConfig = computed(() => shouldShowOpenModelConfig(selectedProvider.value));
   const showModelSelector = computed(() => shouldShowManagedModelSelector(selectedProvider.value));
-  const showEffortSelector = computed(() =>
-    selectedProviderId.value === "codex"
-  );
-
   const providerModelOptions = computed(() => providerModels.value?.models ?? []);
   const providerModelCatalogLabel = computed(() => {
     if (loadingProviderModels.value) return "Loading the provider model catalog...";
@@ -248,13 +245,36 @@ export function useAddAgentPresentation(
     })),
     { value: "custom", label: "Custom model id" },
   ]);
-  const effortSelectOptions = computed<DesktopSelectOption[]>(() => [
-    { value: "", label: "Use provider default" },
-    ...managedAgentEffortOptionsForProvider(selectedProviderId.value),
-  ]);
   const selectedProviderModel = computed(() =>
     providerModelOptions.value.find((option) => option.id === selectedProviderModelId.value) ?? null
   );
+  // The model an Open Model agent would run: the saved one by default, or the
+  // chosen option. A custom id has no catalog entry, so it has no efforts.
+  const effortModelOption = computed(() => {
+    if (selectedModelMode.value === "option") return selectedProviderModel.value;
+    if (selectedModelMode.value === "default") {
+      const defaultModel = providerModels.value?.defaultModel;
+      return providerModelOptions.value.find((option) => option.id === defaultModel) ?? null;
+    }
+    return null;
+  });
+  const effortOptions = computed(() =>
+    managedAgentEffortOptionsForProvider(selectedProviderId.value, effortModelOption.value)
+  );
+  const showEffortSelector = computed(() =>
+    selectedProviderId.value === "codex"
+    || (selectedProviderId.value === "open-model" && effortOptions.value.length > 0)
+  );
+  const effortSelectOptions = computed<DesktopSelectOption[]>(() => [
+    { value: "", label: "Use provider default" },
+    ...effortOptions.value,
+  ]);
+  // A model that does not list the chosen effort gets its own default instead.
+  watch(effortOptions, (options) => {
+    if (selectedEffort.value && !options.some((option) => option.value === selectedEffort.value)) {
+      selectedEffort.value = "";
+    }
+  }, { flush: "sync" });
   const selectedModelChoice = computed(() =>
     selectedModelMode.value === "option" && selectedProviderModelId.value
       ? `option:${selectedProviderModelId.value}`
@@ -365,8 +385,14 @@ export function useAddAgentPresentation(
   };
 }
 
-function managedAgentEffortOptionsForProvider(
+/**
+ * Codex takes every shared effort. An Open Model agent takes exactly the
+ * efforts its endpoint lists for the model, so a model without that list has
+ * no effort setting at all.
+ */
+export function managedAgentEffortOptionsForProvider(
   providerId: DesktopAgentProviderId | null,
+  model: DesktopAgentProviderModelOption | null = null,
 ): DesktopSelectOption[] {
   const shared = [
     { value: "low", label: "Low" },
@@ -374,6 +400,10 @@ function managedAgentEffortOptionsForProvider(
     { value: "high", label: "High" },
     { value: "xhigh", label: "Extra high" },
   ];
+  if (providerId === "open-model") {
+    const supported = model?.supportedEfforts ?? [];
+    return shared.filter((option) => supported.some((effort) => effort === option.value));
+  }
   return providerId === "claude-code"
     ? [...shared, { value: "max", label: "Max" }]
     : providerId === "codex" ? shared : [];

@@ -285,6 +285,12 @@ export function openCodeConfig(input: {
    * puts an error text in the image's place. `attachment` alone does not do it.
    */
   imageInput?: boolean;
+  /**
+   * The effort the endpoint listed for this model and the owner chose. The
+   * OpenAI-compatible provider sends `options.reasoningEffort` as the request's
+   * `reasoning_effort`. None leaves the endpoint's own default.
+   */
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | null;
 }): OpenCodeConfig {
   return {
     $schema: "https://opencode.ai/config.json",
@@ -317,7 +323,7 @@ export function openCodeConfig(input: {
             release_date: "2025-01-01",
             limit: input.limits,
             cost: { input: 0, output: 0 },
-            options: {},
+            options: input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {},
             ...(input.imageInput === true ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
           },
         },

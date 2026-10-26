@@ -153,6 +153,8 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       display_name: input.displayName.trim() || "Supervised agent",
       provider: input.providerId,
       model: input.model?.trim() || null,
+      // The daemon refuses an effort the provider does not take.
+      ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
       charter: input.charter.trim(),
       desired_state: options.desiredState ?? "running",
       observed_state: "absent",
