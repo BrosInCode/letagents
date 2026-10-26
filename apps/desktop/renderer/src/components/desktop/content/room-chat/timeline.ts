@@ -1,11 +1,14 @@
 import { formatDate, syncTimeZone, timeZoneEpoch } from "../../../../domain/formatters";
 import { contributionChanges } from "../../../../domain/room-contributions";
-import type { DesktopRoomAgentWork, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type { DesktopRoomAgentWork, DesktopRoomMessage, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
+import { defaultSupervisedCharter } from "../add-agent/useAddAgentConfiguration";
 
 const compactContinuationWindowMs = 5 * 60 * 1000;
 
 export type MessageTimelineEntry =
   | { type: "contribution"; id: string; work: DesktopRoomAgentWork }
+  /** The first message an agent started on this Mac was given. Only its starter sees it. */
+  | { type: "first-message"; id: string; agent: DesktopSupervisorManifestEntry }
   | {
       type: "date";
       id: string;
@@ -25,9 +28,34 @@ interface TimelineItem {
   id: string;
   message?: DesktopRoomMessage;
   work?: DesktopRoomAgentWork;
+  agent?: DesktopSupervisorManifestEntry;
 }
 
-export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessage[], work: readonly DesktopRoomAgentWork[] = []): MessageTimelineEntry[] {
+/**
+ * The agents whose first message belongs in the loaded part of the timeline.
+ * The first message reaches the agent privately, so it is never a room
+ * message; it is shown here, to the person who started the agent. The
+ * window's generic first message is left out, and so is an agent started
+ * before the oldest loaded message while older messages are still unloaded.
+ */
+export function firstMessageAgents(
+  entries: readonly DesktopSupervisorManifestEntry[],
+  messages: readonly DesktopRoomMessage[],
+  hasOlderMessages: boolean,
+): DesktopSupervisorManifestEntry[] {
+  const oldest = hasOlderMessages && messages.length ? Math.min(...messages.map(message => Date.parse(message.timestamp)).filter(Number.isFinite)) : -Infinity;
+  return entries.filter(entry => entry.createdBy === "desktop"
+    && entry.charter.trim()
+    && entry.charter.trim() !== defaultSupervisedCharter
+    && Number.isFinite(Date.parse(entry.createdAt))
+    && Date.parse(entry.createdAt) >= oldest);
+}
+
+export function buildMessageTimelineEntries(
+  messages: readonly DesktopRoomMessage[],
+  work: readonly DesktopRoomAgentWork[] = [],
+  firstMessages: readonly DesktopSupervisorManifestEntry[] = [],
+): MessageTimelineEntry[] {
   const entries: MessageTimelineEntry[] = [];
   let previousDayKey: string | null = null;
   let previousMessage: DesktopRoomMessage | null = null;
@@ -51,6 +79,9 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
       ordered.push({ timestamp, time: Date.parse(timestamp), id: `contribution:${entry.attemptId}`, work: entry });
     }
   }
+  for (const agent of firstMessages) {
+    ordered.push({ timestamp: agent.createdAt, time: Date.parse(agent.createdAt), id: `first-message:${agent.id}`, agent });
+  }
   // Messages usually arrive in order. A sorted list (with no unparsable time,
   // which makes the comparator inconsistent) is already its own sort result.
   let sorted = true;
@@ -71,6 +102,11 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
       previousMessage = null;
     }
 
+    if (item.agent) {
+      entries.push({ type: "first-message", id: item.id, agent: item.agent });
+      previousMessage = null;
+      continue;
+    }
     if (item.work) {
       entries.push({ type: "contribution", id: item.id, work: item.work });
       previousMessage = null;

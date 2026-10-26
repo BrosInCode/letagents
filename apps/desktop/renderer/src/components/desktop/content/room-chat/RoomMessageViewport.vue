@@ -24,6 +24,7 @@
           <span>{{ entry.label }}</span>
         </div>
 
+        <RoomFirstMessage v-else-if="entry.type === 'first-message'" :agent="entry.agent" />
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <RoomGitHubUpdates v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
@@ -258,7 +259,8 @@ import { createMessageProviderLabelResolver } from "../../../../domain/agent-pro
 import { useStableIdSet } from "../../../../composables/useStableIdSet";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, createThreadIndicatorMemo, threadParentId, threadQuotePreview } from "./thread-utils";
-import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeline";
+import { buildMessageTimelineEntries, firstMessageAgents, type MessageTimelineEntry } from "./timeline";
+import RoomFirstMessage from "./RoomFirstMessage.vue";
 import {
   anchoredScrollTop,
   firstMessageIdFrom,
@@ -439,7 +441,8 @@ const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
   props.participants, props.presence, props.supervisorEntries,
 ));
 const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
-const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork),
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork,
+  firstMessageAgents(props.supervisorEntries ?? [], props.messages, props.hasOlderMessages)),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 // Bounded mount window (see message-window.ts): only a contiguous range of
 // the timeline is mounted.

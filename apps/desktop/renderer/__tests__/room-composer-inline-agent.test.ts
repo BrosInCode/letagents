@@ -568,3 +568,23 @@ test('the Add agent window sends a Codex effort to the supervised create', async
   assert.equal(sent[0].reasoningEffort, 'xhigh');
   assert.equal('reasoningEffort' in sent[1], false, 'other providers refuse an effort, so none is sent');
 });
+
+/* ---------- "First message · <name>" in the timeline ---------- */
+
+test('the first message shows in its starter\'s timeline at the agent\'s start time, never the window\'s generic one', async () => {
+  const timeline = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/timeline.ts');
+  const { defaultSupervisedCharter } = await vite.ssrLoadModule('/renderer/src/components/desktop/content/add-agent/useAddAgentConfiguration.ts');
+  const message = (id: string, timestamp: string) => ({ id, sender: 'EmmyMay', text: id, attachments: [], agentPromptKind: null, source: 'browser', timestamp, actorLabel: null, agentIdentity: null, threadRootId: id, threadReplyToId: null, thread: null });
+  const agent = (id: string, createdAt: string, charter: string, createdBy = 'desktop') => ({ id, displayName: 'Juniper', charter, createdAt, createdBy });
+  const messages = [message('m1', '2026-10-26T09:00:00Z'), message('m2', '2026-10-26T09:10:00Z')];
+  const agents = [
+    agent('a-new', '2026-10-26T09:05:00Z', 'Fix the flaky test'),
+    agent('a-generic', '2026-10-26T09:06:00Z', defaultSupervisedCharter),
+    agent('a-old', '2026-10-26T08:00:00Z', 'Older than the loaded page'),
+    agent('a-rental', '2026-10-26T09:07:00Z', 'Rented', 'server'),
+  ];
+  assert.deepEqual(timeline.firstMessageAgents(agents, messages, true).map((a: any) => a.id), ['a-new']);
+  assert.deepEqual(timeline.firstMessageAgents(agents, messages, false).map((a: any) => a.id), ['a-new', 'a-old'], 'with the whole history loaded, an older start belongs at its place');
+  const entries = timeline.buildMessageTimelineEntries(messages, [], [agents[0]]).filter((e: any) => e.type !== 'date');
+  assert.deepEqual(entries.map((e: any) => e.id), ['m1', 'first-message:a-new', 'm2']);
+});
