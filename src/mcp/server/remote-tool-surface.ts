@@ -53,7 +53,7 @@ export const REMOTE_EXCLUDED_TOOL_PREFIXES: readonly string[] = ["rental_"];
 export const REMOTE_MAX_TOOL_INPUT_ELEMENTS = 10_000;
 
 /** Input fields that name a local path. They are removed from remote tool schemas. */
-export const REMOTE_STRIPPED_INPUT_FIELDS: readonly string[] = ["cwd"];
+export const REMOTE_STRIPPED_INPUT_FIELDS: readonly string[] = ["cwd", "attachments"];
 
 export function isRemoteExcludedTool(name: string): boolean {
   return Object.hasOwn(REMOTE_EXCLUDED_TOOLS, name)

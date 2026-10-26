@@ -301,6 +301,7 @@ const required = [
     "shared/agent-live-trace.mjs",
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
+    "shared/credential-paths.mjs",
     "shared/live-activity-summary.mjs",
     "shared/message-attachments.mjs",
     "shared/message-contracts.mjs",
@@ -317,6 +318,7 @@ const required = [
     "shared/scratch-workspace-repository.mjs",
     "shared/sqlite-thread-routing.mjs",
     "shared/supervised-read-tools.mjs",
+    "shared/workspace-attachment-files.mjs",
     "shared/workspace-turn-capture.mjs",
     "shared/workspace-turn-capture-worker.mjs",
   ].map((relative) => ({
