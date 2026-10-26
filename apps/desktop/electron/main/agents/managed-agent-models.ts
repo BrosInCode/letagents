@@ -13,6 +13,7 @@ import type {
 import { resolveCodexExecutable } from "./codex-executable.js";
 import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
+import { resolveOpenModelEffortCatalog } from "./open-model-efforts.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
 import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
 
@@ -199,7 +200,10 @@ function modelResult(
   return {
     providerId,
     status,
-    models: models.map((model) => ({ ...model })),
+    models: models.map((model) => ({
+      ...model,
+      ...(model.supportedEfforts ? { supportedEfforts: [...model.supportedEfforts] } : {}),
+    })),
     defaultModel,
     error,
   };
@@ -348,7 +352,27 @@ async function listOpenModelModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
   const settings = await readOpenModelSettings();
+  const efforts = settings.baseUrl
+    ? await resolveOpenModelEffortCatalog({
+      baseUrl: settings.baseUrl,
+      apiKey: settings.apiKey,
+      refresh: Boolean(input.refreshModels),
+    })
+    : null;
+  return openModelModelsResult(settings, input, efforts ?? new Map());
+}
+
+/** The saved model and the agent's own choice, each with the efforts the endpoint lists for it. */
+export function openModelModelsResult(
+  settings: { model: string },
+  input: DesktopAgentProviderPreflightInput,
+  efforts: ReadonlyMap<string, readonly DesktopManagedAgentEffort[]>,
+): DesktopAgentProviderModelsResult {
   const selectedModel = normalizeManagedAgentModel(input.model);
+  const supportedEfforts = (id: string) => {
+    const listed = efforts.get(id);
+    return listed?.length ? { supportedEfforts: [...listed] } : {};
+  };
   const models: DesktopAgentProviderModelOption[] = [];
   if (settings.model) {
     models.push({
@@ -356,6 +380,7 @@ async function listOpenModelModels(
       label: `${settings.model} (saved)`,
       isDefault: true,
       source: "known",
+      ...supportedEfforts(settings.model),
     });
   }
   if (selectedModel && selectedModel !== settings.model) {
@@ -363,6 +388,7 @@ async function listOpenModelModels(
       id: selectedModel,
       label: selectedModel,
       source: normalizeManagedAgentModelSource(input.modelSource),
+      ...supportedEfforts(selectedModel),
     });
   }
   return modelResult("open-model", "ready", models, settings.model || null, null);

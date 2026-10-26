@@ -10,6 +10,7 @@ import { attestProviderSpawnPolicy } from "../provider-spawn-configuration.js";
 import { sameProcessBirthIdentity, terminateFreshLaunch } from "../provider-evidence.js";
 import { credentialBoundaryPluginSource, minimalOpenCodeEnvironment, OPENCODE_SERVER_USERNAME, openCodeAuthContent, openCodeConfig, parseConfiguredOpenModel, parseConfiguredOpenModelImageInput, seedOpenCodeConfigHome, shieldOwnerInstructions, supervisedOpenCodeMcpEnvironment, workspaceOpenCodeEnvironment, supervisedOpenCodePermissionProfileId } from "../opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
+import { isOpenModelReasoningEffort, resolveOpenModelEffortCatalog, type OpenModelReasoningEffort } from "../open-model-efforts.js";
 import { resolveOpenModelLimits } from "../open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION } from "../opencode-runtime.js";
 import { OpenCodeServerClient, type OpenCodeRuntimeAuth } from "../opencode-server-client.js";
@@ -119,6 +120,22 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     );
     const limits = await resolveOpenModelLimits(credential, this.deps.fetch);
+    // The effort was chosen from this model's list, but the saved model can
+    // change after that. An effort the endpoint does not list now is left
+    // out, and the owner is told, rather than sent to be refused or ignored.
+    // An endpoint that cannot be read now says nothing new, so the effort
+    // checked when it was chosen is kept and every start runs the same way.
+    let reasoningEffort: OpenModelReasoningEffort | null = null;
+    let effortNotice: string | null = null;
+    if (req.reasoningEffort) {
+      const catalog = await resolveOpenModelEffortCatalog(credential, this.deps.fetch);
+      const listed = catalog === null ? null : catalog.get(credential.model) ?? [];
+      if (isOpenModelReasoningEffort(req.reasoningEffort) && (listed === null || listed.includes(req.reasoningEffort))) {
+        reasoningEffort = req.reasoningEffort;
+      } else {
+        effortNotice = `Reasoning effort ${req.reasoningEffort} not used: the endpoint does not list it for this model, so the model's default applies.`;
+      }
+    }
     const config = openCodeConfig({
       model: credential.model,
       limits,
@@ -129,6 +146,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       mcpEnvironment,
       permissionProfileId: supervisedOpenCodePermissionProfileId(req.permissionProfileId),
       imageInput: req.imageInput === true,
+      reasoningEffort,
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;
@@ -269,7 +287,8 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     );
     handle.nativeOrderingVerified = true;
     handle.imageInput = req.imageInput === true;
-    if (launchNotice) handle.launchNotices = [launchNotice];
+    const launchNotices = [launchNotice, effortNotice].filter((notice): notice is string => notice !== null);
+    if (launchNotices.length) handle.launchNotices = launchNotices;
     this.handles.set(req.workAttemptId, handle);
     this.observeTerminal(handle, launch.exited);
     this.emitRuntimeReady(handle);

@@ -316,6 +316,19 @@ export function entryLaunchPolicy(agent: HomeHarnessAgent, policy: unknown): unk
 }
 
 const efforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh", "max"]);
+// The values an OpenAI-compatible endpoint takes as `reasoning_effort`; "max"
+// is Claude's. The desktop offers only those the endpoint lists for the model
+// and leaves out, at launch, one it no longer lists.
+const openModelEfforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh"]);
+
+/** Whether an agent of this provider may store this effort. Null, the provider's default, always may. */
+export function providerAcceptsReasoningEffort(provider: string, effort: unknown): boolean {
+  if (effort === null || effort === undefined) return true;
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "codex") return efforts.has(effort as Exclude<ProviderReasoningEffort, null>);
+  if (normalized === "open-model") return openModelEfforts.has(effort as Exclude<ProviderReasoningEffort, null>);
+  return false;
+}
 const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort", "sandbox"]);
 
 /**
@@ -388,8 +401,8 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
   }
 
   if (provider === "open-model") {
-    if (input.reasoningEffort !== null) {
-      throw new Error("Open Model reasoning effort is controlled by the selected endpoint and model.");
+    if (!providerAcceptsReasoningEffort(provider, input.reasoningEffort)) {
+      throw new Error(`Open Model does not take reasoning effort '${String(input.reasoningEffort)}'.`);
     }
     const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
     const permission = profile === "auto_review"
@@ -404,7 +417,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     return {
       provider,
       model: normalizedModel,
-      reasoningEffort: null,
+      reasoningEffort: input.reasoningEffort,
       permissionProfileId: profile,
       launchPolicy: { ...policy, permission },
       configurationRevision: input.configurationRevision,
