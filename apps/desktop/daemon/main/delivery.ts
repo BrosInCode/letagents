@@ -6,6 +6,7 @@
 import { ContinuationRepairCoordinator } from "../continuation-repair-coordinator.js";
 import { redactCredentialText } from "../credential-redaction.js";
 import { DaemonReadModel } from "../daemon-read-model.js";
+import { launchProgress } from "../launch-progress.js";
 import { DeliveryCutoverExecutionCoordinator } from "../delivery-cutover-execution-coordinator.js";
 import { DesiredStateCoordinator } from "../desired-state-coordinator.js";
 import { ProviderCheckpointCoordinator } from "../provider-checkpoint-coordinator.js";
@@ -154,6 +155,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
       readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
       compactionProgress: (entry) => entry.work_attempt_id
         ? this.providerPort?.compactionProgress?.(entry.work_attempt_id, entry.provider) ?? null : null,
+      launchProgress: (entry) => launchProgress.view(entry.id, this.convergencePacer.snapshot("launch")),
       deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),
       recordRecovery: (entry) => this.runtimeConfigurationApply.recordRecovery(entry),
       currentDaemonGeneration: () => this.singleton.currentGeneration,

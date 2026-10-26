@@ -10,6 +10,7 @@ import type { loadHostApprovalSigner } from "../host-approval-auth.js";
 export type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 export type WireEntry = {
   provider_progress?: DesktopSupervisorManifestEntry["providerProgress"];
+  launch_progress?: unknown;
   runtime_recovery?: DesktopSupervisorManifestEntry["runtimeRecovery"];
   local_room_id?: string;
   runtime_generation_id?: string | null;
