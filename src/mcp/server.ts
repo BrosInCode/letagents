@@ -7,6 +7,7 @@ import { executionProfile } from "./server/runtime/execution-profile.js";
 import { setMcpClientNameSource } from "./server/runtime/identity/config.js";
 import { LETAGENTS_RUNTIME_CONTRACT_ARG, letAgentsRuntimeContract } from "./server/runtime-contract.js";
 import { createLetAgentsMcpServer } from "./server/letagents-server.js";
+import { pinAttachmentWorkingFolder } from "./server/runtime/message-attachments.js";
 
 const CLIENT_INITIALIZE_WAIT_MS = 5_000;
 
@@ -16,6 +17,8 @@ async function main() {
     return;
   }
   const profile = executionProfile();
+  // Before any agent call: file attachments never follow a later change to this folder.
+  pinAttachmentWorkingFolder();
   const supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null;
   // The stdio binding. The API's remote endpoint builds the same server object.
   const server = createLetAgentsMcpServer({ profile, supervisedProvider, remote: false });

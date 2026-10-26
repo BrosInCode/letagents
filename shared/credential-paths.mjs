@@ -37,6 +37,8 @@ const SECRET_NAMES = [
   /\.(pem|key|p8|p12|pfx|ppk|jks|keystore|kdbx|tfvars|tfstate)(\.|$)/, /^terraform\.tfstate/,
   /^(auth|credentials?|secrets?)(\.(json|ya?ml|toml|ini|txt|env|xml|cfg|conf|enc|properties))*$/,
   /service[-_]?account.*\.json$/, /^firebase-adminsdk.*\.json$/,
+  /^\.credentials\.json$/, /^mcp-state\.json/, /^client_secret.*\.json$/, /^token\.json$/, /^credentials\.db$/,
+  /\.keychain(-db)?$/,
 ];
 
 /**

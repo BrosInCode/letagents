@@ -96,7 +96,8 @@ test("the reader refuses files that may hold credentials, in any letter case", a
   const env = await setup();
   try {
     const names = [".env", ".ENV.local", ".envrc", "id_ed25519", "deploy.pem", "auth.json", "credentials.yml.enc", ".npmrc",
-      ".mcp.json", "prod.tfvars", "my-service-account.json", ".letagents-supervisor-context.json"];
+      ".mcp.json", "prod.tfvars", "my-service-account.json", ".letagents-supervisor-context.json", ".credentials.json",
+      "mcp-state.json", "client_secret_123.json", "token.json", "login.keychain-db"];
     for (const name of names) await writeFile(join(env.workspace, name), "secret");
     const folders = windows ? [".git", ".cursor", ".claude", ".ssh"] : [".git", ".cursor", ".claude", ".ssh", ".Git"];
     for (const folder of folders) {
@@ -140,7 +141,7 @@ test("on Windows the reader refuses other drives, network paths and alternate da
     await writeFile(join(env.workspace, "auth.json"), "secret");
     await writeFile(join(env.workspace, "notes.md:hidden"), "stream");
     // An alternate data stream reads another name's bytes; Windows drops a trailing dot or space; device names open devices.
-    for (const file of ["auth.json::$DATA", "notes.md:hidden", "notes.md.", "notes.md ", "CON", "nul.txt", join("shots", "COM1.png"), "LPT1"]) {
+    for (const file of ["auth.json::$DATA", "notes.md:hidden", "notes.md.", "notes.md ", "CON", "nul.txt", "nul .txt", join("shots", "COM1.png"), "LPT1"]) {
       await assert.rejects(readWorkspaceAttachmentFile({ workspace: env.workspace }, file), /not a plain file name/, file);
     }
   } finally { await env.cleanup(); }

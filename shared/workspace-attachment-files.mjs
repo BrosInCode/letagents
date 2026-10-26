@@ -13,19 +13,23 @@ import {
  * Reads the workspace files an agent attaches to a room message. The desktop
  * daemon and the npm MCP server both read them with the owner's rights,
  * outside the agent's sandbox, so both use this one reader and these checks:
- *   1. The name, as text, must be inside the workspace. Nothing outside it is
- *      looked up, so a Windows network path never connects to its host.
+ *   1. The name, as text, must be inside the workspace. A name outside it is
+ *      never looked up, so a Windows network path does not connect to its
+ *      host. (A folder swapped for a link during the checks can still send
+ *      one lookup elsewhere; step 4 refuses what it finds.)
  *   2. Every part below the workspace is looked at without following it; a
  *      symlink or Windows junction anywhere is refused.
  *   3. The file must be regular, singly linked, not empty and within the size
  *      limit, and must not be a file that may hold credentials.
- *   4. The open file must be the file that was checked. macOS refuses a
- *      symlink anywhere in the path in the open itself (O_NOFOLLOW_ANY; macOS
- *      rejects it combined with O_NOFOLLOW). Linux refuses one as the last
- *      part, and the kernel then names the opened file exactly. Windows has
- *      neither, so there the path is checked again after the read: a folder
- *      swapped for a junction in that moment is the one race left, and agents
- *      on Windows are not sandboxed from the owner's files to begin with.
+ *   4. The open file must be the file that was checked, before it is read.
+ *      macOS refuses a symlink anywhere in the path in the open itself
+ *      (O_NOFOLLOW_ANY; macOS rejects it combined with O_NOFOLLOW). Linux
+ *      refuses one as the last part, and the kernel then names the opened
+ *      file exactly. Windows has neither, and Node cannot ask Windows for an
+ *      open file's path, so there the path is checked again after the read.
+ *      A folder swapped back and forth with a junction at exactly the right
+ *      moments is the race left on Windows; agents there are not sandboxed
+ *      from the owner's files to begin with.
  * O_NONBLOCK keeps a named pipe from blocking the open.
  */
 const O_NOFOLLOW_ANY = 0x20000000;
@@ -35,8 +39,12 @@ const WINDOWS = process.platform === "win32";
 const NO_SYMLINKS = DARWIN ? O_NOFOLLOW_ANY : (constants.O_NOFOLLOW ?? 0);
 export const ATTACHMENT_READ_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | NO_SYMLINKS;
 
-/** Names Windows opens as a device, in any folder and with any extension. */
-const WINDOWS_DEVICE_NAME = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
+/** Names Windows opens as a device, in any folder, with any extension and with spaces before it (`nul .txt`). */
+const WINDOWS_DEVICE_STEM = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])$/i;
+
+function windowsDeviceName(part) {
+  return WINDOWS_DEVICE_STEM.test(part.split(".")[0].replace(/ +$/, ""));
+}
 
 /** The name a room shows for an attached file: its base name, without control characters. */
 export function attachmentFileName(requested) {
@@ -79,7 +87,7 @@ export async function readWorkspaceAttachmentFile({ workspace, aliases = [], bas
   if (WINDOWS) {
     // A colon names an alternate data stream (`auth.json::$DATA` reads auth.json),
     // and Windows drops a trailing dot or space when it opens a name.
-    if (parts.some((part) => part.includes(":") || WINDOWS_DEVICE_NAME.test(part) || /[. ]$/.test(part))) {
+    if (parts.some((part) => part.includes(":") || windowsDeviceName(part) || /[. ]$/.test(part))) {
       throw new Error(`${requested} is not a plain file name. Attach the file by its own name.`);
     }
   }
@@ -115,12 +123,12 @@ export async function readWorkspaceAttachmentFile({ workspace, aliases = [], bas
   });
   let bytes;
   try {
-    bytes = await readRegularFile(handle, requested, before);
     if (LINUX) {
       // The kernel names the file this handle opened, whatever happened to the path.
       const opened = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
       if (opened !== real) throw changedError(requested);
     }
+    bytes = await readRegularFile(handle, requested, before);
   } finally {
     await handle.close();
   }

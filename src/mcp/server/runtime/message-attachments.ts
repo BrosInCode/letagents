@@ -1,6 +1,7 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   MESSAGE_ATTACHMENT_LIMITS,
@@ -20,7 +21,7 @@ import {
 } from "../../../../shared/workspace-attachment-files.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { ApiError, getApiUrl, parseApiErrorPayload } from "./api.js";
-import { getDaemonToolExecutionContext, getRuntimeWorkingDirectory } from "./daemon-tool-context.js";
+import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
 import { roomScopedApiCall } from "./room-api.js";
 import { currentSessionScope } from "./session-scope.js";
 
@@ -69,25 +70,77 @@ async function checkoutAround(folder: string): Promise<string | null> {
   }
 }
 
+/** The working folder this server started in: its names, and the identity of the folder they named. */
+type PinnedFolder = { logical: string; pwd: string | undefined; real: string; dev: bigint; ino: bigint };
+let startFolder: PinnedFolder | null = null;
+
 /**
- * The folder files may come from: the checkout around the MCP server's working
- * folder, or that folder outside a checkout. Relative names resolve against
- * the working folder. A home folder, or a folder around it, is not a project:
- * attaching from it would reach every file the owner has.
+ * Record the working folder when the stdio server starts, before any agent
+ * call. The workspace never follows that path later: an agent that moves the
+ * folder and puts a link to another folder in its place must not move the
+ * workspace with it.
+ */
+export function pinAttachmentWorkingFolder(logical = process.cwd(), pwd = process.env.PWD): void {
+  try {
+    const real = realpathSync.native(logical);
+    const info = lstatSync(real, { bigint: true });
+    startFolder = info.isDirectory() ? { logical, pwd, real, dev: info.dev, ino: info.ino } : null;
+  } catch {
+    startFolder = null;
+  }
+}
+
+async function stillTheStartFolder(folder: PinnedFolder): Promise<boolean> {
+  const info = await lstat(folder.real, { bigint: true }).catch(() => null);
+  if (!info?.isDirectory() || info.dev !== folder.dev || info.ino !== folder.ino) return false;
+  return (await realpath(folder.real).catch(() => null)) === folder.real;
+}
+
+/**
+ * Home folders that hold a tool's configuration (`~/.claude`, `~/.ssh`,
+ * `~/Library`, `%USERPROFILE%/AppData` …) are not projects, except the
+ * `worktrees` folder some tools keep inside theirs (`~/.cursor/worktrees`,
+ * `~/.letagents/worktrees`), where each checkout is a project.
+ */
+function insideHomeConfiguration(folder: string, home: string): string | null {
+  if (!contains(home, folder) || folder === home) return null;
+  const parts = relative(home, folder).split(sep);
+  const first = parts[0]!.normalize("NFKC").toLowerCase();
+  if (!first.startsWith(".") && first !== "library" && first !== "appdata") return null;
+  if (parts[1]?.normalize("NFKC").toLowerCase() === "worktrees" && parts.length >= 3) return null;
+  return join(home, parts[0]!);
+}
+
+/**
+ * The folder files may come from: the checkout around the folder this
+ * server started in, or that folder outside a checkout. Relative names
+ * resolve against the start folder. A home folder, a folder around it, or a
+ * tool's configuration folder in it is not a project: attaching from it
+ * would reach the owner's other files and credentials.
  */
 export async function resolveAttachmentWorkspace(): Promise<Required<WorkspaceAttachmentRoots>> {
-  const logicalWorkingDirectory = getRuntimeWorkingDirectory();
-  const workingDirectory = await realpath(logicalWorkingDirectory);
-  const home = await realpath(homedir()).catch(() => null);
-  const project = (folder: string) => !isFileSystemRoot(folder) && !(home && contains(folder, home));
+  const folder = startFolder;
+  if (!folder) {
+    throw new Error(`This MCP server did not record a working folder when it started, so it cannot attach files. ${NOTHING_POSTED}`);
+  }
+  if (!(await stillTheStartFolder(folder))) {
+    throw new Error(`The folder this MCP server started in (${folder.real}) has moved or changed. Restart the server in your project folder. ${NOTHING_POSTED}`);
+  }
+  const workingDirectory = folder.real;
+  // An unknown home is compared by its name, never skipped.
+  const homeName = resolve(homedir());
+  const home = await realpath(homeName).catch(() => homeName);
+  const configuration = (candidate: string) => insideHomeConfiguration(candidate, home);
+  const project = (candidate: string) => !isFileSystemRoot(candidate) && !contains(candidate, home) && !configuration(candidate);
   const checkout = await checkoutAround(workingDirectory);
   // A home folder kept in git (dotfiles) is not a project; a folder below it may be.
   const workspace = checkout && project(checkout) ? checkout : workingDirectory;
   if (!project(workspace)) {
-    throw new Error(`Attachments need a project folder, but this MCP server runs in ${workspace}. Start it in your project folder (set "cwd" in its MCP configuration). ${NOTHING_POSTED}`);
+    const where = configuration(workspace);
+    throw new Error(`Attachments need a project folder, but this MCP server runs in ${workspace}${where ? `, inside the tool configuration folder ${where}` : ""}. Start it in your project folder (set "cwd" in its MCP configuration). ${NOTHING_POSTED}`);
   }
   // The agent may name files through the shell's path, or a Windows short name, of the same folder.
-  const aliases = await workspaceAliases(workspace, workingDirectory, [logicalWorkingDirectory, process.env.PWD]);
+  const aliases = await workspaceAliases(workspace, workingDirectory, [folder.logical, folder.pwd]);
   return { workspace, aliases, baseDirectory: workingDirectory };
 }
 
