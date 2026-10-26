@@ -59,6 +59,7 @@
       class="desktop-composer-add-flyout"
       :class="{ 'is-narrow': flyoutNarrow }"
       :data-animate="flyoutAnimate || undefined"
+      @keydown="handleFlyoutKey"
     >
       <button v-if="flyoutNarrow" type="button" class="desktop-composer-add-menu-item desktop-composer-add-back" @click="backToMenu">
         <ChevronLeft class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
@@ -73,6 +74,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import { Bot, ChevronLeft, ChevronRight, ImagePlay, ListTodo, Paperclip, Plus } from "@lucide/vue";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
+import { prefersReducedMotion } from "./room-gif-search";
 
 export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent";
 
@@ -157,8 +159,7 @@ function openGif(query = "", byPointer = false): void {
   open.value = true;
   flyoutQuery.value = query;
   flyoutAnimate.value = byPointer && !prefersReducedMotion();
-  const left = root.value?.getBoundingClientRect?.().left ?? 0;
-  flyoutNarrow.value = typeof window !== "undefined" && left + FLYOUT_SPAN_PX > window.innerWidth;
+  measureFlyout();
   if (flyout.value === "gif") {
     // Already open: a new query starts a fresh panel; otherwise just return to its search box.
     if (query) flyout.value = null;
@@ -194,6 +195,8 @@ function enabledItems(): HTMLElement[] {
 }
 
 function focusItem(element: HTMLElement): void {
+  // While a panel is open, the pointer passing over the menu never takes focus from it.
+  if (flyout.value) return;
   if (!(element as HTMLButtonElement).disabled && typeof document !== "undefined" && document.activeElement !== element) {
     element.focus({ preventScroll: true });
   }
@@ -237,6 +240,19 @@ function closeOnOutsidePointer(event: PointerEvent): void {
   if (root.value && !root.value.contains(event.target as Node)) closeMenu();
 }
 // Escape spent on closing the menu does nothing else, such as dismissing a suggestion.
+/** An Escape the panel did not use (on a quick search, Back or the GIPHY link) goes back to the menu. */
+function handleFlyoutKey(event: KeyboardEvent): void {
+  if (event.key !== "Escape" || event.defaultPrevented) return;
+  event.preventDefault();
+  event.stopPropagation();
+  backToMenu();
+}
+
+function measureFlyout(): void {
+  const left = root.value?.getBoundingClientRect?.().left ?? 0;
+  flyoutNarrow.value = typeof window !== "undefined" && left + FLYOUT_SPAN_PX > window.innerWidth;
+}
+
 function closeOnEscape(event: KeyboardEvent): void {
   if (event.key !== "Escape" || menu.value?.contains(event.target as Node) || flyoutElement.value?.contains(event.target as Node)) return;
   event.preventDefault();
@@ -247,15 +263,11 @@ function setDocumentListeners(listening: boolean): void {
   const method = listening ? "addEventListener" : "removeEventListener";
   document[method]("pointerdown", closeOnOutsidePointer as EventListener, true);
   document[method]("keydown", closeOnEscape as EventListener, true);
+  if (typeof window !== "undefined") window[method]("resize", measureFlyout);
 }
 watch(open, setDocumentListeners);
 watch(() => props.disabled, (disabled) => { if (disabled) closeMenu(); });
-watch(() => props.gifDisabled || !props.gifAvailable, (off) => { if (off && flyout.value === "gif") flyout.value = null; });
 onBeforeUnmount(() => setDocumentListeners(false));
-
-function prefersReducedMotion(): boolean {
-  return typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
-}
 
 defineExpose({ close: closeMenu, isOpen: () => open.value, openGif });
 </script>

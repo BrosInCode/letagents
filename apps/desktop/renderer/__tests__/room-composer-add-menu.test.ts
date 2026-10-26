@@ -293,6 +293,41 @@ test('GIF opens a panel beside the menu; the menu stays open and Back returns to
   assert.equal(vm.flyout.value, null, 'closing the menu closes the panel');
 });
 
+test('with the GIF panel open, the pointer over the menu keeps focus in the panel; a stray Escape there goes back', async t => {
+  const { vm, items } = mountMenu(t);
+  vm.openGif('');
+  await flush();
+  const search = { name: 'gif search' };
+  fakeDocument.activeElement = search;
+  vm.focusItem(items[1]);
+  assert.equal(fakeDocument.activeElement, search, 'moving over the GIF row does not steal the search box focus');
+
+  const chipEscape = key('Escape', { target: { name: 'quick search chip' } });
+  vm.handleFlyoutKey(chipEscape);
+  assert.equal(chipEscape.defaultPrevented, true);
+  assert.equal(vm.flyout.value, null, 'Escape on a quick search, Back or the GIPHY link goes back to the menu');
+  assert.equal(vm.open.value, true);
+  const usedEscape = key('Escape', { defaultPrevented: true });
+  vm.openGif('');
+  await flush();
+  vm.handleFlyoutKey(usedEscape);
+  assert.equal(vm.flyout.value, 'gif', 'an Escape the panel already used does nothing more');
+
+  vm.closeMenu();
+  vm.focusItem(items[2]);
+  assert.equal(fakeDocument.activeElement, items[2], 'without a panel the pointer highlights rows as before');
+});
+
+test('a GIF availability check that fails while the panel is open leaves the panel open', async t => {
+  const { vm, props } = mountMenu(t);
+  vm.openGif('ship');
+  await flush();
+  props.gifAvailable = false;
+  props.gifDisabled = true;
+  await flush();
+  assert.equal(vm.flyout.value, 'gif');
+});
+
 test('openGif opens the menu and the panel with a search; it does nothing when GIFs are off', async t => {
   const { vm, props } = mountMenu(t);
   vm.openGif('lgtm');

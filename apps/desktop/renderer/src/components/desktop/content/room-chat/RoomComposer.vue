@@ -647,8 +647,10 @@ function openGifCommand(): boolean {
     pushActionToast("GIFs are not available in this room. Your draft is still here.", "error");
     return true;
   }
+  if (!addMenu.value) return false;
   draft.value = "";
-  addMenu.value?.openGif(query);
+  typing.stop();
+  addMenu.value.openGif(query);
   return true;
 }
 

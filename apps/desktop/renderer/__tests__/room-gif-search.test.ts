@@ -170,6 +170,7 @@ test('a failed page keeps the shown GIFs; a failure with no wait stops paging', 
   assert.equal(calls.length, 2, 'no page during the wait');
   timers.fire(15_000);
   assert.equal(calls.length, 2, 'shown results are not searched again by themselves');
+  assert.equal(gifs.error.value, '', 'the page message goes when the wait ends');
   gifs.loadMore();
   assert.equal(calls.length, 3, 'paging resumes after the wait');
   calls[2].reject(new Error('IPC gone'));
@@ -186,6 +187,8 @@ test('a query over 50 characters is refused with the client wording and not sent
   gifs.setQuery('x'.repeat(51), { immediate: true });
   assert.equal(calls.length, 0);
   assert.equal(gifs.error.value, 'Use a GIF search of 1–50 characters.');
+  gifs.setQuery(`  ${'x'.repeat(50)}`, { immediate: true });
+  assert.deepEqual(calls.map(call => call.query), ['x'.repeat(50)], 'spaces around a 50-character search do not count');
 });
 
 test('dispose drops answers and timers', async () => {

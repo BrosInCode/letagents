@@ -64,7 +64,7 @@ export function createRoomGifSearch(options: RoomGifSearchOptions) {
       loading.value = false;
       return;
     }
-    if (value.length > MAX_QUERY_LENGTH) {
+    if (trimmed.length > MAX_QUERY_LENGTH) {
       loading.value = false;
       error.value = INVALID_QUERY;
       return;
@@ -90,6 +90,8 @@ export function createRoomGifSearch(options: RoomGifSearchOptions) {
     cooldownTimer = setTimer(() => {
       cooldownTimer = null;
       coolingDown.value = false;
+      // A failed page is retried by the next scroll; its message goes with the wait.
+      if (items.value.length) error.value = "";
       // A search that the wait refused runs once more by itself; a shown page can page again.
       if (!disposed && !items.value.length && query.value.trim()) setQuery(query.value, { immediate: true });
     }, ms);

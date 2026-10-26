@@ -59,7 +59,7 @@
 
 <script setup lang="ts">
 import giphyAttribution from "../../../../../../../../shared/ui/assets/powered-by-giphy.png";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Search } from "@lucide/vue";
 import type { GiphyItem } from "../../../../../../../../shared/giphy-client.mjs";
 import { desktopIpc } from "../../../../ipc/index";
@@ -132,6 +132,9 @@ function loadMoreNearEnd(): void {
   const element = grid.value;
   if (element && element.scrollTop + element.clientHeight >= element.scrollHeight - 80) gifs.loadMore();
 }
+
+// After a wait, a grid already scrolled to its end loads its next page without another scroll.
+watch(gifs.coolingDown, coolingDown => { if (!coolingDown) void nextTick(loadMoreNearEnd); });
 
 onMounted(() => {
   if (props.initialQuery?.trim()) gifs.setQuery(props.initialQuery, { immediate: true });
