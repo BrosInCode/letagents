@@ -673,6 +673,116 @@ test("purge proves preconditions and deletes local agent rows atomically without
   }
 });
 
+test("purge of a given agent cancels the messages it never answered; an ordinary agent keeps them and is refused", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-10-26T12:00:00.000Z");
+  const markers = { given: join(env.root, "given-worktree.txt"), ordinary: join(env.root, "ordinary-worktree.txt") };
+  await writeFile(markers.given, "keep");
+  await writeFile(markers.ordinary, "keep");
+  const stoppedEntry = (id: string, attemptId: string, executionId: string, marker: string): DaemonManifestEntry => ({
+    ...entry, id, desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: marker, work_attempt_id: attemptId,
+    provider_ref: { ...entry.provider_ref!, work_attempt_id: attemptId, execution_generation_id: executionId },
+    activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  });
+  const given = stoppedEntry("supervised_rental_ask_0123456789abcdef0123456789abcdef", "attempt_given", "run_given", markers.given);
+  const ordinary = stoppedEntry("supervised_ordinary_agent", "attempt_ordinary", "run_ordinary", markers.ordinary);
+  try {
+    await store.write(0, [given, ordinary]);
+    seedTerminalAttempt(env.databasePath, "attempt_given", "run_given", markers.given);
+    seedTerminalAttempt(env.databasePath, "attempt_ordinary", "run_ordinary", markers.ordinary);
+    // Each agent was handed two room messages it never started on.
+    const unanswered: Record<string, string[]> = {};
+    for (const agent of [given, ordinary]) {
+      unanswered[agent.id] = [];
+      for (const message of ["first", "second"]) {
+        const item = await inbox.enqueueCorrection({
+          agent_id: agent.id, room_id: agent.room_id, source_message_id: `${agent.id}-${message}`,
+          source_message: { text: `help with ${message}` }, activation: { decision: "activate" },
+        });
+        assert.equal(item.state, "pending");
+        unanswered[agent.id]!.push(item.inbox_item_id);
+      }
+    }
+    await inbox.close();
+
+    await assert.rejects(store.preparePurge(1, {
+      operationId: "purge_ordinary", requestId: "purge_ordinary", agentId: ordinary.id, daemonGeneration: 3,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    }), /blocker/, "an ordinary agent's unanswered messages still block its purge");
+
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_given", requestId: "purge_given", agentId: given.id, daemonGeneration: 3,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    });
+    assert.equal(prepared.purge.phase, "local_commit");
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const inboxItemId of unanswered[given.id]!) {
+        const row = database.prepare("SELECT state,last_error FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as { state: string; last_error: string | null };
+        assert.equal(row.state, "cancelled_by_user");
+        assert.equal(row.last_error, "The agent was removed before it answered.");
+        assert.equal((database.prepare("SELECT phase FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence DESC LIMIT 1").get(inboxItemId) as { phase: string }).phase, "user_cancelled");
+      }
+      for (const inboxItemId of unanswered[ordinary.id]!) {
+        assert.equal((database.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as { state: string }).state, "pending",
+          "the ordinary agent's messages are untouched");
+      }
+    } finally { database.close(); }
+    const committed = await store.commitPurge(1, { operationId: "purge_given", agentId: given.id, daemonGeneration: 3 });
+    assert.equal(committed.purge.phase, "complete");
+    assert.equal(await store.getEntry(given.id), undefined);
+    assert.notEqual(await store.getEntry(ordinary.id), undefined);
+  } finally {
+    await inbox.close().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a given agent's purge stops at the first message a provider turn touched", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-10-26T12:00:00.000Z");
+  const marker = join(env.root, "guest-worktree-2.txt");
+  await writeFile(marker, "keep");
+  const given: DaemonManifestEntry = {
+    ...entry, id: "supervised_rental_ask_fedcba9876543210fedcba9876543210", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: marker, work_attempt_id: "attempt_touched",
+    provider_ref: { ...entry.provider_ref!, work_attempt_id: "attempt_touched", execution_generation_id: "run_touched" },
+    activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [given]);
+    seedTerminalAttempt(env.databasePath, "attempt_touched", "run_touched", marker);
+    const touched = await inbox.enqueueCorrection({
+      agent_id: given.id, room_id: given.room_id, source_message_id: "touched",
+      source_message: { text: "a turn started on this" }, activation: { decision: "activate" },
+    });
+    await inbox.close();
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      // A message a provider turn already took: not the daemon's to cancel on its own.
+      database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',provider_turn_id='turn_1' WHERE inbox_item_id=?").run(touched.inbox_item_id);
+    } finally { database.close(); }
+    await assert.rejects(store.preparePurge(1, {
+      operationId: "purge_touched", requestId: "purge_touched", agentId: given.id, daemonGeneration: 3,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    }), /blocker/);
+    const database2 = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal((database2.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(touched.inbox_item_id) as { state: string }).state, "dispatching");
+    } finally { database2.close(); }
+  } finally {
+    await inbox.close().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("mint-state evidence is none only before an attempt, unknown across crashes, exact after recovery, and conflict-safe", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
