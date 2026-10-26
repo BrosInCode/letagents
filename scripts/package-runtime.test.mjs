@@ -8,16 +8,22 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { npmInvocation, resolveNpmCommand } from "./npm-command.mjs";
+
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const npm = resolveNpmCommand();
+const runNpm = (args, options) => {
+  const spawn = npmInvocation(args, npm);
+  return execFileSync(spawn.command, spawn.args, { ...spawn.options, ...options });
+};
 
 test("the packed MCP CLI reports its contract and active supervised readiness", { timeout: 120_000 }, async () => {
   const tempRoot = mkdtempSync(join(tmpdir(), "letagents-package-runtime-"));
 
   try {
-    execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });
+    runNpm(["run", "build"], { cwd: repoRoot, stdio: "pipe" });
 
-    const packOutput = execFileSync(
-      "npm",
+    const packOutput = runNpm(
       ["pack", "--json", "--ignore-scripts", "--pack-destination", tempRoot],
       { cwd: repoRoot, encoding: "utf8" },
     );
@@ -27,8 +33,7 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
     mkdirSync(installRoot);
     writeFileSync(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
 
-    execFileSync(
-      "npm",
+    runNpm(
       ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
       { cwd: installRoot, stdio: "pipe" },
     );
@@ -87,7 +92,7 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
           LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
           LETAGENTS_SUPERVISOR_PROVIDER: provider,
           LETAGENTS_SUPERVISOR_ENTRY_ID: "package_test_entry",
-          LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-package-test.sock",
+          LETAGENTS_SUPERVISOR_DAEMON_SOCKET: join(tmpdir(), "letagents-package-test.sock"),
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "package_test_attempt",
           LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "package_test_generation",
           LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "package_test_session",
@@ -206,7 +211,16 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
           assert.deepEqual(completionSchema?.required, ["outcome"], "text must remain optional for no-reply completion");
         }
       } finally {
+        // Wait for the server to exit before the next one starts and before
+        // the install tree is removed: Windows refuses to delete a directory
+        // that is still a running process's working directory.
+        const exited = new Promise((resolve) => {
+          if (server.exitCode !== null || server.signalCode !== null) resolve();
+          else server.once("exit", resolve);
+          setTimeout(resolve, 10_000).unref();
+        });
         server.kill("SIGTERM");
+        await exited;
       }
     }
   } finally {

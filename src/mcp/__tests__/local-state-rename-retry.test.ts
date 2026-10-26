@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { RENAME_RETRY_DELAYS_MS, renameWithRetry } from "../local-state/rename-retry.js";
 import { readLocalState, updateLocalState } from "../local-state.js";
+import { assertOwnerPrivateFile } from "./support/platform.js";
 
 function failing(code: string, times: number) {
   const calls: Array<[string, string]> = [];
@@ -60,9 +61,7 @@ test("the state file keeps its private mode and no temp file is left", () => {
   try {
     updateLocalState((state) => ({ ...state, local_host_id: "host_1" }));
     assert.equal(readLocalState().local_host_id, "host_1");
-    if (process.platform !== "win32") {
-      assert.equal(statSync(process.env.LETAGENTS_STATE_PATH).mode & 0o777, 0o600);
-    }
+    assertOwnerPrivateFile(process.env.LETAGENTS_STATE_PATH, directory);
     assert.match(readFileSync(process.env.LETAGENTS_STATE_PATH, "utf8"), /"host_1"/);
     assert.deepEqual(readdirSync(directory), ["mcp-state.json"]);
   } finally {

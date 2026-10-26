@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { unixSocketOnly } from "./support/platform.js";
+
 const root = await mkdtemp(join(tmpdir(), "letagents-supervised-registration-"));
 const home = join(root, "home");
 const workspace = join(root, "workspace");
@@ -66,7 +68,7 @@ test.after(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-test("register_agent_session persists its validated supervised cwd for later bridge calls", async () => {
+test("register_agent_session persists its validated supervised cwd for later bridge calls", { skip: unixSocketOnly }, async () => {
   const originalFetch = globalThis.fetch;
   const requests: Array<Record<string, any>> = [];
   const daemon = createServer((socket) => {

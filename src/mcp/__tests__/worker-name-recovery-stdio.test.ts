@@ -4,10 +4,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+import { childProcessEnv, connectOrExplain } from "./support/platform.js";
 
 import { AGENT_SESSION_ENDED_ADVICE } from "../../shared/request-headers.js";
 
@@ -70,14 +73,13 @@ async function harness() {
   const clients: Client[] = [];
   const openClient = async () => {
     const transport = new StdioClientTransport({ command: process.execPath,
-      args: ["--import", resolve("node_modules/tsx/dist/loader.mjs"), resolve("src/mcp/server.ts")], cwd: temp,
-      env: { PATH: process.env.PATH!, LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
+      args: ["--import", pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href, resolve("src/mcp/server.ts")], cwd: temp,
+      env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
-        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }, stderr: "pipe" });
-    transport.stderr?.resume();
+        LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
     const client = new Client({ name: "worker-name-recovery-test", version: "1" });
     clients.push(client);
-    await client.connect(transport);
+    await connectOrExplain(client, transport);
     return client;
   };
   const attempt = async (client: Client, name: string, args: Record<string, unknown>) => {

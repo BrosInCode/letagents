@@ -88,7 +88,8 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
     const pair2 = await captureWorkspacePair(directory, base, second, 'second');
     assert.match(pair2.contribution.changes.patch, /\+second turn/);
     assert.doesNotMatch(pair2.contribution.changes.patch, /\+first turn/);
-    assert.match(pair2.contribution.changes.patch, /new mode 100755/);
+    // A Windows checkout has no exec bit (core.fileMode=false), so the chmod above is not a change there.
+    if (process.platform !== 'win32') assert.match(pair2.contribution.changes.patch, /new mode 100755/);
     assert.match(pair2.workspace.patch, /\+first turn/);
     assert.deepEqual(readFileSync(join(directory, '.git/index')), indexBefore);
     assert.equal(existsSync(join(directory, 'FILTER_EXECUTED')), false);

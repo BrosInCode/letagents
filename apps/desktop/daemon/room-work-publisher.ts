@@ -24,7 +24,7 @@ type Options = {
   assertCurrent(): Promise<void>;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
-  diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
+  diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | `remote_unanswered: ${string}`): void;
   now?(): number;
   /** `remote` is the remote to ask what upstream held (recordedRemote); without it a turn is compared plainly. */
   workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null; remote?: string | null }>;
@@ -93,7 +93,9 @@ export class RoomWorkPublisher {
   private readonly turnStarts = new Map<string, { head: string; remoteTips: Promise<string[] | null> }>();
   /** One set of answers for all agents and turns of this daemon. It does not outlive this process either. */
   private readonly remoteAnswers = new RecordedRemoteAnswers(
-    (remote) => (this.options.askRemote ?? captureRecordedRemoteTips)(remote), () => this.now());
+    // A remote that gives no answer leaves the turn compared plainly; the reason goes to the daemon's diagnostics, not to a stderr nobody reads.
+    (remote) => this.options.askRemote ? this.options.askRemote(remote)
+      : captureRecordedRemoteTips(remote, undefined, { onNoAnswer: (reason) => this.report(`remote_unanswered: ${reason}`) }), () => this.now());
   private readonly cancellation = new AbortController();
   private readonly workspaceCapture = new WorkspaceCapture();
   private scheduled: NodeJS.Timeout | null = null;

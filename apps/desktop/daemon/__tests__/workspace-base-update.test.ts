@@ -285,8 +285,18 @@ test('without an answer from the remote, the card is the plain comparison', asyn
   assertPlain(failed);
 
   // An MCP worker asks every remote its clone configures. One that does not answer makes the answer incomplete: no answer.
+  // A null always comes with its reason, so a capture compared plainly for a fixable cause is not silent.
+  const reasons: string[] = [];
+  const onNoAnswer = (reason: string) => { reasons.push(reason); };
   git(partly, 'remote', 'add', 'gone', join(f.root, 'missing.git'));
-  assert.equal(await captureRemoteTips(partly), null);
+  assert.equal(await captureRemoteTips(partly, { onNoAnswer }), null);
+  assert.equal(await captureRemoteTips(lonely, { onNoAnswer }), null);
+  assert.equal(await captureRecordedRemoteTips(join(f.root, 'missing.git'), undefined, { onNoAnswer }), null);
+  assert.equal(await captureRecordedRemoteTips(null, undefined, { onNoAnswer }), null);
+  assert.equal(reasons.length, 4);
+  assert.ok(reasons.every(reason => reason.length > 0), JSON.stringify(reasons));
+  assert.equal(reasons[1], 'the repository has no remote');
+  assert.equal(reasons[3], 'no remote was recorded');
   assert.ok((await captureRecordedRemoteTips(f.remote))?.length, 'the daemon asks its one recorded remote only');
 
   // The remote answered, but the capture does not know the answer or the starting commit (a restarted daemon), or the commit is gone.
@@ -318,7 +328,10 @@ test('two unrelated upstream lines in one turn give the plain comparison', async
   assertPlain(result);
 });
 
-test('when the files on disk are not the committed files, the card is the plain comparison', async t => {
+test('under core.autocrlf the rule holds; a sparse checkout keeps the plain comparison', async t => {
+  // The files on disk are not the committed bytes under core.autocrlf (CRLF on disk, LF in
+  // HEAD), the default of Git for Windows. The captured trees hold text files as Git stores
+  // them, so the pulled base is told from the agent's own CRLF edit all the same.
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'config', 'core.autocrlf', 'true');
@@ -329,8 +342,10 @@ test('when the files on disk are not the committed files, the card is the plain 
     git(workspace, 'pull', '-q', '--ff-only');
     write(workspace, { 'src/app.ts': lines(5, 'app').replace('app 3', 'app 3 fixed').replaceAll('\n', '\r\n') });
   });
-  assert.equal(count(result.after), STAGING_FILES + 1);
-  assertPlain(result);
+  assert.equal(count(result.before), STAGING_FILES + 1, 'the plain comparison counts every file staging gained');
+  assert.deepEqual(listed(result.after), ['modified src/app.ts +1 -1']);
+  assert.match(result.after.patch, /\+app 3 fixed\n/);
+  assert.doesNotMatch(result.after.patch, /\r|module|from staging|handbook/);
 
   // A sparse checkout leaves files out. They are not deletions by the agent.
   const sparse = f.clone('sparse');

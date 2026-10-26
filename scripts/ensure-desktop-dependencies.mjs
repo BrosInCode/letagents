@@ -15,7 +15,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { npmInvocation, resolveNpmCommand } from "./npm-command.mjs";
+
 const defaultRepoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const defaultNpm = resolveNpmCommand();
 const LOCK_WAIT_MS = 100;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -102,7 +105,11 @@ function acquireInstallLock(lockPath, timeoutMs = LOCK_TIMEOUT_MS, onContention)
 }
 
 function runNpm(npmCommand, npmCommandArgs, args, options) {
-  const result = spawnSync(npmCommand, [...npmCommandArgs, ...args], options);
+  // The default command may be the cmd.exe fallback, which needs its arguments quoted as one line.
+  const spawn = npmCommand === defaultNpm.command && npmCommandArgs === defaultNpm.args
+    ? npmInvocation(args, defaultNpm)
+    : { command: npmCommand, args: [...npmCommandArgs, ...args], options: {} };
+  const result = spawnSync(spawn.command, spawn.args, { ...spawn.options, ...options });
   if (result.error) throw result.error;
   return result;
 }
@@ -139,8 +146,10 @@ export function ensureDesktopDependencies({
   repoRoot = defaultRepoRoot,
   desktopRoot = join(repoRoot, "apps", "desktop"),
   lockRoot = tmpdir(),
-  npmCommand = process.platform === "win32" ? "npm.cmd" : "npm",
-  npmCommandArgs = [],
+  // npm runs as `node npm-cli.js`: `spawn("npm")` finds nothing on Windows,
+  // and `spawn("npm.cmd")` without a shell is refused by Node 20.12+/22.
+  npmCommand = defaultNpm.command,
+  npmCommandArgs = defaultNpm.args,
   lockTimeoutMs = LOCK_TIMEOUT_MS,
   onLockContention,
 } = {}) {
