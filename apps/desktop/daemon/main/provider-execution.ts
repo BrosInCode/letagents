@@ -88,6 +88,7 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
         notifyProgressChanged: () => this.notifyStateChanged(),
+        notifyLaunchProgressChanged: () => this.notifyStateChanged(false),
         retirePendingActivity: (entryId) => this.activityWrites.retireEntry(entryId),
         refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
         exitSettling: (entryId) => this.providerTerminals.settling(entryId),

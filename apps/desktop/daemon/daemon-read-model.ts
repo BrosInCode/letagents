@@ -33,6 +33,8 @@ const OWNER_SETUP_END_ATTENTION_AFTER_MS = 30_000;
 export type DaemonReadModelPorts = {
   readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["provider_progress"];
+  /** The live start-up progress of the entry's latest launch in this daemon. */
+  launchProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["launch_progress"];
   currentDaemonGeneration(): number;
   nowMs(): number;
   startedAt: string;
@@ -313,6 +315,7 @@ export class DaemonReadModel {
       provider_progress: entry.desired_state === "running" && entry.condition === "none"
         && !["stopped", "failed", "stopping"].includes(entry.observed_state)
         ? this.ports.compactionProgress?.(entry) ?? null : null,
+      launch_progress: entry.desired_state === "running" ? this.ports.launchProgress?.(entry) ?? null : null,
       runtime_generation_id: this.runtimeGenerationId(entry),
       runtime_recovery: recovery ? { operationId: recovery.operation_id, roomId: recovery.room_id,
         executionGenerationId: recovery.execution_generation_id, runtimeGenerationId: recovery.runtime_generation_id,

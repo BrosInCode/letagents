@@ -361,6 +361,8 @@ export type DaemonManifestEntry = {
 export type DaemonManifestEntryView = DaemonManifestEntry & {
   /** Current child-owned progress only; never durable lifecycle or readiness. */
   provider_progress?: { state: "compacting"; startedAt: string } | null;
+  /** Live start-up progress of the latest launch in this daemon; memory only. */
+  launch_progress?: import("./launch-progress.js").LaunchProgressView | null;
   runtime_recovery?: {
     operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
     mode: "resume" | "fresh"; phase: "prepared" | "stopped";

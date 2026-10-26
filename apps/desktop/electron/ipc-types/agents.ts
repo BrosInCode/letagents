@@ -621,6 +621,30 @@ export interface DesktopRoomAgentDeliveryAttention {
   skipUnavailableReason: string | null;
 }
 
+/** A daemon provider launch phase; see daemon/turn-start-latency.ts LaunchPhase. */
+export type DesktopSupervisorLaunchPhase = "prepare" | "slot_wait" | "admission" | "process" | "bootstrap" | "install";
+
+/**
+ * Live start-up progress of an agent's latest provider launch in the running
+ * daemon. Memory only: absent after a daemon restart. No content or error text.
+ */
+export interface DesktopSupervisorLaunchProgress {
+  /** 1, or one more than the failed launch this one retries. */
+  attempt: number;
+  startedAt: string;
+  state: "running" | "launched" | "failed";
+  /** The phase in progress; null once the launch ended. */
+  current: DesktopSupervisorLaunchPhase | null;
+  /** Phases in the order they ran; `ms` is null for the one in progress. */
+  phases: Array<{ phase: DesktopSupervisorLaunchPhase; startedAt: string; ms: number | null }>;
+  endedAt: string | null;
+  /** The first visible output after the launch. */
+  firstOutputAt: string | null;
+  failure: { phase: DesktopSupervisorLaunchPhase; action: "sign_in" | "install" | "retry" } | null;
+  /** Launches that start first while this one waits for a launch slot. */
+  slotAhead: number | null;
+}
+
 export interface DesktopSupervisorManifestEntry {
   /** Opaque exact native process birth, used only to fence cached read evidence. */
   runtimeGenerationId?: string | null;
@@ -676,6 +700,8 @@ export interface DesktopSupervisorManifestEntry {
   nativeLiveness: DesktopSupervisorLivenessAxis;
   /** Ephemeral native compaction; not a readiness or room-turn claim. */
   providerProgress?: { state: "compacting"; startedAt: string } | null;
+  /** Live start-up progress of the latest launch; null when the daemon has none. */
+  launchProgress?: DesktopSupervisorLaunchProgress | null;
   /** First time this entry reached ready (bound + reachable + running +
    * unblocked); set once, never cleared. Null/absent if it never reached ready. */
   readyReachedAt?: string | null;

@@ -195,7 +195,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // 1678 -> 1900: main.ts split into ./main/ modules (one class chain, no behavior
   // change); the budget now counts every file of the composition root, and the
   // split added only file headers, imports, layer declarations and abstract parts.
-  assert.ok(mainSource.split("\n").length < 1_900, "main.ts must remain a thin composition root");
+  // 1900 -> 1903: the live launch progress port and its notify; the tracking
+  // stays in launch-progress.ts.
+  assert.ok(mainSource.split("\n").length < 1_903, "main.ts must remain a thin composition root");
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 

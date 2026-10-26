@@ -47,6 +47,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
       && typeof entry.provider_progress.startedAt === "string"
       && Number.isFinite(Date.parse(entry.provider_progress.startedAt))
       ? { state: "compacting", startedAt: entry.provider_progress.startedAt } : null,
+    launchProgress: projectLaunchProgress(entry.launch_progress),
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,
@@ -132,6 +133,50 @@ function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["
     turn: { state: turnState, inboxItemId, sourceMessageId, providerTurnId, detail: turnDetail },
     task: { state: taskState, taskId, title },
   };
+}
+
+const LAUNCH_PHASES = ["prepare", "slot_wait", "admission", "process", "bootstrap", "install"] as const;
+
+function wireTime(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function wireCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** Fail-closed: a malformed progress record is shown as no progress, never partly. */
+export function projectLaunchProgress(value: unknown): DesktopSupervisorManifestEntry["launchProgress"] {
+  const root = record(value);
+  if (!root || !Array.isArray(root.phases) || root.phases.length > LAUNCH_PHASES.length) return null;
+  const state = enumValue(root.state, ["running", "launched", "failed"] as const);
+  const startedAt = wireTime(root.started_at);
+  const current = root.current === null ? null : enumValue(root.current, LAUNCH_PHASES);
+  const endedAt = root.ended_at === null ? null : wireTime(root.ended_at);
+  const firstOutputAt = root.first_output_at === null ? null : wireTime(root.first_output_at);
+  if (!state || !startedAt || (root.current !== null && !current)
+    || (root.ended_at !== null && !endedAt) || (root.first_output_at !== null && !firstOutputAt)) return null;
+  const phases: NonNullable<DesktopSupervisorManifestEntry["launchProgress"]>["phases"] = [];
+  for (const candidate of root.phases) {
+    const phase = record(candidate);
+    const name = enumValue(phase?.phase, LAUNCH_PHASES);
+    const phaseStartedAt = wireTime(phase?.started_at);
+    const ms = phase?.ms === null ? null : wireCount(phase?.ms);
+    if (!phase || !name || !phaseStartedAt || (phase.ms !== null && ms === null)) return null;
+    phases.push({ phase: name, startedAt: phaseStartedAt, ms });
+  }
+  let failure: NonNullable<DesktopSupervisorManifestEntry["launchProgress"]>["failure"] = null;
+  if (root.failure !== null && root.failure !== undefined) {
+    const raw = record(root.failure);
+    const phase = enumValue(raw?.phase, LAUNCH_PHASES);
+    const action = enumValue(raw?.action, ["sign_in", "install", "retry"] as const);
+    if (!phase || !action) return null;
+    failure = { phase, action };
+  }
+  const slotAhead = root.slot_ahead === null || root.slot_ahead === undefined ? null : wireCount(root.slot_ahead);
+  const attempt = root.attempt === undefined ? 1 : wireCount(root.attempt);
+  if (!attempt) return null;
+  return { attempt, startedAt, state, current, phases, endedAt, firstOutputAt, failure, slotAhead };
 }
 
 function projectDeliveryAttention(value: unknown): DesktopSupervisorManifestEntry["deliveryAttention"] {

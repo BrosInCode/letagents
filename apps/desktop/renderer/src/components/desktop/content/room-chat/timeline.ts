@@ -7,6 +7,7 @@ const compactContinuationWindowMs = 5 * 60 * 1000;
 
 export type MessageTimelineEntry =
   | { type: "contribution"; id: string; work: DesktopRoomAgentWork }
+  | { type: "agent-startup"; id: string; entryId: string }
   /** A quiet "Juniper joined" or "Juniper left" line, seen in this window only. */
   | { type: "presence"; id: string; line: PresenceTimelineLine }
   | {
@@ -28,13 +29,22 @@ interface TimelineItem {
   id: string;
   message?: DesktopRoomMessage;
   work?: DesktopRoomAgentWork;
+  startupEntryId?: string;
   presence?: PresenceTimelineLine;
+}
+
+/** An agent start-up row: under the person's first message to it, or at the time it started. */
+export interface TimelineAgentStartup {
+  entryId: string;
+  anchorMessageId: string | null;
+  startedAt: string;
 }
 
 export function buildMessageTimelineEntries(
   messages: readonly DesktopRoomMessage[],
   work: readonly DesktopRoomAgentWork[] = [],
   presence: readonly PresenceTimelineLine[] = [],
+  startups: readonly TimelineAgentStartup[] = [],
 ): MessageTimelineEntry[] {
   const entries: MessageTimelineEntry[] = [];
   let previousDayKey: string | null = null;
@@ -62,6 +72,18 @@ export function buildMessageTimelineEntries(
   for (const line of presence) {
     ordered.push({ timestamp: line.timestamp, time: Date.parse(line.timestamp), id: line.id, presence: line });
   }
+  const anchoredStartups: Array<{ item: TimelineItem; anchorId: string }> = [];
+  if (startups.length) {
+    const sources = new Map(messages.map(message => [message.id, message.timestamp]));
+    for (const startup of startups) {
+      const anchor = startup.anchorMessageId && sources.has(startup.anchorMessageId) ? startup.anchorMessageId : null;
+      const timestamp = anchor ? sources.get(anchor)! : startup.startedAt;
+      const item: TimelineItem = { timestamp, time: Date.parse(timestamp), id: `agent-startup:${startup.entryId}`, startupEntryId: startup.entryId };
+      // A row with its first message goes right under that message, after the sort.
+      if (anchor) anchoredStartups.push({ item, anchorId: anchor });
+      else ordered.push(item);
+    }
+  }
   // Messages usually arrive in order. A sorted list (with no unparsable time,
   // which makes the comparator inconsistent) is already its own sort result.
   let sorted = true;
@@ -69,6 +91,11 @@ export function buildMessageTimelineEntries(
     if (!(ordered[index - 1]!.time <= ordered[index]!.time)) { sorted = false; break; }
   }
   if (!sorted) ordered.sort((a, b) => a.time - b.time);
+  for (const { item, anchorId } of anchoredStartups) {
+    let index = ordered.findIndex(candidate => candidate.message?.id === anchorId) + 1;
+    while (ordered[index]?.startupEntryId) index += 1;
+    ordered.splice(index, 0, item);
+  }
   for (const item of ordered) {
     const dayKey = messageDayKey(item.timestamp);
     if (dayKey !== previousDayKey) {
@@ -82,6 +109,11 @@ export function buildMessageTimelineEntries(
       previousMessage = null;
     }
 
+    if (item.startupEntryId) {
+      entries.push({ type: "agent-startup", id: item.id, entryId: item.startupEntryId });
+      previousMessage = null;
+      continue;
+    }
     if (item.presence) {
       entries.push({ type: "presence", id: item.id, line: item.presence });
       previousMessage = null;
