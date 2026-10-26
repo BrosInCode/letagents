@@ -1,4 +1,4 @@
-import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS } from "../desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, roomTurnImageLabel } from "../desktop-event-prompt-format.js";
 import type { ProviderRoomTurnRequest, ProviderStreamEventKind } from "../provider-adapter.js";
 import { CLAUDE_NO_ROOM_REPLY_SENTINEL } from "../claude-room-turn-evidence.js";
 import { shownName } from "./launch-args.js";
@@ -127,7 +127,7 @@ export function assistantTextOf(message: ClaudeStreamMessage): string | null {
  */
 export function userStreamJsonLine(text: string, uuid?: string, attachments?: ProviderRoomTurnRequest["attachments"]): string {
   const images = includedRoomTurnImages(attachments).flatMap(image => image.data ? [
-    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}` },
+    { type: "text", text: roomTurnImageLabel(image) },
     { type: "image", source: { type: "base64", media_type: image.mimeType,
       data: Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64") } },
   ] : []);

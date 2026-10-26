@@ -1,5 +1,5 @@
 /** Room-turn prompt input and the checks that the LetAgents workplace and room tools are ready. */
-import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS } from "../desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, roomTurnImageLabel } from "../desktop-event-prompt-format.js";
 import { z } from "zod";
 import { type ProviderRoomTurnRequest, ProviderContinuationMissingError } from "../provider-adapter.js";
 import { errorMessage } from "../provider-evidence.js";
@@ -15,7 +15,7 @@ import { recordValue } from "./notifications.js";
  */
 export function roomTurnImageInput(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
   return includedRoomTurnImages(request.attachments).flatMap(image => image.path ? [
-    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}`, text_elements: [] },
+    { type: "text", text: roomTurnImageLabel(image), text_elements: [] },
     { type: "localImage", path: image.path },
   ] : []);
 }

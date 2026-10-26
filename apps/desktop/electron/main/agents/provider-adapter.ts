@@ -416,19 +416,34 @@ export interface ProviderStreamEvent {
 export type RoomTurnImageDelivery = "memory" | "file" | null;
 /** An image type every image-capable provider accepts. */
 export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/** Where a file from the recent room context came from, so the prompt can name it. */
+export type RoomTurnAttachmentOrigin = {
+  messageId: string;
+  /** The sender's display name, printable and short. */
+  sender: string;
+  /** The message belongs to the activating message's thread. */
+  inThread: boolean;
+};
 /**
- * One file on the activating room message, as the daemon prepared it for this
- * turn. The daemon alone downloads; an adapter never sees a bearer or a
- * storage address, only bytes in memory or a daemon-owned file path.
+ * One file on the activating room message or on a recent message before it,
+ * as the daemon prepared it for this turn. The daemon alone downloads; an
+ * adapter never sees a bearer or a storage address, only bytes in memory or
+ * a daemon-owned file path.
  */
 export type ProviderRoomTurnAttachment = {
-  /** 1-based position on the message. */
+  /** 1-based position on its message. */
   index: number;
+  /** The recent message that carried the file; absent for the activating message. */
+  origin?: RoomTurnAttachmentOrigin;
   fileName: string;
   /** The sender's declared type; for an included image, the type its bytes show. */
   mimeType: string;
   sizeBytes: number | null;
-  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported";
+  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported"
+    /** Recent messages only: the turn already carries its most images from earlier messages. */
+    | "context_limit"
+    /** Recent messages only: an earlier turn of this agent already received it, so it is not sent again. */
+    | "earlier_turn";
   /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
   image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
 };
@@ -443,7 +458,7 @@ export interface ProviderRoomTurnRequest {
   observedContext?: unknown[];
   /** The room's history summary, on the first turn of a continuation that has not had it. */
   historySummary?: import("../../../../../shared/room-history-summary.mjs").RoomHistoryTurnSummary;
-  /** The activating message's files, prepared by the daemon for this one turn. Never persisted. */
+  /** The activating message's files, then images from recent messages, prepared by the daemon for this one turn. Never persisted. */
   attachments?: ProviderRoomTurnAttachment[];
 }
 

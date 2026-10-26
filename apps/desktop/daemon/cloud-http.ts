@@ -444,6 +444,44 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
   return "acknowledged";
 }
 
+/** How long a turn waits for its thread's images to be found; the thread is optional. */
+const THREAD_READ_TIMEOUT_MS = 4_000;
+
+/**
+ * The root and the latest replies before one message of a thread, for the
+ * images a turn may carry. Optional: any failure, a refused bearer included,
+ * is null, so it never marks the room as refused or holds a turn back long.
+ */
+export async function readRoomThread(input: {
+  roomId: string; apiUrl: string; bearer: string; rootMessageId: string; beforeMessageId: string;
+  limit: number; signal: AbortSignal;
+}): Promise<{ root: Record<string, unknown>; replies: Array<Record<string, unknown>> } | null> {
+  const messageId = /^msg_[1-9]\d*$/;
+  if (!messageId.test(input.rootMessageId) || !messageId.test(input.beforeMessageId)
+    || !Number.isSafeInteger(input.limit) || input.limit < 1) return null;
+  const origin = isLocalRoomApi(input.apiUrl) ? LOCAL_ROOM_API_ORIGIN : input.apiUrl;
+  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(THREAD_READ_TIMEOUT_MS)]);
+  try {
+    const response = await untilAborted(roomRequest(`${origin}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.rootMessageId}/thread?before=${input.beforeMessageId}&limit=${input.limit}`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, redirect: "error", signal,
+    }), signal);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return null;
+    }
+    const body = await untilAborted(response.json() as Promise<unknown>, signal);
+    const page = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+    const isMessage = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object"
+      && !Array.isArray(value) && messageId.test(String((value as Record<string, unknown>).id));
+    if (page?.room_id !== input.roomId || !isMessage(page.root) || page.root.id !== input.rootMessageId
+      || !Array.isArray(page.replies) || !page.replies.every(isMessage)) return null;
+    return { root: page.root, replies: page.replies.slice(-input.limit) };
+  } catch {
+    input.signal.throwIfAborted();
+    return null;
+  }
+}
+
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
@@ -601,6 +639,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     return await response.json() as { messages?: Array<Record<string, unknown>> };
   },
   downloadAttachment: downloadRoomAttachment,
+  thread: readRoomThread,
   async joinRoom(input) {
     const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/join`, {
       method: "POST", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" }, body: "{}", signal: boundedCloudSignal(input.signal),

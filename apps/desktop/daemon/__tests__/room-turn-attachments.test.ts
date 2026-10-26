@@ -6,12 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { attachmentStorageUrl, downloadRoomAttachment, isThisMachineAddress, storageResolvesToThisMachine } from "../cloud-http.js";
+import { attachmentStorageUrl, downloadRoomAttachment, isThisMachineAddress, readRoomThread, storageResolvesToThisMachine } from "../cloud-http.js";
 import {
+  activatingThreadRootId,
   declaredRoomAttachments,
+  roomTurnFileKey,
+  recentRoomImageMessages,
   RoomAttachmentDownloadError,
   RoomTurnAttachmentStager,
   ROOM_TURN_IMAGE_MAX_BYTES,
+  ROOM_TURN_RECENT_IMAGES_MAX_BYTES,
   sniffRoomTurnImageType,
   STAGED_FOLDER_MAX_AGE_MS,
 } from "../room-turn-attachments.js";
@@ -479,4 +483,270 @@ test("a link-local room API is another device and gets no loopback trust; a stal
   const stalled = storageResolvesToThisMachine("slow.example.test", controller.signal, () => new Promise(() => {}));
   controller.abort(new Error("stopped by the owner"));
   await assert.rejects(stalled, /stopped by the owner/);
+});
+
+// Images on recent messages before the activating one.
+
+function roomMessage(id: string, overrides: Record<string, unknown> = {}) {
+  return { id, text: `text of ${id}`, sender: `Sender ${id}`, thread_root_id: id, attachments: [attachment(`att_${id.slice(4)}`)], ...overrides };
+}
+
+test("a top-level message looks at the five top-level messages just before it, newest first, never its own or later ones", () => {
+  const context = [
+    roomMessage("msg_1"), roomMessage("msg_2"), roomMessage("msg_3", { attachments: [] }),
+    roomMessage("msg_4", { agent_identity: { agent_key: "me", actor_label: "Me", agent_session_id: "session-me" } }),
+    roomMessage("msg_5", { sender: "Ada\u0000 \u202eLove\u200blace\u2028" }), roomMessage("msg_6", { thread_root_id: "msg_1" }),
+    roomMessage("msg_7"), roomMessage("msg_8", { text: "the activating message" }), roomMessage("msg_9"),
+  ];
+  const recent = recentRoomImageMessages({ sourceMessage: context[7], sourceMessageId: "msg_8", context, agentSessionId: "session-me" });
+  // Top-level msg_2..msg_7 minus the reply msg_6 is the window; msg_3 has no files and msg_4 is this agent's own.
+  assert.deepEqual(recent.map(item => [item.messageId, item.sender, item.inThread]), [
+    ["msg_7", "Sender msg_7", false], ["msg_5", "Ada Lovelace", false], ["msg_2", "Sender msg_2", false],
+  ], "a reply in another thread is not this conversation; names lose hidden and reordering characters");
+  assert.equal(recent[0]?.message, context[6], "the message itself is passed on");
+  assert.deepEqual(recentRoomImageMessages({ sourceMessage: context[7], sourceMessageId: "not-a-message", context, agentSessionId: "x" }), []);
+});
+
+test("an agent far behind the room has no window before its message, only what the context holds", () => {
+  const context = [roomMessage("msg_40"), roomMessage("msg_41")];
+  assert.deepEqual(recentRoomImageMessages({ sourceMessage: roomMessage("msg_9"), sourceMessageId: "msg_9", context, agentSessionId: "s" }), []);
+});
+
+test("a thread reply looks at its thread only: the root, then its latest earlier replies", () => {
+  const source = roomMessage("msg_30", { thread_root_id: "msg_2" });
+  const thread = { root: roomMessage("msg_2"), replies: [
+    roomMessage("msg_10", { thread_root_id: "msg_2" }), roomMessage("msg_20", { thread_root_id: "msg_2" }),
+    roomMessage("msg_31", { thread_root_id: "msg_2" }),
+  ] };
+  const context = [roomMessage("msg_20", { thread_root_id: "msg_2" }), roomMessage("msg_28"), roomMessage("msg_29")];
+  const recent = recentRoomImageMessages({ sourceMessage: source, sourceMessageId: "msg_30", context, thread, agentSessionId: "s" });
+  assert.deepEqual(recent.map(item => [item.messageId, item.inThread]), [["msg_2", true], ["msg_20", true], ["msg_10", true]],
+    "each message once; a reply after the activating message and the main room are left out");
+  const replies = Array.from({ length: 8 }, (_, index) => roomMessage(`msg_${10 + index}`, { thread_root_id: "msg_2" }));
+  const fromContext = recentRoomImageMessages({ sourceMessage: source, sourceMessageId: "msg_30",
+    context: [roomMessage("msg_2"), ...replies], agentSessionId: "s" });
+  assert.deepEqual(fromContext.map(item => item.messageId), ["msg_2", "msg_17", "msg_16", "msg_15", "msg_14", "msg_13"],
+    "the root, then the five latest earlier replies");
+});
+
+test("the message the activating one quotes comes first, from anywhere in what the turn holds", () => {
+  const source = roomMessage("msg_30", { reply_to: { id: "msg_4", text: "a preview without files" } });
+  const context = [roomMessage("msg_4", { thread_root_id: "msg_1" }), roomMessage("msg_28"), roomMessage("msg_29")];
+  const recent = recentRoomImageMessages({ sourceMessage: source, sourceMessageId: "msg_30", context, agentSessionId: "s" });
+  assert.deepEqual(recent.map(item => item.messageId), ["msg_4", "msg_29", "msg_28"]);
+});
+
+test("only a reply names a thread root, and only an earlier one", () => {
+  assert.equal(activatingThreadRootId({ thread_root_id: "msg_2" }, "msg_9"), "msg_2");
+  assert.equal(activatingThreadRootId({ thread_root_id: "msg_9" }, "msg_9"), null, "a root is its own thread");
+  assert.equal(activatingThreadRootId({ thread_root_id: "msg_12" }, "msg_9"), null);
+  assert.equal(activatingThreadRootId({ thread_root_id: "../msg_2" }, "msg_9"), null);
+  assert.equal(activatingThreadRootId({}, "msg_9"), null);
+});
+
+function recentInput(overrides: Record<string, unknown>, downloads: Download[] = [], bytes?: (id: string) => Uint8Array | Error) {
+  return prepareInput({ sourceMessage: { id: "msg_7", text: "please fix this", attachments: [attachment("att_70", { filename: "own.png" })] },
+    ...overrides }, downloads, bytes);
+}
+
+const recentFrom = (id: string, files: unknown[], overrides: Record<string, unknown> = {}) =>
+  ({ messageId: id, sender: `Sender ${id}`, inThread: false, message: { id, text: "", attachments: files }, ...overrides });
+
+test("a recent message's images follow the activating message's, each named by its message and sender", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ delivery: "file", recentMessages: [
+      recentFrom("msg_6", [attachment("att_60", { filename: "bug.png" }), attachment("att_61", { filename: "log.txt", content_type: "text/plain" })],
+        { inThread: true }),
+      recentFrom("msg_5", [attachment("att_50", { filename: "bug.png" })]),
+    ] }, downloads));
+    assert.deepEqual(prepared.attachments.map(file => [file.origin?.messageId ?? "source", file.index, file.status]), [
+      ["source", 1, "image"], ["msg_6", 1, "image"], ["msg_5", 1, "image"],
+    ], "a recent message's other files stay out: its context lists them");
+    assert.deepEqual(prepared.attachments[1]?.origin, { messageId: "msg_6", sender: "Sender msg_6", inThread: true });
+    assert.deepEqual(downloads.map(item => [item.messageId, item.attachmentId]), [["msg_7", "att_70"], ["msg_6", "att_60"], ["msg_5", "att_50"]]);
+    assert.deepEqual(prepared.attachments.map(file => file.image?.path?.split("/").at(-1)), ["1.png", "2.png", "3.png"],
+      "files of two messages with the same index never collide");
+    assert.deepEqual(prepared.outcomes, [
+      { messageId: "msg_7", attachmentId: "att_70", outcome: "image" }, { messageId: "msg_6", attachmentId: "att_60", outcome: "image" },
+      { messageId: "msg_5", attachmentId: "att_50", outcome: "image" },
+    ]);
+    await prepared.release();
+  });
+});
+
+test("recent messages add at most four images and 10 MB, inside the turn budget and after the activating message", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const many = await new RoomTurnAttachmentStager(root).prepare(recentInput({ recentMessages: [
+      recentFrom("msg_6", [attachment("att_1"), attachment("att_2"), attachment("att_3")]),
+      recentFrom("msg_5", [attachment("att_4"), attachment("att_5")]),
+    ] }, downloads));
+    assert.deepEqual(many.attachments.map(file => file.status), ["image", "image", "image", "image", "image", "context_limit"]);
+    assert.equal(downloads.length, 5, "the fifth recent image is not downloaded");
+
+    const six = new Uint8Array(6 * 1024 * 1024); six.set(PNG);
+    const bytesCap: Download[] = [];
+    const capped = await new RoomTurnAttachmentStager(root).prepare(recentInput({ recentMessages: [
+      recentFrom("msg_6", [attachment("att_1", { byte_size: six.byteLength }), attachment("att_2", { byte_size: six.byteLength }),
+        attachment("att_3", { byte_size: null })]),
+    ] }, bytesCap, (id) => id === "att_3" ? new RoomAttachmentDownloadError("too_large") : six));
+    assert.deepEqual(capped.attachments.map(file => file.status), ["image", "image", "context_limit", "context_limit"]);
+    assert.deepEqual(bytesCap.map(item => [item.attachmentId, item.maxBytes]), [
+      ["att_70", ROOM_TURN_IMAGE_MAX_BYTES], ["att_1", ROOM_TURN_IMAGE_MAX_BYTES], ["att_3", ROOM_TURN_RECENT_IMAGES_MAX_BYTES - six.byteLength],
+    ], "an image of unknown size may take only what recent images have left");
+    assert.deepEqual(capped.outcomes.map(file => file.outcome), ["image", "image"], "a budget is not a refusal for good");
+
+    const nine = new Uint8Array(9 * 1024 * 1024); nine.set(PNG);
+    const turnBudget: Download[] = [];
+    const shared = await new RoomTurnAttachmentStager(root).prepare(prepareInput({
+      sourceMessage: { id: "msg_7", text: "two big ones", attachments: [attachment("att_70", { byte_size: nine.byteLength }), attachment("att_71", { byte_size: nine.byteLength })] },
+      recentMessages: [recentFrom("msg_6", [attachment("att_1", { byte_size: 3 * 1024 * 1024 }), attachment("att_2", { byte_size: null })])],
+    }, turnBudget, (id) => id === "att_2" ? new RoomAttachmentDownloadError("too_large") : nine));
+    assert.deepEqual(shared.attachments.map(file => file.status), ["image", "image", "turn_limit", "turn_limit"]);
+    assert.deepEqual(turnBudget.map(item => [item.attachmentId, item.maxBytes]), [
+      ["att_70", ROOM_TURN_IMAGE_MAX_BYTES], ["att_71", ROOM_TURN_IMAGE_MAX_BYTES], ["att_2", 2 * 1024 * 1024],
+    ], "an image of unknown size may take only what the turn has left");
+  });
+});
+
+test("what the conversation already has is not fetched again; the activating message's files always are", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const earlierOutcomes = new Map([
+      [roomTurnFileKey("msg_6", "att_60"), "image" as const], [roomTurnFileKey("msg_6", "att_62"), "not_image" as const],
+      [roomTurnFileKey("msg_6", "att_63"), "too_large" as const], [roomTurnFileKey("msg_7", "att_70"), "image" as const],
+    ]);
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ earlierOutcomes, recentMessages: [
+      recentFrom("msg_6", [attachment("att_60"), attachment("att_61"), attachment("att_62"), attachment("att_63")]),
+    ] }, downloads));
+    assert.deepEqual(prepared.attachments.map(file => [file.origin?.messageId ?? "source", file.index, file.status]), [
+      ["source", 1, "image"], ["msg_6", 1, "earlier_turn"], ["msg_6", 2, "image"],
+    ], "a refusal for good is named once, in the turn that found it");
+    assert.deepEqual(downloads.map(item => item.attachmentId), ["att_70", "att_61"]);
+  });
+});
+
+test("only a refusal by the bytes is remembered for good, so a later turn does not fetch it again", async () => {
+  await withRoot(async (root) => {
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ recentMessages: [
+      recentFrom("msg_6", [attachment("att_1"), attachment("att_2", { byte_size: null }), attachment("att_3")]),
+    ] }, [], (id) => id === "att_1" ? new TextEncoder().encode("<html>")
+      : id === "att_2" ? new RoomAttachmentDownloadError("too_large")
+        : id === "att_3" ? new RoomAttachmentDownloadError("unavailable") : PNG));
+    assert.deepEqual(prepared.attachments.map(file => file.status), ["image", "not_image", "too_large", "unavailable"]);
+    assert.deepEqual(prepared.outcomes.map(file => [file.attachmentId, file.outcome]), [
+      ["att_70", "image"], ["att_1", "not_image"], ["att_2", "too_large"],
+    ], "an unavailable file is asked for again next turn");
+  });
+});
+
+test("received images never crowd new ones out of the notes", async () => {
+  await withRoot(async (root) => {
+    const earlierOutcomes = new Map<string, "image">();
+    const old = Array.from({ length: 12 }, (_, index) => {
+      earlierOutcomes.set(roomTurnFileKey("msg_6", `att_${index + 1}`), "image");
+      return attachment(`att_${index + 1}`);
+    });
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ earlierOutcomes, recentMessages: [
+      recentFrom("msg_6", old), recentFrom("msg_5", [attachment("att_50")]),
+    ] }));
+    const statuses = prepared.attachments.map(file => file.status);
+    assert.equal(statuses.filter(status => status === "earlier_turn").length, 8, "at most eight received images are named");
+    assert.equal(prepared.attachments.at(-1)?.origin?.messageId, "msg_5");
+    assert.equal(prepared.attachments.at(-1)?.status, "image");
+  });
+});
+
+test("recent images have their own short deadline, so a stalled store holds the turn back less for them", async () => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await withRoot(async (root) => {
+      const requested: string[] = [];
+      const started = Date.now();
+      const prepared = await new RoomTurnAttachmentStager(root, Date.now, 5_000, 100).prepare({ ...recentInput({ recentMessages: [
+        recentFrom("msg_6", [attachment("att_1"), attachment("att_2")]),
+      ] }), http: {
+        downloadAttachment: ({ attachmentId, signal }: { attachmentId: string; signal: AbortSignal }) => {
+          requested.push(attachmentId);
+          if (attachmentId === "att_70") return Promise.resolve(PNG);
+          return new Promise<Uint8Array>((_resolve, reject) => {
+            if (signal.aborted) { reject(signal.reason); return; }
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+      } });
+      assert.deepEqual(prepared.attachments.map(file => file.status), ["image", "unavailable", "unavailable"]);
+      assert.deepEqual(requested, ["att_70", "att_1"], "once the recent deadline passed, the rest are not asked for");
+      assert.ok(Date.now() - started < 2_000);
+    });
+  } finally { clearInterval(keepAlive); }
+});
+
+test("an agent that cannot take images downloads nothing from recent messages either", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(recentInput({ delivery: null,
+      recentMessages: [recentFrom("msg_6", [attachment("att_60")])] }, downloads));
+    assert.deepEqual(prepared.attachments.map(file => file.status), ["provider_unsupported", "provider_unsupported"]);
+    assert.deepEqual(prepared.outcomes, []);
+    assert.equal(downloads.length, 0);
+  });
+});
+
+test("a recent image of a local room is read by its local id", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(prepareInput({ localRoom: true,
+      sourceMessage: { id: "msg_7", text: "this one" },
+      recentMessages: [recentFrom("msg_6", [attachment("local:3f1c"), attachment("../escape")])] }, downloads));
+    assert.deepEqual(prepared.attachments.map(file => file.status), ["image", "unavailable"]);
+    assert.deepEqual(downloads.map(item => [item.messageId, item.attachmentId]), [["msg_6", "local:3f1c"]]);
+  });
+});
+
+test("the thread read sends the bearer to the room API only, and any failure or other shape is no thread", async () => {
+  await withServers(async ({ api, apiRequests, setApi }) => {
+    const input = { roomId: "github.com/BrosInCode/letagents", apiUrl: api, bearer: "worker-bearer",
+      rootMessageId: "msg_2", beforeMessageId: "msg_9", limit: 5, signal: AbortSignal.timeout(10_000) };
+    for (const status of [401, 403, 404, 500, 200]) {
+      setApi((_request, respond) => respond(status));
+      assert.equal(await readRoomThread(input), null, `HTTP ${status} with a body that is not a thread is no thread, never a refusal`);
+    }
+    assert.equal(apiRequests[0]?.url, "/rooms/github.com/BrosInCode/letagents/messages/msg_2/thread?before=msg_9&limit=5");
+    assert.equal(apiRequests[0]?.headers.authorization, "Bearer worker-bearer");
+    const before = apiRequests.length;
+    assert.equal(await readRoomThread({ ...input, rootMessageId: "msg_2/../x" }), null);
+    assert.equal(apiRequests.length, before, "a malformed id makes no request");
+    const controller = new AbortController();
+    setApi(() => controller.abort(new Error("stopped by the owner")));
+    await assert.rejects(readRoomThread({ ...input, signal: controller.signal }), /stopped by the owner/);
+  });
+});
+
+test("a thread page is accepted only for its room and root", async () => {
+  const pages: unknown[] = [];
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(pages.shift()));
+  });
+  const api = await listen(server);
+  try {
+    const input = { roomId: "room_1", apiUrl: api, bearer: "b", rootMessageId: "msg_2", beforeMessageId: "msg_9", limit: 2,
+      signal: AbortSignal.timeout(10_000) };
+    const root = { id: "msg_2", text: "root" };
+    const replies = [{ id: "msg_3", text: "a" }, { id: "msg_4", text: "b" }, { id: "msg_5", text: "c" }];
+    pages.push({ room_id: "room_1", root, replies });
+    assert.deepEqual(await readRoomThread(input), { root, replies: replies.slice(-2) });
+    pages.push({ room_id: "room_2", root, replies });
+    assert.equal(await readRoomThread(input), null);
+    pages.push({ room_id: "room_1", root: { id: "msg_7", text: "other" }, replies });
+    assert.equal(await readRoomThread(input), null);
+    // What an older local supervisor answers: the room page.
+    pages.push({ room_id: "room_1", messages: [root], has_more: false });
+    assert.equal(await readRoomThread(input), null);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

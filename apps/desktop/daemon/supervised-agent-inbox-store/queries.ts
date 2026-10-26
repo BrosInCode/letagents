@@ -3,6 +3,7 @@ import { validRecordedReplyAttachments, type RecordedReplyAttachment } from "../
 import { DatabaseSync } from "node:sqlite";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import type { PreparedRoomContext, MessageIntervention } from "../../shared/message-outcome.js";
+import { inspectorPreparedRoomContext } from "../prepared-room-context.js";
 import { endedFollowUpReason, FOLLOW_UP_REASONS_THAT_ASK_THE_OWNER } from "../task-continuity.js";
 import { queuedDeliveryKind } from "../queued-delivery-order.js";
 import { RETAINED_UNCERTAIN_EFFECTS_PER_AGENT, RETAINED_TERMINAL_RECEIPTS_PER_AGENT } from "../supervised-agent-history-retention.js";
@@ -209,7 +210,7 @@ export abstract class InboxQueryStore extends InboxTaskContinuationStore {
       const events = (database.prepare("SELECT event_sequence,phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
       const contextEvent = database.prepare("SELECT snapshot_json FROM supervised_agent_prepared_context WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       let preparedContext: PreparedRoomContext | null = null;
-      try { if (contextEvent) preparedContext = JSON.parse(String(contextEvent.snapshot_json)); } catch { /* Optional evidence must not hide delivery receipts. */ }
+      try { if (contextEvent) preparedContext = inspectorPreparedRoomContext(JSON.parse(String(contextEvent.snapshot_json))); } catch { /* Optional evidence must not hide delivery receipts. */ }
       const control = database.prepare(`SELECT j.* FROM turn_control_journals j
         JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=j.inbox_item_id
         WHERE j.turn_control_present=1 AND j.agent_id=? AND j.target_room_id=?
