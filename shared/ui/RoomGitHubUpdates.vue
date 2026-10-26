@@ -51,7 +51,10 @@ const unseen = ref(new Set<string>());
 const scrollers = new Map<string, HTMLElement>();
 const positions = new Map<string, { top: number; bottom: boolean; id?: string; offset?: number }>();
 const instanceId = useId();
-const rows = computed(() => githubUpdateRows(props.messages, props.parseEvent));
+// A plain (ungrouped) message renders through the slot only: it has no rows,
+// and the same empty list each time, so the rows watch below never runs for it.
+const noRows: ReturnType<typeof githubUpdateRows<M>> = [];
+const rows = computed(() => props.grouped ? githubUpdateRows(props.messages, props.parseEvent) : noRows);
 // Bounded mode (desktop): a long run of events mounts at most rowLimit rows,
 // and no closed history. A row stays mounted once it has been opened.
 const shownCount = ref(props.rowLimit ?? Number.POSITIVE_INFINITY);

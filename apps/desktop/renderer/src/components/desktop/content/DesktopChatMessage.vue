@@ -163,6 +163,7 @@
           :sender="readerSender"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
+          @mention-click="openMention"
         />
 
         <DesktopGitHubEventCard
@@ -213,7 +214,7 @@
         <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
       </button>
         <ThreadTransition>
-          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
+          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread"><component :is="inlineThread" v-if="inlineThread" /></slot></div>
         </ThreadTransition>
       </div>
 
@@ -404,6 +405,7 @@
 </template>
 
 <script setup lang="ts">
+import { inlineThreadKey } from "./desktop-chat-message/inline-thread";
 import RoomGif from "./room-chat/RoomGif.vue";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
@@ -465,6 +467,7 @@ import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../.
 import ThreadTransition from "../../../../../../../shared/ui/ThreadTransition.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
 import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
+import { linkRenderedMentions, mayContainMention, roomMentionDirectoryKey } from "../../../domain/room-mention-links";
 import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";
 import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../../../shared/message-link-previews.mjs";
 import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
@@ -713,6 +716,7 @@ const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
+const inlineThread = inject(inlineThreadKey, null);
 const replyPreviewText = computed(() => truncate((props.message.replyTo
   ? roomMessageVisibleText(props.message.replyTo, attentionResponseAgentNames?.value)
   : "").replace(/\s+/g, " ").trim(), 160));
@@ -739,7 +743,21 @@ const linkedText = computed(() => {
   if (!mayContainMessageReference(html)) return html;
   return linkRenderedMessageReferences(html, props.messageReferenceIds, props.taskReferenceIds);
 });
-const renderedText = computed(() => highlightRenderedMessage(linkedText.value, props.highlightQuery));
+// Same rule for mentions: only a message with an @mention reads the room's participants.
+const mentionDirectory = inject(roomMentionDirectoryKey, null);
+const mentionLinkedText = computed(() => {
+  const html = linkedText.value;
+  if (!mentionDirectory || !mayContainMention(html)) return html;
+  return linkRenderedMentions(html, mentionDirectory.value);
+});
+/** A clicked @mention opens that participant: an agent's inspector, or a person's menu. */
+function openMention(mentionKey: string, position: PersonMenuPosition): void {
+  const target = mentionDirectory?.value.byKey(mentionKey);
+  if (!target) return;
+  if (target.kind === "agent") emit("open-agent", target.agent);
+  else emit("open-person", target.person, position);
+}
+const renderedText = computed(() => highlightRenderedMessage(mentionLinkedText.value, props.highlightQuery));
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
 const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");

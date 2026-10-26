@@ -1,6 +1,5 @@
-import { computed, shallowRef, watch, type ComputedRef } from "vue";
+import { computed, shallowRef, watch } from "vue";
 import type { DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
-import { useSecondClock } from "../../../../composables/useSecondClock";
 import {
   agentStartupView,
   initialAgentStartupState,
@@ -42,29 +41,33 @@ export function useAgentStartupRows(options: {
   }, { immediate: true });
 
   const entriesById = computed(() => new Map((options.entries() ?? []).map((entry) => [entry.id, entry])));
-  // The clock moves only while a row is still starting; its views read it.
-  const now = useSecondClock(() => [...views.value.values()].some((view) => view.status === "running"));
   const roomLabel = computed(() => agentStartupRoomLabel(options.roomIdentifier()));
 
-  const views: ComputedRef<Map<string, AgentStartupView>> = computed(() => {
-    const result = new Map<string, AgentStartupView>();
-    for (const row of state.value.rows) {
-      const entry = entriesById.value.get(row.entryId);
-      if (!entry) continue;
-      result.set(row.entryId, agentStartupView(entry, {
-        roomLabel: roomLabel.value,
-        effort: row.effort,
-        retryRequestedAtMs: row.retryRequestedAtMs,
-        cancelRequested: row.cancelRequested,
-      }, now.value));
-    }
-    return result;
-  });
+  /**
+   * One row's view at `nowMs`. Each start-up row calls it with its own clock,
+   * so a tick redraws that row only, not the whole timeline.
+   */
+  function viewFor(entryId: string, nowMs: number): AgentStartupView | null {
+    const row = state.value.rows.find((candidate) => candidate.entryId === entryId);
+    const entry = entriesById.value.get(entryId);
+    if (!row || !entry) return null;
+    return agentStartupView(entry, {
+      roomLabel: roomLabel.value,
+      effort: row.effort,
+      retryRequestedAtMs: row.retryRequestedAtMs,
+      cancelRequested: row.cancelRequested,
+    }, nowMs);
+  }
 
-  const timelineStartups = computed<TimelineAgentStartup[]>(() => state.value.rows.flatMap((row) => {
-    const entry = entriesById.value.get(row.entryId);
-    return entry ? [{ entryId: row.entryId, anchorMessageId: row.anchorMessageId, startedAt: entry.createdAt }] : [];
-  }));
+  // The same array while the rows are the same, so an entry update that does
+  // not add, move or remove a row does not rebuild the timeline.
+  const timelineStartups = computed<TimelineAgentStartup[]>((previous) => {
+    const next = state.value.rows.flatMap((row) => {
+      const entry = entriesById.value.get(row.entryId);
+      return entry ? [{ entryId: row.entryId, anchorMessageId: row.anchorMessageId, startedAt: entry.createdAt }] : [];
+    });
+    return previous && sameTimelineStartups(previous, next) ? previous : next;
+  });
 
   /** Starts the saved agent again; the daemon picks up after the stages it already finished. */
   async function retry(entryId: string): Promise<void> {
@@ -87,5 +90,12 @@ export function useAgentStartupRows(options: {
     }
   }
 
-  return { views, timelineStartups, retry, cancel };
+  return { viewFor, timelineStartups, retry, cancel };
+}
+
+function sameTimelineStartups(a: readonly TimelineAgentStartup[], b: readonly TimelineAgentStartup[]): boolean {
+  return a.length === b.length && a.every((row, index) => {
+    const other = b[index]!;
+    return row.entryId === other.entryId && row.anchorMessageId === other.anchorMessageId && row.startedAt === other.startedAt;
+  });
 }
