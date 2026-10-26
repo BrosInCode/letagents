@@ -153,6 +153,14 @@ test("zero-connector mode lists native cards assigned to me or my agent", option
   const fallback = await myWork!.listMyWork({ accountId: me.id, login: me.login });
   assert.equal(fallback.cards[0]!.agent!.provider, "Codex", "recorded IDE supplies a fallback for unknown runtime");
 
+  await client!.pool.query("UPDATE room_agent_sessions SET ended_at = $1 WHERE room_id = $2", [now, roomId]);
+  await client!.pool.query("DELETE FROM room_agent_presence WHERE room_id = $1", [roomId]);
+  const retired = await myWork!.listMyWork({ accountId: me.id, login: me.login });
+  assert.deepEqual(retired.cards[0]!.agent, {
+    provider: "claude", label: "MapleRidge", agent_key: "agent:maple", display_name: null,
+    status: null, status_text: null, last_heartbeat_at: null,
+  }, "retired agent keeps its saved provider without fabricating presence");
+
   // Paging: one card a page, newest first, then nothing.
   const first = await myWork!.listMyWork({ accountId: me.id, login: me.login, limit: 1 });
   assert.deepEqual(first.cards.map((entry) => entry.task_id), [byAgent]);
@@ -160,6 +168,30 @@ test("zero-connector mode lists native cards assigned to me or my agent", option
   const second = await myWork!.listMyWork({ accountId: me.id, login: me.login, limit: 1, cursor: first.next_cursor });
   assert.deepEqual(second.cards.map((entry) => entry.task_id), [byLogin]);
   assert.equal(second.next_cursor, null);
+});
+
+test("saved providers follow the exact room and agent key, using the newest session", options, async () => {
+  const me = await account("provider-fallback");
+  const roomId = await room("provider-fallback", me.id);
+  const otherRoom = await room("other-provider-room", me.id);
+  for (const [room, key, runtime, ide, minute] of [
+    [roomId, "agent:brook", "claude", "Claude Code", 0],
+    [roomId, "agent:brook", "unknown", "Codex", 1],
+    [roomId, "agent:other", "cursor", "Cursor", 2],
+    [otherRoom, "agent:brook", "antigravity", "Antigravity", 3],
+  ] as const) {
+    await client!.db.insert(schema!.room_agent_sessions).values({
+      session_id: unique("sess"), room_id: room, token_hash: unique("hash"), session_kind: "worker", runtime,
+      actor_label: "BrookCopper", agent_key: key, display_name: "BrookCopper", owner_account_id: me.id,
+      owner_label: me.login, ide_label: ide, created_at: at(minute), updated_at: at(minute), last_seen_at: at(minute), ended_at: at(4),
+    });
+  }
+  await card(roomId, "Saved agent", { updatedMinute: 2, assignee: "BrookCopper", agentKey: "agent:brook" });
+  // A card without a matching session must not borrow another agent's provider.
+  await card(roomId, "No matching session", { updatedMinute: 1, assignee: me.login, agentKey: "agent:missing" });
+  const page = await myWork!.listMyWork({ accountId: me.id, login: me.login });
+  assert.equal(page.cards[0]!.agent!.provider, "Codex");
+  assert.equal(page.cards[1]!.agent!.provider, null);
 });
 
 test("needs me: review requested of me, an open request on the card, a done ticket with an open PR", options, async () => {
