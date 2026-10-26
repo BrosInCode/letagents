@@ -1,11 +1,14 @@
 import { formatDate, syncTimeZone, timeZoneEpoch } from "../../../../domain/formatters";
 import { contributionChanges } from "../../../../domain/room-contributions";
 import type { DesktopRoomAgentWork, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type { PresenceTimelineLine } from "./room-activity";
 
 const compactContinuationWindowMs = 5 * 60 * 1000;
 
 export type MessageTimelineEntry =
   | { type: "contribution"; id: string; work: DesktopRoomAgentWork }
+  /** A quiet "Juniper joined" or "Juniper left" line, seen in this window only. */
+  | { type: "presence"; id: string; line: PresenceTimelineLine }
   | {
       type: "date";
       id: string;
@@ -25,9 +28,14 @@ interface TimelineItem {
   id: string;
   message?: DesktopRoomMessage;
   work?: DesktopRoomAgentWork;
+  presence?: PresenceTimelineLine;
 }
 
-export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessage[], work: readonly DesktopRoomAgentWork[] = []): MessageTimelineEntry[] {
+export function buildMessageTimelineEntries(
+  messages: readonly DesktopRoomMessage[],
+  work: readonly DesktopRoomAgentWork[] = [],
+  presence: readonly PresenceTimelineLine[] = [],
+): MessageTimelineEntry[] {
   const entries: MessageTimelineEntry[] = [];
   let previousDayKey: string | null = null;
   let previousMessage: DesktopRoomMessage | null = null;
@@ -51,6 +59,9 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
       ordered.push({ timestamp, time: Date.parse(timestamp), id: `contribution:${entry.attemptId}`, work: entry });
     }
   }
+  for (const line of presence) {
+    ordered.push({ timestamp: line.timestamp, time: Date.parse(line.timestamp), id: line.id, presence: line });
+  }
   // Messages usually arrive in order. A sorted list (with no unparsable time,
   // which makes the comparator inconsistent) is already its own sort result.
   let sorted = true;
@@ -71,6 +82,11 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
       previousMessage = null;
     }
 
+    if (item.presence) {
+      entries.push({ type: "presence", id: item.id, line: item.presence });
+      previousMessage = null;
+      continue;
+    }
     if (item.work) {
       entries.push({ type: "contribution", id: item.id, work: item.work });
       previousMessage = null;

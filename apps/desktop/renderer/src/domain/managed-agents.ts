@@ -14,6 +14,7 @@ import type {
   RepoStatus,
   RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
+import { orbStateForActivity, orbStateForTurn, type ActivityOrbState } from "./activity-orb-state";
 import { isGenericAgentProviderLabel } from "./agent-provider";
 import { normalizeAgentKey } from "./agents";
 import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../../../../src/shared/agent-presence";
@@ -264,6 +265,7 @@ export function supervisedAgentWorkIndicators(
           boundPresence?.displayName || boundPresence?.actorLabel || entry.displayName,
           entry.id,
         ),
+        activity: latest ? orbStateForActivity(latest) : orbStateForTurn(turn.state),
         summary: resourceFreshness === "fresh" && agentCompactionProgress(entry) ? "Compacting conversation" : latest
           ? humanFacingSupervisorActivitySummary(latest)
           : roomTurnFallbackSummary(turn.state),
@@ -330,6 +332,8 @@ export interface ManagedAgentWorkIndicator {
   waitsForBackgroundWork?: boolean;
   /** Another member's agent, known only from room presence: shown as a label, with no control and no live stream. */
   remote?: true;
+  /** What the agent does now, from its native activity or turn state; it chooses the live orb. */
+  activity?: ActivityOrbState;
 }
 
 /** Default number of concurrent work indicators shown before collapsing. */
