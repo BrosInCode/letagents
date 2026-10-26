@@ -126,11 +126,15 @@
         ref="addMenu"
         :disabled="roomLoading || !roomIdentifier"
         :attach-disabled="!canAttach"
-        :gif-available="Boolean(gifPicker?.enabled)"
+        :gif-available="gifAvailable"
         :gif-disabled="roomLoading || sending"
         @select="handleAddMenuSelect"
         @dismiss="focusInput"
-      />
+      >
+        <template #gif="{ initialQuery, back }">
+          <RoomGifPanel :room-identifier="roomIdentifier ?? ''" :initial-query="initialQuery" @select="pickGif" @back="back" />
+        </template>
+      </RoomComposerAddMenu>
       <div class="desktop-composer-field">
         <!-- The suggestion is drawn under the textarea; screen readers get it from the description. -->
         <div v-if="suggestionVisible" class="desktop-composer-ghost" aria-hidden="true" data-testid="desktop-composer-suggestion">{{ visibleSuggestion?.text }}</div>
@@ -166,10 +170,12 @@
         <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
-      <RoomGifPicker ref="gifPicker" :trigger="false" :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending"
-        @select="selectedGif = $event" @closed="focusInput" />
     </div>
-    <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
+    <div v-if="selectedGif" class="desktop-composer-gif-draft" data-testid="desktop-composer-gif-draft">
+      <img v-if="selectedGifPreview" class="desktop-composer-gif-draft-preview" :src="selectedGifPreview" alt="" referrerpolicy="no-referrer" />
+      <span class="desktop-composer-gif-draft-name">{{ selectedGif.title || "GIF" }}</span>
+      <button type="button" :aria-label="`Remove GIF ${selectedGif.title || ''}`.trim()" @click="removeSelectedGif"><X :size="13" aria-hidden="true" /></button>
+    </div>
     <DesktopAttachmentDrafts
       :attachments="attachmentDrafts"
       :pending-attachments="pendingAttachmentDrafts"
@@ -219,7 +225,7 @@ import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { useRoomTyping } from "../../../../composables/useRoomTyping";
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, X } from "@lucide/vue";
 import type {
   DesktopParticipantSummary,
@@ -232,7 +238,9 @@ import { decideHostApproval, hostApprovalIdentity, hostApprovalPollDue, hostAppr
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
-import RoomGifPicker from "./RoomGifPicker.vue";
+import RoomGifPanel from "./RoomGifPanel.vue";
+import { gifCommandQuery, gifPreviewSource, prefersReducedMotion, useRoomGifAvailability } from "./room-gif-search";
+import type { GiphyItem } from "../../../../../../../../shared/giphy-client.mjs";
 import RoomComposerAddMenu, { type RoomComposerAddMenuItemId } from "./RoomComposerAddMenu.vue";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
@@ -280,8 +288,12 @@ const props = defineProps<{
 }>();
 
 const selectedGif = ref<RoomGif | null>(null);
+// Preview URLs stay in the draft only; the message carries the GIF id and title.
+const selectedGifItem = shallowRef<GiphyItem | null>(null);
+const selectedGifPreview = computed(() => selectedGif.value && selectedGifItem.value?.id === selectedGif.value.id
+  ? gifPreviewSource(selectedGifItem.value, prefersReducedMotion()) : null);
 const addMenu = ref<InstanceType<typeof RoomComposerAddMenu> | null>(null);
-const gifPicker = ref<InstanceType<typeof RoomGifPicker> | null>(null);
+const { enabled: gifAvailable } = useRoomGifAvailability(() => props.roomIdentifier);
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
@@ -623,11 +635,39 @@ onBeforeUnmount(() => {
 
 async function submitMessage(): Promise<void> {
   if (!canSend.value || props.sending) return;
+  if (openGifCommand()) return;
   await slash.submit(sendRoomMessage);
 }
 
+/** `/gif <query>` opens the GIF panel with that search instead of sending. */
+function openGifCommand(): boolean {
+  const query = gifCommandQuery(draft.value);
+  if (query === null) return false;
+  if (!gifAvailable.value) {
+    pushActionToast("GIFs are not available in this room. Your draft is still here.", "error");
+    return true;
+  }
+  if (!addMenu.value) return false;
+  draft.value = "";
+  typing.stop();
+  addMenu.value.openGif(query);
+  return true;
+}
+
+function pickGif(item: GiphyItem): void {
+  selectedGif.value = { provider: item.provider, id: item.id, title: item.title };
+  selectedGifItem.value = item;
+  addMenu.value?.close();
+  focusInput();
+}
+
+function removeSelectedGif(): void {
+  selectedGif.value = null;
+  focusInput();
+}
+
 const messageMotion = injectRoomMessageMotion();
-watch(() => props.messageNamespace || props.roomIdentifier, () => { selectedGif.value = null; });
+watch(() => props.messageNamespace || props.roomIdentifier, () => { selectedGif.value = null; addMenu.value?.close(); });
 
 function sendRoomMessage(): void {
   const text = draft.value.trim();
@@ -767,8 +807,6 @@ function handleAddMenuSelect(item: RoomComposerAddMenuItemId): void {
   if (item === "attach") {
     requestAttachments();
     focusInput();
-  } else if (item === "gif") {
-    void gifPicker.value?.open();
   } else if (item === "task") {
     // The draft, if any, becomes the task title; nothing typed is lost.
     const text = draft.value.trimStart();
