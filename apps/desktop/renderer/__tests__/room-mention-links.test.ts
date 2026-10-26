@@ -95,6 +95,25 @@ describe("mention resolution", () => {
     assert.equal(target?.kind === "agent" && target.agent.agentSessionId, "sess_1");
   });
 
+  test("an agent with several live sessions opens by key, not by one guessed session", () => {
+    const presence = (agentSessionId: string) => ({
+      displayName: "Gardenpoint", actorLabel: null, agentKey: "EmmyMay/gardenpoint", ownerLabel: null, ideLabel: null, agentSessionId,
+    });
+    const target = buildRoomMentionDirectory([], [presence("sess_controller"), presence("sess_worker")]).resolve("Gardenpoint");
+    assert.equal(target?.kind === "agent" && target.agent.agentSessionId, null);
+  });
+
+  test("a hidden participant does not block a live one with the same name", () => {
+    const withHidden = buildRoomMentionDirectory([
+      participant({ displayName: "Twin", agentKey: "old/twin", hiddenAt: "2026-10-01T00:00:00.000Z" }),
+      participant({ displayName: "Twin", agentKey: "new/twin-b" }),
+      participant({ displayName: "Gone", agentKey: "old/gone", hiddenAt: "2026-10-01T00:00:00.000Z" }),
+    ]);
+    assert.equal(withHidden.resolve("Twin")?.key, "agent:new/twin-b");
+    assert.equal(withHidden.resolve("old/twin")?.key, "agent:old/twin");
+    assert.equal(withHidden.resolve("Gone")?.key, "agent:old/gone");
+  });
+
   test("a key resolves back to the participant that opens", () => {
     const agent = directory.byKey("agent:emmymay/harborvale");
     assert.equal(agent?.kind, "agent");

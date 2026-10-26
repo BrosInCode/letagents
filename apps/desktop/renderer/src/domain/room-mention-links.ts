@@ -60,33 +60,39 @@ export function buildRoomMentionDirectory(
 ): RoomMentionDirectory {
   const targets = new Map<string, RoomMentionTarget>();
   const aliases = new Map<string, string | typeof AMBIGUOUS>();
-  const addAlias = (alias: string, key: string) => {
+  const sessions = new Map<string, Set<string>>();
+  // A hidden participant (one who left) only takes a handle no live participant uses,
+  // so a newcomer with an old name still opens.
+  const hiddenAliases = new Map<string, string | typeof AMBIGUOUS>();
+  const addAlias = (alias: string, key: string, hidden = false) => {
     const normalized = normalizeHandle(alias);
     if (!normalized || BROADCAST_HANDLES.has(normalized) || normalized === "anonymous") return;
-    const existing = aliases.get(normalized);
-    if (existing === undefined) aliases.set(normalized, key);
-    else if (existing !== key) aliases.set(normalized, AMBIGUOUS);
+    const into = hidden ? hiddenAliases : aliases;
+    const existing = into.get(normalized);
+    if (existing === undefined) into.set(normalized, key);
+    else if (existing !== key) into.set(normalized, AMBIGUOUS);
   };
 
-  const addAgent = (source: AgentSource) => {
+  const addAgent = (source: AgentSource, hidden = false) => {
     const agentKey = source.agentKey?.trim();
     if (!agentKey) return;
     const key = `agent:${agentKey.toLowerCase()}`;
-    const existing = targets.get(key);
-    // Presence knows the live session; keep it when the participant row does not.
-    if (!existing || (existing.kind === "agent" && !existing.agent.agentSessionId && source.agentSessionId)) {
+    if (!targets.has(key)) {
       const agent = agentTarget(source, agentKey);
       targets.set(key, { kind: "agent", key, displayName: agent.displayName, agent });
     }
-    addAlias(source.displayName.split("|")[0]!, key);
-    addAlias(agentKey, key);
-    addAlias(agentKey.split("/").at(-1)!, key);
-    addAlias(`agent:${agentKey}`, key);
+    const sessionId = source.agentSessionId?.trim();
+    if (sessionId) sessions.set(key, (sessions.get(key) ?? new Set()).add(sessionId));
+    addAlias(source.displayName.split("|")[0]!, key, hidden);
+    addAlias(agentKey, key, hidden);
+    addAlias(agentKey.split("/").at(-1)!, key, hidden);
+    addAlias(`agent:${agentKey}`, key, hidden);
   };
 
   for (const participant of participants) {
+    const hidden = Boolean(participant.hiddenAt);
     if (participant.kind === "agent") {
-      addAgent(participant);
+      addAgent(participant, hidden);
       continue;
     }
     const login = participant.githubLogin?.trim();
@@ -96,10 +102,21 @@ export function buildRoomMentionDirectory(
     if (!targets.has(key)) {
       targets.set(key, { kind: "human", key, displayName, person: { login, displayName, avatarUrl: null } });
     }
-    addAlias(login, key);
-    addAlias(displayName, key);
+    addAlias(login, key, hidden);
+    addAlias(displayName, key, hidden);
   }
   for (const agent of presence) addAgent(agent);
+  for (const [alias, key] of hiddenAliases) {
+    if (!aliases.has(alias)) aliases.set(alias, key);
+  }
+  // Presence knows the live session. With one session the inspector opens it;
+  // with several (controller and worker) the inspector resolves the agent by key,
+  // as the reasoning launcher does.
+  for (const [key, target] of targets) {
+    if (target.kind !== "agent") continue;
+    const ids = sessions.get(key);
+    target.agent.agentSessionId = ids?.size === 1 ? [...ids][0]! : null;
+  }
 
   const resolved = new Map<string, RoomMentionTarget | null>();
   return {
@@ -116,11 +133,6 @@ export function buildRoomMentionDirectory(
     },
   };
 }
-
-export const EMPTY_ROOM_MENTION_DIRECTORY: RoomMentionDirectory = {
-  resolve: () => null,
-  byKey: () => null,
-};
 
 const MENTION_SPAN = /<span class="mention-token">@([A-Za-z0-9._:/-]+)<\/span>/g;
 
