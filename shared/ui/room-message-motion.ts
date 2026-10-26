@@ -22,10 +22,11 @@ export interface WorkGeometry {
   bounds: DOMRect; pulse: DOMRect; name: DOMRect; summary: DOMRect;
   clone: HTMLElement; dots: Keyframe[];
 }
+/** Work rows: the room's live strip (web) and the desktop activity line. */
 export function captureWork(element: HTMLElement): WorkGeometry | null {
-  const pulse = element.querySelector<HTMLElement>('.room-local-agent-work-pulse');
+  const pulse = element.querySelector<HTMLElement>('.room-local-agent-work-pulse, .room-activity-pulse');
   const name = element.querySelector<HTMLElement>('strong');
-  const summary = element.querySelector<HTMLElement>('.room-local-agent-work-copy > span');
+  const summary = element.querySelector<HTMLElement>('.room-local-agent-work-copy > span, .room-activity-copy > span');
   if (!pulse || !name || !summary) return null;
   return {
     bounds: element.getBoundingClientRect(), pulse: pulse.getBoundingClientRect(),
@@ -116,7 +117,7 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null, wo
     Object.assign(shell.style, { position: 'absolute', boxSizing: 'border-box', background: style.background, border: style.border, borderRadius: style.borderRadius, boxShadow: style.boxShadow });
     const ghost = source.clone;
     Object.assign(ghost.style, { position: 'absolute', left: `${source.bounds.left - bounds.left}px`, top: `${source.bounds.top - bounds.top}px`, width: `${source.bounds.width}px`, height: `${source.bounds.height}px`, margin: '0' });
-    ghost.querySelectorAll<HTMLElement>('.room-local-agent-work-pulse, strong').forEach(element => { element.style.visibility = 'hidden'; });
+    ghost.querySelectorAll<HTMLElement>('.room-local-agent-work-pulse, .room-activity-pulse, strong').forEach(element => { element.style.visibility = 'hidden'; });
     overlay.element.append(shell, ghost);
     const seed = source.summary;
     Object.assign(shell.style, { left: `${target.left - bounds.left}px`, top: `${target.top - bounds.top}px`, width: `${target.width}px`, height: `${target.height}px`, transformOrigin: '0 0' });
@@ -129,7 +130,7 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null, wo
       const after = element.getBoundingClientRect();
       animate(element, [{ transform: `translate(${before.left - after.left}px,${before.top - after.top}px)` }, { transform: 'none' }], { duration: duration * .7, easing: ease });
     }
-    animate(ghost.querySelector('.room-local-agent-work-copy > span'), [{ opacity: 1 }, { opacity: 0, transform: 'translateX(-8px)' }], { duration: duration * .28, easing: ease, fill: 'forwards' });
+    animate(ghost.querySelector('.room-local-agent-work-copy > span, .room-activity-copy > span'), [{ opacity: 1 }, { opacity: 0, transform: 'translateX(-8px)' }], { duration: duration * .28, easing: ease, fill: 'forwards' });
     ghost.querySelectorAll<HTMLElement>('i').forEach((dot, index) => {
       dot.style.animation = 'none';
       animate(dot, [source.dots[index] || { opacity: 1 }, { opacity: 1, transform: `translateX(${-index * 6}px) scale(1.3)`, offset: .6 }, { opacity: 0, transform: `translateX(${-index * 6}px) scale(.8)` }], { duration: duration * .38, easing: ease, fill: 'forwards' });

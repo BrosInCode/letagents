@@ -1,4 +1,5 @@
 @import "../../../../../shared/ui/room-agent-work.css";
+@import "./room-activity-line.css";
 
 .room-chat-layout {
   position: relative;
@@ -61,12 +62,8 @@
   min-height: 0;
 }
 
-/* The strip owns the space under the last message, so its rows grow into
-   that space without moving the list twice. */
-.room-live-strip {
-  min-height: 16px;
-  padding: 0 var(--room-chat-side-gutter) 0 max(44px, var(--room-chat-side-gutter));
-}
+/* The live strip (room-activity-line.css) floats over the list's bottom
+   padding, so the last message is never under the activity line. */
 
 .room-message-list {
   display: flex;
@@ -74,7 +71,7 @@
   gap: 1px;
   height: 100%;
   overflow-y: auto;
-  padding: 18px var(--room-chat-side-gutter) 8px;
+  padding: 18px var(--room-chat-side-gutter) 42px;
   padding-left: max(44px, var(--room-chat-side-gutter));
   scroll-behavior: smooth;
 }
@@ -388,13 +385,6 @@
   box-shadow: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .room-local-agent-work-pulse,
-  .room-local-agent-work-dots i {
-    animation: none;
-  }
-}
-
 @keyframes desktop-message-arrive-reduced {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -403,7 +393,8 @@
 .room-thread-activity-pill {
   position: absolute;
   right: 30px;
-  bottom: 42px;
+  /* Above the "new messages" pill, which sits above the activity line. */
+  bottom: 80px;
   z-index: 3;
   display: flex;
   align-items: stretch;
@@ -479,7 +470,8 @@
 .room-new-messages-pill {
   position: absolute;
   right: 30px;
-  bottom: 2px;
+  /* Clear of the activity line at the bottom of the list. */
+  bottom: 40px;
   z-index: 3;
   padding: 7px 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -525,10 +517,3 @@
 .room-chat-message.is-github-history .room-message-meta-tail { width: 100%; }
 .room-chat-message.is-github-history .room-message-meta time { font-size: 10px; }
 .room-chat-message.is-github-history .room-message-bubble { margin-top: 0; }
-.room-local-agent-work-list {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-}
-
-.room-local-agent-work-group {
-  min-width: 0;
-}
