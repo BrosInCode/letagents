@@ -1,0 +1,164 @@
+/* The "+" menu above the composer. It opens on click only and closes on a
+   click outside or Escape. A pointer-opened menu grows out of "+"; a
+   keyboard-opened one appears at once. */
+.desktop-composer-add-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.desktop-composer-add-agent[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.11);
+  color: var(--text);
+}
+
+.desktop-composer-add-agent svg {
+  transition: transform 220ms var(--ease-out);
+}
+
+.desktop-composer-add-agent[aria-expanded="true"] svg {
+  transform: rotate(45deg);
+}
+
+.desktop-composer-add-agent:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.desktop-composer-add-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: -1px;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  width: 268px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 86%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  backdrop-filter: blur(24px) saturate(170%);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6), 0 16px 40px rgba(0, 0, 0, 0.5);
+  transform-origin: 17px 100%;
+}
+
+.desktop-composer-add-menu[data-animate] {
+  animation: desktop-composer-add-menu-in 170ms var(--ease-out) both;
+}
+
+@keyframes desktop-composer-add-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.97);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .desktop-composer-add-menu {
+    background: var(--bg-elevated);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .desktop-composer-add-menu {
+    background: var(--bg-elevated);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+.desktop-composer-add-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: default;
+}
+
+/* One highlight at a time: the pointer moves focus, so focus is the highlight. */
+.desktop-composer-add-menu-item:focus {
+  outline: none;
+  background: var(--accent-hover);
+}
+
+.desktop-composer-add-menu-item:active:not(:disabled) {
+  background: var(--accent-active);
+}
+
+.desktop-composer-add-menu-item:disabled {
+  color: var(--text-muted);
+}
+
+.desktop-composer-add-menu-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  color: var(--text-secondary);
+}
+
+.desktop-composer-add-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-add-menu-end {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.desktop-composer-add-menu-separator {
+  height: 1px;
+  margin: 4px 9px;
+  background: var(--border-strong);
+  opacity: 0.7;
+}
+
+/* The suggested reply: faint text in the empty input, under the textarea. */
+.desktop-composer-field {
+  position: relative;
+  min-width: 0;
+}
+
+.desktop-composer-field .desktop-composer-input {
+  position: relative;
+  z-index: 1;
+  display: block;
+}
+
+.desktop-composer-ghost {
+  position: absolute;
+  top: 7px;
+  right: 3px;
+  left: 3px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.88rem;
+  line-height: 1.42;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-composer-add-menu[data-animate] {
+    animation: none;
+  }
+
+  .desktop-composer-add-agent svg {
+    transition: none;
+  }
+}

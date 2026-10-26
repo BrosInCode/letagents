@@ -159,6 +159,7 @@
           :pending-attachment-drafts="pendingAttachmentDrafts"
           :reply-to="replyTarget"
           :room-identifier="roomIdentifier"
+          :room-label="roomLabel"
           :room-loading="roomLoading"
           :send-error="sendError"
           :sending="sending"
@@ -167,6 +168,7 @@
           @open-add-agent="emit('open-add-agent')"
           @open-ask-agent="emit('open-ask-agent')"
           @pick-attachments="pickAttachments"
+          @stage-attachments="stageDroppedAttachments"
           @remove-attachment="removeAttachment"
           @open-event-preview="openEventPreview"
           @dismiss-event-preview="emit('dismiss-event-preview', $event)"
@@ -275,6 +277,7 @@ const props = defineProps<{
   composerEventPreviews: ComposerEventPreview[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
+  roomLabel?: string | null;
   githubEventsVisible: boolean;
   githubEventsAvailable: boolean;
   roomLoading: boolean;
@@ -435,6 +438,7 @@ const {
   pendingAttachmentDrafts,
   pickAttachments,
   removeAttachment,
+  stageDroppedAttachments,
 } = useRoomAttachments({
   roomIdentifier: toRef(props, "roomIdentifier"),
   discardAttachment: (uploadId) => emit("discard-attachment", uploadId),

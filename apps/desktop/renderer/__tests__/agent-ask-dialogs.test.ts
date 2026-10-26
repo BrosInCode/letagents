@@ -13,11 +13,11 @@ test("a new room made by a failed ask is reused on retry, and forgotten when the
 });
 
 test("the composer's + menu closes on a click elsewhere or Escape, and drops its listeners on unmount", () => {
-  const composer = source("room-chat/RoomComposer.vue");
-  assert.match(composer, /ref="addMenuWrap"/);
-  assert.match(composer, /document\[method\]\("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true\)/);
-  assert.match(composer, /document\[method\]\("keydown", closeAddMenuOnEscape as EventListener, true\)/);
-  assert.match(composer, /document\.removeEventListener\("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true\)/);
+  // Behaviour: room-composer-add-menu.test.ts. This keeps the listener cleanup in place.
+  const menu = source("room-chat/RoomComposerAddMenu.vue");
+  assert.match(menu, /document\[method\]\("pointerdown", closeOnOutsidePointer as EventListener, true\)/);
+  assert.match(menu, /document\[method\]\("keydown", closeOnEscape as EventListener, true\)/);
+  assert.match(menu, /onBeforeUnmount\(\(\) => setDocumentListeners\(false\)\)/);
 });
 
 test("the giving screen shows why \"Can't right now\" did not go through, and stays open", () => {
