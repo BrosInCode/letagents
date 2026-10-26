@@ -589,7 +589,7 @@ test('the first message shows in its starter\'s timeline at the agent\'s start t
   ];
   assert.deepEqual(timeline.firstMessageAgents(agents, messages, true).map((a: any) => a.id), ['a-new']);
   assert.deepEqual(timeline.firstMessageAgents(agents, messages, false).map((a: any) => a.id), ['a-new', 'a-old'], 'with the whole history loaded, an older start belongs at its place');
-  const entries = timeline.buildMessageTimelineEntries(messages, [], [agents[0]]).filter((e: any) => e.type !== 'date');
+  const entries = timeline.buildMessageTimelineEntries(messages, [], [], [], [agents[0]]).filter((e: any) => e.type !== 'date');
   assert.deepEqual(entries.map((e: any) => e.id), ['m1', 'first-message:a-new', 'm2']);
 });
 

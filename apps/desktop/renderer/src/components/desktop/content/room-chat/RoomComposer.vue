@@ -4,33 +4,6 @@
       :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
       {{ hostApprovalHistoryLabel(historyApprovalCount, showApprovalHistory) }}
     </button>
-    <RoomPresenceChips :chips="presenceChips ?? []" />
-    <RoomComposerEventChips
-      :event-previews="visibleEventPreviews"
-      @open-event-preview="openEventPreview"
-      @dismiss-event-preview="emit('dismiss-event-preview', $event)"
-    />
-    <!-- The live region exists before the offer does, so the offer is announced.
-      It sits above the approval tray, so the offer never moves the tray's buttons. -->
-    <div class="desktop-composer-correction-live" aria-live="polite" data-testid="desktop-composer-correction-live">
-      <div
-        v-if="correctionOffer"
-        class="desktop-composer-correction-offer"
-        data-testid="desktop-composer-correction-offer"
-      >
-        <span>
-          <strong>{{ correctionOffer.target.displayName }}</strong> is in the middle of a turn. A room message waits until it ends.
-        </span>
-        <button
-          type="button"
-          :disabled="sending"
-          data-testid="desktop-composer-send-as-correction"
-          @click="sendAsCorrection"
-        >
-          Send as correction…
-        </button>
-      </div>
-    </div>
     <!-- One request at a time. Arrivals join its queue or appear above it, so
       they never move the buttons; details open over the messages on demand. -->
     <section v-if="currentHostApproval" :key="hostApprovalIdentity(currentHostApproval)"
@@ -157,7 +130,7 @@
         ref="addMenu"
         :disabled="roomLoading || !roomIdentifier"
         :attach-disabled="!canAttach"
-        :gif-available="Boolean(gifPicker?.enabled)"
+        :gif-available="gifAvailable"
         :gif-disabled="roomLoading || sending"
         :agent-rows="agentHost ? agentRows : null"
         @select="handleAddMenuSelect"
@@ -165,7 +138,11 @@
         @agent-menu-opened="agentDraft.refreshProviders()"
         @select-agent="pickAgent"
         @setup-agent="agentHost?.openAddAgent()"
-      />
+      >
+        <template #gif="{ initialQuery, back }">
+          <RoomGifPanel :room-identifier="roomIdentifier ?? ''" :initial-query="initialQuery" @select="pickGif" @back="back" />
+        </template>
+      </RoomComposerAddMenu>
       <div class="desktop-composer-field">
         <!-- The suggestion is drawn under the textarea; screen readers get it from the description. -->
         <div v-if="suggestionVisible" class="desktop-composer-ghost" aria-hidden="true" data-testid="desktop-composer-suggestion">{{ visibleSuggestion?.text }}</div>
@@ -201,8 +178,6 @@
         <LoaderCircle v-if="sending || agentLaunching" :size="16" aria-hidden="true" />
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
-      <RoomGifPicker ref="gifPicker" :trigger="false" :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending"
-        @select="selectedGif = $event" @closed="focusInput" />
     </div>
     <div v-if="agentHost && roomIdentifier" class="desktop-composer-under">
       <RoomComposerAccessDefault
@@ -213,7 +188,11 @@
         @dismiss="focusInput"
       />
     </div>
-    <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
+    <div v-if="selectedGif" class="desktop-composer-gif-draft" data-testid="desktop-composer-gif-draft">
+      <img v-if="selectedGifPreview" class="desktop-composer-gif-draft-preview" :src="selectedGifPreview" alt="" referrerpolicy="no-referrer" />
+      <span class="desktop-composer-gif-draft-name">{{ selectedGif.title || "GIF" }}</span>
+      <button type="button" :aria-label="`Remove GIF ${selectedGif.title || ''}`.trim()" @click="removeSelectedGif"><X :size="13" aria-hidden="true" /></button>
+    </div>
     <DesktopAttachmentDrafts
       :attachments="attachmentDrafts"
       :pending-attachments="pendingAttachmentDrafts"
@@ -263,7 +242,7 @@ import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { useRoomTyping } from "../../../../composables/useRoomTyping";
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, X } from "@lucide/vue";
 import type {
   DesktopAgentProviderId,
@@ -277,7 +256,9 @@ import { decideHostApproval, hostApprovalIdentity, hostApprovalPollDue, hostAppr
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
-import RoomGifPicker from "./RoomGifPicker.vue";
+import RoomGifPanel from "./RoomGifPanel.vue";
+import { gifCommandQuery, gifPreviewSource, prefersReducedMotion, useRoomGifAvailability } from "./room-gif-search";
+import type { GiphyItem } from "../../../../../../../../shared/giphy-client.mjs";
 import RoomComposerAddMenu, { type RoomComposerAddMenuItemId } from "./RoomComposerAddMenu.vue";
 import RoomComposerAgentChip from "./RoomComposerAgentChip.vue";
 import RoomComposerAccessDefault from "./RoomComposerAccessDefault.vue";
@@ -287,11 +268,8 @@ import { useComposerAgentDraft } from "./useComposerAgentDraft";
 import { supervisorEntriesKey } from "../add-agent/supervisor-entries-context";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
-import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
-import RoomPresenceChips from "./RoomPresenceChips.vue";
-import type { PresenceChip } from "../../../../domain/presence-chips";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
-import { visibleComposerEventPreviews } from "./composer-event-preview";
+import { composerDrafting } from "./composer-event-preview";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";
 import {
   mentionedCorrectionTarget,
@@ -313,10 +291,8 @@ const props = defineProps<{
   attaching: boolean;
   attachmentDrafts: DesktopStagedAttachment[];
   attachmentError: string | null;
-  eventPreviews: ComposerEventPreview[];
   messageNamespace?: string;
   participants: DesktopParticipantSummary[];
-  presenceChips?: PresenceChip[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   replyTo: RoomComposerReplyTarget | null;
   roomIdentifier: string | null;
@@ -331,8 +307,12 @@ const props = defineProps<{
 }>();
 
 const selectedGif = ref<RoomGif | null>(null);
+// Preview URLs stay in the draft only; the message carries the GIF id and title.
+const selectedGifItem = shallowRef<GiphyItem | null>(null);
+const selectedGifPreview = computed(() => selectedGif.value && selectedGifItem.value?.id === selectedGif.value.id
+  ? gifPreviewSource(selectedGifItem.value, prefersReducedMotion()) : null);
 const addMenu = ref<InstanceType<typeof RoomComposerAddMenu> | null>(null);
-const gifPicker = ref<InstanceType<typeof RoomGifPicker> | null>(null);
+const { enabled: gifAvailable } = useRoomGifAvailability(() => props.roomIdentifier);
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
@@ -342,8 +322,6 @@ const emit = defineEmits<{
   "open-ask-agent": [];
   "remove-attachment": [uploadId: string];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
-  "open-event-preview": [event: ComposerEventPreview];
-  "dismiss-event-preview": [messageId: string];
   "stop-agent-turn": [agentId: string, approvalId: string];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
 }>();
@@ -354,11 +332,12 @@ const typing = useRoomTyping(computed(() => props.roomIdentifier ?? ""));
 watch(draft, value => { if (!value) typing.stop(); });
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
-const visibleEventPreviews = computed(() => [...visibleComposerEventPreviews(props.eventPreviews, {
+// Someone is writing: the room's activity line keeps GitHub updates off while this is true.
+const drafting = computed(() => composerDrafting({
   draft: draft.value,
   attachmentCount: props.attachmentDrafts.length + props.pendingAttachmentDrafts.length,
   replying: Boolean(props.replyTo),
-})]);
+}));
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 // Approvals are shared with the Inbox; card visibility stays local to this composer.
@@ -574,9 +553,10 @@ const sendLabel = computed(() => {
   if (agentChip.value) return "Start agent with this message";
   return props.sending ? "Sending message" : "Send message";
 });
-// A correction is plain text for one agent's private session, so a reply,
-// a quote or attachments keep the message a room message.
-const correctionOffer = computed(() =>
+// Steering is plain text for one agent's private session, so a reply,
+// a quote or attachments keep the message a room message. The offer shows on
+// the room's activity line: "<agent> is mid-turn · your message waits [Steer]".
+const steerOffer = computed(() =>
   props.correctableAgents?.length && !props.replyTo && !selectedGif.value
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
@@ -726,6 +706,7 @@ async function submitMessage(): Promise<void> {
     await startAgentFromDraft();
     return;
   }
+  if (openGifCommand()) return;
   await slash.submit(sendRoomMessage);
 }
 
@@ -748,8 +729,35 @@ async function startAgentFromDraft(): Promise<void> {
   focusInput();
 }
 
+/** `/gif <query>` opens the GIF panel with that search instead of sending. */
+function openGifCommand(): boolean {
+  const query = gifCommandQuery(draft.value);
+  if (query === null) return false;
+  if (!gifAvailable.value) {
+    pushActionToast("GIFs are not available in this room. Your draft is still here.", "error");
+    return true;
+  }
+  if (!addMenu.value) return false;
+  draft.value = "";
+  typing.stop();
+  addMenu.value.openGif(query);
+  return true;
+}
+
+function pickGif(item: GiphyItem): void {
+  selectedGif.value = { provider: item.provider, id: item.id, title: item.title };
+  selectedGifItem.value = item;
+  addMenu.value?.close();
+  focusInput();
+}
+
+function removeSelectedGif(): void {
+  selectedGif.value = null;
+  focusInput();
+}
+
 const messageMotion = injectRoomMessageMotion();
-watch(() => props.messageNamespace || props.roomIdentifier, () => { selectedGif.value = null; });
+watch(() => props.messageNamespace || props.roomIdentifier, () => { selectedGif.value = null; addMenu.value?.close(); });
 
 function sendRoomMessage(): void {
   const text = draft.value.trim();
@@ -778,9 +786,13 @@ function sendRoomMessage(): void {
   );
 }
 
-/** Hand the draft to the Inspector's correction box; it leaves the composer only once that opened. */
-function sendAsCorrection(): void {
-  const offer = correctionOffer.value;
+/**
+ * Steer: hand the draft to the Inspector's correction box for the agent's
+ * live turn; it leaves the composer only once that opened. `done` hears
+ * whether it opened, so the activity line can confirm it.
+ */
+function steer(done?: (opened: boolean, displayName: string) => void): void {
+  const offer = steerOffer.value;
   if (!offer || props.sending) return;
   const handedOver = draft.value;
   const handoff = {
@@ -792,6 +804,7 @@ function sendAsCorrection(): void {
   emit("open-agent-correction", handoff, (opened) => {
     // Opening may have restored an earlier, abandoned hand-over; keep that.
     if (opened) draft.value = draft.value.replace(handedOver, "").trim();
+    done?.(opened, offer.target.displayName);
   });
 }
 
@@ -889,8 +902,6 @@ function handleAddMenuSelect(item: RoomComposerAddMenuItemId): void {
   if (item === "attach") {
     requestAttachments();
     focusInput();
-  } else if (item === "gif") {
-    void gifPicker.value?.open();
   } else if (item === "task") {
     // The draft, if any, becomes the task title; nothing typed is lost.
     const text = draft.value.trimStart();
@@ -963,9 +974,5 @@ function syncTextareaHeight(): void {
   input.style.overflowY = input.scrollHeight > maxComposerInputHeight ? "auto" : "hidden";
 }
 
-function openEventPreview(event: ComposerEventPreview): void {
-  emit("open-event-preview", event);
-}
-
-defineExpose({ focusWithMention });
+defineExpose({ focusWithMention, drafting, steerOffer, steer });
 </script>

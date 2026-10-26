@@ -196,7 +196,7 @@ function mountComposer() {
   Object.assign(globalThis, { window: Object.assign(new EventTarget(), { letagentsDesktop: {} }) });
   const emitted: Array<[string, ...unknown[]]> = [];
   const props = reactive({
-    attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: "room-a",
+    attaching: false, attachmentDrafts: [], attachmentError: null, messageNamespace: "room-a",
     participants: [], pendingAttachmentDrafts: [], replyTo: null,
     roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false,
     correctableAgents: [{ entryId: "supervised_busy", displayName: "LunarAmber", mentionInsertText: "LunarAmber" }],
@@ -213,13 +213,14 @@ function mountComposer() {
   return { vm, props, emitted, stop: () => app.unmount() };
 }
 
-test("Send as correction hands over the draft and clears it only once the Inspector opened", () => {
+test("Steer hands over the draft, clears it only once the Inspector opened, and tells the line who was steered", () => {
   viteDrafts.clearDesktopMessageDrafts();
   withComposer(({ vm, emitted }) => {
     vm.draft.value = "@LunarAmber stop and rebase on main";
-    assert.equal(vm.correctionOffer.value?.target.entryId, "supervised_busy");
+    assert.equal(vm.steerOffer.value?.target.entryId, "supervised_busy");
 
-    vm.sendAsCorrection();
+    const heard: Array<[boolean, string]> = [];
+    vm.steer((opened: boolean, name: string) => heard.push([opened, name]));
     const [event, handoff, opened] = emitted.at(-1) as [string, Record<string, unknown>, (value: boolean) => void];
     assert.equal(event, "open-agent-correction");
     assert.deepEqual(handoff, {
@@ -232,27 +233,36 @@ test("Send as correction hands over the draft and clears it only once the Inspec
     assert.equal(vm.draft.value, "@LunarAmber stop and rebase on main", "a refused hand-over keeps the draft");
     opened(true);
     assert.equal(vm.draft.value, "");
+    assert.deepEqual(heard, [[false, "LunarAmber"], [true, "LunarAmber"]]);
   });
 });
 
-test("the composer offers no correction for a reply, attachments, or a draft that mentions someone else", () => {
+test("the composer offers no Steer for a reply, attachments, or a draft that mentions someone else", () => {
   viteDrafts.clearDesktopMessageDrafts();
   withComposer(({ vm, props }) => {
     vm.draft.value = "@LunarAmber stop and rebase on main @HarborMarsh fyi";
-    assert.equal(vm.correctionOffer.value, null);
+    assert.equal(vm.steerOffer.value, null);
     vm.draft.value = "@LunarAmber stop";
-    assert.ok(vm.correctionOffer.value);
+    assert.ok(vm.steerOffer.value);
     props.replyTo = { id: "msg_1", sender: "Emmy", text: "earlier" } as never;
-    assert.equal(vm.correctionOffer.value, null);
+    assert.equal(vm.steerOffer.value, null);
     props.replyTo = null;
     props.pendingAttachmentDrafts = [{ id: "upload_1" }] as never;
-    assert.equal(vm.correctionOffer.value, null);
+    assert.equal(vm.steerOffer.value, null);
   });
 });
 
-test("the offer is announced by a live region that exists before it, and its controls are addressable", () => {
-  const composerSource = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/RoomComposer.vue", import.meta.url)), "utf8");
-  // A live region inserted together with its content is not announced.
-  assert.match(composerSource, /<div class="desktop-composer-correction-live" aria-live="polite"[^>]*>\s*<div\s+v-if="correctionOffer"/);
-  assert.match(composerSource, /data-testid="desktop-composer-send-as-correction"\s*@click="sendAsCorrection"/);
+test("Steer lives on the activity line, which announces the offer; the composer has no offer of its own", () => {
+  const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+  const composerSource = read("../src/components/desktop/content/room-chat/RoomComposer.vue");
+  const lineSource = read("../src/components/desktop/content/room-chat/RoomActivityLine.vue");
+  const chatSource = read("../src/components/desktop/content/RoomChatView.vue");
+  assert.doesNotMatch(composerSource, /correction-offer|Send as correction/);
+  assert.match(composerSource, /defineExpose\(\{ focusWithMention, drafting, steerOffer, steer \}\)/);
+  assert.match(lineSource, /is mid-turn · your message waits<\/span>\s*<button[\s\S]*?data-testid="desktop-composer-steer"\s*@click="emit\('steer'\)"\s*>Steer<\/button>/);
+  // The live region is always mounted, so the offer is announced when it appears.
+  assert.match(lineSource, /<span class="sr-only" role="status" aria-live="polite" aria-atomic="true">\{\{ announcement \}\}<\/span>/);
+  // The line's Steer runs the composer's hand-off, and a hand-over that opened is confirmed on the line.
+  assert.match(chatSource, /@steer="steerComposerDraft"/);
+  assert.match(chatSource, /roomComposer\.value\?\.steer\(\(opened, displayName\) => \{\s*if \(opened\) roomActivity\.confirmSteer\(displayName\);/);
 });

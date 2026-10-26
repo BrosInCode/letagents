@@ -142,7 +142,8 @@ let RoomThreadPanel: object;
 let DesktopLongMessageContent: object;
 let DesktopAttachmentDrafts: object;
 let RoomComposer: object;
-let RoomComposerEventChips: object;
+let RoomActivityLine: object;
+let ActivityOrb: object;
 let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
 let attentionResponse: typeof import("../src/domain/attention-response");
 let hostApprovals: typeof import("../src/components/desktop/content/room-chat/host-approvals");
@@ -175,14 +176,15 @@ before(async () => {
   // The same module instance DesktopChatMessage injects from.
   attentionResponse = await vite.ssrLoadModule("/renderer/src/domain/attention-response.ts") as typeof attentionResponse;
   hostApprovals = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/host-approvals.ts");
-  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
+  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomActivityLine, ActivityOrb] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopLongMessageContent.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopAttachmentDrafts.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
-    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposerEventChips.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomActivityLine.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/ActivityOrb.vue").then((module) => module.default),
   ]);
   // This test mounts client templates onto SSR-loaded components. Compile the
   // timeline's transparent grouping wrapper too so ordinary message slots run.
@@ -195,7 +197,8 @@ before(async () => {
     attachClientRender(DesktopLongMessageContent, "components/desktop/content/DesktopLongMessageContent.vue"),
     attachClientRender(DesktopAttachmentDrafts, "components/desktop/content/DesktopAttachmentDrafts.vue"),
     attachClientRender(RoomComposer, "components/desktop/content/room-chat/RoomComposer.vue"),
-    attachClientRender(RoomComposerEventChips, "components/desktop/content/room-chat/RoomComposerEventChips.vue"),
+    attachClientRender(RoomActivityLine, "components/desktop/content/room-chat/RoomActivityLine.vue"),
+    attachClientRender(ActivityOrb, "components/desktop/content/room-chat/ActivityOrb.vue"),
   ]);
 });
 
@@ -204,7 +207,7 @@ after(async () => { await vite?.close(); });
 beforeEach(() => { hostApprovals?.resetHostApprovals(); });
 
 function composerProps() {
-  return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],
+  return { attaching: false, attachmentDrafts: [], attachmentError: null, participants: [],
     pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
 }
 
@@ -1249,7 +1252,7 @@ test("a mounted message counts down in view to the saved time, and its buttons a
   }
 });
 
-test("the room's live strip shows an agent that waits to try again as a row at rest, which no room message retires", async () => {
+test("the room's activity line shows an agent that waits to try again as a row at rest, which no room message retires", async () => {
   const waiting = { id: "agent-a:waiting", displayName: "Agent A", summary: "Waiting to try again, due at 14:32 (attempt 2 of 3)",
     startedAt: "2026-10-09T14:32:00.000Z", agentSessionId: "session-a", agentKey: null, sourceMessageId: null, waiting: true as const };
   const props = Vue.reactive({
@@ -1261,32 +1264,34 @@ test("the room's live strip shows an agent that waits to try again as a row at r
   });
   const opened: unknown[] = [];
   const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props, onOpenAgent: (target: unknown) => opened.push(target) }) }, {});
-  const rows = () => descendants(viewport.root).filter((node) => node.props["data-testid"] === "room-local-agent-work");
-  const echo = (row: HostNode) => descendants(row).filter((node) => node.props["data-testid"] === "room-local-agent-work-echo")
-    .map((node) => descendants(node).map((child) => child.text).join("")).join("");
+  const byTestId = (id: string) => descendants(viewport.root).filter((node) => node.props["data-testid"] === id);
+  const text = (node: HostNode) => descendants(node).map((child) => child.text ?? "").join("");
+  const pill = () => byTestId("room-activity-live")[0]!;
   try {
     await nextTick();
-    assert.equal(rows().length, 1);
-    const [row] = rows();
-    assert.equal(row!.props["data-waiting"], true, "the row is marked as one that waits, which is what puts it at rest");
-    assert.equal(echo(row!), "Waiting to try again, due at 14:32 (attempt 2 of 3)");
-    assert.equal(row!.props["aria-label"], "Agent A: Waiting to try again, due at 14:32 (attempt 2 of 3). Open live activity");
-    (row!.props.onClick as () => void)();
-    assert.equal((opened[0] as { agentSessionId: string }).agentSessionId, "session-a", "it opens that agent");
+    assert.ok(pill(), "one agent: one live pill");
+    assert.equal(pill().props["data-waiting"], true, "the pill is marked as one that waits, which is what puts it at rest");
+    assert.equal(text(byTestId("room-activity-live-echo")[0]!), "Waiting to try again, due at 14:32 (attempt 2 of 3)");
+    assert.equal(byTestId("room-local-agent-work").length, 0, "the list opens only on a click");
+    (pill().props.onClick as () => void)();
+    await nextTick();
+    const [row] = byTestId("room-local-agent-work");
+    assert.equal(row!.props["data-waiting"], true);
+    assert.equal(row!.props["aria-label"], "Agent A: Waiting to try again, due at 14:32 (attempt 2 of 3)");
+    (byTestId("room-local-agent-work-open")[0]!.props.onClick as () => void)();
+    assert.equal((opened[0] as { agentSessionId: string }).agentSessionId, "session-a", "Open opens that agent");
 
-    // The agent wrote to the room earlier, and other messages arrive: the row stays, because the agent still waits.
+    // The agent wrote to the room earlier, and other messages arrive: the pill stays, because the agent still waits.
     props.messages = [message("msg_1"), { ...message("msg_2"), agentIdentity: { agentSessionId: "session-a" } } as never, message("msg_3")];
     await nextTick();
-    assert.equal(rows().length, 1);
-    assert.equal(rows()[0]!.props["data-waiting"], true);
+    assert.equal(pill().props["data-waiting"], true);
 
-    // The attempt starts. The agent's working row takes its place at once, with its own text, and is not at rest.
+    // The attempt starts. The agent's working pill takes its place at once, with its own text, and is not at rest.
     props.localAgentWork = [{ id: "agent-a", displayName: "Agent A", summary: "Working", startedAt: "2026-10-09T14:32:05.000Z",
       agentSessionId: "session-a", agentKey: null, sourceMessageId: null }];
     await nextTick();
-    assert.equal(rows().length, 1);
-    assert.equal(rows()[0]!.props["data-waiting"], undefined);
-    assert.equal(echo(rows()[0]!), "Working");
+    assert.equal(pill().props["data-waiting"], undefined);
+    assert.equal(text(byTestId("room-activity-live-echo")[0]!), "Working");
   } finally {
     viewport.app.unmount();
   }
@@ -1404,7 +1409,7 @@ test("an idle viewport skips work history tracking and resumes causal reply supp
   setup.currentLocalAgentWork.onTrack = (event) => {
     if (event.key === "messages" || event.key === "threadMessages") historyReads += 1;
   };
-  const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-local-agent-work-echo");
+  const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-activity-live-echo");
   try {
     props.localAgentWork = [];
     await nextTick();
@@ -1660,32 +1665,30 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
 });
 
-test("a GitHub update in the composer steps aside while a message is being written", async () => {
+test("the composer tells the activity line when a message is being written, so a GitHub update steps aside", async () => {
   Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
-  const preview = {
-    id: "msg_github", kind: "review", tone: "violet", kindLabel: "Review", statusLabel: "reviewed",
-    headline: "Review on #1", repositoryLabel: "year-dots", refLabel: "feat/dates-core", numberLabel: "#1",
-    stats: null, actionLabel: "reviewed", url: null,
-  };
   const render = (props: Record<string, unknown> = {}) =>
-    mount(RoomComposer, { ...composerProps(), roomIdentifier: "room-github-update", eventPreviews: [preview], ...props });
-  const showsUpdate = (root: HostNode) => descendants(root).some(node => node.props["data-testid"] === "desktop-composer-events");
+    mount(RoomComposer, { ...composerProps(), roomIdentifier: "room-github-update", ...props });
+  const drafting = (mounted: ReturnType<typeof render>) =>
+    (mounted.app._instance!.exposed as { drafting: { value: boolean } }).drafting.value;
   const mounted = render();
   try {
-    assert.equal(showsUpdate(mounted.root), true, "an empty composer shows the update");
+    assert.equal(drafting(mounted), false, "an empty composer lets the update show");
+    assert.equal(descendants(mounted.root).some(node => String(node.props["data-testid"] ?? "").startsWith("desktop-composer-event")), false,
+      "updates are no longer drawn inside the composer");
     const input = descendants(mounted.root).find(node => node.type === "textarea")!;
     const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
     setDraft("A new top-level message"); await nextTick();
-    assert.equal(showsUpdate(mounted.root), false, "a message being written never looks like it carries the update");
+    assert.equal(drafting(mounted), true, "a message being written never looks like it carries the update");
     setDraft("   "); await nextTick();
-    assert.equal(showsUpdate(mounted.root), true);
+    assert.equal(drafting(mounted), false);
   } finally { mounted.app.unmount(); }
   for (const props of [
     { replyTo: { id: "msg_1", sender: "Emmy", text: "Earlier" } },
     { attachmentDrafts: [{ uploadId: "upl_1", name: "notes.txt", sizeBytes: 3, mimeType: "text/plain" }] },
   ]) {
     const composing = render(props);
-    try { assert.equal(showsUpdate(composing.root), false, JSON.stringify(props)); } finally { composing.app.unmount(); }
+    try { assert.equal(drafting(composing), true, JSON.stringify(props)); } finally { composing.app.unmount(); }
   }
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
 });

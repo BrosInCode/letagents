@@ -22,6 +22,7 @@
         <RoomMessageViewport
           ref="messageViewport"
           v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
+          @open-add-agent="emit('open-add-agent')"
           :active-search-message-id="activeTimelineMessageId"
           :active-thread-parent-id="activeThreadParentId"
           :reading-thread-parent-id="readingThreadLatest ? activeThreadParentId : null"
@@ -34,6 +35,13 @@
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
           :typing-names="typingNames"
+          :activity-notice="roomActivity.notice.value"
+          :steer-offer="steerOffer"
+          :steer-disabled="sending"
+          :presence-lines="roomActivity.presenceLines.value"
+          @activity-hold="(held) => held ? roomActivity.pause() : roomActivity.resume()"
+          @steer="steerComposerDraft"
+          @open-event-preview="openEventPreview"
           :delivery-receipts-by-message="deliveryReceiptsByMessage"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :continuation-repair-available="continuationRepairAvailable"
@@ -151,8 +159,6 @@
           :attaching="attaching"
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
-          :event-previews="composerEventPreviews"
-          :presence-chips="presenceChips"
           :message-namespace="messageNamespace"
           :participants="participants"
           :pending-attachment-drafts="pendingAttachmentDrafts"
@@ -169,8 +175,6 @@
           @pick-attachments="pickAttachments"
           @stage-attachments="stageDroppedAttachments"
           @remove-attachment="removeAttachment"
-          @open-event-preview="openEventPreview"
-          @dismiss-event-preview="emit('dismiss-event-preview', $event)"
           @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
           @send-message="handleComposerSend"
           @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
@@ -239,10 +243,10 @@ import {
   isGitHubRoomMessage,
 } from "./desktop-chat-message/github-event";
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
-import { useAgentPresenceChips } from "../../../composables/useAgentPresenceChips";
+import { useRoomActivity } from "../../../composables/useRoomActivity";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomAskBar from "./asks/RoomAskBar.vue";
-import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
+import type { ComposerEventPreview } from "./room-chat/composer-event-preview";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
@@ -347,11 +351,6 @@ const emit = defineEmits<{
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
 }>();
 
-const { chips: presenceChips } = useAgentPresenceChips({
-  presence: () => props.presence,
-  scope: () => props.roomIdentifier,
-  ready: () => !props.roomLoading,
-});
 
 const threadLayoutAnimationMs = 260;
 const readingThreadLatest = ref(false);
@@ -364,6 +363,24 @@ provideRoomMessageMotion(() => props.messageNamespace);
 
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
+// The line above the composer: joins and leaves, GitHub updates, live work,
+// typing, and the Steer offer for a draft that names an agent mid-turn.
+const roomActivity = useRoomActivity({
+  presence: () => props.presence,
+  scope: () => props.roomIdentifier,
+  ready: () => !props.roomLoading,
+  eventPreviews: () => props.composerEventPreviews,
+  drafting: () => roomComposer.value?.drafting ?? false,
+});
+const steerOffer = computed(() => {
+  const offer = roomComposer.value?.steerOffer;
+  return offer ? { entryId: offer.target.entryId, displayName: offer.target.displayName } : null;
+});
+function steerComposerDraft(): void {
+  roomComposer.value?.steer((opened, displayName) => {
+    if (opened) roomActivity.confirmSteer(displayName);
+  });
+}
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
 const transientHighlightMessageId = ref<string | null>(null);
 const fetchedThreadRootId = ref<string | null>(null);
@@ -506,7 +523,9 @@ function quoteSelectedText(messageId: string, selectedText: string): void {
     : null;
 }
 
+/** View or Details on a GitHub update: open it, and it leaves the line. */
 function openEventPreview(event: ComposerEventPreview): void {
+  emit("dismiss-event-preview", event.id);
   if (event.url) {
     emit("open-github-event", event.url);
     return;

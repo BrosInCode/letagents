@@ -62,6 +62,7 @@ import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from
 import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ConvergencePacing } from "./convergence-pacer.js";
+import { launchProgress } from "./launch-progress.js";
 import { turnStartLatency } from "./turn-start-latency.js";
 
 // A live generation with no attachable handle resolves on its own once the
@@ -205,6 +206,8 @@ export type ProviderExecutionCoordinatorOptions = {
     serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   };
   notifyProgressChanged?(): void;
+  /** Start-up progress changed; it carries no receipts, so no capture refresh is needed. */
+  notifyLaunchProgressChanged?(): void;
   /**
    * Called inside the commit lane right after a retiring daemon checkpointed
    * an entry's provider birth outside the manifest lane: batched activity
@@ -1314,7 +1317,14 @@ export class ProviderExecutionCoordinator {
       const admission = configuration && await this.launchAdmission(entry, launchControlEpoch, configuration);
       if (admission && admission === this.failedLaunchAdmissions.get(entry.id)) return;
     }
-    await this.launchProvider(entry, launchControlEpoch);
+    try {
+      await this.launchProvider(entry, launchControlEpoch);
+    } catch (error) {
+      launchProgress.fail(entry.id, error);
+      throw error;
+    } finally {
+      launchProgress.settle(entry.id);
+    }
   }
 
   private async launchAdmission(
@@ -1577,6 +1587,7 @@ export class ProviderExecutionCoordinator {
       || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
       || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
     const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
+    launchProgress.begin(initialEntry.id, () => (this.options.notifyLaunchProgressChanged ?? this.options.notifyProgressChanged)?.());
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
@@ -1799,6 +1810,7 @@ export class ProviderExecutionCoordinator {
       // bootstrap) returns its launch slot as soon as its process is up.
       onNativeStarted: () => {
         launchTiming?.mark("process");
+        launchProgress.mark(entry.id, "process");
         releaseLaunchSlot();
       },
       workAttemptId: attempt.work_attempt_id,
@@ -1868,8 +1880,10 @@ export class ProviderExecutionCoordinator {
       // agents is checked again, and its own startup budget starts only once
       // it is admitted. It covers the local process start; see onNativeStarted.
       launchTiming?.mark("prepare");
+      launchProgress.mark(entry.id, "prepare");
       releaseLaunchSlot = this.options.pacing ? await this.options.pacing.acquire("launch", entry.id) : () => {};
       launchTiming?.mark("slot_wait");
+      launchProgress.mark(entry.id, "slot_wait");
       // Capture consumed inputs before the final existing authority check. No
       // new await is inserted between that check and native dispatch.
       const admission = await this.launchAdmission(initialEntry, launchControlEpoch, launchConfiguration,
@@ -1893,10 +1907,12 @@ export class ProviderExecutionCoordinator {
         try {
           try {
             launchTiming?.mark("admission");
+            launchProgress.mark(entry.id, "admission");
             handle = resumed
               ? await this.options.provider.resume(ref!, { ...spawn, resumeFrom: ref })
               : await this.options.provider.spawn(spawn);
             launchTiming?.markProcessReturned();
+            launchProgress.markProcessReturned(entry.id);
           } catch (error) {
             if (admission) this.failedLaunchAdmissions.set(entry.id, admission);
             throw error;
@@ -2016,6 +2032,7 @@ export class ProviderExecutionCoordinator {
           if (control === "handoff" || control === "fenced") return;
           launchTiming?.mark("install");
           launchTiming?.complete(resumed ? "resume" : "fresh");
+          launchProgress.mark(entry.id, "install");
         } catch (error) {
           if (providerDispatched && !providerPersisted && handle) {
             try {
@@ -2040,6 +2057,8 @@ export class ProviderExecutionCoordinator {
         dispatchReservation.release(fatalReservationError);
       }
     } catch (error) {
+      // Each path below ends this launch: the start-up row says so, whether or not the error is rethrown.
+      if (!(providerPersisted && this.options.authority.isHandoffScheduled())) launchProgress.fail(entry.id, error);
       if (reusesActiveCursorExecution && !providerPersisted) {
         await this.options.host.recordBindingRecoveryFailure(
           entry.id,
