@@ -1,5 +1,5 @@
 import { reactive } from "vue";
-import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
+import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 import { desktopIpc } from "../../../../ipc";
 import { reuseUnchanged } from "../../../../domain/reuse-unchanged";
 
@@ -13,6 +13,8 @@ export interface HostApprovalRoomState {
   firstSeenAt: Record<string, string>;
   /** The last listing failed: main no longer holds these presentations, so none can be decided. */
   stale: boolean;
+  /** The decision this desktop sent for each request, by hostApprovalIdentity, so an unconfirmed card can name it. */
+  decisions: Record<string, HostApprovalSelection>;
 }
 
 /**
@@ -23,7 +25,7 @@ const rooms = reactive(new Map<string, HostApprovalRoomState>());
 const mutations = new Map<string, number>();
 const pendingReads = new Map<string, Promise<void>>();
 const EMPTY_ROOM: Readonly<HostApprovalRoomState> = Object.freeze({
-  approvals: [], error: null, loading: false, busy: null, firstSeenAt: {}, stale: false,
+  approvals: [], error: null, loading: false, busy: null, firstSeenAt: {}, stale: false, decisions: {},
 });
 /** Main refuses a decision on a presentation it has replaced, expired or already decided. */
 const CHANGED_REQUEST = /refresh the approval|approval was refreshed|approval changed|different decision is already recorded/i;
@@ -145,7 +147,7 @@ export function resetHostApprovals(): void {
 
 function roomState(roomIdentifier: string): HostApprovalRoomState {
   if (!rooms.has(roomIdentifier)) {
-    rooms.set(roomIdentifier, { approvals: [], error: null, loading: false, busy: null, firstSeenAt: {}, stale: false });
+    rooms.set(roomIdentifier, { approvals: [], error: null, loading: false, busy: null, firstSeenAt: {}, stale: false, decisions: {} });
   }
   return rooms.get(roomIdentifier)!;
 }
@@ -200,25 +202,39 @@ async function readHostApprovals(roomIdentifier: string): Promise<void> {
   }
 }
 
-export async function decideHostApproval(roomIdentifier: string, id: string, decision: HostApprovalSelection): Promise<void> {
+/** Records the decision and returns the status main reports, or null when none was confirmed. */
+export async function decideHostApproval(roomIdentifier: string, id: string, decision: HostApprovalSelection): Promise<HostApprovalStatus | null> {
   const decide = desktopIpc.supervisor?.decideHostApproval;
   const state = rooms.get(roomIdentifier);
-  if (!decide || !state || state.busy || state.error) return;
+  if (!decide || !state || state.busy || state.error) return null;
   const epoch = generation;
   mutations.set(roomIdentifier, (mutations.get(roomIdentifier) ?? 0) + 1);
   state.busy = id;
+  const decided = state.approvals.find(item => item.id === id);
+  const identity = decided ? hostApprovalIdentity(decided) : null;
+  if (identity) state.decisions = { ...state.decisions, [identity]: decision };
   try {
     const status = await decide({ id, decision });
-    if (epoch !== generation) return;
+    if (epoch !== generation) return null;
     const approval = state.approvals.find(item => item.id === id);
     if (approval) {
       approval.status = status;
       if (status !== "decision_recorded") approval.retryDecision = null;
     }
+    return status;
   } catch (error) {
-    if (epoch === generation) state.error = CHANGED_REQUEST.test(error instanceof Error ? error.message : String(error))
-      ? "This request changed. Refresh approvals to see its current state."
-      : "Could not confirm the decision. Refresh approvals to check its recorded state.";
+    const changed = CHANGED_REQUEST.test(error instanceof Error ? error.message : String(error));
+    if (epoch === generation) {
+      state.error = changed
+        ? "This request changed. Refresh approvals to see its current state."
+        : "Could not confirm the decision. Refresh approvals to check its recorded state.";
+      // Main refused before sending: no decision is out there to confirm.
+      if (changed && identity) {
+        const { [identity]: _refused, ...rest } = state.decisions;
+        state.decisions = rest;
+      }
+    }
+    return null;
   } finally {
     if (epoch === generation) state.busy = null;
   }

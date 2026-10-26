@@ -1,4 +1,4 @@
-import type { DesktopHostApproval, HostApprovalPresentation, HostApprovalStatus } from "../../../../../../shared/host-approvals";
+import type { DesktopHostApproval, HostApprovalPresentation, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 
 type Field = { label: string; value: string };
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object"
@@ -130,18 +130,80 @@ export function hostApprovalDecisionsArmed(shownAtMs: number, nowMs: number): bo
 }
 
 /**
- * The decision buttons a card offers now. The composer restarts the card's hold
- * when this set changes, so a button that appears on the same request is never
- * armed at once. Stop turn appears when a turn starts to wait on the request.
+ * What the composer card offers for one request. Problems stay inside the card,
+ * in a few plain words:
+ * - decide: Deny (or "Deny all N" for a deny that covers the agent's other
+ *   pending requests) and Allow once.
+ * - offline: the approvals service cannot take a decision now. "Can't answer
+ *   right now" with Retry, which lists the approvals again.
+ * - blocked: the agent waits on a request that cannot be answered here.
+ *   Details explains it; Stop turn sits in Deny's place.
+ * - unconfirmed: a decision was sent but not confirmed. "Allowed · not confirmed
+ *   yet" with Check again. Check again sends the recorded decision again only
+ *   where main offers that retry (decision_recorded); otherwise it lists again
+ *   and never sends a decision.
+ * - none: nothing to do here (an unavailable record no turn waits on).
  */
-export function hostApprovalActionKey(approval: Pick<DesktopHostApproval, "presentation" | "status" | "retryDecision">,
-  blocksTurn: boolean): string {
-  return [
-    approval.status === "pending" ? "deny allow_once" : "",
-    approval.status === "pending" && approval.presentation.alwaysAllow ? "allow_always" : "",
-    approval.status === "decision_recorded" && approval.retryDecision ? `retry_${approval.retryDecision}` : "",
-    blocksTurn ? "stop_turn" : "",
-  ].filter(Boolean).join(" ");
+export type HostApprovalCardView =
+  | { kind: "decide"; denyLabel: string; denyTitle: string | null; alwaysAllow: boolean }
+  | { kind: "offline" }
+  | { kind: "blocked" }
+  | { kind: "unconfirmed"; label: string; resend: HostApprovalSelection | null }
+  | { kind: "none" };
+
+function decisionWord(decision: HostApprovalSelection | null | undefined): string {
+  if (decision === "deny") return "Denied";
+  return decision ? "Allowed" : "Answered";
+}
+
+export function hostApprovalCardView(approval: Pick<DesktopHostApproval, "presentation" | "status" | "retryDecision">, input: {
+  /** The agent's turn waits on this request, and it cannot be answered here. */
+  blocksTurn: boolean;
+  /** The approvals service failed its last listing or decision. */
+  serviceError: boolean;
+  /** Pending requests from this agent in the room, this one included. */
+  agentPending: number;
+  /** The decision this desktop sent for the request, if any. */
+  sent?: HostApprovalSelection;
+}): HostApprovalCardView {
+  if (input.blocksTurn) return { kind: "blocked" };
+  const sent = approval.retryDecision ?? input.sent;
+  if (approval.status === "uncertain" || approval.status === "decision_recorded"
+    || (approval.status === "pending" && input.serviceError && input.sent)) {
+    return { kind: "unconfirmed", label: `${decisionWord(sent)} · not confirmed yet`,
+      resend: approval.status === "decision_recorded" && !input.serviceError ? approval.retryDecision : null };
+  }
+  if (approval.status !== "pending") return { kind: "none" };
+  if (input.serviceError) return { kind: "offline" };
+  const coversAll = approval.presentation.denyScope === "session_pending";
+  return {
+    kind: "decide",
+    denyLabel: coversAll && input.agentPending > 1 ? `Deny all ${input.agentPending}` : "Deny",
+    denyTitle: coversAll ? `Denies this and every other request from ${approval.presentation.displayName}` : null,
+    alwaysAllow: Boolean(approval.presentation.alwaysAllow),
+  };
+}
+
+/** The card's heading: who asks and what, or who waits on what cannot be answered here. */
+export function hostApprovalCardHeading(approval: Pick<DesktopHostApproval, "presentation" | "status">, view: HostApprovalCardView): string {
+  if (view.kind === "blocked") return `${approval.presentation.displayName} is waiting on a request you can't answer here`;
+  if (view.kind === "unconfirmed" || view.kind === "offline") return `${approval.presentation.displayName} · ${hostApprovalTitle(approval.presentation)}`;
+  return hostApprovalHeading(approval);
+}
+
+/**
+ * The buttons a card offers now. The composer restarts the card's hold when
+ * this changes, so a button that appears on the same request (Stop turn, or
+ * Deny after a Retry in its place) is never armed at once.
+ */
+export function hostApprovalActionKey(view: HostApprovalCardView): string {
+  switch (view.kind) {
+    case "decide": return ["deny", view.denyLabel, "allow_once", view.alwaysAllow ? "allow_always" : ""].filter(Boolean).join(" ");
+    case "offline": return "retry";
+    case "blocked": return "stop_turn";
+    case "unconfirmed": return view.resend ? `retry_${view.resend}` : "check";
+    case "none": return "";
+  }
 }
 
 /** Unavailable and unconfirmed requests cannot be answered here. */
@@ -155,14 +217,9 @@ export function hostApprovalTrayOrder<T extends Pick<DesktopHostApproval, "statu
     ...approvals.filter(approval => hostApprovalCannotBeAnswered(approval.status))];
 }
 
-/** The history line counts exactly the requests that cannot be answered here. */
-export function hostApprovalHistoryCount(approvals: readonly Pick<DesktopHostApproval, "status">[]): number {
-  return approvals.filter(approval => hostApprovalCannotBeAnswered(approval.status)).length;
-}
-
-/** The history toggle names what it counts, in the words the cards show. */
-export function hostApprovalHistoryLabel(count: number, showing: boolean): string {
-  return `${showing ? "Hide" : "Show"} ${count} unavailable or unconfirmed ${count === 1 ? "approval" : "approvals"}`;
+/** The activity line's words after a deny that covered N requests. */
+export function hostApprovalDeniedAllNotice(count: number, displayName: string): { lead: string; name: string } {
+  return { lead: `Denied ${count} requests from `, name: displayName };
 }
 
 /** One line: what the request would do, for a list row or the composer tray. */
