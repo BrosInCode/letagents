@@ -36,9 +36,9 @@
           tabindex="-1"
           class="desktop-composer-add-menu-item"
           :disabled="item.disabled"
-          :aria-haspopup="item.opensDialog ? 'dialog' : undefined"
-          :aria-expanded="item.id === flyout ? true : item.id === 'gif' ? false : undefined"
-          :data-open="item.id === flyout || undefined"
+          :aria-haspopup="item.id === 'agent' && inlineAgents ? 'menu' : item.opensDialog ? 'dialog' : undefined"
+          :aria-expanded="item.id === 'agent' && inlineAgents ? agentMenuOpen : item.id === flyout ? true : item.id === 'gif' ? false : undefined"
+          :data-open="(item.id === 'agent' && agentMenuOpen) || item.id === flyout || undefined"
           :aria-keyshortcuts="item.keyShortcuts"
           :data-item="item.id"
           :data-testid="item.testid"
@@ -51,6 +51,47 @@
           <kbd v-else-if="item.hint" class="desktop-composer-add-menu-end">{{ item.hint }}</kbd>
         </button>
       </template>
+    </div>
+    <!-- Add agent › opens beside its row on click; the composer text becomes the agent's first message. -->
+    <div
+      v-if="open && agentMenuOpen"
+      ref="agentMenu"
+      class="desktop-composer-add-menu desktop-composer-agent-flyout"
+      role="menu"
+      aria-label="Add agent"
+      data-testid="desktop-composer-agent-flyout"
+      @keydown="handleAgentMenuKey"
+    >
+      <button type="button" role="menuitem" tabindex="-1" class="desktop-composer-add-menu-item" data-agent="back"
+        @click="closeAgentMenu(true)" @pointermove="focusItem($event.currentTarget as HTMLElement)">
+        <ChevronLeft class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
+        <span class="desktop-composer-add-menu-label">Back</span>
+      </button>
+      <div class="desktop-composer-agent-flyout-head">Starts with the message you type</div>
+      <p v-if="!agentRows?.length" class="desktop-composer-agent-flyout-head" role="status">Checking your agents…</p>
+      <button
+        v-for="row in agentRows ?? []"
+        :key="row.providerId"
+        type="button"
+        role="menuitem"
+        tabindex="-1"
+        class="desktop-composer-add-menu-item"
+        :data-agent="row.providerId"
+        :data-testid="`desktop-composer-agent-row-${row.providerId}`"
+        @click="chooseAgent(row.providerId, $event.currentTarget as HTMLElement)"
+        @pointermove="focusItem($event.currentTarget as HTMLElement)"
+      >
+        <span class="desktop-composer-agent-dot" :data-provider="row.providerId" aria-hidden="true"><Bot :size="12" /></span>
+        <span class="desktop-composer-add-menu-label">{{ row.name }} <span class="desktop-composer-agent-flyout-detail">{{ row.detail }}</span></span>
+        <span v-if="row.hint" class="desktop-composer-add-menu-end">{{ row.hint }}</span>
+      </button>
+      <div class="desktop-composer-add-menu-separator" role="separator"></div>
+      <button type="button" role="menuitem" tabindex="-1" class="desktop-composer-add-menu-item" data-agent="setup"
+        aria-haspopup="dialog" data-testid="desktop-composer-agent-setup-another"
+        @click="setUpAnother" @pointermove="focusItem($event.currentTarget as HTMLElement)">
+        <Settings2 class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
+        <span class="desktop-composer-add-menu-label">Set up another agent…</span>
+      </button>
     </div>
     <!-- GIFs open beside the menu; where there is no room beside it, over it with a Back row. -->
     <div
@@ -72,9 +113,11 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
-import { Bot, ChevronLeft, ChevronRight, ImagePlay, ListTodo, Paperclip, Plus } from "@lucide/vue";
+import { Bot, ChevronLeft, ChevronRight, ImagePlay, ListTodo, Paperclip, Plus, Settings2 } from "@lucide/vue";
+import type { DesktopAgentProviderId } from "../../../../../../electron/ipc-types";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 import { prefersReducedMotion } from "./room-gif-search";
+import type { ComposerAgentRow } from "./useComposerAgentDraft";
 
 export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent";
 
@@ -95,12 +138,20 @@ const props = defineProps<{
   attachDisabled: boolean;
   gifAvailable: boolean;
   gifDisabled: boolean;
+  /** Present when agents can start from the composer; Add agent then opens a submenu of these. */
+  agentRows?: readonly ComposerAgentRow[] | null;
 }>();
 
 const emit = defineEmits<{
   select: [item: RoomComposerAddMenuItemId];
   /** The menu closed from inside (Escape); the composer takes focus back. */
   dismiss: [];
+  /** The Add agent submenu opened; its rows should be checked again. */
+  "agent-menu-opened": [];
+  /** A provider row was chosen. `from` is where the row was, so the chip can grow out of it. */
+  "select-agent": [providerId: DesktopAgentProviderId, from: DOMRect | null];
+  /** "Set up another agent…" opens the Add agent window. */
+  "setup-agent": [];
 }>();
 
 const mac = isMacPlatform();
@@ -119,6 +170,9 @@ const flyoutAnimate = ref(false);
 const FLYOUT_SPAN_PX = 268 + 6 + 340 + 8;
 // Only a pointer-opened menu grows out of "+"; a keyboard-opened one appears at once.
 const animate = ref(false);
+const agentMenu = ref<HTMLElement | null>(null);
+const agentMenuOpen = ref(false);
+const inlineAgents = computed(() => Boolean(props.agentRows));
 
 const items = computed<MenuItem[]>(() => [
   { id: "attach", label: "Attach files…", icon: Paperclip, testid: "desktop-composer-attach", disabled: props.attachDisabled,
@@ -149,6 +203,7 @@ function openMenu(byPointer: boolean, focusLast = false): void {
 function closeMenu(): void {
   open.value = false;
   animate.value = false;
+  agentMenuOpen.value = false;
   flyout.value = null;
 }
 
@@ -182,12 +237,69 @@ function backToMenu(): void {
 
 function choose(item: MenuItem, byPointer = false): void {
   if (item.disabled) return;
+  if (item.id === "agent" && inlineAgents.value) {
+    // A second click on the row closes its submenu again.
+    if (agentMenuOpen.value) closeAgentMenu(true);
+    else openAgentMenu();
+    return;
+  }
   if (item.id === "gif") {
+    agentMenuOpen.value = false;
     openGif("", byPointer);
     return;
   }
   closeMenu();
   emit("select", item.id);
+}
+
+function openAgentMenu(): void {
+  // One surface beside the menu at a time.
+  flyout.value = null;
+  agentMenuOpen.value = true;
+  emit("agent-menu-opened");
+  void nextTick(() => agentItems().find((item) => item.dataset.agent !== "back")?.focus({ preventScroll: true }));
+}
+
+function closeAgentMenu(refocusRow: boolean): void {
+  agentMenuOpen.value = false;
+  if (refocusRow) void nextTick(() => enabledItems().find((item) => item.dataset?.item === "agent")?.focus({ preventScroll: true }));
+}
+
+function chooseAgent(providerId: DesktopAgentProviderId, row: HTMLElement | null): void {
+  const from = row && typeof row.getBoundingClientRect === "function" ? row.getBoundingClientRect() : null;
+  closeMenu();
+  emit("select-agent", providerId, from);
+}
+
+function setUpAnother(): void {
+  closeMenu();
+  emit("setup-agent");
+}
+
+function agentItems(): HTMLElement[] {
+  return Array.from(agentMenu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+}
+
+function handleAgentMenuKey(event: KeyboardEvent): void {
+  const list = agentItems();
+  const index = list.indexOf(event.target as HTMLElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (list.length) list[(index + (event.key === "ArrowDown" ? 1 : -1) + list.length) % list.length]?.focus({ preventScroll: true });
+  } else if (event.key === "Home" || event.key === "End") {
+    event.preventDefault();
+    (event.key === "Home" ? list[0] : list.at(-1))?.focus({ preventScroll: true });
+  } else if (event.key === "ArrowLeft" || event.key === "Escape") {
+    // Back to the "+" menu, on the Add agent row.
+    event.preventDefault();
+    event.stopPropagation();
+    closeAgentMenu(true);
+  } else if (/^[1-9]$/.test(event.key)) {
+    const row = props.agentRows?.[Number(event.key) - 1];
+    if (!row) return;
+    event.preventDefault();
+    chooseAgent(row.providerId, list.find((item) => item.dataset.agent === row.providerId) ?? null);
+  }
 }
 
 function enabledItems(): HTMLElement[] {
@@ -254,7 +366,8 @@ function measureFlyout(): void {
 }
 
 function closeOnEscape(event: KeyboardEvent): void {
-  if (event.key !== "Escape" || menu.value?.contains(event.target as Node) || flyoutElement.value?.contains(event.target as Node)) return;
+  if (event.key !== "Escape" || menu.value?.contains(event.target as Node) || agentMenu.value?.contains(event.target as Node)
+    || flyoutElement.value?.contains(event.target as Node)) return;
   event.preventDefault();
   closeMenu();
 }
