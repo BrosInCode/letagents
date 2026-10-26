@@ -17,10 +17,6 @@ import {
   getStoredRoomSession,
 } from "../../local-state.js";
 import {
-  getDefaultManagedAgentProvider,
-  toManagedAgentStartResponse,
-} from "../../managed-agent-providers.js";
-import {
   ApiError,
   apiCall,
   isMissingRouteError,
@@ -43,21 +39,15 @@ import {
   type RoomState,
 } from "./room-state.js";
 import { hasSupervisedWorkerAuthority, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
-import { currentSessionScope } from "./session-scope.js";
 
-export type JoinSessionMode = "live" | "current";
+export type JoinSessionMode = "current";
 
+/** letagents 0.12.46 removed the "live" mode, which started a local Codex worker process. */
 export function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
-  const mode = String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
-  if (mode === "live" && currentSessionScope()) {
-    // A live session starts a local agent process; remotely that would be the server.
-    throw new Error("session_mode 'live' is not available over the remote MCP endpoint. Join with session_mode 'current'.");
+  if (String(value || "").trim().toLowerCase() === "live") {
+    throw new Error("session_mode 'live' was removed in letagents 0.12.46. Join with session_mode 'current' (the default), and run Codex agents from the LetAgents desktop app.");
   }
-  return mode;
-}
-
-export function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {
-  return getDefaultManagedAgentProvider().getCurrentLiveSessionPayload(roomId);
+  return "current";
 }
 
 interface JoinRoomIdentifierOptions {
@@ -351,24 +341,7 @@ export async function buildJoinResponse(input: {
     session_mode: input.session_mode,
   });
 
-  if (input.session_mode === "current") {
-    return withJoinRoomAgentPrompt(basePayload);
-  }
-
-  const provider = getDefaultManagedAgentProvider();
-  const liveSession = await provider.startLocalSession({
-    room_id: input.joined.room.room_id,
-    room_identifier: input.room_identifier,
-    room_code: input.joined.room.code ?? null,
-    room_display_name: input.joined.room.display_name ?? null,
-    joined_via: input.joined_via,
-    cwd: process.cwd(),
-  });
-
-  return withJoinRoomAgentPrompt({
-    ...basePayload,
-    ...toManagedAgentStartResponse(provider, liveSession),
-  });
+  return withJoinRoomAgentPrompt(basePayload);
 }
 
 export async function joinInviteCode(

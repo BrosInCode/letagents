@@ -28,7 +28,7 @@ function seedState(): void {
     local_host_id: "host_1",
     agent_sessions: {},
     current_agent_session_ids: {},
-    // Owned by the `letagents` MCP package (start_local_codex_session).
+    // Written by `letagents` MCP packages before 0.12.46 (start_local_codex_session).
     codex_live_sessions: {
       local_package: { session_id: "local_package", room_id: "room_a", status: "running" },
       local_desktop: { session_id: "local_desktop", room_id: "room_b", status: "running", desktop_managed: true, delivery_mode: "desktop_events" },

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,25 +8,20 @@ import {
   clearPendingDeviceAuth,
   endStoredAgentSession,
   getCurrentAgentSession,
-  getCurrentCodexLiveSession,
   getLocalStatePath,
   getPendingDeviceAuth,
   getStoredAgentIdentity,
   getStoredAuth,
-  getStoredCodexLiveSession,
   getStoredCurrentRoom,
   getStoredRoomSession,
   readLocalState,
   saveAgentSession,
-  saveCodexLiveSession,
   saveRoomSession,
   setPendingDeviceAuth,
   setStoredAgentIdentity,
   setStoredAuth,
   touchRoomSession,
-  updateCodexLiveSession,
   updateLocalState,
-  type CodexLiveSessionState,
   type PendingDeviceAuthState,
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
@@ -90,32 +85,6 @@ function agentSession(input: Partial<StoredAgentSessionState> = {}): StoredAgent
     session.ended_at = input.ended_at;
   }
   return session;
-}
-
-function codexSession(input: Partial<CodexLiveSessionState> = {}): CodexLiveSessionState {
-  const now = input.updated_at ?? "2026-05-28T00:00:00.000Z";
-  return {
-    session_id: input.session_id ?? "codex_session_1",
-    room_id: input.room_id ?? "room_1",
-    room_identifier: input.room_identifier ?? input.room_id ?? "room_1",
-    joined_via: input.joined_via ?? "join_room",
-    cwd: input.cwd ?? "/tmp/letagents",
-    repo_branch: input.repo_branch ?? "codex/git-rooms",
-    stop_phrase: input.stop_phrase ?? "/stop-codex-room",
-    max_minutes: input.max_minutes ?? 0,
-    deadline_utc: input.deadline_utc ?? null,
-    token: input.token ?? "LOCAL_CODEX_ROOM_test",
-    thread_id: input.thread_id ?? "thread_1",
-    turn_id: input.turn_id ?? "turn_1",
-    server_url: input.server_url ?? "ws://127.0.0.1:8765",
-    server_pid: input.server_pid ?? null,
-    launched_server: input.launched_server ?? false,
-    codex_bin: input.codex_bin ?? "codex",
-    status: input.status ?? "running",
-    last_error: input.last_error ?? null,
-    started_at: input.started_at ?? now,
-    updated_at: now,
-  };
 }
 
 test("auth helpers clear pending device auth and remove expired auth", () => {
@@ -274,40 +243,22 @@ test("room session helpers preserve join metadata and update current room on tou
   });
 });
 
-test("codex live session helpers maintain per-room current sessions", () => {
+test("a state file from before 0.12.46 still loads and keeps its old Codex live-session entries", () => {
   withTempLocalState(() => {
-    const first = saveCodexLiveSession(codexSession({
-      session_id: "codex_session_1",
-      room_id: "room_1",
-      updated_at: "2026-05-28T00:00:00.000Z",
-    }));
-    const second = saveCodexLiveSession(codexSession({
-      session_id: "codex_session_2",
-      room_id: "room_2",
-      updated_at: "2026-05-28T00:10:00.000Z",
-    }));
+    const legacy = {
+      current_codex_live_session_ids: { room_1: "codex_session_1" },
+      codex_live_sessions: {
+        codex_session_1: { session_id: "codex_session_1", room_id: "room_1", status: "running", desktop_managed: false },
+      },
+    };
+    writeFileSync(getLocalStatePath(), JSON.stringify(legacy), "utf-8");
 
-    assert.deepEqual(getCurrentCodexLiveSession("room_1"), first);
-    assert.deepEqual(getCurrentCodexLiveSession("room_2"), second);
-    assert.deepEqual(getCurrentCodexLiveSession(), second);
-    assert.deepEqual(getStoredCodexLiveSession("codex_session_1"), first);
-    assert.equal(getStoredCodexLiveSession("codex_session_1")?.repo_branch, "codex/git-rooms");
+    assert.deepEqual(readLocalState().codex_live_sessions, legacy.codex_live_sessions);
+    saveRoomSession({ room_id: "room_2", joined_via: "join_room" });
 
-    const background = saveCodexLiveSession(codexSession({
-      session_id: "codex_session_3",
-      room_id: "room_3",
-      updated_at: "2026-05-28T00:20:00.000Z",
-    }), false);
-
-    assert.equal(getCurrentCodexLiveSession("room_3"), null);
-    const updated = updateCodexLiveSession(background.session_id, (session) => ({
-      ...session,
-      status: "failed",
-      updated_at: "2026-05-28T00:21:00.000Z",
-    }));
-
-    assert.equal(updated?.status, "failed");
-    assert.deepEqual(getCurrentCodexLiveSession("room_3"), updated);
-    assert.equal(updateCodexLiveSession("missing_session", (session) => session), null);
+    const saved = JSON.parse(readFileSync(getLocalStatePath(), "utf-8")) as Record<string, unknown>;
+    assert.deepEqual(saved.current_codex_live_session_ids, legacy.current_codex_live_session_ids);
+    assert.deepEqual(saved.codex_live_sessions, legacy.codex_live_sessions);
+    assert.equal(getStoredRoomSession("room_2")?.room_id, "room_2");
   });
 });

@@ -16,11 +16,8 @@ const {
   buildJoinResponse,
   joinRoomIdentifier,
   joinRoomIdentifierWithoutImplicitGitRefCreate,
+  normalizeJoinSessionMode,
 } = await import("../server/runtime/rooms.js");
-const {
-  registerManagedAgentProvider,
-  resetManagedAgentProvidersForTest,
-} = await import("../managed-agent-providers.js");
 const { shutdownRuntime } = await import("../server/runtime/room-state.js");
 
 test.after(() => {
@@ -30,45 +27,22 @@ test.after(() => {
 
 test.afterEach(() => {
   shutdownRuntime();
-  resetManagedAgentProvidersForTest();
 });
 
-test("live joins dispatch through the default managed-agent provider while preserving Codex fields", async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  registerManagedAgentProvider(
-    {
-      id: "codex",
-      displayName: "Codex",
-      responseKeys: {
-        localSession: "local_codex_session",
-        localSessionStarted: "local_codex_session_started",
-        localSessionReused: "local_codex_session_reused",
-      },
-      getCurrentLiveSessionPayload: () => null,
-      startLocalSession: async (input) => {
-        calls.push(input as unknown as Record<string, unknown>);
-        return {
-          session: {
-            session_id: "session_live",
-            room_id: input.room_id,
-            room_identifier: input.room_identifier,
-            cwd: input.cwd,
-          },
-          reused: false,
-        };
-      },
-      inspectLocalSession: async () => null,
-      stopLocalSession: async () => null,
-      toPublicLiveSession: (session) => session as Record<string, unknown>,
-    },
-    { replace: true, setDefault: true }
-  );
+test("a join with session_mode live fails with the 0.12.46 removal message, and current is the only mode", () => {
+  assert.throws(() => normalizeJoinSessionMode("live"), /session_mode 'live' was removed in letagents 0\.12\.46/);
+  assert.throws(() => normalizeJoinSessionMode(" LIVE "), /removed/);
+  for (const value of [undefined, null, "", "current", "CURRENT"]) {
+    assert.equal(normalizeJoinSessionMode(value), "current");
+  }
+});
 
+test("a current join answers with the room and starts no local agent process", async () => {
   const room: RoomState = {
-    room_id: "room_live",
+    room_id: "room_current",
     project_id: null,
-    code: "ROOM-LIVE",
-    display_name: "Live Room",
+    code: "ROOM-CURRENT",
+    display_name: "Current Room",
     joined_via: "join_room",
     joined_at: "2026-06-30T00:00:00.000Z",
     last_seen_at: "2026-06-30T00:00:00.000Z",
@@ -81,24 +55,14 @@ test("live joins dispatch through the default managed-agent provider while prese
     },
     room_identifier: "focus_28",
     joined_via: "join_room",
-    session_mode: "live",
+    session_mode: "current",
   });
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.room_id, "room_live");
-  assert.equal(calls[0]?.room_identifier, "focus_28");
-  assert.equal(calls[0]?.room_code, "ROOM-LIVE");
-  assert.equal(calls[0]?.room_display_name, "Live Room");
-  assert.equal(calls[0]?.joined_via, "join_room");
-  assert.equal(calls[0]?.cwd, process.cwd());
-  assert.deepEqual(response.local_codex_session, {
-    session_id: "session_live",
-    room_id: "room_live",
-    room_identifier: "focus_28",
-    cwd: process.cwd(),
-  });
-  assert.equal(response.local_codex_session_started, true);
-  assert.equal(response.local_codex_session_reused, false);
+  assert.equal(response.room_id, "room_current");
+  assert.equal(response.session_mode, "current");
+  for (const removed of ["local_codex_session", "local_codex_session_started", "local_codex_session_reused"]) {
+    assert.equal(removed in response, false, removed);
+  }
 });
 
 test("joinRoomIdentifier can request an existing-only room join", async () => {

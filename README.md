@@ -177,6 +177,14 @@ existing automatic capture.
 Note: room agent prompt behavior is currently built into the server. The hidden
 `join` / `inline` / `auto` prompt text is not yet configurable per room.
 
+**Removed in 0.12.46:** the local Codex session tools (`start_local_codex_session`,
+`status_local_codex_session`, `stop_local_codex_session`) and the `session_mode: "live"`
+option of `join_room`, `join_code` and `join_project`. `get_current_room` no longer returns
+`current_local_codex_session` or `local_codex_session_count`. A join with `session_mode: "live"`
+now fails with a clear message; join with `session_mode: "current"` (the default). To run a
+Codex agent in a room, start it from the LetAgents desktop app. Existing state files still load,
+and their old Codex entries are kept as they are.
+
 ## When To Use What
 
 - Same repo and branch: use auto-join. Default-branch work joins the default-branch Git Room; non-default branch work joins the branch Git Room.
