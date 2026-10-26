@@ -6,6 +6,7 @@ const compactContinuationWindowMs = 5 * 60 * 1000;
 
 export type MessageTimelineEntry =
   | { type: "contribution"; id: string; work: DesktopRoomAgentWork }
+  | { type: "agent-startup"; id: string; entryId: string }
   | {
       type: "date";
       id: string;
@@ -25,9 +26,21 @@ interface TimelineItem {
   id: string;
   message?: DesktopRoomMessage;
   work?: DesktopRoomAgentWork;
+  startupEntryId?: string;
 }
 
-export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessage[], work: readonly DesktopRoomAgentWork[] = []): MessageTimelineEntry[] {
+/** An agent start-up row: under the person's first message to it, or at the time it started. */
+export interface TimelineAgentStartup {
+  entryId: string;
+  anchorMessageId: string | null;
+  startedAt: string;
+}
+
+export function buildMessageTimelineEntries(
+  messages: readonly DesktopRoomMessage[],
+  work: readonly DesktopRoomAgentWork[] = [],
+  startups: readonly TimelineAgentStartup[] = [],
+): MessageTimelineEntry[] {
   const entries: MessageTimelineEntry[] = [];
   let previousDayKey: string | null = null;
   let previousMessage: DesktopRoomMessage | null = null;
@@ -51,6 +64,14 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
       ordered.push({ timestamp, time: Date.parse(timestamp), id: `contribution:${entry.attemptId}`, work: entry });
     }
   }
+  if (startups.length) {
+    const sources = new Map(messages.map(message => [message.id, message.timestamp]));
+    for (const startup of startups) {
+      // Pushed after the messages, so an equal time keeps the row under its anchor (the sort is stable).
+      const timestamp = (startup.anchorMessageId && sources.get(startup.anchorMessageId)) || startup.startedAt;
+      ordered.push({ timestamp, time: Date.parse(timestamp), id: `agent-startup:${startup.entryId}`, startupEntryId: startup.entryId });
+    }
+  }
   // Messages usually arrive in order. A sorted list (with no unparsable time,
   // which makes the comparator inconsistent) is already its own sort result.
   let sorted = true;
@@ -71,6 +92,11 @@ export function buildMessageTimelineEntries(messages: readonly DesktopRoomMessag
       previousMessage = null;
     }
 
+    if (item.startupEntryId) {
+      entries.push({ type: "agent-startup", id: item.id, entryId: item.startupEntryId });
+      previousMessage = null;
+      continue;
+    }
     if (item.work) {
       entries.push({ type: "contribution", id: item.id, work: item.work });
       previousMessage = null;

@@ -31,6 +31,7 @@ import type { PollingActivationRecord } from "../custodial-polling-activation.js
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
+import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
 
@@ -789,6 +790,57 @@ test("a completed launch reports its start-up phases, split at the native ready 
   } finally {
     setTurnStartLatencyReporter(null);
   }
+});
+
+test("live launch progress follows the launch phases, records a failure kind, and forgets a launch that stopped early", async () => {
+  for (const nativeSignal of [true, false]) {
+    let notified = 0;
+    const seen: Array<string | null> = [];
+    const runtime = harness({ provider: provider({ spawn: async (request) => {
+      seen.push(launchProgress.view("agent-1")?.current ?? null);
+      if (nativeSignal) {
+        request.onNativeStarted?.();
+        seen.push(launchProgress.view("agent-1")?.current ?? null);
+      }
+      return returnedHandle;
+    } }) });
+    const coordinator = new ProviderExecutionCoordinator({ ...runtime.options, notifyProgressChanged: () => { notified += 1; } });
+    await coordinator.converge("agent-1");
+    const view = launchProgress.view("agent-1")!;
+    assert.deepEqual(seen, nativeSignal ? ["process", "bootstrap"] : ["process"]);
+    assert.equal(view.state, "launched");
+    assert.equal(view.current, null);
+    assert.deepEqual(view.phases.map((phase) => phase.phase),
+      ["prepare", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]);
+    assert.ok(view.phases.every((phase) => typeof phase.ms === "number"));
+    assert.ok(notified >= view.phases.length, "each phase change wakes the state watch");
+  }
+
+  const failing = harness({ provider: provider({ spawn: async () => {
+    throw Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" });
+  } }) });
+  await assert.rejects(failing.coordinator.converge("agent-1"));
+  const failed = launchProgress.view("agent-1")!;
+  assert.equal(failed.state, "failed");
+  assert.deepEqual(failed.failure, { phase: "process", action: "install" });
+  assert.equal(JSON.stringify(failed).includes("ENOENT"), false, "no error text leaves the daemon");
+
+  let admit: (() => void) | null = null;
+  const stopped = harness({ provider: provider({ spawn: async () => returnedHandle }) });
+  const coordinator = new ProviderExecutionCoordinator({
+    ...stopped.options,
+    pacing: {
+      acquire: async () => { await new Promise<void>((resolve) => { admit = resolve; }); return () => {}; },
+      run: async () => { throw new Error("launches pace through acquire"); },
+    },
+  });
+  const converging = coordinator.converge("agent-1");
+  for (let turn = 0; turn < 20 && !admit; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(launchProgress.view("agent-1")?.current, "slot_wait");
+  stopped.bumpControlEpoch();
+  admit!();
+  await converging;
+  assert.equal(launchProgress.view("agent-1"), null, "a launch that never ran leaves the manifest to tell the rest");
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {

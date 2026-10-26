@@ -22,6 +22,7 @@
         <RoomMessageViewport
           ref="messageViewport"
           v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
+          @open-add-agent="emit('open-add-agent')"
           :active-search-message-id="activeTimelineMessageId"
           :active-thread-parent-id="activeThreadParentId"
           :reading-thread-parent-id="readingThreadLatest ? activeThreadParentId : null"

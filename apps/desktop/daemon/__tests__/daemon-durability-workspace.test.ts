@@ -1542,6 +1542,30 @@ test("read model projects child compaction before admission without changing dur
   assert.equal((await model.entryWithDerivedLiveness(starting)).provider_progress, null);
 });
 
+test("read model projects live launch progress only for an agent meant to run", async () => {
+  const progress = { started_at: "2026-10-26T00:00:00.000Z", state: "running" as const, current: "slot_wait" as const,
+    phases: [{ phase: "prepare" as const, started_at: "2026-10-26T00:00:00.000Z", ms: 40 },
+      { phase: "slot_wait" as const, started_at: "2026-10-26T00:00:00.040Z", ms: null }],
+    ended_at: null, first_output_at: null, failure: null, slot_ahead: 2 };
+  const model = new DaemonReadModel({
+    currentDaemonGeneration: () => 1, nowMs: () => Date.parse("2026-10-26T00:00:01Z"), startedAt: "2026-10-26T00:00:00Z",
+    capabilities: { hasDelivery: () => false, supportsRoomTurns: () => true, supportsContinuationRepair: () => false },
+    recoveryDiagnostics: () => { throw new Error("not part of progress projection"); }, deliveryAdmission: () => null,
+    launchProgress: candidate => { assert.equal(candidate.id, entry.id); return progress; },
+    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null, getAgentConfiguration: async () => undefined },
+    bindings: { credentialFor: async () => null, get: async () => null, list: async () => [] },
+    inbox: { detail: async () => { throw new Error("unused"); }, ingressHealth: async () => null,
+      latestContinuationRepair: async () => null, receiptProjection: async () => [] },
+    durability: { getAttempt: async () => null },
+    workerAuthority: { currentHostGrant: () => null, pollingContract: async () => null },
+    liveHandles: new Map(), delivery: null,
+  });
+  const starting: DaemonManifestEntry = { ...entry, provider: "claude-code", desired_state: "running",
+    observed_state: "starting", condition: "none", provider_ref: undefined };
+  assert.deepEqual((await model.entryWithDerivedLiveness(starting)).launch_progress, progress);
+  assert.equal((await model.entryWithDerivedLiveness({ ...starting, desired_state: "stopped" })).launch_progress, null);
+});
+
 test("inspector usage is read for the exact live continuation and drops races during the read", async () => {
   for (const mutation of ["none", "room", "continuation", "execution", "daemon", "handle", "failure"] as const) {
     const handle = { workAttemptId: "usage-attempt", providerContinuationId: "thread" } as any;

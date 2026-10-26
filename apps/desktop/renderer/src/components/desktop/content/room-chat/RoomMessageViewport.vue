@@ -24,6 +24,15 @@
           <span>{{ entry.label }}</span>
         </div>
 
+        <template v-else-if="entry.type === 'agent-startup'">
+          <RoomAgentStartupRow
+            v-if="startupViews.get(entry.entryId)"
+            :view="startupViews.get(entry.entryId)!"
+            @retry="startupAction(retryStartup, $event, 'Could not start the agent again.')"
+            @cancel="startupAction(cancelStartup, $event, 'Could not cancel the agent.')"
+            @setup="emit('open-add-agent')"
+          />
+        </template>
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <RoomGitHubUpdates v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
@@ -246,7 +255,11 @@ import {
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
 import { workIndicatorAgentTarget } from "../../../../domain/agent-inspector-identity";
+import RoomAgentStartupRow from "./RoomAgentStartupRow.vue";
 import RoomContribution from "./RoomContribution.vue";
+import { useAgentStartupRows } from "./useAgentStartupRows";
+import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
+import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { getSenderColor, parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
@@ -343,6 +356,8 @@ const emit = defineEmits<{
   "scroll-position": [position: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-task": [taskId: string];
+  /** An agent's runtime needs sign-in or installing: the Add agent setup shows how. */
+  "open-add-agent": [];
 }>();
 
 const emptyStateTitle = computed(() => {
@@ -439,7 +454,17 @@ const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
   props.participants, props.presence, props.supervisorEntries,
 ));
 const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
-const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork),
+const {
+  views: startupViews,
+  timelineStartups,
+  retry: retryStartup,
+  cancel: cancelStartup,
+} = useAgentStartupRows({ roomIdentifier: () => props.roomIdentifier ?? "", entries: () => props.supervisorEntries });
+const { pushActionToast } = useDesktopActionToasts();
+function startupAction(action: (entryId: string) => Promise<void>, entryId: string, failed: string): void {
+  action(entryId).catch((error: unknown) => pushActionToast(`${failed} ${safeUserVisibleErrorDetail(error, "Try again.")}`, "error"));
+}
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, timelineStartups.value),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 // Bounded mount window (see message-window.ts): only a contiguous range of
 // the timeline is mounted.
