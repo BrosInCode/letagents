@@ -8,7 +8,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { assertNoPollingActivation } from "../custodial-polling-activation.js";
 import { assertNoDeliveryDrain } from "../delivery-drain.js";
-import { pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
+import { cancelInterruptedSupervisedTurn, pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import type { DaemonPurgePhase, DaemonPurgeRecord, DaemonPurgeWorkerSessionAttestation, DaemonRoomMovePhase, DaemonRoomMoveRecord } from "../types.js";
 import { type Row, roomMoveFromRow, purgeFromRow, ManifestConflictError, bool, nullableString, json, run, storeMethods } from "./shared.js";
 
@@ -194,8 +194,9 @@ export const roomMovesAndPurges = storeMethods({
           database.exec("COMMIT");
           return { generation, created: false, purge };
         }
-        const attachment = this.assertPurgePreconditions(database, input.agentId);
         const now = new Date().toISOString();
+        this.settleGivenAgentInboxForPurge(database, input.agentId, now);
+        const attachment = this.assertPurgePreconditions(database, input.agentId);
         const phase: DaemonPurgePhase = input.externalRevokeRequired
           ? input.workerSessionAttestation === "unknown" ? "reprepare_credentials" : "revoking_credentials"
           : "local_commit";
@@ -386,6 +387,8 @@ export const roomMovesAndPurges = storeMethods({
         if (!purgeRow) throw new Error("Unknown purge operation.");
         const purge = purgeFromRow(purgeRow);
         if (purge.agent_id !== input.agentId || purge.daemon_generation !== input.daemonGeneration || purge.phase !== "local_commit") throw new ManifestConflictError("Purge is not authorized for local commit.");
+        // A message that reached the stopped guest after preparation is settled here as well; otherwise the commit would refuse for good.
+        this.settleGivenAgentInboxForPurge(database, input.agentId, new Date().toISOString());
         const attachment = this.assertPurgePreconditions(database, input.agentId);
         if (attachment.attachedWorkAttemptId !== purge.attached_work_attempt_id || attachment.preservedWorkspacePath !== purge.preserved_workspace_path) {
           throw new ManifestConflictError("Purge target attachment changed after preparation.");
@@ -413,6 +416,38 @@ export const roomMovesAndPurges = storeMethods({
       catch (error) { if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} } throw error; }
       return { generation: expectedGeneration + 1, purge: purgeFromRow(database.prepare("SELECT * FROM agent_purge_operations WHERE operation_id=?").get(input.operationId) as Row) };
     });
+  },
+
+  /**
+   * A guest (an agent given through Ask for an agent, or rented: every
+   * `supervised_rental_*` entry, the same family the launch rules treat as a
+   * guest) removed before it ever answered still holds the room messages it
+   * was handed: items in `pending`, `retryable` or `blocked` with no provider
+   * turn. Nothing else settles them, so they would block its purge for good.
+   * They are cancelled here, in FIFO order, only while the agent is fully
+   * stopped and only up to the first item that carries a provider turn id.
+   * (A `blocked` item whose turn could not be saved carries none and is
+   * cancelled too; the room gets no reply from a removed guest either way.)
+   * An ordinary supervised agent keeps its items, and its purge is refused as
+   * before. Runs inside the caller's transaction, so a refused preflight rolls
+   * the cancellations back.
+   */
+  settleGivenAgentInboxForPurge(database: DatabaseSync, agentId: string, timestamp: string): number {
+    if (!agentId.startsWith("supervised_rental_")) return 0;
+    const lifecycle = database.prepare(`SELECT l.desired_state,d.observed_state FROM agent_launch_intents l
+      JOIN runtime_deployments d USING(agent_id) WHERE l.agent_id=?`).get(agentId) as Row | undefined;
+    if (!lifecycle || lifecycle.desired_state !== "stopped" || !["absent", "stopped", "failed"].includes(String(lifecycle.observed_state))) return 0;
+    let cancelled = 0;
+    for (;;) {
+      const head = database.prepare(`SELECT inbox_item_id,state,provider_turn_id FROM supervised_agent_inbox WHERE agent_id=?
+        AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        ORDER BY fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
+      if (!head || !["pending", "retryable", "blocked"].includes(String(head.state)) || head.provider_turn_id !== null) break;
+      const settled = cancelInterruptedSupervisedTurn(database, String(head.inbox_item_id), "The agent was removed before it answered.", timestamp);
+      if (settled?.state !== "cancelled_by_user" && settled?.state !== "acknowledged_failed") break;
+      cancelled += 1;
+    }
+    return cancelled;
   },
 
   assertPurgePreconditions(database: DatabaseSync, agentId: string): { attachedWorkAttemptId: string | null; preservedWorkspacePath: string | null } {
