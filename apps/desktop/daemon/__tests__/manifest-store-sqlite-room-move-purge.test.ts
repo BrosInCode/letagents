@@ -742,6 +742,54 @@ test("purge of a given agent cancels the messages it never answered; an ordinary
   }
 });
 
+test("a rented guest's unanswered messages are settled too, and one that arrives after preparation is settled at commit", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-10-26T12:00:00.000Z");
+  const marker = join(env.root, "rented-worktree.txt");
+  await writeFile(marker, "keep");
+  const rented: DaemonManifestEntry = {
+    ...entry, id: "supervised_rental_0123456789abcdef0123456789abcdef", desired_state: "stopped", observed_state: "stopped", condition: "none", last_error: null,
+    workspace_path: marker, work_attempt_id: "attempt_rented",
+    provider_ref: { ...entry.provider_ref!, work_attempt_id: "attempt_rented", execution_generation_id: "run_rented" },
+    activity: [], turn_control: null, last_worker_binding: null,
+    workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null },
+  };
+  try {
+    await store.write(0, [rented]);
+    seedTerminalAttempt(env.databasePath, "attempt_rented", "run_rented", marker);
+    const before = await inbox.enqueueCorrection({
+      agent_id: rented.id, room_id: rented.room_id, source_message_id: "before-preparation",
+      source_message: { text: "unanswered" }, activation: { decision: "activate" },
+    });
+    const prepared = await store.preparePurge(1, {
+      operationId: "purge_rented", requestId: "purge_rented", agentId: rented.id, daemonGeneration: 3,
+      externalRevokeRequired: false, workerSessionAttestation: "not_required", agentSessionId: null,
+    });
+    assert.equal(prepared.purge.phase, "local_commit");
+    const late = await inbox.enqueueCorrection({
+      agent_id: rented.id, room_id: rented.room_id, source_message_id: "after-preparation",
+      source_message: { text: "arrived between preparation and commit" }, activation: { decision: "activate" },
+    });
+    assert.equal(late.state, "pending");
+    await inbox.close();
+    const committed = await store.commitPurge(1, { operationId: "purge_rented", agentId: rented.id, daemonGeneration: 3 });
+    assert.equal(committed.purge.phase, "complete");
+    assert.equal(await store.getEntry(rented.id), undefined);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const inboxItemId of [before.inbox_item_id, late.inbox_item_id]) {
+        const row = database.prepare("SELECT COUNT(*) AS count FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as { count: number };
+        assert.equal(Number(row.count), 0, "the purge deleted the settled rows");
+      }
+    } finally { database.close(); }
+  } finally {
+    await inbox.close().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("a given agent's purge stops at the first message a provider turn touched", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
@@ -762,11 +810,18 @@ test("a given agent's purge stops at the first message a provider turn touched",
       agent_id: given.id, room_id: given.room_id, source_message_id: "touched",
       source_message: { text: "a turn started on this" }, activation: { decision: "activate" },
     });
+    // Another unanswered message behind it: the head would be cancelled first, then the refusal rolls that back.
+    const behind = await inbox.enqueueCorrection({
+      agent_id: given.id, room_id: given.room_id, source_message_id: "behind",
+      source_message: { text: "still unanswered" }, activation: { decision: "activate" },
+    });
     await inbox.close();
     const database = new DatabaseSync(env.databasePath);
     try {
       // A message a provider turn already took: not the daemon's to cancel on its own.
       database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',provider_turn_id='turn_1' WHERE inbox_item_id=?").run(touched.inbox_item_id);
+      // Put the untouched message first in FIFO order, so the walk cancels it before it meets the touched one.
+      database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=fifo_sequence+100 WHERE inbox_item_id=?").run(touched.inbox_item_id);
     } finally { database.close(); }
     await assert.rejects(store.preparePurge(1, {
       operationId: "purge_touched", requestId: "purge_touched", agentId: given.id, daemonGeneration: 3,
@@ -775,6 +830,10 @@ test("a given agent's purge stops at the first message a provider turn touched",
     const database2 = new DatabaseSync(env.databasePath);
     try {
       assert.equal((database2.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(touched.inbox_item_id) as { state: string }).state, "dispatching");
+      assert.equal((database2.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id=?").get(behind.inbox_item_id) as { state: string }).state, "pending",
+        "the refusal rolled the head's cancellation back");
+      assert.equal(Number((database2.prepare("SELECT COUNT(*) AS count FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='user_cancelled'").get(behind.inbox_item_id) as { count: number }).count), 0);
+      assert.equal(await store.getPurge("purge_touched"), null);
     } finally { database2.close(); }
   } finally {
     await inbox.close().catch(() => undefined);
