@@ -166,6 +166,19 @@ export interface ActivitySteerOffer {
   displayName: string;
 }
 
+/**
+ * The Steer offer for a draft's target. It returns `previous` while the target
+ * is the same agent, so typing more of the draft does not redraw the timeline.
+ */
+export function stableSteerOffer(
+  previous: ActivitySteerOffer | null | undefined,
+  target: ActivitySteerOffer | null | undefined,
+): ActivitySteerOffer | null {
+  if (!target) return null;
+  const { entryId, displayName } = target;
+  return previous?.entryId === entryId && previous.displayName === displayName ? previous : { entryId, displayName };
+}
+
 export interface ActivityWork {
   id: string;
   displayName: string;

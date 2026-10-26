@@ -8,12 +8,15 @@
   gap: 7px;
 }
 
+/* The input grows with its text up to 156px, then scrolls. The browser sizes
+   it (field-sizing), so typing does no layout reads in script. */
 .desktop-composer-input {
   width: 100%;
   min-height: 34px;
   max-height: 156px;
+  field-sizing: content;
   resize: none;
-  overflow-y: hidden;
+  overflow-y: auto;
   border: 0;
   outline: none;
   background: transparent;

@@ -40,6 +40,12 @@ export const ACTIVITY_ORB_LABELS: Record<ActivityOrbState, string> = {
   breathing: "Waiting",
 };
 
+/**
+ * The least time between two drawn frames: 30 fps. The 1 ms slack keeps a
+ * 60 Hz display on every second frame when its frame times jitter.
+ */
+export const ACTIVITY_ORB_FRAME_MS = 1000 / 30 - 1;
+
 /** The time a still frame is drawn at: every state reads clearly there. */
 export const ACTIVITY_ORB_STILL_SECONDS = 1.2;
 
@@ -52,8 +58,10 @@ export function drawActivityOrb(ctx: CanvasRenderingContext2D, state: ActivityOr
   // 1 at a 20px orb drawn at 2x.
   const k = size / 40;
   ctx.clearRect(0, 0, size, size);
+  // One colour for the frame; each dot sets only its alpha (no colour string per dot).
+  ctx.fillStyle = `rgb(${ink})`;
   const dot: Dot = (x, y, radius, alpha) => {
-    ctx.fillStyle = `rgba(${ink},${Math.max(0, Math.min(1, alpha))})`;
+    ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
     ctx.beginPath();
     ctx.arc(r0 + x, r0 + y, radius, 0, TAU);
     ctx.fill();
@@ -62,6 +70,7 @@ export function drawActivityOrb(ctx: CanvasRenderingContext2D, state: ActivityOr
   else if (state === "working") drawWorking(dot, t, k);
   else if (state === "composing") drawComposing(dot, t, k);
   else drawBreathing(dot, t, k);
+  ctx.globalAlpha = 1;
 }
 
 function drawSearching(dot: Dot, t: number, k: number): void {
@@ -140,16 +149,20 @@ export interface ActivityOrbClockEnvironment {
 export function createActivityOrbClock(environment: ActivityOrbClockEnvironment) {
   const hosts = new Set<ActivityOrbHost>();
   let frame: number | null = null;
+  let lastDrawMs = Number.NEGATIVE_INFINITY;
 
   function tick(ms: number): void {
     frame = null;
     if (environment.reducedMotion() || environment.documentHidden()) return;
+    // A 20px orb reads the same at 30 fps; skip the frames between.
+    const due = ms - lastDrawMs >= ACTIVITY_ORB_FRAME_MS;
     let any = false;
     for (const host of hosts) {
       if (!host.visible()) continue;
-      host.draw(ms / 1000);
+      if (due) host.draw(ms / 1000);
       any = true;
     }
+    if (due && any) lastDrawMs = ms;
     if (any) frame = environment.requestFrame(tick);
   }
 
@@ -178,9 +191,16 @@ export function createActivityOrbClock(environment: ActivityOrbClockEnvironment)
 }
 
 let sharedClock: ReturnType<typeof createActivityOrbClock> | null = null;
+// One query for the app; reading `.matches` each frame costs nothing.
+let reducedMotionQuery: MediaQueryList | null = null;
+
+function reducedMotionMediaQuery(): MediaQueryList | null {
+  if (!reducedMotionQuery && typeof matchMedia === "function") reducedMotionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+  return reducedMotionQuery;
+}
 
 function prefersReducedMotion(): boolean {
-  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return reducedMotionMediaQuery()?.matches ?? false;
 }
 
 /** The app's one orb clock. It follows the window's visibility and motion preference. */
@@ -198,10 +218,7 @@ export function activityOrbClock(): ReturnType<typeof createActivityOrbClock> {
   if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
     document.addEventListener("visibilitychange", () => clock.refresh());
   }
-  if (typeof matchMedia === "function") {
-    const query = matchMedia("(prefers-reduced-motion: reduce)");
-    query.addEventListener?.("change", () => clock.refresh());
-  }
+  reducedMotionMediaQuery()?.addEventListener?.("change", () => clock.refresh());
   sharedClock = clock;
   return clock;
 }

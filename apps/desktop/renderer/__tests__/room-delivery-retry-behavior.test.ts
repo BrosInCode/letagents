@@ -1403,11 +1403,15 @@ test("an idle viewport skips work history tracking and resumes causal reply supp
   const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props }) }, {});
   const instance = viewport.app._instance!.subTree.component!;
   const setup = (instance as unknown as {
-    devtoolsRawSetupState: { currentLocalAgentWork: Vue.ComputedRef & { onTrack?: (event: Vue.DebuggerEvent) => void } };
+    devtoolsRawSetupState: {
+      currentLocalAgentWork: Vue.ComputedRef & { onTrack?: (event: Vue.DebuggerEvent) => void };
+      sortedVisibleMessages: Vue.ComputedRef;
+    };
   }).devtoolsRawSetupState;
   let historyReads = 0;
+  // The history is read directly or through the viewport's one sorted copy of it.
   setup.currentLocalAgentWork.onTrack = (event) => {
-    if (event.key === "messages" || event.key === "threadMessages") historyReads += 1;
+    if (event.key === "messages" || event.key === "threadMessages" || event.target === setup.sortedVisibleMessages) historyReads += 1;
   };
   const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-activity-live-echo");
   try {
