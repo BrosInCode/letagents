@@ -122,69 +122,52 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <div class="desktop-composer-input-row">
-      <span ref="addMenuWrap" class="desktop-composer-add-wrap" style="position: relative; display: inline-flex;" data-testid="desktop-composer-add-agent">
-        <button
-          class="desktop-composer-add-agent"
-          type="button"
-          :disabled="roomLoading || !roomIdentifier"
-          :title="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
-          :aria-label="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
-          :aria-expanded="addMenuOpen"
-          aria-haspopup="menu"
-          data-testid="desktop-composer-add-agent-button"
-          @click="addMenuOpen = !addMenuOpen"
-        >
-          <Plus :size="18" aria-hidden="true" />
-        </button>
-        <span v-if="addMenuOpen" class="desktop-composer-add-menu" role="menu" @keydown.esc.stop="addMenuOpen = false">
-          <button type="button" role="menuitem" data-testid="desktop-composer-menu-add-agent" @click="addMenuOpen = false; $emit('open-add-agent')">Add agent</button>
-          <button type="button" role="menuitem" data-testid="desktop-composer-menu-ask-agent" @click="addMenuOpen = false; $emit('open-ask-agent')">Ask someone for an agent</button>
-        </span>
-      </span>
-      <textarea
-        ref="textareaElement"
-        v-model="draft"
-        class="desktop-composer-input"
-        rows="1"
-        :aria-label="composerInputLabel"
-        role="combobox"
-        aria-autocomplete="list"
-        :aria-expanded="suggestionsOpen"
-        aria-controls="desktop-mention-listbox"
-        :aria-activedescendant="suggestionsOpen ? `desktop-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
+      <RoomComposerAddMenu
+        ref="addMenu"
         :disabled="roomLoading || !roomIdentifier"
-        data-testid="desktop-composer-input"
-        @input="handleDraftInput"
-        @keydown="handleComposerKey"
+        :attach-disabled="!canAttach"
+        :gif-available="Boolean(gifPicker?.enabled)"
+        :gif-disabled="roomLoading || sending"
+        @select="handleAddMenuSelect"
+        @dismiss="focusInput"
       />
-      <div class="desktop-composer-actions" data-testid="desktop-composer-actions">
-        <button
-          class="desktop-composer-attach"
-          type="button"
-          :disabled="roomLoading || sending || !roomIdentifier || attaching"
-          :title="attaching ? 'Attaching' : 'Attach files'"
-          :aria-label="attaching ? 'Attaching files' : 'Attach files'"
-          data-testid="desktop-composer-attach"
-          @click="$emit('pick-attachments')"
-        >
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
-        </button>
-        <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
-        <button
-          class="desktop-composer-send"
-          type="submit"
-          :aria-label="sending ? 'Sending message' : 'Send message'"
-          :title="sending ? 'Sending message' : 'Send message'"
-          :disabled="roomLoading || sending || slash.busy.value || !canSend"
-          data-testid="desktop-composer-send"
-        >
-          <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
-          <ArrowUp v-else :size="17" aria-hidden="true" />
-        </button>
+      <div class="desktop-composer-field">
+        <!-- The suggestion is drawn under the textarea; screen readers get it from the description. -->
+        <div v-if="suggestionVisible" class="desktop-composer-ghost" aria-hidden="true" data-testid="desktop-composer-suggestion">{{ visibleSuggestion?.text }}</div>
+        <textarea
+          ref="textareaElement"
+          v-model="draft"
+          class="desktop-composer-input"
+          rows="1"
+          :aria-label="composerInputLabel"
+          :aria-describedby="suggestionVisible ? suggestionDescriptionId : undefined"
+          :placeholder="suggestionVisible ? undefined : composerPlaceholder"
+          role="combobox"
+          aria-autocomplete="list"
+          :aria-expanded="suggestionsOpen"
+          aria-controls="desktop-mention-listbox"
+          :aria-activedescendant="suggestionsOpen ? `desktop-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
+          :disabled="roomLoading || !roomIdentifier"
+          data-testid="desktop-composer-input"
+          @input="handleDraftInput"
+          @keydown="handleComposerKey"
+          @paste="handlePaste"
+        />
+        <span v-if="suggestionVisible" :id="suggestionDescriptionId" class="sr-only">{{ suggestionDescription }}</span>
       </div>
+      <button
+        class="desktop-composer-send"
+        type="submit"
+        :aria-label="sending ? 'Sending message' : 'Send message'"
+        :title="sending ? 'Sending message' : 'Send message'"
+        :disabled="roomLoading || sending || slash.busy.value || !canSend"
+        data-testid="desktop-composer-send"
+      >
+        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
+        <ArrowUp v-else :size="17" aria-hidden="true" />
+      </button>
+      <RoomGifPicker ref="gifPicker" :trigger="false" :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending"
+        @select="selectedGif = $event" @closed="focusInput" />
     </div>
     <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
     <DesktopAttachmentDrafts
@@ -237,7 +220,7 @@ import { desktopIpc } from "../../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { useRoomTyping } from "../../../../composables/useRoomTyping";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, Plus, X } from "@lucide/vue";
+import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, X } from "@lucide/vue";
 import type {
   DesktopParticipantSummary,
   DesktopStagedAttachment,
@@ -250,6 +233,9 @@ import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomGifPicker from "./RoomGifPicker.vue";
+import RoomComposerAddMenu, { type RoomComposerAddMenuItemId } from "./RoomComposerAddMenu.vue";
+import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
+import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import RoomPresenceChips from "./RoomPresenceChips.vue";
 import type { PresenceChip } from "../../../../domain/presence-chips";
@@ -283,6 +269,8 @@ const props = defineProps<{
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   replyTo: RoomComposerReplyTarget | null;
   roomIdentifier: string | null;
+  /** The room's display name, for the placeholder and the input's label. */
+  roomLabel?: string | null;
   roomLoading: boolean;
   sendError: string | null;
   sending: boolean;
@@ -292,29 +280,13 @@ const props = defineProps<{
 }>();
 
 const selectedGif = ref<RoomGif | null>(null);
-const addMenuOpen = ref(false);
-const addMenuWrap = ref<HTMLElement | null>(null);
-// The "+" menu closes on a click anywhere else or on Escape, wherever focus is.
-function closeAddMenuOnOutsidePointer(event: PointerEvent) {
-  if (addMenuWrap.value && !addMenuWrap.value.contains(event.target as Node)) addMenuOpen.value = false;
-}
-function closeAddMenuOnEscape(event: KeyboardEvent) {
-  if (event.key === "Escape") addMenuOpen.value = false;
-}
-watch(addMenuOpen, open => {
-  if (typeof document === "undefined") return;
-  const method = open ? "addEventListener" : "removeEventListener";
-  document[method]("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true);
-  document[method]("keydown", closeAddMenuOnEscape as EventListener, true);
-});
-onBeforeUnmount(() => {
-  if (typeof document === "undefined") return;
-  document.removeEventListener("pointerdown", closeAddMenuOnOutsidePointer as EventListener, true);
-  document.removeEventListener("keydown", closeAddMenuOnEscape as EventListener, true);
-});
+const addMenu = ref<InstanceType<typeof RoomComposerAddMenu> | null>(null);
+const gifPicker = ref<InstanceType<typeof RoomGifPicker> | null>(null);
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
+  /** Files pasted into the input; the room stages them like dropped files. */
+  "stage-attachments": [files: File[]];
   "open-add-agent": [];
   "open-ask-agent": [];
   "remove-attachment": [uploadId: string];
@@ -510,10 +482,34 @@ const correctionOffer = computed(() =>
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
     : null);
+const roomHandle = computed(() => {
+  const label = (props.roomLabel || props.roomIdentifier || "").trim().replace(/^#/, "");
+  return label ? `#${label}` : "room";
+});
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
-  return props.roomIdentifier ? "Message room" : "Choose a room before writing";
+  return props.roomIdentifier ? `Message ${roomHandle.value}` : "Choose a room before writing";
 });
+const composerPlaceholder = computed(() =>
+  props.roomIdentifier && !props.roomLoading ? `Message ${roomHandle.value} · @ to mention · / for commands` : undefined);
+const canAttach = computed(() => Boolean(!props.roomLoading && !props.sending && props.roomIdentifier && !props.attaching));
+
+// A suggested reply comes from an open Needs you request in this room. It shows
+// as faint text in the empty input until it is used (Tab) or dismissed (Escape).
+const readSuggestedReply = inject(composerSuggestedReplyKey, null);
+const visibleSuggestion = computed(() => {
+  const suggestion = readSuggestedReply?.(props.roomIdentifier) ?? null;
+  return suggestion && !suggestionSettled(suggestion.recordId) ? suggestion : null;
+});
+const suggestionVisible = computed(() => Boolean(visibleSuggestion.value && !draft.value && !props.replyTo
+  && !props.roomLoading && props.roomIdentifier));
+const suggestionDescription = computed(() => {
+  const suggestion = visibleSuggestion.value;
+  if (!suggestion) return "";
+  const text = /[.!?…]$/.test(suggestion.text) ? suggestion.text : `${suggestion.text}.`;
+  return `Suggested reply to ${suggestion.from}: ${text} Press Tab to use it, or Escape to dismiss it.`;
+});
+const suggestionDescriptionId = `desktop-composer-suggestion-${Math.random().toString(36).slice(2, 10)}`;
 const replyHeading = computed(() => {
   const target = props.replyTo;
   if (!target) return "";
@@ -692,17 +688,86 @@ function insertNewlineAtCursor(): void {
   });
 }
 
+const mac = isMacPlatform();
 function handleComposerKey(event: KeyboardEvent): void {
   if (event.isComposing) return;
+  if (isAttachShortcut(event)) {
+    event.preventDefault();
+    requestAttachments();
+    return;
+  }
   if (slash.handleKey(event)) {
     mentionOpen.value = false;
     return;
   }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     moveMentionSelection(event, event.key === "ArrowDown" ? 1 : -1);
+  } else if (event.key === "Tab" && !mentionOpen.value && useSuggestion(event)) {
+    return;
+  } else if (event.key === "Escape" && !mentionOpen.value && suggestionVisible.value && !event.defaultPrevented) {
+    event.preventDefault();
+    settleSuggestion(visibleSuggestion.value!.recordId);
   } else if (event.key === "Tab" || event.key === "Escape") {
     mentionOpen.value = false;
   } else if (event.key === "Enter") handleEnterKey(event);
+}
+
+function isAttachShortcut(event: KeyboardEvent): boolean {
+  return event.key.toLowerCase() === "u" && !event.altKey && !event.shiftKey
+    && (mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
+}
+
+/** Tab takes the suggested reply once, only into an empty input with no menu or list open. */
+function useSuggestion(event: KeyboardEvent): boolean {
+  const suggestion = visibleSuggestion.value;
+  if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || !suggestion || !suggestionVisible.value
+    || suggestionsOpen.value || addMenu.value?.isOpen()) return false;
+  event.preventDefault();
+  settleSuggestion(suggestion.recordId);
+  setDraftAndFocus(suggestion.text);
+  return true;
+}
+
+function setDraftAndFocus(text: string): void {
+  draft.value = text;
+  handleDraftInput();
+  void nextTick(() => {
+    syncTextareaHeight();
+    const input = textareaElement.value;
+    input?.focus();
+    input?.setSelectionRange(text.length, text.length);
+  });
+}
+
+function focusInput(): void {
+  void nextTick(() => textareaElement.value?.focus());
+}
+
+function requestAttachments(): void {
+  if (canAttach.value) emit("pick-attachments");
+}
+
+/** Pasted images and files take the same path as dropped ones; pasted text stays text. */
+function handlePaste(event: ClipboardEvent): void {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (!files.length || !props.roomIdentifier || props.roomLoading) return;
+  event.preventDefault();
+  emit("stage-attachments", files);
+}
+
+function handleAddMenuSelect(item: RoomComposerAddMenuItemId): void {
+  if (item === "attach") {
+    requestAttachments();
+    focusInput();
+  } else if (item === "gif") {
+    void gifPicker.value?.open();
+  } else if (item === "task") {
+    // The draft, if any, becomes the task title; nothing typed is lost.
+    const text = draft.value.trimStart();
+    setDraftAndFocus(/^\/task(\s|$)/.test(text) ? text : `/task ${text}`);
+  } else {
+    emit("open-add-agent");
+  }
 }
 
 function handleEnterKey(event: KeyboardEvent): void {

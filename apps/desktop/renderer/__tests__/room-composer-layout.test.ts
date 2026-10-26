@@ -54,11 +54,12 @@ after(async () => {
   if (originals.window) Object.defineProperty(globalThis, 'window', originals.window); else Reflect.deleteProperty(globalThis, 'window');
 });
 
-async function mountInputRow(t: { after: (fn: () => void) => void }, gifEnabled: boolean) {
+async function mountInputRow(t: { after: (fn: () => void) => void }, gifEnabled: boolean, provides: Array<[unknown, unknown]> = []) {
   ipc.room.getExpressions = async () => ({ enabled: gifEnabled, gif_provider_configured: true });
   const props = reactive({ attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: `layout-${gifEnabled}`, participants: [], pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: 'room-a', roomLoading: false, sendError: null, sending: false });
   const root = node('root');
   const app = renderer.createApp({ render: () => h(Composer, props) });
+  for (const [key, value] of provides) app.provide(key as any, value);
   app.mount(root);
   t.after(() => app.unmount());
   await flush();
@@ -75,18 +76,44 @@ function gridTrackCount(): number {
 }
 
 for (const gifEnabled of [true, false]) {
-  test(`room composer input row keeps one grid row with the GIF switch ${gifEnabled ? 'on' : 'off'}`, async t => {
+  test(`room composer bar holds only "+", the input and send with the GIF switch ${gifEnabled ? 'on' : 'off'}`, async t => {
     const row = await mountInputRow(t, gifEnabled);
     const children = elements(row);
-    assert.deepEqual(children.map(child => child.props['data-testid']), ['desktop-composer-add-agent', 'desktop-composer-input', 'desktop-composer-actions']);
+    assert.deepEqual(children.map(child => child.props['data-testid'] ?? classOf(child)), ['desktop-composer-add-agent', 'desktop-composer-field', 'desktop-composer-send']);
     assert.equal(children.length, gridTrackCount(), 'each input-row child has its own grid track');
-
-    const actions = elements(children[2]).map(child => child.props['data-testid'] ?? classOf(child));
-    assert.deepEqual(actions, gifEnabled
-      ? ['desktop-composer-attach', 'room-gif-trigger', 'desktop-composer-send']
-      : ['desktop-composer-attach', 'desktop-composer-send']);
+    const field = elements(children[1]).map(child => child.props['data-testid']);
+    assert.deepEqual(field, ['desktop-composer-input']);
+    assert.equal(all(row).some(n => classOf(n).includes('room-gif-trigger') || n.props['data-testid'] === 'desktop-composer-attach'), false,
+      'GIF and attach live in the "+" menu');
   });
 }
+
+test('the suggested reply is faint text under the input, described to screen readers, with no label or key chip', async t => {
+  const { composerSuggestedReplyKey } = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/composer-suggested-reply.ts');
+  const row = await mountInputRow(t, false, [[composerSuggestedReplyKey, () => ({ recordId: 'layout-ghost', from: 'Ada', text: 'Ship it now.' })]]);
+  const field = elements(row)[1];
+  const [ghost, input, description] = elements(field);
+  assert.equal(ghost.props['data-testid'], 'desktop-composer-suggestion');
+  assert.equal(ghost.props['aria-hidden'], 'true');
+  assert.equal(all(ghost).map(n => n.text).join(''), 'Ship it now.');
+  assert.equal(elements(ghost).length, 0, 'no label, no Tab chip');
+  assert.equal(input.props.placeholder, undefined, 'the placeholder gives way to the suggestion');
+  assert.equal(input.props['aria-describedby'], description.props.id);
+  assert.match(all(description).map(n => n.text).join(''), /^Suggested reply to Ada: Ship it now\. Press Tab to use it, or Escape to dismiss it\.$/);
+});
+
+test('"+" and send are the same size', () => {
+  const css = readFileSync(new URL('../src/styles/composer-agent-reasoning/composer-controls.css', import.meta.url), 'utf8');
+  const agent = readFileSync(new URL('../src/styles/agent-management.css', import.meta.url), 'utf8');
+  assert.match(css, /grid-template-columns:\s*34px minmax\(0, 1fr\) 34px;/);
+  const send = css.match(/\.desktop-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
+  const plus = agent.match(/\n\.desktop-composer-add-agent\s*\{([^}]*)\}/)?.[1] ?? '';
+  for (const rule of [send, plus]) {
+    assert.match(rule, /width:\s*34px;/);
+    assert.match(rule, /height:\s*34px;/);
+    assert.match(rule, /border-radius:\s*10px;/);
+  }
+});
 
 test('GIF trigger matches the attach button box and has no stray margin', () => {
   const picker = readFileSync(new URL('../src/components/desktop/content/room-chat/RoomGifPicker.vue', import.meta.url), 'utf8');
