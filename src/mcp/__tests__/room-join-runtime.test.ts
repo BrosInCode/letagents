@@ -35,6 +35,7 @@ test("a join with session_mode live fails with the 0.12.46 removal message, and 
   for (const value of [undefined, null, "", "current", "CURRENT"]) {
     assert.equal(normalizeJoinSessionMode(value), "current");
   }
+  assert.throws(() => normalizeJoinSessionMode("foo"), /Unknown session_mode 'foo'\. Use 'current'/);
 });
 
 test("a current join answers with the room and starts no local agent process", async () => {

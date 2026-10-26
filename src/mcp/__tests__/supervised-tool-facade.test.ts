@@ -341,10 +341,11 @@ test("interleaved supervised tools retain independent exact room authority", asy
   assert.deepEqual(observed, ["source-room", "destination-room", "source-room"]);
 });
 
-test("every registered read-only tool is classified for safe supervised redrive", async () => {
+test("every read-only tool, and one an older pinned runtime may still offer, is classified for safe supervised redrive", async () => {
   for (const toolName of [
     "get_current_room", "check_repo", "check_repo_visibility", "read_messages", "wait_for_messages",
     "get_board", "get_board_settings", "get_room_artifacts", "get_room_events", "list_board_intents",
+    // status_local_codex_session: removed in 0.12.46, still offered by an older pinned runtime.
     "get_onboarding_status", "status_local_codex_session", "rental_list_requests",
   ]) {
     let mutation: boolean | null = null;

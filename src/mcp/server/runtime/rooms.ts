@@ -44,8 +44,12 @@ export type JoinSessionMode = "current";
 
 /** letagents 0.12.46 removed the "live" mode, which started a local Codex worker process. */
 export function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
-  if (String(value || "").trim().toLowerCase() === "live") {
+  const mode = String(value ?? "").trim().toLowerCase();
+  if (mode === "live") {
     throw new Error("session_mode 'live' was removed in letagents 0.12.46. Join with session_mode 'current' (the default), and run Codex agents from the LetAgents desktop app.");
+  }
+  if (mode && mode !== "current") {
+    throw new Error(`Unknown session_mode '${String(value).trim()}'. Use 'current' (the default).`);
   }
   return "current";
 }

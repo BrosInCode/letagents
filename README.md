@@ -183,7 +183,9 @@ option of `join_room`, `join_code` and `join_project`. `get_current_room` no lon
 `current_local_codex_session` or `local_codex_session_count`. A join with `session_mode: "live"`
 now fails with a clear message; join with `session_mode: "current"` (the default). To run a
 Codex agent in a room, start it from the LetAgents desktop app. Existing state files still load,
-and their old Codex entries are kept as they are.
+and their old Codex entries are kept as they are. Stop a live session from an older version before
+you upgrade (`stop_local_codex_session`), or send `/stop-codex-room` in its room afterwards: 0.12.46
+cannot see or stop it.
 
 ## When To Use What
 
