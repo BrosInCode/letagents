@@ -316,9 +316,9 @@ function pageTuples(rows: readonly CandidateRow[], roomColumn: unknown, numberCo
   return sql`(${roomColumn}, ${numberColumn}) IN (${sql.join(rows.map((row) => sql`(${row.room_id}, ${row.number})`), sql`, `)})`;
 }
 
-async function readPresence(rows: readonly CandidateRow[]) {
+async function readAgents(rows: readonly CandidateRow[]) {
   const withAgent = rows.filter((row) => row.assignee_agent_key);
-  const result = new Map<string, { provider: string | null; display_name: string; status: string; status_text: string | null; last_heartbeat_at: string }>();
+  const result = new Map<string, { provider: string | null; display_name: string | null; status: string | null; status_text: string | null; last_heartbeat_at: string | null }>();
   if (!withAgent.length) return result;
   const p = room_agent_presence;
   const found = await db.execute(sql`
@@ -336,6 +336,25 @@ async function readPresence(rows: readonly CandidateRow[]) {
       status: String(row.status),
       status_text: (row.status_text as string | null) ?? null,
       last_heartbeat_at: timestampString(row.last_heartbeat_at),
+    });
+  }
+  // Presence is removed when a session ends. Its saved identity still owns the
+  // task, but must not supply a live status or heartbeat.
+  const missing = withAgent.filter(row => !result.get(`${row.room_id}\n${row.assignee_agent_key}`)?.provider);
+  if (!missing.length) return result;
+  const s = room_agent_sessions;
+  const sessions = await db.execute(sql`
+    SELECT DISTINCT ON (${s.room_id}, ${s.agent_key})
+           ${s.room_id} AS room_id, ${s.agent_key} AS agent_key, ${s.runtime} AS runtime, ${s.ide_label} AS ide_label
+      FROM ${s}
+     WHERE (${s.room_id}, ${s.agent_key}) IN (${sql.join(missing.map(row => sql`(${row.room_id}, ${row.assignee_agent_key})`), sql`, `)})
+     ORDER BY ${s.room_id}, ${s.agent_key}, ${s.created_at} DESC, ${s.session_id} DESC
+  `);
+  for (const row of sessions.rows as Array<Record<string, unknown>>) {
+    const key = `${row.room_id}\n${row.agent_key}`;
+    result.set(key, {
+      ...(result.get(key) ?? { display_name: null, status: null, status_text: null, last_heartbeat_at: null }),
+      provider: row.runtime && row.runtime !== "unknown" ? String(row.runtime) : (row.ide_label as string | null) ?? null,
     });
   }
   return result;
@@ -532,7 +551,7 @@ async function buildCards(
   if (!rows.length) return [];
   const pageRoomIds = [...new Set(rows.map((row) => row.room_id))];
   const [presence, mentions] = await Promise.all([
-    readPresence(rows),
+    readAgents(rows),
     readMentions(rows),
     fillRequestCache(cache, rows, login),
   ]);

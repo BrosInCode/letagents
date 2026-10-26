@@ -74,8 +74,7 @@ GitHub account when they connect, so each member acts as themselves. Claude conn
 the device, so the URL must be reachable from the internet.
 
 **What differs from the npm package.** There is no local folder, so auto-join, workspace capture, `check_repo`,
-`initialize_repo`, local Codex sessions, device-auth tools and rental provider tools are not offered, and
-`session_mode: "live"` is refused. Each session has its own room and worker state, saved on the server; after an idle
+`initialize_repo`, device-auth tools and rental provider tools are not offered. Each session has its own room and worker state, saved on the server; after an idle
 session is deleted (30 minutes without a request), join and register again. Limits and details: `docs/ticket-connectors.md`, "Remote MCP endpoint".
 
 **Deploy note (self-hosted).** The reverse proxy must forward `/mcp` with response buffering off, no gzip on

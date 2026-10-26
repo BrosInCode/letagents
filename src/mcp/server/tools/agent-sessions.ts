@@ -1,19 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import {
-  scheduleCodexRuntimeStreamBridgeBind,
-} from "../../codex-session.js";
-import {
-  getManagedAgentProvider,
-  toManagedAgentStartResponse,
-} from "../../managed-agent-providers.js";
-import { encodeRoomIdPath, looksLikeInviteCode, normalizeInviteCode, type JoinedVia } from "../../room-id.js";
+import { encodeRoomIdPath } from "../../room-id.js";
 import {
   agentInstanceUuid,
-  RepoRoomAuthRequiredError,
   apiCall,
   agentSessionCredentials,
-  getCurrentRoom,
   detectAgentIdeLabel,
   detectAgentRuntimeLabel,
   endStoredAgentSession,
@@ -25,20 +16,13 @@ import {
   getTargetRoomId,
   ensureLocalWorkerAgentSession,
   isLocalRoomStorageEnabled,
-  joinRoomIdentifier,
   resolveLocalRoomStorageIdentifiers,
   resolveClientRequestedBase,
   saveAgentSession,
   toPublicAgentSession,
-  toPublicRoomState,
-  toRepoRoomAuthRequiredResult,
-  withAgentIdentity,
   resolveWorkerToolIdentity,
 } from "../runtime.js";
-import {
-  requireValidWorkerBearerRuntime,
-  workerModeDisabledToolResult,
-} from "../runtime/worker-bearer.js";
+import { requireValidWorkerBearerRuntime } from "../runtime/worker-bearer.js";
 import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
 import { readAdoptedTaskLeases, recoverMcpWorker, registerMcpWorker, type AdoptedTaskLease } from "../runtime/worker-handles.js";
 import { holdProcessConnection, releaseProcessConnection } from "../runtime/process-connection.js";
@@ -333,7 +317,6 @@ export function registerAgentSessionTools(server: McpServer): void {
           supervisor_context_cwd: supervisorBinding.supervisorContextCwd,
         });
       }
-      scheduleCodexRuntimeStreamBridgeBind(session);
       holdProcessConnection(session);
 
       return {
@@ -501,191 +484,6 @@ export function registerAgentSessionTools(server: McpServer): void {
                 agent_session: result.agent_session ?? toPublicAgentSession(endedLocalSession),
                 delivery_session: result.delivery_session ?? null,
                 local_state: endedLocalSession ? "ended" : "unchanged",
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
-
-  // -- local Codex live sessions ---------------------------------------------
-
-  server.tool(
-    "start_local_codex_session",
-    "Start or reuse a detached local Codex live session for a LetAgents room. The worker will join the room, keep polling, contribute in discussion, and do repo work from the current working directory when asked.",
-    {
-      room: z
-        .string()
-        .describe("Invite code or room name to run as a detached local Codex worker."),
-      cwd: z
-        .string()
-        .optional()
-        .describe("Working directory for repo work. Defaults to the current process directory."),
-      stop_phrase: z
-        .string()
-        .optional()
-        .describe("Exact room message text that tells the worker to stop. Defaults to /stop-codex-room."),
-      max_minutes: z
-        .number()
-        .optional()
-        .describe("Optional hard stop in minutes. Defaults to 0, which means run until stopped."),
-    },
-    async ({ room, cwd, stop_phrase, max_minutes }) => {
-      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
-      if (disabled) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
-        };
-      }
-      const joinedVia: JoinedVia = looksLikeInviteCode(room) ? "join_code" : "join_room";
-
-      try {
-        const joined = await joinRoomIdentifier(room, joinedVia);
-        const provider = getManagedAgentProvider("codex");
-        const liveSession = await provider.startLocalSession({
-          room_id: joined.room.room_id,
-          room_identifier: joinedVia === "join_code" ? normalizeInviteCode(room) : room.trim(),
-          room_code: joined.room.code ?? null,
-          room_display_name: joined.room.display_name ?? null,
-          joined_via: joinedVia,
-          cwd: cwd || process.cwd(),
-          stop_phrase,
-          max_minutes,
-        });
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                await withAgentIdentity({
-                  success: true,
-                  room: toPublicRoomState(joined.room),
-                  ...toManagedAgentStartResponse(provider, liveSession),
-                }),
-                null,
-                2
-              ),
-            },
-          ],
-        };
-      } catch (error) {
-        if (error instanceof RepoRoomAuthRequiredError) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(toRepoRoomAuthRequiredResult(error), null, 2),
-              },
-            ],
-          };
-        }
-
-        throw error;
-      }
-    }
-  );
-
-  server.tool(
-    "status_local_codex_session",
-    "Inspect the current detached local Codex live session, or a specific one by session_id.",
-    {
-      session_id: z
-        .string()
-        .optional()
-        .describe("Optional session id. Defaults to the current local Codex live session."),
-    },
-    async ({ session_id }) => {
-      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
-      if (disabled) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
-        };
-      }
-      const provider = getManagedAgentProvider("codex");
-      const status = await provider.inspectLocalSession(session_id, getCurrentRoom()?.room_id);
-      if (!status) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ success: false, error: "No local Codex live session found." }, null, 2),
-            },
-          ],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                success: true,
-                session: provider.toPublicLiveSession(status.session),
-                server_reachable: status.server_reachable,
-                thread_status: status.thread_status,
-                turn_status: status.turn_status,
-                recent_items: status.recent_items,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
-
-  server.tool(
-    "stop_local_codex_session",
-    "Stop the current detached local Codex live session, or a specific one by session_id.",
-    {
-      session_id: z
-        .string()
-        .optional()
-        .describe("Optional session id. Defaults to the current local Codex live session."),
-      shutdown_server: z
-        .boolean()
-        .optional()
-        .describe("If true, also terminate the spawned codex app-server process when possible."),
-    },
-    async ({ session_id, shutdown_server }) => {
-      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
-      if (disabled) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
-        };
-      }
-      const provider = getManagedAgentProvider("codex");
-      const stopped = await provider.stopLocalSession({
-        session_id,
-        room_id: getCurrentRoom()?.room_id,
-        shutdown_server,
-      });
-
-      if (!stopped) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ success: false, error: "No local Codex live session found." }, null, 2),
-            },
-          ],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                success: true,
-                session: provider.toPublicLiveSession(stopped),
               },
               null,
               2

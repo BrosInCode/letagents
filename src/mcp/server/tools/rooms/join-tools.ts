@@ -13,9 +13,9 @@ import {
 import { jsonToolResponse } from "./response.js";
 
 const joinSessionModeSchema = z
-  .enum(["live", "current"])
+  .string()
   .optional()
-  .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker.");
+  .describe("Only 'current' (the default), a normal inline join. The 'live' mode was removed in letagents 0.12.46; run Codex agents from the LetAgents desktop app.");
 
 async function createInviteRoomResponse() {
   const created = await createInviteRoom();

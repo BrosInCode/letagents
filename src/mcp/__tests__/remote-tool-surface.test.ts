@@ -70,11 +70,11 @@ function fakeScope(): McpSessionScope {
   };
 }
 
-test("a remote session cannot start a live local agent session", () => {
-  assert.equal(normalizeJoinSessionMode("live"), "live", "stdio keeps live sessions");
+test("no session, local or remote, can start a live local agent session", () => {
+  assert.throws(() => normalizeJoinSessionMode("live"), /removed in letagents 0\.12\.46/);
   runInSessionScope(fakeScope(), () => {
     assert.equal(normalizeJoinSessionMode("current"), "current");
-    assert.throws(() => normalizeJoinSessionMode("LIVE"), /not available over the remote MCP endpoint/);
+    assert.throws(() => normalizeJoinSessionMode("LIVE"), /removed in letagents 0\.12\.46/);
   });
 });
 

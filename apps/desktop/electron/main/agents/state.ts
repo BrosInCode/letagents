@@ -82,7 +82,8 @@ function sleepSync(ms: number): void {
  * desktop does not own is kept as it is. The Claude and Cursor live-session
  * caches belonged only to the retired Electron engine and are dropped on
  * load, so the next write cannot revive them. The Codex live-session keys
- * also serve the package's `start_local_codex_session` tools: only the
+ * also served the package's `start_local_codex_session` tools, which letagents
+ * 0.12.46 removed; an older package version may still use them, so only the
  * entries the retired engine owned (marked `desktop_managed` or carrying a
  * `delivery_mode`) are dropped.
  */

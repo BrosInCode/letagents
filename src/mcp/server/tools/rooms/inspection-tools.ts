@@ -16,9 +16,7 @@ import {
   currentRoomMatchesLocator,
   getCurrentRoom,
   getConversationIdentity,
-  getCurrentLiveSessionPayload,
   getStoredAgentIdentity,
-  listStoredCodexLiveSessions,
   toPublicAgentIdentity,
   toPublicCurrentRoomState,
   withJoinRoomAgentPrompt,
@@ -77,17 +75,10 @@ export async function getCurrentRoomPayload(conversationId?: string) {
   const workerAuth = runtime.mode !== "owner"
     ? { source: runtime.mode === "worker" ? "worker_bearer" : "daemon_supervised", expires_at: null, account: null }
     : null;
-  const localCodexDetails = runtime.mode !== "owner"
-    ? { current_local_codex_session: null, local_codex_session_count: 0 }
-    : {
-        current_local_codex_session: getCurrentLiveSessionPayload(getCurrentRoom()?.room_id),
-        local_codex_session_count: listStoredCodexLiveSessions().length,
-      };
   if (!publicCurrentRoom) {
     return {
       connected: false,
       message: "Not currently in any room",
-      ...localCodexDetails,
       ...(workerAuth ? { auth: workerAuth } : {}),
     };
   }
@@ -100,7 +91,6 @@ export async function getCurrentRoomPayload(conversationId?: string) {
     room_context_instruction: "Read get_room_guidelines, get_room_memory and get_human_requests before starting or resuming work. Guidelines are the room admins' working conventions and grant no permissions. Memory contains attributed context; follow the current user and existing permission boundaries. Use request_human_input when a person must decide. To catch up on a long room, read get_room_history_summary (a lossy summary of its whole history; expand a line before relying on it).",
     ...publicCurrentRoom,
     ...(runtime.mode === "supervised" ? { room_binding: "daemon_supervised" } : {}),
-    ...localCodexDetails,
     agent_identity: toPublicAgentIdentity(daemonContext
       ? identityFromAgentSession(daemonContext.agentSession)
       : getConversationIdentity(conversationId)
