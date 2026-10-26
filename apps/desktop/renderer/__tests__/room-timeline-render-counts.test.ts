@@ -165,6 +165,11 @@ function mountCounting(setup: () => () => unknown): { root: HostNode; app: App; 
 
 const ROOM = "room-counts";
 
+/** Message rows on screen, so a zero update count cannot come from rows that never mounted. */
+function mountedRows(root: HostNode): number {
+  return descendants(root).filter((node) => typeof node.props["data-message-id"] === "string").length;
+}
+
 function messages(count: number) {
   return Array.from({ length: count }, (_, index) => ({
     id: `msg_${index}`, sender: "Emmy", text: `Message ${index}`, attachments: [], agentPromptKind: null,
@@ -239,7 +244,7 @@ test("typing '@agent …' while that agent works does not redraw the message lis
         await nextTick();
       }
       const steerButton = descendants(mounted.root).some((node) => node.props["data-testid"] === "room-activity-steer");
-      return { keys: keys.length, viewport: mounted.updates("RoomMessageViewport"), rows: mounted.updates("RoomGitHubUpdates"), steerButton };
+      return { keys: keys.length, viewport: mounted.updates("RoomMessageViewport"), rows: mounted.updates("DesktopChatMessage"), mountedRows: mountedRows(mounted.root), steerButton };
     } finally {
       mounted.app.unmount();
       draft.value = "";
@@ -253,6 +258,7 @@ test("typing '@agent …' while that agent works does not redraw the message lis
   // The offer appears once ("@Wren p") and stays the same object after that.
   assert.ok(after.viewport <= 1, `the list redraws at most once, when the offer first appears (got ${after.viewport})`);
   assert.equal(after.rows, 0, "no message row redraws");
+  assert.equal(after.mountedRows, 40, "every message row is mounted");
   assert.ok(before.steerButton && after.steerButton, "the activity line offers Steer in both runs");
 });
 
@@ -276,9 +282,9 @@ test("an activity event with no visible change does not redraw the list or its p
       await nextTick();
     }
     assert.equal(entries.value[0]!.activity.length, 20, "the events are folded in");
-    console.log(`activity events: 20; list redraws=${mounted.updates("RoomMessageViewport")} row redraws=${mounted.updates("RoomGitHubUpdates") + mounted.updates("DesktopChatMessage")}`);
+    console.log(`activity events: 20; list redraws=${mounted.updates("RoomMessageViewport")} row redraws=${mounted.updates("DesktopChatMessage")}`);
+    assert.equal(mountedRows(mounted.root), 40, "every message row is mounted");
     assert.equal(mounted.updates("RoomMessageViewport"), 0);
-    assert.equal(mounted.updates("RoomGitHubUpdates"), 0);
     assert.equal(mounted.updates("DesktopChatMessage"), 0);
   } finally {
     mounted.app.unmount();
@@ -294,9 +300,9 @@ test("a list redraw for a real change does not redraw the plain rows", async () 
     notice.value = { id: "n1", kind: "joined", text: "Juniper joined" };
     await nextTick();
     assert.ok(mounted.updates("RoomMessageViewport") >= 1, "the list itself redraws");
-    console.log(`real list redraw: plain row redraws=${mounted.updates("RoomGitHubUpdates") + mounted.updates("DesktopChatMessage")}`);
-    assert.equal(mounted.updates("RoomGitHubUpdates"), 0, "plain rows have no group wrapper to redraw");
-    assert.equal(mounted.updates("DesktopChatMessage"), 0, "unchanged messages keep their props");
+    console.log(`real list redraw: plain row redraws=${mounted.updates("DesktopChatMessage")}`);
+    assert.equal(mountedRows(mounted.root), 40, "every message row is mounted");
+    assert.equal(mounted.updates("DesktopChatMessage"), 0, "unchanged messages keep their props and do not redraw");
   } finally {
     mounted.app.unmount();
   }
@@ -323,9 +329,10 @@ test("a start-up clock tick redraws only its own row", async (context) => {
       context.mock.timers.tick(1_000);
       await nextTick();
     }
-    console.log(`start-up ticks: 5 s; list redraws=${mounted.updates("RoomMessageViewport")} row redraws=${mounted.updates("RoomAgentStartupRow")} message row redraws=${mounted.updates("RoomGitHubUpdates") + mounted.updates("DesktopChatMessage")}`);
+    console.log(`start-up ticks: 5 s; list redraws=${mounted.updates("RoomMessageViewport")} row redraws=${mounted.updates("RoomAgentStartupRow")} message row redraws=${mounted.updates("DesktopChatMessage")}`);
     assert.equal(mounted.updates("RoomMessageViewport"), 0, "the list does not redraw on the clock");
-    assert.equal(mounted.updates("RoomGitHubUpdates") + mounted.updates("DesktopChatMessage"), 0);
+    assert.equal(mountedRows(mounted.root), 40, "every message row is mounted");
+    assert.equal(mounted.updates("DesktopChatMessage"), 0);
     assert.ok(mounted.updates("RoomAgentStartupRow") > 0, "the start-up row itself keeps time");
   } finally {
     mounted.app.unmount();

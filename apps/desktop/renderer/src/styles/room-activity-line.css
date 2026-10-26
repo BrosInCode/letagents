@@ -34,9 +34,10 @@
   padding: 0 10px 0 6px;
   border: 0;
   border-radius: 999px;
-  /* No backdrop blur: the sheen below repaints every frame, and a blur under
-     it would be redrawn with it. At 92% the blur showed almost nothing. */
-  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  /* Opaque, with no backdrop blur: the sheen below repaints every frame, and
+     a blur under it would be redrawn with it. The old 92% fill under a 12px
+     blur showed only a faint even tint, so a solid fill looks the same. */
+  background: var(--bg-elevated);
   box-shadow: 0 0 0 1px var(--border), 0 4px 14px rgba(0, 0, 0, 0.25);
   color: var(--text-secondary);
   font: inherit;
