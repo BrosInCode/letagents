@@ -106,8 +106,10 @@ test("joins close together become one line: queued joins merge, and a join soon 
   notices.push(join("Sable"));
   assert.equal(shown(), "Juniper and 2 others joined", "a join just after the line appeared joins it in place");
   assert.equal(notices.waiting().length, 0);
+  timers.advance(ACTIVITY_NOTICE_MS - 1);
+  assert.equal(shown(), "Juniper and 2 others joined", "the longer line gets its own full time");
 
-  timers.advance(ACTIVITY_NOTICE_MS);
+  timers.advance(1);
   notices.push(join("Wren"));
   timers.advance(ACTIVITY_JOIN_MERGE_MS);
   notices.push(join("Birch"));
@@ -164,6 +166,9 @@ test("a GitHub update stays off the line while someone writes, and leaves when i
   assert.equal(shown(), "github:msg_1", "the draft is gone: the update shows");
   notices.setEligible(item => item.kind !== "github");
   assert.equal(shown(), null, "writing again puts it away at once");
+  notices.setEligible(() => true);
+  assert.equal(shown(), "github:msg_1", "the draft is cleared before the update expires: it comes back");
+  notices.setEligible(item => item.kind !== "github");
   notices.remove("github:msg_1");
   notices.setEligible(() => true);
   assert.equal(shown(), null, "an expired update never comes back");
@@ -176,6 +181,13 @@ test("a Steer confirmation shows before anything else, and the notice it covered
   assert.equal(shown(), "steered:1");
   timers.advance(ACTIVITY_NOTICE_MS);
   assert.equal(shown(), "Marlow left");
+
+  // Two Steers in a row: the older confirmation is not shown again.
+  timers.advance(ACTIVITY_NOTICE_MS);
+  notices.pushFirst({ kind: "steered", id: "steered:2", displayName: "Juniper" });
+  notices.pushFirst({ kind: "steered", id: "steered:3", displayName: "Kestrel" });
+  timers.advance(ACTIVITY_NOTICE_MS);
+  assert.equal(shown(), null);
 });
 
 test("composerDrafting: text, attachments or a reply count as writing; spaces do not", () => {
@@ -395,4 +407,17 @@ test("a pointer or keyboard focus on the line holds its notice through the room'
   assert.match(line, /@pointerenter="hold\(true\)"\s+@pointerleave="hold\(false\)"\s+@focusin="hold\(true\)"\s+@focusout="onFocusOut"/);
   assert.match(viewport, /@hold="\$emit\('activity-hold', \$event\)"/);
   assert.match(chat, /@activity-hold="\(held\) => held \? roomActivity\.pause\(\) : roomActivity\.resume\(\)"/);
+});
+
+test("each reply anchor carries what the flight measures, there is one per agent, and a waiting row shows no elapsed time", () => {
+  const line = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/RoomActivityLine.vue", import.meta.url)), "utf8");
+  // captureWork (shared/ui/room-message-motion.ts) needs a pulse, a name and a summary inside the anchor.
+  assert.match(line, /class="room-activity-anchor"[\s\S]*?><span class="room-activity-pulse"><\/span><strong><\/strong><span class="room-activity-copy"><span><\/span><\/span><\/span>/);
+  // With the list open, its rows are the only anchors, so each agent has exactly one.
+  assert.match(line, /<template v-if="!single && !listOpen">/);
+  assert.match(line, /:data-motion-work="single && !single\.awaitingRoomTurn && !listOpen \? '' : undefined"/);
+  assert.match(line, /work\.waiting \? "" : elapsedLabel\(work\.startedAt, now\)/);
+  const motion = readFileSync(fileURLToPath(new URL("../../../../shared/ui/room-message-motion.ts", import.meta.url)), "utf8");
+  assert.match(motion, /'\.room-local-agent-work-pulse, \.room-activity-pulse'/);
+  assert.match(motion, /'\.room-local-agent-work-copy > span, \.room-activity-copy > span'/);
 });

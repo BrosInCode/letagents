@@ -4,6 +4,7 @@
   <div
     ref="root"
     class="room-activity-line"
+    tabindex="-1"
     data-testid="room-activity-line"
     @pointerenter="hold(true)"
     @pointerleave="hold(false)"
@@ -34,7 +35,8 @@
         <!-- The reply's flight reads these class names (room-message-motion.ts captureWork). -->
         <span class="room-activity-pulse"><ActivityOrb :state="orbStateForWork(work)" /></span>
         <span class="room-activity-row-copy room-activity-copy"><strong>{{ work.displayName }}</strong><span data-testid="room-local-agent-work-echo">{{ work.summary }}</span></span>
-        <span class="room-activity-row-time">{{ elapsedLabel(work.startedAt, now) }}</span>
+        <!-- A row that waits to try again carries its due time, not a start: it shows no elapsed time. -->
+        <span class="room-activity-row-time">{{ work.waiting ? "" : elapsedLabel(work.startedAt, now) }}</span>
         <span class="room-activity-row-actions">
           <button
             v-if="work.waitsForBackgroundWork"
@@ -143,7 +145,7 @@
         data-kind="live"
         :aria-expanded="expanded"
         :aria-label="liveLabel"
-        :data-motion-work="single && !single.awaitingRoomTurn ? '' : undefined"
+        :data-motion-work="single && !single.awaitingRoomTurn && !listOpen ? '' : undefined"
         :data-motion-session="single?.agentSessionId"
         :data-motion-agent="single?.agentKey"
         :data-motion-after="single?.sourceMessageId"
@@ -160,7 +162,8 @@
         </span>
         <ChevronUp class="room-activity-caret" :size="13" aria-hidden="true" />
         <!-- Each agent's reply flies out of the line, so every agent has an anchor here, even when they are counted. -->
-        <template v-if="!single">
+        <!-- While the list is open, its rows are the anchors: one per agent, so the flight finds it. -->
+        <template v-if="!single && !listOpen">
           <span
             v-for="work in pill.work"
             :key="work.id"
@@ -170,7 +173,7 @@
             :data-motion-agent="work.agentKey"
             :data-motion-after="work.sourceMessageId"
             aria-hidden="true"
-          ></span>
+          ><span class="room-activity-pulse"></span><strong></strong><span class="room-activity-copy"><span></span></span></span>
         </template>
       </button>
       <div
@@ -194,7 +197,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, ChevronUp, GitBranch, GitPullRequest, MessageSquare } from "@lucide/vue";
 import { typingLabel, typingSentence } from "../../../../../../../../shared/room-typing.mjs";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
@@ -255,6 +258,23 @@ watch(listOpen, (open) => {
   ticker = setInterval(() => { now.value = Date.now(); }, 1_000);
 });
 watch(() => pill.value?.kind, (kind) => { if (kind !== "live") expanded.value = false; });
+
+// A focused control that leaves with its pill fires no focusout: let the queue run again,
+// and keep the keyboard on the line instead of dropping it to the page.
+const pillKey = computed(() => {
+  const current = pill.value;
+  if (!current) return "";
+  return current.kind === "notice" ? current.notice.id : current.kind === "steer" ? `steer:${current.offer.entryId}` : current.kind;
+});
+watch(pillKey, () => {
+  void nextTick(() => {
+    if (!held || typeof document === "undefined" || !root.value) return;
+    const active = document.activeElement;
+    if (active && root.value.contains(active)) return;
+    if (!active || active === document.body) root.value.focus({ preventScroll: true });
+    hold(false);
+  });
+});
 
 // The open list closes on a click anywhere else.
 function onDocumentPointerDown(event: PointerEvent): void {

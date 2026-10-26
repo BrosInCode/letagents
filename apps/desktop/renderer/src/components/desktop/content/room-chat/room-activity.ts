@@ -100,6 +100,9 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
       if (shown?.kind === "join" && timers.now() - shownAt < ACTIVITY_JOIN_MERGE_MS) {
         const present = new Set(shown.agents.map((agent) => agent.key));
         shown = { ...shown, agents: [...shown.agents, ...notice.agents.filter((agent) => !present.has(agent.key))] };
+        // The longer line gets its own full time on screen.
+        shownAt = timers.now();
+        arm(ACTIVITY_NOTICE_MS);
         onChange();
         return;
       }
@@ -110,7 +113,8 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
 
   /** Show a notice before the others, now (a confirmation of the person's own action). */
   function pushFirst(notice: ActivityNotice): void {
-    if (shown) queue = [shown, ...queue].slice(0, ACTIVITY_NOTICE_LIMIT);
+    // The covered notice shows again after it, unless it is an older confirmation.
+    if (shown && shown.kind !== "steered") queue = [shown, ...queue].slice(0, ACTIVITY_NOTICE_LIMIT);
     queue = [notice, ...queue.filter((item) => item.id !== notice.id)];
     advance();
   }
@@ -143,7 +147,8 @@ export function createActivityNoticeQueue(timers: ActivityTimers, onChange: () =
     /** Which notices can show now. A shown notice that no longer can gives way. */
     setEligible(test: (notice: ActivityNotice) => boolean): void {
       eligible = test;
-      if (shown && !test(shown)) advance();
+      // A notice put away keeps its place at the front, so it comes back when it can show again.
+      if (shown && !test(shown)) { queue = [shown, ...queue]; advance(); }
       else if (!shown && queue.some(test)) advance();
     },
     clear(): void {

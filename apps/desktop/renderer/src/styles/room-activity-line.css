@@ -19,6 +19,8 @@
   height: 30px;
   /* Only the pill takes the pointer; the rest of the line lets clicks reach the messages. */
   pointer-events: none;
+  /* It takes focus only to keep the keyboard here when a focused pill leaves. */
+  outline: none;
 }
 
 .room-activity-pill {

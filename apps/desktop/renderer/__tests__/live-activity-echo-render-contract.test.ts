@@ -160,5 +160,5 @@ test("the work indicator is pinned outside the scrolling list and still feeds th
   assert.match(viewportSource, /useRoomMessageMotion\(\{\s*element: messagesElement,\s*work: liveStripElement,/);
   // Every working agent has an anchor in the line, also when several are counted as one pill.
   assert.match(lineSource, /class="room-activity-anchor"\s+:data-motion-work="work\.awaitingRoomTurn \? undefined : ''"/);
-  assert.match(lineSource, /:data-motion-work="single && !single\.awaitingRoomTurn \? '' : undefined"/);
+  assert.match(lineSource, /:data-motion-work="single && !single\.awaitingRoomTurn && !listOpen \? '' : undefined"/);
 });
