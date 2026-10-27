@@ -10,9 +10,10 @@ export function useRoomViewport() {
   function syncRoomViewport() {
     const viewport = window.visualViewport
     if (!viewport) return
-    // Normalize zoom before detecting keyboard space, so closing the keyboard
-    // while zoomed still restores navigation and the main draft.
-    keyboardOpen.value = window.innerHeight - viewport.height * viewport.scale > 120
+    // iOS Safari can shrink innerHeight with the keyboard while the root layout
+    // viewport stays stable. Normalize zoom so dismissal also works while zoomed.
+    const layoutHeight = Math.max(document.documentElement.clientHeight, window.innerHeight)
+    keyboardOpen.value = layoutHeight - viewport.height * viewport.scale > 120
 
     const active = document.activeElement
     const composer = active?.closest('.composer')
