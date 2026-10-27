@@ -2,6 +2,7 @@ import { computed, reactive, ref, watch } from "vue";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
+  DesktopAgentProviderModelSource,
   DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflight,
   DesktopManagedAgentEffort,
@@ -68,10 +69,14 @@ export interface ComposerAgentRow {
 
 export type ComposerAgentLaunchResult =
   | { outcome: "started"; entry: DesktopSupervisorManifestEntry }
-  /** Nothing was started; the draft stays and `notice` says why. */
-  | { outcome: "blocked" }
-  /** The Add agent window opened to finish setup; the draft stays. */
-  | { outcome: "setup" };
+  /** Nothing was started; the draft and chip stay and `notice` says why. */
+  | { outcome: "blocked" };
+
+/**
+ * The one step offered beside a notice. Enter never opens the Add agent
+ * window by itself: "setup" opens it only when the person clicks.
+ */
+export type ComposerAgentNoticeAction = "setup" | "check-again" | "retry-providers" | "open-chip" | "open-chip-where";
 
 // The last model and effort a person chose for each provider, for this app session.
 const remembered = new Map<DesktopAgentProviderId, { model: string | null; effort: DesktopManagedAgentEffort | "" }>();
@@ -92,6 +97,9 @@ export function useComposerAgentDraft(options: {
   const chip = ref<ComposerAgentChip | null>(null);
   const launching = ref(false);
   const notice = ref<string | null>(null);
+  const noticeAction = ref<ComposerAgentNoticeAction | null>(null);
+  /** A "Check again" or "Try again" is running; Enter waits for it. */
+  const checking = ref(false);
   const personalAccess = ref<DesktopManagedAgentPermissionProfileId>(readPersonalAccess(viewerLogin(), options.roomIdentifier()));
   let checkVersion = 0;
   let catalogVersion = 0;
@@ -126,6 +134,17 @@ export function useComposerAgentDraft(options: {
       failed: failedChecks[providerId] === true,
     });
   }
+  /**
+   * Where a chosen model comes from, so the check validates it against the
+   * right list: Claude's rows are the desktop's known list, Codex's come from
+   * the CLI. Before the catalog is ready the provider's usual list is assumed;
+   * only an id a ready catalog no longer lists passes as custom.
+   */
+  function modelSourceFor(providerId: DesktopAgentProviderId, model: string): DesktopAgentProviderModelSource {
+    const catalog = catalogs[providerId];
+    if (catalog?.status !== "ready") return providerId === "claude-code" ? "known" : "provider";
+    return catalog.models.find((option) => option.id === model)?.source ?? "custom";
+  }
   function preflightInput(providerId: DesktopAgentProviderId, overrides: { access?: DesktopManagedAgentPermissionProfileId | null; model?: string | null; effort?: DesktopManagedAgentEffort | "" } = {}) {
     const current = context();
     return {
@@ -135,7 +154,7 @@ export function useComposerAgentDraft(options: {
       roomOnly: roomOnly(),
       permissionProfileId: overrides.access !== undefined ? overrides.access : resolveAccess(profilesFor(providerId), personalAccess.value)?.id ?? null,
       model: overrides.model ?? null,
-      modelSource: overrides.model ? "provider" as const : null,
+      modelSource: overrides.model ? modelSourceFor(providerId, overrides.model) : null,
       effort: overrides.effort || null,
     };
   }
@@ -228,6 +247,7 @@ export function useComposerAgentDraft(options: {
     };
     lastUsedProvider = providerId;
     notice.value = null;
+    noticeAction.value = null;
     pendingCreationRequestId = null;
     void loadCatalog(providerId);
     if (providerId === "open-model") void refreshOpenModelStatus();
@@ -237,6 +257,7 @@ export function useComposerAgentDraft(options: {
   function removeChip(): void {
     chip.value = null;
     notice.value = null;
+    noticeAction.value = null;
     pendingCreationRequestId = null;
   }
 
@@ -356,10 +377,11 @@ export function useComposerAgentDraft(options: {
     const current = chip.value;
     const roomIdentifier = options.roomIdentifier();
     const charter = text.trim();
-    if (!current || !roomIdentifier || !charter || launching.value) return { outcome: "blocked" };
+    if (!current || !roomIdentifier || !charter || launching.value || checking.value) return { outcome: "blocked" };
     // Set before the first await, so a second Enter cannot start a second launch.
     launching.value = true;
     notice.value = null;
+    noticeAction.value = null;
     // The click-time choices are sent as they were; only removing the chip or leaving the room cancels.
     const chipId = current.id;
     const isCurrent = () => chip.value?.id === chipId && options.roomIdentifier() === roomIdentifier;
@@ -368,8 +390,9 @@ export function useComposerAgentDraft(options: {
     let creationRequestId: string | null = null;
     try {
       if (!provider || !options.host) {
-        options.host?.openAddAgent({ providerId: current.providerId });
-        return { outcome: "setup" };
+        notice.value = `Couldn't load ${name}. Your message is still here.`;
+        noticeAction.value = "retry-providers";
+        return { outcome: "blocked" };
       }
       if (current.providerId === "open-model" && openModelConfigured.value !== true) {
         await refreshOpenModelStatus();
@@ -404,8 +427,10 @@ export function useComposerAgentDraft(options: {
           notice.value = "Configure Open Model before this agent can start. Your message is still here.";
           return { outcome: "blocked" };
         }
-        options.host.openAddAgent({ providerId: current.providerId });
-        return { outcome: "setup" };
+        // The chip and draft stay; the reason and one step show under the chip.
+        notice.value = `${name} can't start yet. ${preflightReason(preflight)} Your message is still here.`;
+        noticeAction.value = preflightNoticeAction(preflight);
+        return { outcome: "blocked" };
       }
       if (launchContext.roomStorageMode !== "local") {
         const storage = await desktopIpc.supervisorGrant.getStorageStatus();
@@ -460,6 +485,58 @@ export function useComposerAgentDraft(options: {
     }
   }
 
+  /**
+   * Runs the step beside the notice. Only "setup" opens the Add agent window;
+   * the chip steps are the composer's to open. A check shows "Checking…" and
+   * Enter waits for it.
+   */
+  async function runNoticeAction(): Promise<void> {
+    const action = noticeAction.value;
+    const current = chip.value;
+    if (!action || !current || checking.value) return;
+    const providerId = current.providerId;
+    if (action === "setup") {
+      options.host?.openAddAgent({ providerId });
+      return;
+    }
+    if (action === "open-chip" || action === "open-chip-where") return;
+    const chipId = current.id;
+    const isCurrent = () => chip.value?.id === chipId;
+    const name = composerAgentName(providerById(providerId));
+    checking.value = true;
+    notice.value = "Checking…";
+    noticeAction.value = null;
+    try {
+      if (action === "retry-providers") {
+        await refreshProviders({ force: true });
+        if (!isCurrent()) return;
+        const loaded = Boolean(providerById(providerId));
+        notice.value = loaded ? `Agents loaded. Press Enter to start ${name}.` : `Couldn't load ${name}. Your message is still here.`;
+        noticeAction.value = loaded ? null : "retry-providers";
+        return;
+      }
+      const result = await desktopIpc.workers.runAgentProviderPreflight(providerId, {
+        ...preflightInput(providerId, { access: current.access, model: current.model, effort: current.effort }),
+        refreshEnvironment: true,
+      });
+      if (!isCurrent()) return;
+      preflights[providerId] = result;
+      failedChecks[providerId] = false;
+      if (result.canStart) {
+        notice.value = `${name} is ready. Press Enter to start it.`;
+      } else {
+        notice.value = `${name} still can't start. ${preflightReason(result)}`;
+        noticeAction.value = preflightNoticeAction(result);
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      notice.value = contextualAddAgentError(`Couldn't check ${name} again`, error, "Try again.");
+      noticeAction.value = "check-again";
+    } finally {
+      checking.value = false;
+    }
+  }
+
   /** The attempt surely made no agent, so the next one gets a new id. */
   function forgetAttempt(roomIdentifier: string, creationRequestId: string): void {
     pendingCreationRequestId = null;
@@ -480,6 +557,9 @@ export function useComposerAgentDraft(options: {
     openModelHost,
     launching,
     notice,
+    noticeAction,
+    checking,
+    runNoticeAction,
     personalAccess,
     refreshProviders,
     refreshOpenModelStatus: () => refreshOpenModelStatus(),
@@ -491,4 +571,38 @@ export function useComposerAgentDraft(options: {
     setPersonalAccess,
     launch,
   };
+}
+
+/**
+ * The check's own sentences: the message, then the detail when the message
+ * alone does not say what to do (an error, a model or setup to refresh).
+ */
+function preflightReason(preflight: DesktopAgentProviderPreflight): string {
+  const sentence = (text: string) => /[.!?]$/.test(text) ? text : `${text}.`;
+  const message = sentence(preflight.message.trim());
+  const detail = preflight.detail?.trim();
+  return detail && (preflight.status === "config_required" || preflight.status === "error") ? `${message} ${sentence(detail)}` : message;
+}
+
+/**
+ * The one step that can fix this result, so no button loops:
+ * - install, sign-in, the agent app connection or a Claude Code update are
+ *   finished in the Add agent window;
+ * - a worktree on the room's branch is chosen in the chip's "Works in" menu;
+ * - a model that is not available is changed in the chip;
+ * - a provider environment to refresh is checked again.
+ */
+function preflightNoticeAction(preflight: DesktopAgentProviderPreflight): ComposerAgentNoticeAction | null {
+  if (preflight.nextAction === "authenticate"
+    || preflight.nextAction === "install_runtime"
+    || preflight.nextAction === "install_external_runtime"
+    || preflight.nextAction === "install_mcp_bridge"
+    || preflight.status === "missing_runtime"
+    || preflight.status === "auth_required"
+    || preflight.status === "bridge_required"
+    || preflight.status === "error") return "setup";
+  if (preflight.nextAction === "choose_worktree" || preflight.status === "branch_mismatch") return "open-chip-where";
+  if (preflight.status === "config_required" && /model/i.test(preflight.message)) return "open-chip";
+  if (preflight.status === "config_required") return "check-again";
+  return null;
 }

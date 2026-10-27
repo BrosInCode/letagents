@@ -68,11 +68,10 @@ async function mountInputRow(t: { after: (fn: () => void) => void }, gifEnabled:
   return row;
 }
 
-function gridTrackCount(): number {
+function gridAreas(): string[] {
   const css = readFileSync(new URL('../src/styles/composer-agent-reasoning/composer-controls.css', import.meta.url), 'utf8');
   const rule = css.match(/\.desktop-composer-input-row\s*\{([^}]*)\}/)?.[1] ?? '';
-  const columns = rule.match(/grid-template-columns:\s*([^;]+);/)?.[1] ?? '';
-  return columns.replace(/minmax\([^)]*\)/g, 'track').trim().split(/\s+/).length;
+  return (rule.match(/grid-template-areas:([^;]+);/)?.[1] ?? '').match(/"[^"]*"/g)?.map(row => row.slice(1, -1).trim()) ?? [];
 }
 
 for (const gifEnabled of [true, false]) {
@@ -80,7 +79,7 @@ for (const gifEnabled of [true, false]) {
     const row = await mountInputRow(t, gifEnabled);
     const children = elements(row);
     assert.deepEqual(children.map(child => child.props['data-testid'] ?? classOf(child)), ['desktop-composer-add-agent', 'desktop-composer-field', 'desktop-composer-send']);
-    assert.equal(children.length, gridTrackCount(), 'each input-row child has its own grid track');
+    assert.deepEqual(gridAreas(), ['field field field', 'add under send'], 'the input spans the top; "+", access and send share the bar under it');
     const field = elements(children[1]).map(child => child.props['data-testid']);
     assert.deepEqual(field, ['desktop-composer-input']);
     assert.equal(all(row).some(n => classOf(n).includes('room-gif-trigger') || n.props['data-testid'] === 'desktop-composer-attach'), false,
@@ -102,16 +101,16 @@ test('the suggested reply is faint text under the input, described to screen rea
   assert.match(all(description).map(n => n.text).join(''), /^Suggested reply to Ada: Ship it now\. Press Tab to use it, or Escape to dismiss it\.$/);
 });
 
-test('"+" and send are the same size', () => {
+test('"+" and send are the same round size in the bar under the input', () => {
   const css = readFileSync(new URL('../src/styles/composer-agent-reasoning/composer-controls.css', import.meta.url), 'utf8');
   const agent = readFileSync(new URL('../src/styles/agent-management.css', import.meta.url), 'utf8');
-  assert.match(css, /grid-template-columns:\s*34px minmax\(0, 1fr\) 34px;/);
-  const send = css.match(/\.desktop-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(css, /grid-template-columns:\s*32px minmax\(0, 1fr\) 32px;/);
+  const send = css.match(/\n\.desktop-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
   const plus = agent.match(/\n\.desktop-composer-add-agent\s*\{([^}]*)\}/)?.[1] ?? '';
   for (const rule of [send, plus]) {
-    assert.match(rule, /width:\s*34px;/);
-    assert.match(rule, /height:\s*34px;/);
-    assert.match(rule, /border-radius:\s*10px;/);
+    assert.match(rule, /width:\s*32px;/);
+    assert.match(rule, /height:\s*32px;/);
+    assert.match(rule, /border-radius:\s*50%;/);
   }
 });
 
@@ -125,4 +124,19 @@ test('GIF trigger matches the attach button box and has no stray margin', () => 
   assert.match(trigger, /margin:\s*0;/);
   assert.doesNotMatch(picker, /margin:\s*0 5px/);
   assert.doesNotMatch(picker, /^button, input\s*\{/m, 'dialog button rules must not leak onto the trigger');
+});
+
+test('the activity pill starts at the composer edge, on wide and narrow windows', () => {
+  const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const shell = read('../src/styles/composer-agent-reasoning/composer-shell.css');
+  const line = read('../src/styles/room-activity-line.css');
+  const responsive = read('../src/styles/12-responsive.css');
+  // The composer is centred at min(100% - 48px, 960px), so each edge sits at max(24px, (100% - 960px) / 2).
+  assert.match(shell, /width:\s*min\(calc\(100% - 48px\), 960px\);/);
+  const rule = line.match(/\n\.room-activity-line\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rule, /--room-activity-line-inset:\s*max\(24px, calc\(\(100% - var\(--room-chat-content-max, 960px\)\) \/ 2\)\);/);
+  assert.match(rule, /left:\s*var\(--room-activity-line-inset\);/);
+  assert.match(rule, /right:\s*var\(--room-activity-line-inset\);/);
+  // Under 720px the composer is 100% - 20px wide, so 10px each side.
+  assert.match(responsive, /\.desktop-composer\s*\{\s*width:\s*calc\(100% - 20px\);\s*\}\s*\.room-activity-line\s*\{\s*--room-activity-line-inset:\s*10px;\s*\}/);
 });

@@ -1,8 +1,7 @@
 <template>
-  <nav class="mobile-bottom-nav" role="tablist" aria-label="Room navigation">
+  <nav class="mobile-bottom-nav" aria-label="Room navigation">
     <button
-      role="tab"
-      :aria-selected="activeTab === 'chat'"
+      :aria-current="activeTab === 'chat' ? 'page' : undefined"
       :class="{ active: activeTab === 'chat' }"
       type="button"
       @click="selectTab('chat')"
@@ -12,8 +11,7 @@
     </button>
     <button
       v-if="showEventsTab"
-      role="tab"
-      :aria-selected="activeTab === 'events'"
+      :aria-current="activeTab === 'events' ? 'page' : undefined"
       :class="{ active: activeTab === 'events' }"
       type="button"
       @click="selectTab('events')"
@@ -22,8 +20,7 @@
       <span>Activity</span>
     </button>
     <button
-      role="tab"
-      :aria-selected="activeTab === 'board'"
+      :aria-current="activeTab === 'board' ? 'page' : undefined"
       :class="{ active: activeTab === 'board' }"
       type="button"
       @click="selectTab('board')"
@@ -32,8 +29,7 @@
       <span>Board</span>
     </button>
     <button
-      role="tab"
-      :aria-selected="activeTab === 'activity'"
+      :aria-current="activeTab === 'activity' ? 'page' : undefined"
       :class="{ active: activeTab === 'activity' }"
       type="button"
       @click="selectTab('activity')"
@@ -42,8 +38,7 @@
       <span>Agents</span>
     </button>
     <button
-      role="tab"
-      :aria-selected="activeTab === 'rooms'"
+      :aria-current="activeTab === 'rooms' ? 'page' : undefined"
       :class="{ active: activeTab === 'rooms' }"
       type="button"
       @click="selectTab('rooms')"
@@ -82,7 +77,7 @@ function selectTab(tab: RoomTab) {
     align-items: center;
     justify-content: space-around;
     height: calc(56px + env(safe-area-inset-bottom, 0px));
-    padding: 0 4px env(safe-area-inset-bottom, 0px);
+    padding: 0 max(4px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px) max(4px, env(safe-area-inset-left, 0px));
     background: var(--bg-0, #09090b);
     border-top: 1px solid var(--line, #27272a);
     position: sticky;
@@ -114,18 +109,19 @@ function selectTab(tab: RoomTab) {
   }
 
   .mobile-bottom-nav button span {
-    font-size: 0.62rem;
+    font-size: 0.7rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
   }
 
   .mobile-bottom-nav button.active,
-  .mobile-bottom-nav button[aria-selected="true"] {
-    color: var(--accent, #6366f1);
+  .mobile-bottom-nav button[aria-current="page"] {
+    color: var(--text, #fafafa);
+    background: var(--accent-hover);
+    border-radius: 8px;
   }
 
-  .mobile-bottom-nav button:hover:not(.active) {
-    color: var(--text, #fafafa);
+  .mobile-bottom-nav button:focus-visible {
+    outline-offset: -3px;
   }
 }
 </style>

@@ -189,3 +189,6 @@
     --app-select-height: 44px;
   }
 }
+
+.reviewer-chip { min-width: 0; max-width: 100%; flex-wrap: wrap; overflow-wrap: anywhere; }
+.reviewer-chip button { flex-shrink: 0; }

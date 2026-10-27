@@ -164,10 +164,35 @@
 }
 
 .desktop-composer-agent-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
   margin: 0 0 6px;
   color: var(--text-secondary);
   font-size: 12.5px;
   line-height: 1.45;
+}
+
+.desktop-composer-agent-notice-action {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent, #4da3ff);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.desktop-composer-agent-notice-action:hover {
+  text-decoration: underline;
+}
+
+.desktop-composer-agent-notice-action:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--accent, #4da3ff);
+  outline-offset: 2px;
 }
 
 /* ---------- Popovers: chip settings and access default ---------- */
@@ -525,7 +550,7 @@
 .desktop-composer-under {
   display: flex;
   align-items: center;
-  margin-top: 4px;
+  min-width: 0;
 }
 
 .desktop-composer-access-wrap {

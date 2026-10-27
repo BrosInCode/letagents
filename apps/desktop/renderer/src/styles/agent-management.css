@@ -16,12 +16,12 @@
 .desktop-composer-add-agent {
   position: relative;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   padding: 0;
-  border-radius: 10px;
+  border-radius: 50%;
   border-color: transparent;
-  background: rgba(255, 255, 255, 0.055);
+  background: transparent;
   color: var(--text-secondary);
 }
 

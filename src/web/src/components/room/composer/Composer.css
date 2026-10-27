@@ -52,6 +52,7 @@
 .message-textarea {
   width: 100%;
   min-height: 56px;
+  field-sizing: content;
   max-height: 180px;
   resize: none;
   overflow-y: auto;
@@ -189,7 +190,9 @@
   cursor: pointer;
   transition: opacity 180ms ease, transform 180ms ease;
 }
-.send-btn:hover:not(:disabled) { transform: scale(1.06); }
+@media (hover: hover) and (pointer: fine) {
+  .send-btn:hover:not(:disabled) { opacity: .88; }
+}
 .send-btn:active:not(:disabled) { transform: scale(0.96); }
 .send-btn:disabled { opacity: 0.2; cursor: default; }
 .send-btn svg {
@@ -327,7 +330,9 @@
   .composer { padding: 4px 12px 8px; max-height: min(calc(var(--room-viewport-height, 100dvh) * 0.65), calc(var(--room-viewport-height, 100dvh) - 152px)); }
   .composer-card { border-radius: 12px; }
   .message-textarea { padding: 12px 14px 6px; font-size: 16px; min-height: 44px; max-height: min(120px, calc(var(--room-viewport-height, 100dvh) * 0.24)); }
-  .composer-pills-row { padding: 0 2px 2px; }
+  .composer-pills-row { padding: 0 2px 4px; }
+  .composer-identity { justify-content: flex-start; }
+  .composer-toolbar-left { flex-wrap: wrap; gap: 4px; }
   .composer-toolbar { padding: 0 4px 4px; }
   .composer-shortcut-hint { display: none; }
   .prompt-panel {
@@ -379,3 +384,18 @@
 .inline-thread-composer .composer-toolbar { gap: 4px; padding: 0; border: 0; }
 .inline-thread-composer .attachment-btn { padding: 6px; font-size: .75rem; }
 .inline-thread-composer .send-btn { width: 32px; height: 32px; border-radius: 8px; }
+
+/* Inline replies have less room than the main composer. Keep the controls on
+   their own row so a phone still has a usable writing and attachment area. */
+@media (max-width: 768px), (pointer: coarse) {
+  .inline-thread-composer .composer-card { flex-direction: column; align-items: stretch; gap: 4px; }
+  .inline-thread-composer .message-textarea { min-height: 44px; max-height: 120px; padding: 10px 0; font-size: 16px; }
+  .inline-thread-composer .composer-toolbar { justify-content: space-between; }
+  .inline-thread-composer .send-btn { width: 44px; height: 44px; }
+  .inline-thread-composer .attachment-btn { min-height: 44px; padding: 6px 10px; }
+  .inline-thread-composer :deep(.composer-mention-panel) { left: 0; right: 0; bottom: calc(100% + 4px); }
+}
+.composer :is(.attachment-btn, .send-btn, .prompt-trigger, .prompt-option, .composer-signin-btn):focus-visible {
+  outline: 2px solid var(--blue-text, #60a5fa);
+  outline-offset: 2px;
+}

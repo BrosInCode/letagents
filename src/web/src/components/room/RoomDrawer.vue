@@ -1,7 +1,6 @@
 <template>
   <Teleport to="body">
-    <div v-if="open" class="drawer-overlay" @click="emit('close')" />
-    <aside :class="['drawer', { open }]" :inert="!open">
+    <dialog ref="drawerElement" class="drawer" aria-label="Room settings" @cancel.prevent="emit('close')" @click="handleBackdropClick">
       <DrawerBrand @close="emit('close')" />
 
       <RouterLink class="drawer-work-link" to="/my-work" @click="emit('close')">My work <span aria-hidden="true">→</span></RouterLink>
@@ -52,12 +51,12 @@
         @install="installGitHubApp"
         @setup="setupGitHubAppManifest"
       />
-    </aside>
+    </dialog>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, toRef, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
@@ -82,6 +81,22 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [] }>()
+const drawerElement = ref<HTMLDialogElement | null>(null)
+
+function handleBackdropClick(event: MouseEvent) {
+  const dialog = drawerElement.value
+  if (!dialog || event.target !== dialog) return
+  const bounds = dialog.getBoundingClientRect()
+  if (event.clientX < bounds.left || event.clientX > bounds.right
+    || event.clientY < bounds.top || event.clientY > bounds.bottom) emit('close')
+}
+
+watch([() => props.open, drawerElement], ([open, dialog]) => {
+  if (open && !dialog?.open) dialog?.showModal()
+  else if (!open && dialog?.open) dialog.close()
+}, { flush: 'post', immediate: true })
+
+onBeforeUnmount(() => drawerElement.value?.close())
 
 const roomRef = toRef(props, 'room')
 const messagesRef = toRef(props, 'messages')
