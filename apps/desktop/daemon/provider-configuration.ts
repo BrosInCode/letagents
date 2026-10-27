@@ -325,7 +325,8 @@ const openModelEfforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low",
 export function providerAcceptsReasoningEffort(provider: string, effort: unknown): boolean {
   if (effort === null || effort === undefined) return true;
   const normalized = provider.trim().toLowerCase();
-  if (normalized === "codex") return efforts.has(effort as Exclude<ProviderReasoningEffort, null>);
+  // Claude Code takes the same five levels as its `--effort` flag.
+  if (normalized === "codex" || normalized === "claude-code" || normalized === "claude") return efforts.has(effort as Exclude<ProviderReasoningEffort, null>);
   if (normalized === "open-model") return openModelEfforts.has(effort as Exclude<ProviderReasoningEffort, null>);
   return false;
 }
@@ -424,7 +425,6 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     };
   }
 
-  if (input.reasoningEffort !== null) throw new Error(`Provider '${provider}' does not support reasoning effort.`);
   if (provider === "claude-code" || provider === "claude") {
     scalarCliPolicy(policy, "Claude");
     const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "auto_review", "full_access"]);
@@ -462,12 +462,13 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       requirePolicyMatch(policy, key, value, provider);
     }
     return {
-      provider: "claude-code", model: normalizedModel, reasoningEffort: null, permissionProfileId: profile,
+      provider: "claude-code", model: normalizedModel, reasoningEffort: input.reasoningEffort, permissionProfileId: profile,
       launchPolicy: { ...policy, ...authority }, configurationRevision: input.configurationRevision,
       ...homeHarnessField,
     };
   }
 
+  if (input.reasoningEffort !== null) throw new Error(`Provider '${provider}' does not support reasoning effort.`);
   scalarCliPolicy(policy, "Cursor");
   for (const key of Object.keys(policy)) {
     if (!["mode", "force", "sandbox"].includes(key)) {

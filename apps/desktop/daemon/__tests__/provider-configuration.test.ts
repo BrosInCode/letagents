@@ -240,7 +240,10 @@ test("an Open Model agent keeps an OpenAI-compatible reasoning effort, never Cla
   assert.equal(providerAcceptsReasoningEffort("open-model", null), true);
   assert.equal(providerAcceptsReasoningEffort("open-model", "minimal"), false);
   assert.equal(providerAcceptsReasoningEffort("Codex", "max"), true);
-  assert.equal(providerAcceptsReasoningEffort("claude-code", "high"), false);
+  assert.equal(providerAcceptsReasoningEffort("claude-code", "max"), true);
+  assert.equal(providerAcceptsReasoningEffort("claude", "low"), true);
+  assert.equal(providerAcceptsReasoningEffort("claude-code", "minimal"), false);
+  assert.equal(providerAcceptsReasoningEffort("cursor", "high"), false);
 });
 
 test("Claude guest policy derivation keeps local tools and owner setup disabled", () => {
@@ -290,11 +293,20 @@ test("provider configuration rejects unsupported and conflicting native settings
     configurationRevision: 1,
   }), /conflicts with permission-profile authority at 'allowedTools'/);
 
-  assert.throws(() => resolveProviderConfigurationSnapshot({
+  // Claude keeps its effort; the adapter passes it as `--effort`.
+  assert.equal(resolveProviderConfigurationSnapshot({
     provider: "claude-code",
     model: null,
     reasoningEffort: "high",
-    permissionProfileId: "ask_before_write",
+    permissionProfileId: "full_access",
+    launchPolicy: {},
+    configurationRevision: 1,
+  }).reasoningEffort, "high");
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    provider: "cursor",
+    model: null,
+    reasoningEffort: "high",
+    permissionProfileId: "read_only",
     launchPolicy: {},
     configurationRevision: 1,
   }), /does not support reasoning effort/);

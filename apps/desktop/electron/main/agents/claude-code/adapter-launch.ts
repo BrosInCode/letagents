@@ -97,6 +97,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
       mcpConfigPath: managedMcpConfig.path,
       policyArgs,
       model: req.model,
+      effort: req.reasoningEffort ?? null,
       session: resumeRef ? { resume: resumeRef.providerContinuationId } : { sessionId: expectedSessionId },
     });
     // With the owner's setup the CLI is told how to start their servers, and is not given the coordinates.
