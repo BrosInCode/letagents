@@ -140,3 +140,21 @@ Build **1.0 (2)** restores the existing desktop icon. Its signed archive and `co
 Build 3 verification on September 13, 2026: **39 API/state tests and 13 XCUITest flows passed on iPhone 17 Pro**. Five focused flows passed on iPhone 16e in light appearance with accessibility-medium text: Account → Sign out → Sign in, live/history separation with pagination, chat bounds and native Files picking, native Photos picking/removal/attachment-only send/retry/Quick Look, and swipe-to-quote with retry. A focused photo/preview flow passed again after shortening the preview title to preserve the Done button at larger text sizes. Dark and larger-text light screenshots were inspected. The final signed `1.0 (3)` archive and signature verification passed. Export/upload succeeded, Apple finished processing it, and **Mobile Preview** confirms **Testing** for build 3 with two testers. Build-specific testing notes are saved in App Store Connect.
 
 The new API/state checks exercise file limits, authenticated attachment downloads and clean redirect headers, upload/message identity on retries, expired-upload recovery, isolated account drafts after logout, and returning to a room while a send is in flight. Native picker tests transfer a real local image through the fixture upload/download transport; they do not prove production object-storage availability or a physical-device attachment round trip.
+
+Mobile continuity verification on October 27, 2026: all **46 API/state tests** passed on iPhone 17 Pro and iPhone 16e, and the full **14-flow XCUITest suite** passed on iPhone 17 Pro using the standard verification command above. The new relaunch flow restores a thread and its draft, returns through the Continue card, and verifies sign-out removes the saved workspace. Three UI flows passed on iPhone 16e in light appearance with accessibility-medium text: relaunch/Continue/sign-out, project/branch hierarchy, and account sign-out. The small-screen screenshots were visually inspected. The generic iPhone Release build passed; no TestFlight upload was performed.
+
+The focused smaller-device run used:
+
+```sh
+xcrun simctl ui 3CD58526-34E3-4E9B-B60C-8B6B523AAC8B appearance light
+xcrun simctl ui 3CD58526-34E3-4E9B-B60C-8B6B523AAC8B content_size accessibility-medium
+xcodebuild -project mobile/LetAgents.xcodeproj -scheme LetAgents \
+  -destination 'platform=iOS Simulator,name=iPhone 16e' \
+  -derivedDataPath mobile/DerivedData/small test -parallel-testing-enabled NO \
+  -only-testing:LetAgentsTests \
+  -only-testing:LetAgentsUITests/CompanionFlowTests/testRelaunchRestoresThreadDraftAndContinueCard \
+  -only-testing:LetAgentsUITests/CompanionFlowTests/testProjectBranchesKeepTheirOwnFocusRooms \
+  -only-testing:LetAgentsUITests/CompanionFlowTests/testAccountButtonShowsSignOutAndReturnsToSignIn
+```
+
+The new state regressions exercise protected disk restoration of text, quotes, attachment bytes and ambiguous-send identities; successful-send cleanup; account isolation and sign-out; write failure before network submission; unreadable-draft retry/reset; and room refresh retaining cached data after network errors. The tests use isolated local storage and fixture API responses, not production messages.
