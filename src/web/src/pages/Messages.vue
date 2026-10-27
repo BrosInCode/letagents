@@ -1,9 +1,6 @@
 <template>
   <div class="web-messages">
-    <header class="web-messages-nav">
-      <RouterLink to="/">LetAgents</RouterLink><span>Messages</span
-      ><RouterLink to="/my-work">My work</RouterLink><RouterLink to="/">Back to home</RouterLink>
-    </header>
+    <WorkspaceNav />
     <PrivateMessages
       v-if="isSignedIn && user?.id"
       :key="user.id"
@@ -20,8 +17,8 @@
   </div>
 </template>
 <script setup lang="ts">
+import WorkspaceNav from "../components/layout/WorkspaceNav.vue";
 import { onMounted } from "vue";
-import { RouterLink } from "vue-router";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import { useAuth } from "../composables/useAuth";
@@ -83,27 +80,7 @@ onMounted(checkSession);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-.web-messages-nav {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  min-height: 56px;
-  padding: 0 24px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
-.web-messages-nav a:first-child {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.02em;
-}
-.web-messages-nav a:last-child {
-  margin-left: auto;
-  color: var(--text-secondary);
+  min-width: 0;
 }
 .web-messages-signin {
   margin: auto;
@@ -126,5 +103,24 @@ onMounted(checkSession);
   padding: 12px 18px;
   font: inherit;
   cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .web-messages :deep(:is(.chat-icon-button, .chat-send)) { width: 44px; height: 44px; }
+  .web-messages :deep(:is(.conversation-new-chat, .conversation-tabs button, .chat-primary, .chat-secondary, .chat-text-button, .conversation-menu button)) { min-height: 44px; }
+  .web-messages :deep(.conversation-menu > div) { top: calc(100% + 6px); }
+  .web-messages :deep(:is(.conversation-search input, .conversation-recipient-field input)) { font-size: 16px; min-height: 28px; }
+  .web-messages :deep(.conversation-header) { padding: 10px 12px; gap: 8px; }
+  .web-messages :deep(.conversation-header-actions) { gap: 2px; }
+  .web-messages :deep(.conversation-timeline) { padding: 16px 12px; }
+  .web-messages :deep(.conversation-message-meta) { flex-wrap: wrap; overflow-wrap: anywhere; }
+  .web-messages :deep(.conversation-composer-wrap) { padding: 8px 12px max(12px, env(safe-area-inset-bottom, 0px)); }
+  .web-messages :deep(.conversation-composer) { gap: 8px; padding: 10px; }
+  .web-messages :deep(.conversation-compose-people) { padding: 16px 12px; }
+  .web-messages :deep(.conversation-recipient) { max-width: 100%; overflow-wrap: anywhere; }
+  .web-messages :deep(.conversation-recipient-field input) { min-width: min(170px, 100%); }
+  .web-messages :deep(:is(.conversation-person > span:nth-child(2), .conversation-member > span:nth-child(2))) { min-width: 0; overflow-wrap: anywhere; }
+  .web-messages :deep(.conversation-members-dialog) { padding: 16px; max-height: calc(100dvh - 32px); }
+  .web-messages-signin { overflow-y: auto; padding: 24px; }
 }
 </style>

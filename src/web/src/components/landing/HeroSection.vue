@@ -120,7 +120,7 @@ onUnmounted(() => {
 
 <style scoped>
 .hero {
-  padding: 148px 40px 92px;
+  padding: calc(148px + env(safe-area-inset-top, 0px)) 40px 92px;
   text-align: center;
   max-width: var(--max-width);
   margin: 0 auto;
@@ -133,7 +133,7 @@ onUnmounted(() => {
   font-weight: 900;
   letter-spacing: 0;
   line-height: 1.03;
-  color: #fafafa;
+  color: var(--text);
   text-wrap: balance;
 }
 
@@ -144,7 +144,7 @@ onUnmounted(() => {
 
 .hero-word {
   display: block;
-  color: #fafafa;
+  color: var(--text);
   transition: opacity 300ms ease, transform 300ms ease;
 }
 
@@ -176,9 +176,9 @@ onUnmounted(() => {
   padding: 16px 18px 16px 20px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--accent-dim);
   text-align: left;
-  scroll-margin-top: 92px;
+  scroll-margin-top: calc(92px + env(safe-area-inset-top, 0px));
 }
 
 .hero-download-copy {
@@ -208,7 +208,7 @@ onUnmounted(() => {
   border: 1px solid rgba(245, 158, 11, 0.42);
   border-radius: 999px;
   background: rgba(245, 158, 11, 0.1);
-  color: #fbbf24;
+  color: var(--amber-text);
   font-size: 0.67rem;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -243,7 +243,7 @@ onUnmounted(() => {
   padding: 8px 13px;
   border: 1px solid var(--border-strong);
   border-radius: calc(var(--radius-lg) - 3px);
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--accent-dim);
   color: var(--text);
   text-decoration: none;
   transition: border-color var(--duration-fast), background var(--duration-fast), transform var(--duration-fast);
@@ -295,15 +295,15 @@ onUnmounted(() => {
   border-radius: var(--radius-lg);
   font-weight: 700;
   font-size: 0.95rem;
-  background: #fff;
-  color: #0a0a0a;
+  background: var(--text);
+  color: var(--bg);
   border: none;
   text-decoration: none;
-  transition: all var(--duration-fast);
+  transition: color var(--duration-fast), background-color var(--duration-fast), border-color var(--duration-fast), box-shadow var(--duration-fast), transform var(--duration-fast);
 }
 
 .btn-white:hover {
-  box-shadow: 0 4px 20px rgba(255, 255, 255, 0.15);
+  box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 
@@ -318,7 +318,7 @@ onUnmounted(() => {
   color: var(--text-secondary);
   border: 1px solid var(--border-strong);
   text-decoration: none;
-  transition: all var(--duration-fast);
+  transition: color var(--duration-fast), background-color var(--duration-fast), border-color var(--duration-fast), box-shadow var(--duration-fast), transform var(--duration-fast);
 }
 
 .btn-ghost-lg:hover {
@@ -328,7 +328,7 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .hero { padding: 112px 20px 64px; }
+  .hero { padding: calc(112px + env(safe-area-inset-top, 0px)) 20px 64px; }
   .hero-headline {
     max-width: 520px;
     font-size: 3.45rem;
@@ -369,14 +369,14 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) and (min-width: 769px) {
-  .hero { padding: 128px 32px 72px; }
+  .hero { padding: calc(128px + env(safe-area-inset-top, 0px)) 32px 72px; }
   .hero-headline {
     font-size: 4.4rem;
   }
 }
 
 @media (max-width: 480px) {
-  .hero { padding: 96px 16px 56px; }
+  .hero { padding: calc(96px + env(safe-area-inset-top, 0px)) 16px 56px; }
   .hero-headline {
     font-size: 2.65rem;
     line-height: 1.08;

@@ -197,3 +197,12 @@
   border-color: rgba(147, 197, 253, 0.34);
   outline: none;
 }
+
+.activity-panel .activity-detail,
+.activity-detail-section,
+.activity-detail-header > div,
+.activity-liveness-card > div > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.activity-detail-header h3 { flex-wrap: wrap; }

@@ -48,6 +48,7 @@ function handleChange(event: Event) {
   position: relative;
   display: block;
   width: 100%;
+  min-width: 0;
 }
 
 .app-select::after {
@@ -98,5 +99,8 @@ function handleChange(event: Event) {
 .app-select__control:disabled {
   cursor: not-allowed;
   opacity: 0.72;
+}
+@media (pointer: coarse), (max-width: 600px) {
+  .app-select__control { min-height: 44px; font-size: 16px; }
 }
 </style>

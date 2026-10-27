@@ -33,7 +33,9 @@ export const router = createRouter({
   routes,
   scrollBehavior(to, _from, savedPosition) {
     if (to.hash) {
-      return { el: to.hash, top: 92, behavior: 'smooth' }
+      const navbarBottom = document.querySelector('.navbar')?.getBoundingClientRect().bottom ?? 72
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      return { el: to.hash, top: Math.max(92, navbarBottom + 20), behavior: reducedMotion ? 'instant' : 'smooth' }
     }
     if (savedPosition) {
       return savedPosition

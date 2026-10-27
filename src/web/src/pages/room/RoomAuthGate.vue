@@ -114,18 +114,20 @@ defineEmits<{
 
 <style scoped>
 .auth-gate {
-  --auth-bg: #0b0c10;
-  --auth-panel: #12141a;
-  --auth-panel-soft: #171a21;
-  --auth-text: #f5f7fb;
-  --auth-muted: #949aa8;
-  --auth-line: rgba(219, 225, 238, 0.12);
-  --auth-line-strong: rgba(219, 225, 238, 0.2);
-  --auth-signal: #91a7ff;
+  --auth-bg: var(--bg);
+  --auth-panel: var(--bg-elevated);
+  --auth-panel-soft: var(--bg-card);
+  --auth-text: var(--text);
+  --auth-muted: var(--text-secondary);
+  --auth-line: var(--border);
+  --auth-line-strong: var(--border-strong);
+  --auth-signal: var(--blue-text);
   position: relative;
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 100vh;
+  min-height: 100dvh;
+  padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
   overflow: hidden;
   background:
     radial-gradient(circle at 72% 34%, rgba(145, 167, 255, 0.09), transparent 28rem),
@@ -154,7 +156,7 @@ defineEmits<{
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 22px 32px;
+  padding: max(22px, env(safe-area-inset-top, 0px)) 32px max(22px, env(safe-area-inset-bottom, 0px));
 }
 
 .auth-gate-header {
@@ -256,7 +258,7 @@ defineEmits<{
   justify-content: center;
   gap: 10px;
   width: fit-content;
-  min-width: 230px;
+  min-width: 0;
   min-height: 52px;
   margin-top: 38px;
   padding: 0 18px;
@@ -300,7 +302,7 @@ defineEmits<{
 
 .auth-return-note {
   margin: 12px 0 0;
-  color: #6f7581;
+  color: var(--auth-muted);
   font-size: 0.76rem;
 }
 
@@ -427,12 +429,12 @@ defineEmits<{
 }
 
 .auth-gate-footer {
-  color: #727886;
+  color: var(--auth-muted);
   font-size: 0.72rem;
 }
 
 .auth-gate-footer a {
-  color: #aeb6c8;
+  color: var(--auth-muted);
 }
 
 .auth-gate-footer a:hover {
@@ -468,7 +470,7 @@ defineEmits<{
 @media (max-width: 560px) {
   .auth-gate-header,
   .auth-gate-footer {
-    padding: 18px 20px;
+    padding: max(18px, env(safe-area-inset-top, 0px)) 20px max(18px, env(safe-area-inset-bottom, 0px));
   }
 
   .auth-boundary-label {
