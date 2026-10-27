@@ -92,11 +92,17 @@ test('compact thinking exposes every agent and keeps one reply-flight anchor per
 })
 
 test('thinking disclosure dismisses without stealing outside focus and removes idle listeners', () => {
-  const original = { document: globalThis.document, Node: globalThis.Node }
+  const original = { document: globalThis.document, Node: globalThis.Node, ResizeObserver: globalThis.ResizeObserver }
   class ElementStub {}
   const listeners = new Set<unknown>()
   const doc = { addEventListener: (_: string, callback: unknown) => listeners.add(callback), removeEventListener: (_: string, callback: unknown) => listeners.delete(callback) }
-  Object.assign(globalThis, { document: doc, Node: ElementStub })
+  let resize: () => void = () => {}, observers = 0, top = 200
+  class ResizeStub {
+    constructor(callback: () => void) { resize = callback }
+    observe() { observers++ }
+    disconnect() { observers-- }
+  }
+  Object.assign(globalThis, { document: doc, Node: ElementStub, ResizeObserver: ResizeStub })
   let vm: any, focused = 0
   const inside = new ElementStub(), outside = new ElementStub()
   const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null })
@@ -107,16 +113,24 @@ test('thinking disclosure dismisses without stealing outside focus and removes i
   app.provide(ssrContextKey, { modules: new Set() })
   try {
     app.mount({})
-    vm.root.value = markRaw({ contains: (node: unknown) => node === inside })
+    vm.root.value = markRaw({ contains: (node: unknown) => node === inside,
+      getBoundingClientRect: () => ({ top }), closest: () => ({ getBoundingClientRect: () => ({ top: 80 }) }) })
     vm.trigger.value = markRaw({ focus: () => focused++ })
     assert.equal(listeners.size, 0)
     vm.expanded.value = true
     assert.equal(listeners.size, 1)
+    assert.equal(observers, 1)
+    assert.equal(vm.listHeight.value, 112, 'details fit above the pill inside the clipped timeline')
+    top = 150; resize()
+    assert.equal(vm.listHeight.value, 62, 'keyboard/composer resizing updates the available height')
+    top = 700; resize()
+    assert.equal(vm.listHeight.value, 260, 'large screens retain the bounded list')
     vm.onOutsidePress({ target: inside })
     assert.equal(vm.expanded.value, true)
     vm.close(true)
     assert.equal(focused, 1)
     assert.equal(listeners.size, 0)
+    assert.equal(observers, 0)
     vm.expanded.value = true
     vm.onFocusOut({ relatedTarget: inside })
     assert.equal(vm.expanded.value, true)
@@ -129,4 +143,5 @@ test('thinking disclosure dismisses without stealing outside focus and removes i
     vm.expanded.value = true
   } finally { app.unmount(); Object.assign(globalThis, original) }
   assert.equal(listeners.size, 0)
+  assert.equal(observers, 0)
 })

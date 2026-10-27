@@ -17,7 +17,7 @@
         </span>
       </template>
     </button>
-    <div v-if="expanded" :id="listId" class="web-work-list" role="region" aria-label="Working agents" tabindex="0">
+    <div v-if="expanded" :id="listId" class="web-work-list" :style="{ maxHeight: `${listHeight}px` }" role="region" aria-label="Working agents" tabindex="0">
       <div v-for="item in work" :key="item.id" class="web-work-row"
         data-motion-work :data-motion-session="item.session" :data-motion-agent="item.key" :data-motion-after="item.after">
         <span class="room-activity-pulse" aria-hidden="true"><ActivityOrb state="working" /></span>
@@ -36,6 +36,8 @@ const props = defineProps<{ work: readonly RoomWorkIndicator[] }>()
 const root = ref<HTMLElement | null>(null)
 const trigger = ref<HTMLButtonElement | null>(null)
 const expanded = ref(false)
+const listHeight = ref(260)
+let resizeObserver: ResizeObserver | null = null
 const listId = useId()
 const single = computed(() => props.work.length === 1 ? props.work[0] : null)
 const label = computed(() => single.value ? `${single.value.name}: ${single.value.summary}` : `${props.work.length} agents are working`)
@@ -50,12 +52,28 @@ function onFocusOut(event: FocusEvent) {
 function onOutsidePress(event: PointerEvent) {
   if (event.target instanceof Node && !root.value?.contains(event.target)) close()
 }
+function fitList() {
+  const viewport = root.value?.closest('.messages-wrap')
+  if (viewport && root.value) listHeight.value = Math.max(0, Math.min(260, root.value.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 8))
+}
+function stopWatching() {
+  document.removeEventListener('pointerdown', onOutsidePress, true)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+}
 // Collapsed pills do no document-wide work on every pointer interaction.
 watch(expanded, (open) => {
-  if (open) document.addEventListener('pointerdown', onOutsidePress, true)
-  else document.removeEventListener('pointerdown', onOutsidePress, true)
+  stopWatching()
+  if (!open) return
+  document.addEventListener('pointerdown', onOutsidePress, true)
+  fitList()
+  const viewport = root.value?.closest('.messages-wrap')
+  if (viewport && typeof ResizeObserver === 'function') {
+    resizeObserver = new ResizeObserver(fitList)
+    resizeObserver.observe(viewport)
+  }
 }, { flush: 'sync' })
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePress, true))
+onBeforeUnmount(stopWatching)
 </script>
 
 <style scoped>
