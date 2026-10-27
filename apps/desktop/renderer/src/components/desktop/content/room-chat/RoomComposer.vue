@@ -125,7 +125,11 @@
         @dismiss="focusInput"
       />
     </div>
-    <p v-if="agentNotice" class="desktop-composer-agent-notice" role="status" data-testid="desktop-composer-agent-notice">{{ agentNotice }}</p>
+    <p v-if="agentNotice" class="desktop-composer-agent-notice" role="status" data-testid="desktop-composer-agent-notice">
+      <span>{{ agentNotice }}</span>
+      <button v-if="agentNoticeAction" type="button" class="desktop-composer-agent-notice-action"
+        data-testid="desktop-composer-agent-notice-action" @click="runAgentNoticeAction">{{ agentNoticeActionLabel }}</button>
+    </p>
     <div class="desktop-composer-input-row">
       <RoomComposerAddMenu
         ref="addMenu"
@@ -182,10 +186,10 @@
         type="submit"
         :aria-label="sendLabel"
         :title="sendLabel"
-        :disabled="roomLoading || sending || agentLaunching || slash.busy.value || !canSend"
+        :disabled="roomLoading || sending || agentLaunching || agentChecking || slash.busy.value || !canSend"
         data-testid="desktop-composer-send"
       >
-        <LoaderCircle v-if="sending || agentLaunching" :size="16" aria-hidden="true" />
+        <LoaderCircle v-if="sending || agentLaunching || agentChecking" :size="16" aria-hidden="true" />
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
     </div>
@@ -549,8 +553,22 @@ const {
   rows: agentRows, chip: agentChip, chipReadiness: agentChipReadiness, chipModels: agentChipModels,
   chipEfforts: agentChipEfforts, chipAccessStops: agentChipAccessStops, chipWorksIn: agentChipWorksIn,
   chipWorktrees: agentChipWorktrees, openModelHost: agentOpenModelHost, launching: agentLaunching,
-  notice: agentNotice, personalAccess: agentPersonalAccess,
+  notice: agentNotice, noticeAction: agentNoticeAction, checking: agentChecking, personalAccess: agentPersonalAccess,
 } = agentDraft;
+const agentNoticeActionLabels = {
+  "setup": "Set up…", "check-again": "Check again", "retry-providers": "Try again",
+  "open-chip": "Choose a model…", "open-chip-where": "Choose a worktree…",
+} as const;
+const agentNoticeActionLabel = computed(() => agentNoticeAction.value ? agentNoticeActionLabels[agentNoticeAction.value] : "");
+/** The chip steps open the chip's own settings; the rest run in the draft. */
+function runAgentNoticeAction(): void {
+  const action = agentNoticeAction.value;
+  if (action === "open-chip" || action === "open-chip-where") {
+    agentChipElement.value?.open(action === "open-chip-where" ? "where" : "main");
+    return;
+  }
+  void agentDraft.runNoticeAction();
+}
 const agentChipElement = ref<InstanceType<typeof RoomComposerAgentChip> | null>(null);
 const agentChipName = computed(() => composerAgentName(agentDraft.chipProvider.value));
 // A new chip is a new element, so it plays its entrance once.
@@ -559,7 +577,11 @@ const agentChipFromRect = ref<DOMRect | null>(null);
 const agentCoachVisible = ref(false);
 
 // A notice about the last attempt goes away once the draft changes.
-watch(draft, () => { if (!agentLaunching.value) agentNotice.value = null; });
+watch(draft, () => {
+  if (agentLaunching.value || agentChecking.value) return;
+  agentNotice.value = null;
+  agentNoticeAction.value = null;
+});
 
 function pickAgent(providerId: DesktopAgentProviderId, from: DOMRect | null): void {
   if (agentDraft.pick(providerId) !== "chip") return;

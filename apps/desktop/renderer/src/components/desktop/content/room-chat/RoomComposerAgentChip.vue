@@ -362,5 +362,18 @@ function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
 }
 
-defineExpose({ close: closeMenu, isOpen: () => open.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
+/** Opens the settings from the composer's notice, at the main list or straight at "Works in". */
+function openAt(at: "main" | "where"): void {
+  dismissCoach();
+  animate.value = false;
+  open.value = true;
+  emit("opened");
+  if (at === "where" && props.worktrees.length) showWhere();
+  else {
+    view.value = "main";
+    void nextTick(() => focusItem(checkedOrFirst()));
+  }
+}
+
+defineExpose({ close: closeMenu, open: openAt, isOpen: () => open.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
 </script>
