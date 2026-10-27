@@ -621,9 +621,12 @@ watch(
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 
 /* A landscape software keyboard can leave only 98px for the draft and send row. */
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: minmax(0, 1fr) auto; }
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto; }
+/* Keep search focusable: /search or Find restores the header through focusin. */
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-history-search),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-pin-rail),
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.presence-chips) { display: none; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer) { max-height: var(--room-viewport-height); }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer) { padding-block: 2px; }
