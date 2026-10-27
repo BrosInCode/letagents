@@ -39,8 +39,11 @@ export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
   "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=()",
 };
 
-/** The demo's own document and in-page data are the only requests a demo window makes. */
-export function isAllowedHtmlDemoRequest(rawUrl: string): boolean {
+/**
+ * The demo's own document and in-page data are the only requests a demo page
+ * makes. DevTools opened on a demo (another web contents) may load its own UI.
+ */
+export function isAllowedHtmlDemoRequest(rawUrl: string, sender: { fromDemo: boolean } = { fromDemo: true }): boolean {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -49,7 +52,8 @@ export function isAllowedHtmlDemoRequest(rawUrl: string): boolean {
   }
   return url.protocol === `${htmlDemoProtocolScheme}:`
     || url.protocol === "data:"
-    || url.protocol === "blob:";
+    || url.protocol === "blob:"
+    || (url.protocol === "devtools:" && !sender.fromDemo);
 }
 
 /** Only attachment links the app itself made may open as a demo. */

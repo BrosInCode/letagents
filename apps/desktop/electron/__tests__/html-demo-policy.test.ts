@@ -27,6 +27,10 @@ describe("HTML demo policy", () => {
     ]) {
       assert.equal(isAllowedHtmlDemoRequest(url), false, url);
     }
+    // DevTools opened on a demo loads its own UI; the demo page itself cannot.
+    assert.equal(isAllowedHtmlDemoRequest("devtools://devtools/bundled/devtools_app.html", { fromDemo: false }), true);
+    assert.equal(isAllowedHtmlDemoRequest("devtools://devtools/bundled/devtools_app.html", { fromDemo: true }), false);
+    assert.equal(isAllowedHtmlDemoRequest("https://example.com/", { fromDemo: false }), false);
   });
 
   it("blocks every network connection, frame, form and plugin in the page policy", () => {

@@ -22,6 +22,8 @@ const SHOW_DEMO_WINDOW_AFTER_MS = 1500;
 /** Demo documents by window host; a host exists only while its window is open. */
 const demoDocuments = new Map<string, string>();
 const demoWindowsByHref = new Map<string, ElectronBrowserWindow>();
+/** The demo pages' own web contents; DevTools opened on a demo is not one of them. */
+const demoContentsIds = new Set<number>();
 const pendingHrefs = new Set<string>();
 let demoSession: Promise<Session> | null = null;
 
@@ -95,6 +97,8 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
     },
   });
   const contents = demoWindow.webContents;
+  const contentsId = contents.id;
+  demoContentsIds.add(contentsId);
   contents.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
   contents.setWindowOpenHandler(() => ({ action: "deny" }));
   contents.on("will-navigate", (event) => event.preventDefault());
@@ -123,6 +127,7 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
   demoWindow.once("closed", () => {
     clearTimeout(showTimer);
     demoDocuments.delete(host);
+    demoContentsIds.delete(contentsId);
     void ses.clearStorageData({ origin }).catch(() => undefined);
   });
 
@@ -131,7 +136,7 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
 }
 
 function htmlDemoSession(): Promise<Session> {
-  // A failed setup is not cached, so the next open tries again instead of failing forever.
+  // A failed setup is not cached, so the next open tries again.
   demoSession ??= prepareHtmlDemoSession().catch((error: unknown) => {
     demoSession = null;
     throw error;
@@ -141,6 +146,14 @@ function htmlDemoSession(): Promise<Session> {
 
 async function prepareHtmlDemoSession(): Promise<Session> {
   const ses = session.fromPartition(HTML_DEMO_PARTITION);
+  // Connections that skip the request filter (WebRTC over TCP, preconnect) meet a
+  // closed port. Set first: without it no demo opens, and nothing below is
+  // registered yet, so the next open can set the session up again.
+  try {
+    await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
+  } catch {
+    throw new Error("Demos cannot open because their network block could not be set up.");
+  }
   ses.protocol.handle(htmlDemoProtocolScheme, (request) => {
     const url = new URL(request.url);
     const html = url.pathname === "/" ? demoDocuments.get(url.hostname) : undefined;
@@ -149,18 +162,13 @@ async function prepareHtmlDemoSession(): Promise<Session> {
       : new Response(html, { headers: HTML_DEMO_RESPONSE_HEADERS });
   });
   ses.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: !isAllowedHtmlDemoRequest(details.url) });
+    // A request without a known non-demo sender counts as the demo's own.
+    const fromDemo = details.webContentsId === undefined || demoContentsIds.has(details.webContentsId);
+    callback({ cancel: !isAllowedHtmlDemoRequest(details.url, { fromDemo }) });
   });
   ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   ses.setPermissionCheckHandler(() => false);
   ses.setDevicePermissionHandler(() => false);
   ses.on("will-download", (event) => event.preventDefault());
-  // Connections that skip the request filter (WebRTC over TCP, preconnect) meet a
-  // closed port. Set before the first demo loads; without it no demo opens.
-  try {
-    await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
-  } catch {
-    throw new Error("Demos cannot open because their network block could not be set up.");
-  }
   return ses;
 }
