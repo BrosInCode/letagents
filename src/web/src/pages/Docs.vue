@@ -1,16 +1,18 @@
 <template>
   <div class="docs-page">
-    <div v-if="sidebarOpen" class="sidebar-overlay" @click="sidebarOpen = false" />
+    <div v-if="sidebarOpen" class="sidebar-overlay" @click="closeSidebar" />
 
     <div class="docs-layout">
       <DocsSidebar
         :sections="docsNavSections"
         :active-section="activeSection"
         :open="sidebarOpen"
+        :mobile="mobile"
         @navigate="closeSidebarOnMobile"
+        @close="closeSidebar"
       />
 
-      <main class="docs-content">
+      <main class="docs-content" :inert="sidebarOpen && mobile">
         <GettingStartedDocs />
         <RoomConceptDocs />
         <SecurityDocs />
@@ -19,10 +21,13 @@
     </div>
 
     <button
+      ref="sidebarToggle"
       class="sidebar-toggle"
       type="button"
       aria-label="Toggle documentation navigation"
-      @click="sidebarOpen = !sidebarOpen"
+      :aria-expanded="sidebarOpen"
+      aria-controls="docs-navigation"
+      @click="sidebarOpen ? closeSidebar() : sidebarOpen = true"
     >
       <MenuIcon :size="22" label="Menu" />
     </button>
@@ -42,9 +47,21 @@ import '@/components/docs/docs.css'
 
 const activeSection = ref('overview')
 const sidebarOpen = ref(false)
+const mobile = ref(false)
+const sidebarToggle = ref<HTMLButtonElement>()
+
+function closeSidebar() {
+  sidebarOpen.value = false
+  sidebarToggle.value?.focus({ preventScroll: true })
+}
+
+function updateViewport() {
+  mobile.value = window.innerWidth <= 800
+  if (!mobile.value) sidebarOpen.value = false
+}
 
 function closeSidebarOnMobile() {
-  if (window.innerWidth <= 800) sidebarOpen.value = false
+  if (mobile.value) closeSidebar()
 }
 
 function updateActiveSection() {
@@ -57,11 +74,14 @@ function updateActiveSection() {
 }
 
 onMounted(() => {
+  updateViewport()
   updateActiveSection()
   window.addEventListener('scroll', updateActiveSection, { passive: true })
+  window.addEventListener('resize', updateViewport)
 })
 
 onUnmounted(() => {
   window.removeEventListener('scroll', updateActiveSection)
+  window.removeEventListener('resize', updateViewport)
 })
 </script>

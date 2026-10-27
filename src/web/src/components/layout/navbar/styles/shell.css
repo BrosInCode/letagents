@@ -39,8 +39,10 @@
 }
 
 .navbar--scrolled {
-  background: rgba(12, 12, 12, 0.92);
+  background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.05),
     0 8px 32px rgba(0, 0, 0, 0.5);
 }
+
+.navbar :is(a, button):focus-visible { outline: 2px solid var(--blue-text); outline-offset: 3px; }

@@ -2,7 +2,7 @@
   <div class="code-block">
     <div class="code-block-header">
       <span>{{ label }}</span>
-      <button class="copy-btn" @click="copy">{{ copied ? 'Copied!' : 'Copy' }}</button>
+      <button type="button" class="copy-btn" @click="copy">{{ copied ? 'Copied!' : 'Copy' }}</button>
     </div>
     <pre><code ref="codeEl"><slot /></code></pre>
   </div>
@@ -40,6 +40,7 @@ async function copy() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 8px 14px;
   background: #1a1a1a;
   border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
@@ -59,8 +60,9 @@ async function copy() {
   font-weight: 600;
   padding: 3px 10px;
   cursor: pointer;
-  transition: all 150ms;
+  transition: background-color 150ms, color 150ms;
   font-family: inherit;
+  min-height: 44px;
 }
 .copy-btn:hover { background: rgba(228,228,231,0.1); color: var(--text, #fafafa); }
 
