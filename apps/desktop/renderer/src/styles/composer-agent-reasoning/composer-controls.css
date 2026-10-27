@@ -1,12 +1,22 @@
+/* Not positioned, so the "+" and access menus open above the whole composer
+   instead of over the draft. */
 .desktop-composer-input-row {
-  position: relative;
   display: grid;
-  /* "+", the input and send. Everything else lives in the "+" menu, so the
-     bar never grows a track. */
-  grid-template-columns: 34px minmax(0, 1fr) 34px;
-  align-items: end;
-  gap: 7px;
+  /* The input has the full width on top. Under it, one bar: "+" and the
+     access selector on the left, send on the right. */
+  grid-template-columns: 32px minmax(0, 1fr) 32px;
+  grid-template-areas:
+    "field field field"
+    "add under send";
+  align-items: center;
+  gap: 2px 6px;
 }
+
+.desktop-composer-input-row > .desktop-composer-add-wrap { grid-area: add; position: static; }
+.desktop-composer-input-row > .desktop-composer-field { grid-area: field; }
+.desktop-composer-input-row > .desktop-composer-under { grid-area: under; }
+.desktop-composer-input-row .desktop-composer-access-wrap { position: static; }
+.desktop-composer-input-row > .desktop-composer-send { grid-area: send; }
 
 /* The input grows with its text up to 156px, then scrolls. The browser sizes
    it (field-sizing), so typing does no layout reads in script. */
@@ -24,7 +34,7 @@
   font: inherit;
   font-size: 0.88rem;
   line-height: 1.42;
-  padding: 7px 3px;
+  padding: 6px 7px 4px;
 }
 
 .desktop-composer-input::placeholder {
@@ -63,11 +73,12 @@
 .desktop-composer-send {
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
   padding: 0;
-  border-radius: 10px;
+  border: 0;
+  border-radius: 50%;
   background: #4da3ff;
   color: #06111d;
   transition:
@@ -91,7 +102,7 @@
 
 .desktop-composer-send:disabled {
   cursor: not-allowed;
-  background: rgba(255, 255, 255, 0.065);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--text-tertiary);
   opacity: 1;
 }
