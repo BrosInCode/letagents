@@ -96,7 +96,7 @@ test("the Add agent effort selector follows the selected Open Model model", () =
   assert.equal(view.showEffortSelector.value, false, "a custom id has no catalog entry");
 
   selectedProviderId.value = "claude-code";
-  assert.equal(view.showEffortSelector.value, false, "Claude Code keeps no effort selector");
+  assert.equal(view.showEffortSelector.value, true, "Claude Code passes its effort as --effort");
   selectedProviderId.value = "codex";
   assert.equal(view.showEffortSelector.value, true);
 });
