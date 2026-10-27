@@ -56,7 +56,7 @@ struct ConversationView: View {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         if let error = model.error { ErrorNotice(message: error) }
                         if model.isLoading { ProgressView("Loading conversation…").frame(maxWidth: .infinity).padding(.top, 40) }
-                        else if model.visibleMessages.isEmpty {
+                        else if model.visibleMessages.isEmpty && model.error == nil {
                             ContentUnavailableView("Start the conversation", systemImage: "bubble.left.and.bubble.right", description: Text("Write to the people and agents in this room."))
                         }
                         if model.hasOlder {
@@ -151,7 +151,17 @@ struct ConversationView: View {
                         }
                         }.padding(14)
                     }
-            }.safeAreaInset(edge: .bottom, spacing: 0) { composer }
+            }.safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    if !model.isConnected {
+                        Label(model.isLoading ? "Connecting…" : "Not connected · your draft is kept", systemImage: "wifi.exclamationmark")
+                            .font(.caption).foregroundStyle(Theme.muted).frame(maxWidth: .infinity).padding(.vertical, 6)
+                            .background(Theme.surface).accessibilityIdentifier("connection-status")
+                    }
+                    WorkspaceNotice(workspace: session.workspace)
+                    composer
+                }
+            }
         }.buttonStyle(.plain).background(Theme.background).navigationBarTitleDisplayMode(.inline)
             .toolbar { conversationToolbar.companionToolbarStyle() }
             .environment(\.openURL, OpenURLAction { url in
@@ -234,7 +244,12 @@ struct ConversationView: View {
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
                 withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { highlightedID = nil }
             }
-            .task(id: active) { if active { await model.run() } }
+            .task(id: active) {
+                if active {
+                    session.workspace.lastConversation = ConversationRoute(roomID: model.room.id, rootID: model.rootID)
+                    await model.run()
+                }
+            }
             .task(id: active) { if active { await model.watchParticipants() } }
             .task(id: "\(active)-\(atBottom)-\(model.visibleMessages.last?.id ?? "")") {
                 if active && atBottom, let last = model.visibleMessages.last { await model.markRead(through: last) }

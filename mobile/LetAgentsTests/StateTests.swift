@@ -348,7 +348,7 @@ extension StateTests {
         old.addAttachments([try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Private file".utf8))])
         await session.signOut()
         XCTAssertNil(session.account); XCTAssertNil(credentials.token)
-        XCTAssertTrue(session.drafts.isEmpty); XCTAssertTrue(session.attachmentDrafts.isEmpty)
+        XCTAssertTrue(session.workspace.drafts.isEmpty); XCTAssertTrue(session.workspace.attachments.isEmpty)
         credentials.token = "second-token"; await session.restore()
         old.draft = "A late edit"; await old.send()
         let reopened = ConversationStore(room: room, session: session)
@@ -473,5 +473,169 @@ extension StateTests {
         finish.signal(); await sending.value
         XCTAssertEqual(messageRequests, 1)
         XCTAssertTrue(reopened.attachments.isEmpty); XCTAssertTrue(reopened.draft.isEmpty); XCTAssertFalse(reopened.isSending)
+    }
+}
+
+extension StateTests {
+    func testWorkspaceRestoresQuotedAttachmentDraftAndRetryIdentityAfterRelaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let accountJSON = accountJSON
+        var identifiers: [String] = []
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            if request.url!.path.hasSuffix("/attachments/uploads") {
+                return (200, #"{"upload_id":"upl_saved","upload_url":"https://storage.example/file","method":"PUT","headers":{}}"#)
+            }
+            if request.httpMethod == "PUT" { return (200, "{}") }
+            let body = MockURLProtocol.body(request)
+            identifiers.append(body["client_message_id"] as! String)
+            XCTAssertEqual(body["reply_to"] as? String, "msg_1")
+            XCTAssertEqual((body["attachments"] as? [[String: String]])?.first?["upload_id"], "upl_saved")
+            throw URLError(.networkConnectionLost)
+        }
+        let credentials = MemoryCredentials("token")
+        let workspace = WorkspaceStore(disk: WorkspaceDisk(directory: directory))
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: credentials, workspace: workspace)
+        await session.restore()
+        let room = Room(roomId: "repo", displayName: "Project")
+        let original = ConversationStore(room: room, rootID: "msg_1", session: session)
+        original.draft = "Keep the whole reply"
+        original.quote = ReplyPreview(message: Message(id: "msg_1", sender: "Emmy", text: "Original", timestamp: ""))
+        original.addAttachments([try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Saved bytes".utf8))])
+        workspace.lastConversation = ConversationRoute(roomID: room.id, rootID: "msg_1")
+        await original.send()
+        let saved = await workspace.flush(); XCTAssertTrue(saved)
+        let restoredWorkspace = WorkspaceStore(disk: WorkspaceDisk(directory: directory))
+        let restoredSession = SessionStore(client: MockURLProtocol.client(), credentials: credentials, workspace: restoredWorkspace)
+        await restoredSession.restore()
+        let restored = ConversationStore(room: room, rootID: "msg_1", session: restoredSession)
+        XCTAssertEqual(restored.draft, original.draft)
+        XCTAssertEqual(restored.quote, original.quote)
+        XCTAssertEqual(restored.attachments, original.attachments)
+        XCTAssertEqual(restoredWorkspace.lastConversation, workspace.lastConversation)
+        await restored.send()
+        XCTAssertEqual(identifiers.count, 2); XCTAssertEqual(identifiers.first, identifiers.last)
+    }
+
+    func testWorkspaceAccountIsolationSignOutAndSuccessfulSendCleanup() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let disk = WorkspaceDisk(directory: directory)
+        let workspace = WorkspaceStore(disk: disk)
+        await workspace.load(accountID: "a")
+        workspace.drafts["repo|room"] = "Private"
+        let saved = await workspace.flush(); XCTAssertTrue(saved)
+        await workspace.load(accountID: "b")
+        XCTAssertTrue(workspace.drafts.isEmpty)
+        await workspace.load(accountID: "a")
+        XCTAssertEqual(workspace.drafts["repo|room"], "Private")
+        try await workspace.clear()
+        await workspace.load(accountID: "a")
+        XCTAssertTrue(workspace.drafts.isEmpty)
+        let accountJSON = accountJSON
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            return (200, #"{"id":"msg_2","sender":"EmmyMay","text":"Sent","timestamp":""}"#)
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"), workspace: workspace)
+        await session.restore()
+        let conversation = ConversationStore(room: Room(roomId: "repo", displayName: "Project"), session: session)
+        conversation.draft = "Sent"; await conversation.send()
+        let restored = try await WorkspaceDisk(directory: directory).load(accountID: "a")
+        XCTAssertTrue(restored.drafts.isEmpty); XCTAssertTrue(restored.submissions.isEmpty)
+    }
+
+    func testWorkspaceSaveFailureDoesNotSendAnUnrecoverableMessage() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("Not a directory".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let accountJSON = accountJSON
+        var sends = 0
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            sends += 1; return (500, "{}")
+        }
+        let workspace = WorkspaceStore(disk: WorkspaceDisk(directory: file))
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"), workspace: workspace)
+        await session.restore()
+        let conversation = ConversationStore(room: Room(roomId: "repo", displayName: "Project"), session: session)
+        conversation.draft = "Keep me"; await conversation.send()
+        XCTAssertEqual(sends, 0); XCTAssertEqual(conversation.draft, "Keep me")
+        XCTAssertNotNil(conversation.sendError); XCTAssertNotNil(workspace.saveError)
+    }
+
+    func testDirectoryRefreshPreservesLoadedRoomsOnFailureAndUpdatesNestedRooms() async {
+        let accountJSON = accountJSON
+        var refreshes = 0
+        MockURLProtocol.handler = { request in
+            if request.url!.path == "/auth/session" { return (200, accountJSON) }
+            refreshes += 1
+            if refreshes == 2 { throw URLError(.notConnectedToInternet) }
+            let name = refreshes == 1 ? "Earlier" : "Updated"
+            return (200, "{\"rooms\":[{\"room_id\":\"repo\",\"display_name\":\"Project\",\"focus_rooms\":[{\"room_id\":\"focus\",\"display_name\":\"\(name)\",\"kind\":\"focus\",\"latest_message_at\":\"2026-10-26T12:00:00Z\"}]}]}")
+        }
+        let session = SessionStore(client: MockURLProtocol.client(), credentials: MemoryCredentials("token"))
+        await session.restore()
+        let directory = RoomDirectoryStore(session: session)
+        await directory.refresh()
+        XCTAssertEqual(directory.room("focus")?.displayName, "Earlier")
+        await directory.refresh()
+        XCTAssertEqual(directory.room("focus")?.displayName, "Earlier"); XCTAssertNotNil(directory.error)
+        await directory.refresh()
+        XCTAssertEqual(directory.room("focus")?.displayName, "Updated"); XCTAssertNil(directory.error)
+        XCTAssertEqual(directory.recentRooms.map(\.id), ["focus"])
+    }
+}
+
+
+extension StateTests {
+    func testWorkspaceRecoveryPreservesRetryIdentityAndEditsAfterLoadFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = WorkspaceStore(disk: WorkspaceDisk(directory: directory))
+        await original.load(accountID: "a")
+        let attachment = try DraftAttachment(filename: "notes.txt", contentType: "text/plain", data: Data("Notes".utf8))
+        original.drafts["repo|room"] = "Possibly already sent"
+        original.attachments["repo|room"] = [attachment]
+        original.submissions["repo|room"] = MessageSubmission(text: "Possibly already sent", id: "desktop-send:original", replyTo: nil, attachmentIDs: [attachment.id])
+        let saved = await original.flush(); XCTAssertTrue(saved)
+        let folder = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first)
+        let file = folder.appendingPathComponent(attachment.id.uuidString)
+        try FileManager.default.removeItem(at: file)
+        let recovering = WorkspaceStore(disk: WorkspaceDisk(directory: directory))
+        await recovering.load(accountID: "a")
+        XCTAssertTrue(recovering.needsRecovery)
+        recovering.drafts["other|room"] = "A new edit while recovery is unavailable"
+        recovering.submissions["repo|room"] = MessageSubmission(text: "Possibly already sent", id: "desktop-send:not-sent", replyTo: nil)
+        try attachment.data.write(to: file)
+        await recovering.retrySaving()
+        XCTAssertFalse(recovering.needsRecovery); XCTAssertNil(recovering.saveError)
+        XCTAssertEqual(recovering.drafts["other|room"], "A new edit while recovery is unavailable")
+        XCTAssertEqual(recovering.attachments["repo|room"], [attachment])
+        XCTAssertEqual(recovering.submissions["repo|room"]?.id, "desktop-send:original")
+    }
+
+    func testCorruptWorkspaceCannotLeakPreviousAccountAndCanBeExplicitlyReset() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let workspace = WorkspaceStore(disk: WorkspaceDisk(directory: directory))
+        await workspace.load(accountID: "b")
+        workspace.drafts["repo|room"] = "B draft"
+        let saved = await workspace.flush(); XCTAssertTrue(saved)
+        let folder = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first)
+        try Data("Invalid JSON".utf8).write(to: folder.appendingPathComponent("workspace.json"))
+        await workspace.load(accountID: "a")
+        workspace.drafts["repo|room"] = "Private A draft"
+        await workspace.load(accountID: "b")
+        XCTAssertTrue(workspace.drafts.isEmpty); XCTAssertTrue(workspace.needsRecovery)
+        await workspace.retrySaving()
+        XCTAssertTrue(workspace.needsRecovery)
+        await workspace.resetSavedDrafts()
+        XCTAssertFalse(workspace.needsRecovery); XCTAssertNil(workspace.saveError)
+        workspace.drafts["repo|room"] = "Fresh B draft"
+        let fresh = await workspace.flush(); XCTAssertTrue(fresh)
+        let loaded = try await WorkspaceDisk(directory: directory).load(accountID: "b")
+        XCTAssertEqual(loaded.drafts["repo|room"], "Fresh B draft")
     }
 }

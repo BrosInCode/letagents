@@ -19,16 +19,16 @@ import Observation
     private(set) var participants: [Participant] = []
     private(set) var participantsError: String?
     var quote: ReplyPreview? {
-        get { isCurrentSession ? session.quotes[draftKey] : nil }
-        set { if isCurrentSession { session.quotes[draftKey] = newValue } }
+        get { isCurrentSession ? session.workspace.quotes[draftKey] : nil }
+        set { if isCurrentSession { session.workspace.quotes[draftKey] = newValue } }
     }
     var draft: String {
-        get { isCurrentSession ? session.drafts[draftKey] ?? "" : "" }
-        set { if isCurrentSession { session.drafts[draftKey] = newValue } }
+        get { isCurrentSession ? session.workspace.drafts[draftKey] ?? "" : "" }
+        set { if isCurrentSession { session.workspace.drafts[draftKey] = newValue } }
     }
     private(set) var attachments: [DraftAttachment] {
-        get { isCurrentSession ? session.attachmentDrafts[draftKey] ?? [] : [] }
-        set { if isCurrentSession { session.attachmentDrafts[draftKey] = newValue } }
+        get { isCurrentSession ? session.workspace.attachments[draftKey] ?? [] : [] }
+        set { if isCurrentSession { session.workspace.attachments[draftKey] = newValue } }
     }
     var attachmentError: String?
     private(set) var uploadProgress: String?
@@ -40,8 +40,8 @@ import Observation
     private var unavailableRoots: Set<String> = []
     // Retain the id after an ambiguous network failure so retry cannot duplicate a message.
     private var submission: MessageSubmission? {
-        get { isCurrentSession ? session.submissions[draftKey] : nil }
-        set { if isCurrentSession { session.submissions[draftKey] = newValue } }
+        get { isCurrentSession ? session.workspace.submissions[draftKey] : nil }
+        set { if isCurrentSession { session.workspace.submissions[draftKey] = newValue } }
     }
 
     init(room: Room, rootID: String? = nil, session: SessionStore) {
@@ -183,6 +183,10 @@ import Observation
         var requestedSend = false
         defer { if isCurrentSession { session.sendingDrafts.remove(draftKey) }; uploadProgress = nil }
         do {
+            guard await session.workspace.flush(), isCurrentSession else {
+                sendError = "Couldn’t save this message for a safe retry. Free some storage and try again."
+                return
+            }
             for (index, attachment) in selectedFiles.enumerated() where submission?.uploads[attachment.id] == nil {
                 uploadProgress = "Uploading \(index + 1) of \(selectedFiles.count)…"
                 let uploadID = try await session.client.uploadAttachment(roomID: room.id, token: token, attachment: attachment)
@@ -190,6 +194,10 @@ import Observation
                 submission?.uploads[attachment.id] = uploadID
             }
             guard isCurrentSession else { return }
+            guard await session.workspace.flush(), isCurrentSession else {
+                sendError = "Couldn’t save this message for a safe retry. Free some storage and try again."
+                return
+            }
             let references = selectedFiles.compactMap { submission?.uploads[$0.id] }.map { SendMessageBody.AttachmentReference(uploadId: $0) }
             uploadProgress = nil; requestedSend = true
             let sent = try await session.client.send(roomID: room.id, token: token,
@@ -200,6 +208,7 @@ import Observation
             if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text && quote?.id == quoteID { draft = ""; quote = nil }
             attachments.removeAll { attachmentIDs.contains($0.id) }
             submission = nil
+            await session.workspace.flush()
         } catch {
             guard isCurrentSession else { return }
             if let failure = error as? APIError, failure.status == 400, failure.serverMessage == "attachment upload not found or expired" {

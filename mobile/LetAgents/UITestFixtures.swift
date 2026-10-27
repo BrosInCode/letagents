@@ -6,7 +6,15 @@ import Foundation
     static func makeSession() -> SessionStore {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [FixtureProtocol.self]
-        return SessionStore(client: APIClient(session: URLSession(configuration: configuration)), credentials: MemoryCredentials())
+        let arguments = ProcessInfo.processInfo.arguments
+        let credentials = MemoryCredentials()
+        if arguments.contains("--restore-session") { credentials.token = "fixture-token" }
+        var workspace = WorkspaceStore()
+        if let index = arguments.firstIndex(of: "--workspace-test-id"), arguments.indices.contains(index + 1) {
+            let directory = URL.applicationSupportDirectory.appendingPathComponent("UITestWorkspace").appendingPathComponent(arguments[index + 1])
+            workspace = WorkspaceStore(disk: WorkspaceDisk(directory: directory))
+        }
+        return SessionStore(client: APIClient(session: URLSession(configuration: configuration)), credentials: credentials, workspace: workspace)
     }
     private final class MemoryCredentials: CredentialStore {
         var token: String?
@@ -83,7 +91,7 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         else if path == "/account/rooms" {
             if ProcessInfo.processInfo.arguments.contains("--empty-rooms") { result = ["rooms": []] }
             else {
-                result = ["rooms": [["room_id": roomID, "display_name": "LetAgents", "pinned": true,
+                result = ["rooms": [["room_id": roomID, "display_name": "LetAgents", "pinned": true, "latest_message_at": "2026-10-27T00:00:00Z",
                     "git_room": ["repository": ["owner": "BrosInCode", "name": "letagents"], "ref": ["name": "main", "default_branch": "main", "is_default": true]],
                     "role": "admin", "focus_rooms": [
                         ["room_id": "focus-mobile", "display_name": "Mobile companion", "kind": "focus", "parent_room_id": roomID, "focus_status": "active", "source_task_id": "task_42"],

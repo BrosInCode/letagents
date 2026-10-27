@@ -4,13 +4,17 @@ struct ProjectsView: View {
     let session: SessionStore
     let account: Account
     @Environment(\.scenePhase) private var scenePhase
-    @State private var rooms: [Room] = []
+    @State private var directory: RoomDirectoryStore
+    @State private var path: [ConversationRoute] = []
+    @State private var restoredNavigation = false
     @State private var search = ""
-    @State private var loading = true
-    @State private var error: String?
     @State private var showingAccount = false
     @State private var pinnedOnly = false
-    private var projects: [RoomProject] { RoomProject.build(rooms).filter { !pinnedOnly || $0.pinned } }
+    private var projects: [RoomProject] { directory.projects.filter { !pinnedOnly || $0.pinned } }
+    init(session: SessionStore, account: Account) {
+        self.session = session; self.account = account
+        _directory = State(initialValue: RoomDirectoryStore(session: session))
+    }
     private func ownerLabel(_ project: RoomProject) -> String {
         guard let owner = project.owner else { return "Shared rooms" }
         if owner.caseInsensitiveCompare(account.login) == .orderedSame { return account.login }
@@ -23,7 +27,7 @@ struct ProjectsView: View {
         }
     }
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 Section {
                     SearchInput(placeholder: "Search projects and rooms", text: $search, identifier: "room-search")
@@ -33,20 +37,24 @@ struct ProjectsView: View {
                         Spacer()
                     }.padding(.vertical, 2)
                 }.listRowBackground(Color.clear).listRowSeparator(.hidden)
-                if let error {
-                    Section { ErrorNotice(message: error); Button("Try again") { Task { await refresh() } } }
+                if let error = directory.error {
+                    Section { ErrorNotice(message: error); Button("Try again") { Task { await directory.refresh() } } }
                 }
-                if loading && rooms.isEmpty {
+                if session.workspace.saveError != nil {
+                    Section { WorkspaceNotice(workspace: session.workspace) }
+                }
+                if directory.isLoading && directory.rooms.isEmpty {
                     ProgressView("Loading your rooms…").frame(maxWidth: .infinity).listRowBackground(Color.clear)
-                } else if projects.isEmpty || (!search.isEmpty && !projects.contains { $0.matches(search) }) {
+                } else if directory.error == nil && (projects.isEmpty || (!search.isEmpty && !projects.contains { $0.matches(search) })) {
                     ContentUnavailableView(search.isEmpty ? "Your rooms will be here" : "No matching rooms", systemImage: "bubble.left.and.bubble.right", description: Text(search.isEmpty ? "Join a room with this GitHub account on LetAgents, then pull down to refresh." : "Search a project, branch, or focus room."))
                         .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 } else if search.isEmpty {
+                    if !pinnedOnly { continuationSections }
                     ForEach(owners, id: \.self) { owner in
                         Section {
                             ForEach(projects.filter { ownerLabel($0) == owner }) { project in
                                 NavigationLink {
-                                    ProjectRoomsView(project: project, session: session)
+                                    ProjectRoomsView(projectID: project.id, directory: directory, session: session)
                                 } label: { ProjectRow(project: project) }
                                 .listRowBackground(Theme.surface).accessibilityIdentifier("project-\(project.id)")
                             }
@@ -71,8 +79,23 @@ struct ProjectsView: View {
                     }.companionToolbarStyle()
                 }
                 .sheet(isPresented: $showingAccount) { AccountView(session: session, account: account) }
-                .refreshable { await refresh() }
-                .task(id: scenePhase) { if scenePhase == .active { await refresh() } }
+                .navigationDestination(for: ConversationRoute.self) { route in
+                    if let room = directory.room(route.roomID) {
+                        ConversationView(room: room, rootID: route.rootID, context: directory.project(containing: room.id)?.name ?? "", session: session)
+                    } else {
+                        ContentUnavailableView("Room unavailable", systemImage: "bubble.left", description: Text("Return to Projects and refresh your rooms."))
+                    }
+                }
+                .refreshable { await directory.refresh() }
+                .task(id: scenePhase) {
+                    if scenePhase == .active {
+                        await directory.refresh()
+                        if directory.hasLoaded && !restoredNavigation {
+                            restoredNavigation = true
+                            if let route = session.workspace.lastConversation, directory.room(route.roomID) != nil { path = [route] }
+                        }
+                    }
+                }
         }
     }
     private func filter(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -85,15 +108,38 @@ struct ProjectsView: View {
             RoomRow(room: room, subtitle: room.parentRoomId.flatMap { id in project.rooms.first { $0.id == id }?.branchName } ?? room.subtitle)
         }.listRowBackground(Theme.surface).accessibilityIdentifier("room-\(room.id)")
     }
-    private func refresh() async {
-        guard let token = session.token else { return }
-        loading = true; defer { loading = false }
-        do {
-            let result = try await session.client.rooms(token: token)
-            try Task.checkCancellation(); rooms = result; error = nil
-        } catch is CancellationError { }
-        catch let error as URLError where error.code == .cancelled { }
-        catch { self.error = error.localizedDescription; session.handleUnauthorized(error, token: token) }
+    @ViewBuilder private var continuationSections: some View {
+        if let route = session.workspace.lastConversation, let room = directory.room(route.roomID) {
+            Section("Continue where you left off") {
+                NavigationLink(value: route) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(route.rootID == nil ? room.displayName : "Thread in \(room.displayName)", systemImage: "arrow.turn.down.right")
+                            .font(.headline).foregroundStyle(Theme.ink)
+                        Text(directory.project(containing: room.id)?.name ?? room.subtitle).font(.caption).foregroundStyle(Theme.muted)
+                        if let draft = session.workspace.drafts[route.draftKey], !draft.isEmpty {
+                            Text("Draft · " + draft).font(.subheadline).foregroundStyle(Theme.accent).lineLimit(2)
+                        } else if let files = session.workspace.attachments[route.draftKey], !files.isEmpty {
+                            Label("\(files.count) saved attachments", systemImage: "paperclip").font(.caption).foregroundStyle(Theme.accent)
+                        }
+                    }.padding(.vertical, 8)
+                }.listRowBackground(Theme.outgoing).accessibilityIdentifier("continue-conversation")
+            }
+        }
+        if !directory.recentRooms.isEmpty {
+            Section("Recent activity") {
+                ForEach(Array(directory.recentRooms.prefix(3))) { room in
+                    NavigationLink(value: ConversationRoute(roomID: room.id)) {
+                        HStack(alignment: .top) {
+                            RoomRow(room: room, subtitle: directory.project(containing: room.id)?.name ?? room.subtitle)
+                            Spacer(minLength: 4)
+                            if let date = room.latestMessageAt.flatMap(MessageDate.parse) {
+                                Text(date, style: .relative).font(.caption2).foregroundStyle(Theme.muted).padding(.top, 10)
+                            }
+                        }
+                    }.listRowBackground(Theme.surface).accessibilityIdentifier("recent-\(room.id)")
+                }
+            }
+        }
     }
 }
 
@@ -130,19 +176,25 @@ private struct ProjectRow: View {
 }
 
 struct ProjectRoomsView: View {
-    let project: RoomProject
-    var branch: Room? = nil
+    @Environment(\.scenePhase) private var scenePhase
+    let projectID: String
+    let directory: RoomDirectoryStore
+    var branchID: String? = nil
     let session: SessionStore
+    private var project: RoomProject? { directory.projects.first { $0.id == projectID } }
+    private var branch: Room? { branchID.flatMap(directory.room) }
     @State private var showConcluded = false
     @State private var branchesExpanded = false
-    private var parent: Room? { branch ?? project.general }
+    private var parent: Room? { branchID == nil ? project?.general : branch }
     private var focuses: [Room] {
+        guard let project else { return [] }
         let all = parent.map { project.focusRooms(for: $0) } ?? project.focuses.filter { $0.parentRoomId == nil }
         return all.filter { showConcluded || $0.focusStatus != "concluded" }
             .sorted { ($0.latestMessageAt ?? "") > ($1.latestMessageAt ?? "") }
     }
     var body: some View {
         List {
+            if let project {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(project.owner.map { "\($0) / \(project.name)" } ?? "Shared room").font(.subheadline).foregroundStyle(Theme.muted)
@@ -167,7 +219,7 @@ struct ProjectRoomsView: View {
                     }.listRowBackground(Theme.surface).accessibilityIdentifier("project-branches")
                     if branchesExpanded {
                     ForEach(project.branches) { room in
-                        NavigationLink { ProjectRoomsView(project: project, branch: room, session: session) } label: {
+                        NavigationLink { ProjectRoomsView(projectID: project.id, directory: directory, branchID: room.id, session: session) } label: {
                             RoomRow(room: room, title: room.branchName, subtitle: "\(project.focusRooms(for: room).filter { $0.focusStatus != "concluded" }.count) focus rooms · \(room.membership)", symbol: "arrow.triangle.branch")
                         }.listRowBackground(Theme.surface).accessibilityIdentifier("branch-\(room.id)")
                     }
@@ -183,8 +235,13 @@ struct ProjectRoomsView: View {
                 if focuses.isEmpty { Text("No \(showConcluded ? "" : "active ")focus rooms").font(.subheadline).foregroundStyle(Theme.muted).padding(.vertical, 8) }
             } header: { HStack { Text("Focus rooms"); Spacer(); Text(parent?.gitRoom == nil ? "" : parent?.branchName ?? "").textCase(nil) } }
             Section { Toggle("Show concluded rooms", isOn: $showConcluded).font(.subheadline).listRowBackground(Theme.surface) }
-        }.listStyle(.insetGrouped).scrollContentBackground(.hidden).background(Theme.background)
-            .navigationTitle(branch?.branchName ?? project.name).navigationBarTitleDisplayMode(.inline)
+            } else {
+                ContentUnavailableView("Project unavailable", systemImage: "folder", description: Text("Return to Projects and refresh your rooms."))
+            }
+            if let error = directory.error { ErrorNotice(message: error) }
+        }.task(id: scenePhase) { if scenePhase == .active { await directory.refresh() } }
+            .refreshable { await directory.refresh() }.listStyle(.insetGrouped).scrollContentBackground(.hidden).background(Theme.background)
+            .navigationTitle(branch?.branchName ?? project?.name ?? "Project").navigationBarTitleDisplayMode(.inline)
     }
 }
 struct RoomRow: View {

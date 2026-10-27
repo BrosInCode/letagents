@@ -12,10 +12,10 @@ struct DraftAttachment: Identifiable, Equatable, Sendable {
     let contentType: String
     let data: Data
 
-    init(filename: String, contentType: String, data: Data) throws {
+    init(id: UUID = UUID(), filename: String, contentType: String, data: Data) throws {
         guard !data.isEmpty else { throw APIError(status: 0, message: "This file is empty.") }
         guard data.count <= Self.maximumBytes else { throw APIError(status: 0, message: "Choose files smaller than 25 MB each.") }
-        id = UUID(); self.filename = filename; self.contentType = contentType; self.data = data
+        self.id = id; self.filename = filename; self.contentType = contentType; self.data = data
     }
     static func read(_ url: URL) throws -> Self {
         let access = url.startAccessingSecurityScopedResource()
@@ -34,7 +34,7 @@ struct ImportedPhoto: Transferable, Sendable {
         }
     }
 }
-struct MessageSubmission {
+struct MessageSubmission: Codable, Sendable {
     let text: String
     let id: String
     let replyTo: String?

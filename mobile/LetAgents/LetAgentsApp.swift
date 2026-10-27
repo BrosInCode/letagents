@@ -9,7 +9,7 @@ import SwiftUI
             return
         }
         #endif
-        _session = State(initialValue: SessionStore())
+        _session = State(initialValue: SessionStore(workspace: WorkspaceStore(disk: WorkspaceDisk())))
     }
     var body: some Scene {
         WindowGroup {
@@ -19,6 +19,7 @@ import SwiftUI
 }
 struct RootView: View {
     @Bindable var session: SessionStore
+    @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         Group {
             if session.isRestoring {
@@ -34,5 +35,8 @@ struct RootView: View {
                 WelcomeView(session: session)
             }
         }.background(Theme.background.ignoresSafeArea()).task { await session.restore() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { Task { await session.workspace.flush() } }
+            }
     }
 }
