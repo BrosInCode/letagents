@@ -823,7 +823,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 /* The list and its floating pill. The live strip sits below it, outside the scroll. */
 .messages-scroll { position: relative; flex: 1 1 0; min-height: 0; }
 /* The strip owns the space under the last message, so its rows grow into that space without moving the list twice. */
-.room-live-strip { flex: 0 0 44px; min-height: 44px; padding: 0 20px; --room-chat-content-max: 720px; }
+.room-live-strip { flex: 0 0 44px; min-height: 44px; padding: 0 24px; --room-chat-content-max: 720px; }
 
 .messages {
   height: 100%;

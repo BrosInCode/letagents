@@ -77,7 +77,7 @@ onBeforeUnmount(stopWatching)
 </script>
 
 <style scoped>
-.web-work-activity { position: relative; display: flex; align-items: center; height: 44px; width: 100%; max-width: var(--room-chat-content-max, 720px); margin: 0 auto; }
+.web-work-activity { position: relative; display: flex; align-items: center; height: 44px; width: 100%; margin: 0 auto; }
 .web-work-pill { position: relative; display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; min-height: 32px; padding: 4px 10px 4px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-elevated); color: var(--text-secondary); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
 .web-work-pill:focus-visible, .web-work-list:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .room-activity-pulse { display: grid; flex: 0 0 20px; place-items: center; width: 20px; height: 20px; color: var(--text); }
