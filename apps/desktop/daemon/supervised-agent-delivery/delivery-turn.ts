@@ -2,7 +2,7 @@ import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnImageDelivery } from "../provider-action-port.js";
 import { ReplyTurnCompactionObserver } from "../reply-turn-compaction.js";
 import { RoomLatencyTrace } from "../room-latency-trace.js";
-import type { PreparedRoomTurnAttachments } from "../room-turn-attachments.js";
+import { activatingThreadRootId, recentRoomImageMessages, rememberedRoomTurnFiles, ROOM_TURN_RECENT_MESSAGE_WINDOW, type PreparedRoomTurnAttachments } from "../room-turn-attachments.js";
 import { turnStartLatency } from "../turn-start-latency.js";
 import { SupervisedAgentInboxStore, type SupervisedInboxItem } from "../supervised-agent-inbox-store.js";
 import { SupervisedRoomAuthorizationError } from "./constants.js";
@@ -260,20 +260,45 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
           signal: turnController.signal }).catch(() => undefined)
         : undefined;
       if (!recovering && this.roomTurnAttachments && /^msg_[1-9]\d*$/.test(item.source_message_id)) {
-        // Only this turn's activating message, never history. A file that
-        // cannot be given becomes a note in the prompt, never a failed turn;
-        // only Stop or retirement ends the preparation early.
+        // This turn's activating message, then images on recent messages
+        // before it that this agent has not received. A file that cannot be
+        // given becomes a note in the prompt, never a failed turn; only Stop
+        // or retirement ends the preparation early. A recovered turn never
+        // comes here, so it never downloads again.
         const handle = agent.handle;
         const delivery: RoomTurnImageDelivery = handle && this.provider.roomTurnImageDelivery
           ? await this.provider.roomTurnImageDelivery(handle).catch(() => null) : null;
+        // A thread whose root the room context lacks is read, and only for an
+        // agent that can see its images. A context that holds the root holds
+        // every later reply too.
+        const threadRootId = delivery ? activatingThreadRootId(item.source_message, item.source_message_id) : null;
+        const contextHasRoot = observedContext.some(message => message && typeof message === "object"
+          && (message as Record<string, unknown>).id === threadRootId);
+        const thread = threadRootId && !contextHasRoot && this.http.thread
+          ? await this.http.thread({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+            rootMessageId: threadRootId, beforeMessageId: item.source_message_id,
+            limit: ROOM_TURN_RECENT_MESSAGE_WINDOW, signal: turnController.signal }).catch(() => {
+            turnController.signal.throwIfAborted();
+            return null;
+          })
+          : null;
+        const recentMessages = recentRoomImageMessages({ sourceMessage: item.source_message,
+          sourceMessageId: item.source_message_id, context: observedContext, thread, agentSessionId: agent.agentSessionId });
+        // What this conversation already has; a new conversation is offered the images again.
+        const continuation = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        const earlierOutcomes = recentMessages.length && continuation
+          ? await this.inbox.roomTurnFileOutcomes(agent.agentId, agent.roomId, continuation, item.inbox_item_id).catch(() => new Map())
+          : new Map();
         preparedAttachments = await this.roomTurnAttachments.prepare({
           delivery,
           localRoom: isLocalRoomApi(agent.apiUrl),
           sourceMessage: item.source_message, sourceMessageId: item.source_message_id,
+          recentMessages, earlierOutcomes,
           roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
           http: this.http, signal: turnController.signal,
         });
       }
+
       if (!await hasProviderAuthority()) return;
       // A runtime can itself have ended by the time it reports its turn's
       // exact ending: a crashed Cursor lane, or any provider whose handle
@@ -611,6 +636,18 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
         providerTurnDurable,
       );
       if (providerResult) startTrace?.providerEnded(providerResult.outcome);
+      if (providerResult && preparedAttachments?.outcomes.length) {
+        // A provider that answered this turn, in any way, had its files: a
+        // later turn of the same conversation does not send them again.
+        // Remembering them is optional and never fails the turn.
+        const continuation = ("providerContinuationId" in providerResult ? providerResult.providerContinuationId : null)
+          ?? agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        const files = rememberedRoomTurnFiles(agent.provider, preparedAttachments.outcomes);
+        if (continuation && files.length) {
+          await this.inbox.recordRoomTurnFiles(item.inbox_item_id, { continuation, files: files.map(file => ({
+            message_id: file.messageId, attachment_id: file.attachmentId, outcome: file.outcome })) }).catch(() => {});
+        }
+      }
       if (providerResult && historySummary) {
         this.markHistorySummaryGiven(agent.agentId, [historyContinuation, this.continuationOf(agent),
           "providerContinuationId" in providerResult ? providerResult.providerContinuationId : ""]);

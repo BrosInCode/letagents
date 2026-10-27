@@ -5,9 +5,22 @@ import type { SupervisedInboxItem, Row, ProviderContinuationRepair } from "./typ
 import { run } from "./sql.js";
 import { rowToItem, rowToContinuationRepair } from "./row-mapping.js";
 import { InboxDeliveryStore } from "./delivery.js";
+import { readPreparedRoomTurnFiles, recordPreparedRoomTurnFiles, type PreparedRoomTurnFiles, type RoomTurnFileOutcome } from "../prepared-room-context.js";
 
 /** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
 export class SupervisedAgentInboxStore extends InboxDeliveryStore {
+  /** The room files earlier turns of this conversation received or refused for good, by `${messageId}\n${attachmentId}`. */
+  async roomTurnFileOutcomes(agentId: string, roomId: string, continuation: string, inboxItemId: string): Promise<Map<string, RoomTurnFileOutcome>> {
+    return this.read((database) => readPreparedRoomTurnFiles(database, { agentId, roomId, continuation, inboxItemId }));
+  }
+
+  /** Remember on the turn's own prepared context what its provider received. No observer needs to hear of it. */
+  async recordRoomTurnFiles(inboxItemId: string, files: PreparedRoomTurnFiles): Promise<void> {
+    if (!files.files.length) return;
+    await this.exclusive(async (database) => this.transaction(database, () => recordPreparedRoomTurnFiles(database, inboxItemId, files)),
+      undefined, () => false);
+  }
+
   async beginContinuationRepair(input: {
     agent_id: string;
     room_id: string;

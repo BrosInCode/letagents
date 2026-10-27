@@ -112,6 +112,15 @@ export interface SupervisedDeliveryHttp {
     roomId: string; apiUrl: string; bearer: string; messageId: string; attachmentId: string;
     maxBytes: number; signal: AbortSignal;
   }): Promise<Uint8Array>;
+  /**
+   * The activating message's thread: its root and the latest replies before
+   * that message, read with the worker bearer. Null when the room cannot give
+   * it; never a room refusal. Rejects only with the abort reason.
+   */
+  thread?(input: {
+    roomId: string; apiUrl: string; bearer: string; rootMessageId: string; beforeMessageId: string;
+    limit: number; signal: AbortSignal;
+  }): Promise<{ root: Record<string, unknown>; replies: Array<Record<string, unknown>> } | null>;
   publish(input: {
     roomId: string;
     apiUrl: string;

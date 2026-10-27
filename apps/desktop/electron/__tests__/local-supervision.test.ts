@@ -831,3 +831,53 @@ test("a local room's image reaches the daemon from its stored file, bounded and 
   assert.deepEqual(Buffer.from(prepared.attachments[0].image.data), png);
   await prepared.release();
 });
+
+test("a local thread reply's agent reads the thread's earlier images through the local thread route", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { pathToFileURL } = await import("node:url");
+  const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  const { RoomTurnAttachmentStager, recentRoomImageMessages } = await import(new URL("../../daemon/room-turn-attachments.ts", import.meta.url).href);
+  const roomId = "local_thread_images";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "thread_images");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const filesDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, roomId);
+  await mkdir(filesDir, { recursive: true });
+  const stored = join(filesDir, "bug.png");
+  await writeFile(stored, png);
+  const root = await addLocalChatMessage(roomId, { sender: "Ada", source: "browser", text: "The login page is broken", attachments: [
+    { id: "local:bug", file_name: "bug.png", mime_type: "image/png", size_bytes: png.byteLength,
+      url: pathToFileURL(stored).toString(), download_url: pathToFileURL(stored).toString() },
+  ] });
+  const reply = await addLocalChatMessage(roomId, { sender: "Grace", source: "browser", text: "Same here", reply_to: root.id, thread_root_id: root.id });
+  const ask = await addLocalChatMessage(roomId, { sender: "Ada", source: "browser", text: "@Oak please fix this", reply_to: root.id, thread_root_id: root.id });
+  const later = await addLocalChatMessage(roomId, { sender: "Grace", source: "browser", text: "after", reply_to: root.id, thread_root_id: root.id });
+  const read = (overrides: Record<string, unknown> = {}) => productionSupervisedDeliveryHttp.thread!({ roomId, apiUrl: origin,
+    bearer: oak.session.worker_bearer, rootMessageId: root.id, beforeMessageId: ask.id, limit: 5, signal: AbortSignal.timeout(10_000), ...overrides });
+  const thread = await read();
+  assert.equal(thread?.root.id, root.id);
+  assert.deepEqual(thread?.replies.map((message: { id: string }) => message.id), [reply.id], "only replies before the activating one");
+  assert.ok(!JSON.stringify(thread).includes(png.toString("base64").slice(0, 12)), "no inline file bytes");
+  assert.ok(!thread?.replies.some((message: { id: string }) => message.id === later.id));
+
+  // Another room's worker, a bad bearer and a missing root read nothing; none is a room refusal.
+  await createLocalRoom({ roomIdentifier: "local_thread_images_other" });
+  const elm = await worker("local_thread_images_other", "Elm", "thread_images_other");
+  assert.equal(await read({ bearer: elm.session.worker_bearer }), null);
+  assert.equal(await read({ bearer: "not-a-bearer" }), null);
+  assert.equal(await read({ rootMessageId: "msg_99999" }), null);
+  const route = (path: string, init: RequestInit = {}) => requestLocalSupervisor(`${origin}/rooms/${roomId}/messages/${path}`,
+    { ...init, headers: { authorization: `Bearer ${oak.session.worker_bearer}` } });
+  assert.equal((await route(`${root.id}/thread`, { method: "PUT" })).status, 404);
+
+  // The stager reads the root's image from local storage, named by its sender.
+  const sourceMessage = { ...ask, thread_root_id: root.id };
+  const recentMessages = recentRoomImageMessages({ sourceMessage, sourceMessageId: ask.id, context: [], thread, agentSessionId: oak.session.session_id });
+  const stager = new RoomTurnAttachmentStager(join(environment.tempDir, "room-turn-attachments"));
+  const prepared = await stager.prepare({ delivery: "memory", localRoom: true, sourceMessage, sourceMessageId: ask.id, recentMessages,
+    roomId, apiUrl: origin, bearer: oak.session.worker_bearer, http: productionSupervisedDeliveryHttp, signal: AbortSignal.timeout(10_000) });
+  assert.deepEqual(prepared.attachments.map((item: { status: string; origin?: { messageId: string; sender: string } }) =>
+    [item.origin?.messageId, item.origin?.sender, item.status]), [[root.id, "Ada", "image"]]);
+  assert.deepEqual(Buffer.from(prepared.attachments[0].image.data), png);
+  await prepared.release();
+});

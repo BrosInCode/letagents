@@ -153,6 +153,17 @@ export async function requestLocalSupervisor(rawUrl: string, init: RequestInit =
         reply_to: optional(body.reply_to), thread_root_id: optional(body.thread_root_id) });
       return json({ ...message, room_id: roomId });
     }
+    if (operation.length === 3 && operation[2] === "thread" && /^msg_[1-9]\d*$/.test(operation[1] ?? "")) {
+      // The local counterpart of the hosted thread read: a root and its
+      // latest replies before a message, for the images a turn may carry.
+      // Like the hosted route and the turn's room context, without prompt-only messages.
+      if ((init.method ?? "GET") !== "GET") return json({ error: "Unknown local room operation." }, 404);
+      const before = url.searchParams.get("before");
+      const page = await getLocalMessageThread(roomId, operation[1]!, { include_prompt_only: false,
+        limit: Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 100)),
+        ...(before && /^msg_[1-9]\d*$/.test(before) ? { before } : {}) }).catch(() => null);
+      return page ? json(withoutInlineFileBytes({ room_id: roomId, ...page })) : json({ error: "thread not found" }, 404);
+    }
     const latest = url.searchParams.get("before") === "latest";
     const after = url.searchParams.get("after");
     const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 100));

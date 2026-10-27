@@ -1,5 +1,5 @@
 /** Room-turn prompt input and how a finished OpenCode turn is classified, including denied and unfinished tool calls. */
-import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS } from "../desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, roomTurnImageLabel } from "../desktop-event-prompt-format.js";
 import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
 import type { ProviderRoomTurnRequest, ProviderRoomTurnResult } from "../provider-adapter.js";
 import { messageFinishReason, messageText, record, type JsonRecord, type OpenCodeMessage } from "../opencode-server-client.js";
@@ -11,7 +11,7 @@ import { NO_REPLY_SENTINEL } from "./types.js";
  */
 export function roomTurnImageParts(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
   return includedRoomTurnImages(request.attachments).flatMap(image => image.data ? [
-    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}` },
+    { type: "text", text: roomTurnImageLabel(image) },
     { type: "file", mime: image.mimeType, filename: image.fileName,
       url: `data:${image.mimeType};base64,${Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64")}` },
   ] : []);
