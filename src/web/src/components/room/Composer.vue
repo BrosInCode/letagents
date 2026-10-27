@@ -76,12 +76,14 @@
                 class="prompt-trigger"
                 type="button"
                 :data-mode="promptMode"
+                :aria-expanded="menuOpen"
+                :aria-controls="`${composerId}-prompt-panel`"
                 @click="menuOpen = !menuOpen"
               >
                 <span>{{ promptLabel }}</span>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </button>
-              <div v-if="menuOpen" class="prompt-panel">
+              <div v-if="menuOpen" :id="`${composerId}-prompt-panel`" class="prompt-panel" @keydown.esc.stop.prevent="menuOpen = false">
                 <div class="prompt-panel-header">
                   <strong>Agent prompts</strong>
                 </div>
@@ -466,7 +468,11 @@ function handleKeyUp(e: KeyboardEvent) {
 }
 
 onMounted(() => {
-  if (!props.inlineThread) textareaEl.value?.focus({ preventScroll: props.inlineThread })
+  // Opening a room on a phone should leave the transcript visible until the
+  // user chooses to write. Explicit reply actions still focus the composer.
+  if (!props.inlineThread && window.matchMedia?.('(hover: hover) and (pointer: fine)').matches) {
+    textareaEl.value?.focus({ preventScroll: true })
+  }
 })
 
 onUnmounted(() => {

@@ -10,6 +10,17 @@
       </span>
     </div>
     <div class="message-meta-tail">
+      <button
+        class="message-more-action"
+        type="button"
+        aria-label="Message actions"
+        title="Message actions"
+        aria-haspopup="menu"
+        :aria-expanded="actionsOpen ?? false"
+        @click="emit('actions', $event)"
+      >
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+      </button>
       <div class="message-actions">
       <button
         v-if="canReact"
@@ -80,12 +91,14 @@ defineProps<{
   canOpenThread?: boolean
   canReact?: boolean
   pickerOpen?: boolean
+  actionsOpen?: boolean
   canPin?: boolean
   pinPending?: boolean
   pinned?: boolean
 }>()
 
 const emit = defineEmits<{
+  actions: [event: MouseEvent]
   pin: []
   copy: []
   reply: []
@@ -98,6 +111,10 @@ const emit = defineEmits<{
 
 <style scoped>
 .message-actions { display: contents; }
+.message-more-action { display: none; flex: 0 0 44px; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer; }
+.message-more-action svg { width: 20px; height: 20px; }
+.message-more-action:focus-visible { outline: 2px solid var(--blue-text, #60a5fa); outline-offset: -2px; }
+.message-more-action[aria-expanded="true"] { background: var(--surface); color: var(--text); }
 .message-meta {
   display: flex;
   align-items: baseline;
@@ -221,5 +238,16 @@ const emit = defineEmits<{
   .provenance-badge { padding: 2px 6px; font-size: 0.58rem; }
   .prompt-injection-badge { font-size: 0.58rem; }
   .reply-action { width: 44px; height: 44px; opacity: 1; pointer-events: auto; transform: none; }
+}
+/* One discoverable control keeps the transcript readable on touch screens. */
+@media (max-width: 768px), (hover: none), (pointer: coarse) {
+  .message-meta { align-items: center; flex-wrap: nowrap; gap: 6px; margin-bottom: 4px; }
+  .message-sender { flex: 1; gap: 2px; }
+  .message-sender-subtitle { width: 100%; font-size: .7rem; line-height: 1.35; }
+  .message-meta-tail { flex: 0 0 auto; gap: 0; flex-wrap: nowrap; }
+  .message-meta time { margin-right: 0; font-size: .65rem; white-space: nowrap; }
+  .message-actions { display: none; }
+  .message-more-action { display: inline-flex; }
+  .prompt-injection-badge { width: 6px; overflow: hidden; font-size: 0; gap: 0; }
 }
 </style>
