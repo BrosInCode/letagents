@@ -385,13 +385,18 @@ export function parseConfiguredOpenModelImageInput(config: OpenCodeConfig): bool
   return Array.isArray(input) && input.includes("image");
 }
 
-/** The runtime's own permission decides whether its agent may read outside its project. */
+/**
+ * Whether the runtime's own permission lets its agent read a file outside
+ * its project without a question. Only a plain "allow" counts: a rule
+ * object, "ask", or no rule at all (OpenCode then asks) does not.
+ */
 export function parseConfiguredOpenModelExternalReads(config: OpenCodeConfig): boolean {
   const permission = (config as { permission?: unknown }).permission;
-  if (permission === "deny") return false;
-  if (!permission || typeof permission !== "object" || Array.isArray(permission)) return true;
+  if (typeof permission === "string") return permission === "allow";
+  if (!permission || typeof permission !== "object" || Array.isArray(permission)) return false;
   const rules = permission as Record<string, unknown>;
-  return (rules.external_directory ?? rules["*"]) !== "deny";
+  const rule = (name: string) => rules[name] ?? rules["*"];
+  return rule("external_directory") === "allow" && rule("read") === "allow";
 }
 
 export function parseConfiguredOpenModel(config: OpenCodeConfig): string | null {

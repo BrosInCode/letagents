@@ -214,3 +214,50 @@ test("a refusal for good of a recent file is not named again; a file given befor
     assert.deepEqual(downloads.map(item => item.attachmentId), ["att_3"]);
   });
 });
+
+test("two servers that use the same ids never share a kept file", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const stager = new RoomTurnAttachmentStager(root);
+    const recentMessages = [recentFrom("msg_2", [file("att_1", "thread.log", "text/plain")])];
+    const one = await stager.prepare(input({ recentMessages, apiUrl: "https://letagents.chat" }, downloads, () => utf8("from one\n")));
+    const two = await stager.prepare(input({ recentMessages, apiUrl: "https://self-hosted.example" }, downloads, () => utf8("from two\n")));
+    assert.equal(downloads.length, 2);
+    assert.equal(await readFile(two.attachments[0]!.file!.path, "utf8"), "from two\n");
+    await one.release(); await two.release();
+  });
+});
+
+test("a kept-file folder replaced by a link to another folder is never read", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const stager = new RoomTurnAttachmentStager(root);
+    const recentMessages = [recentFrom("msg_2", [file("att_1", "thread.log", "text/plain")])];
+    await (await stager.prepare(input({ recentMessages }, downloads, () => LOG))).release();
+    const cache = join(root, "file-cache");
+    const [kept] = await readdir(cache);
+    const elsewhere = join(root, "..", "elsewhere");
+    await rm(cache, { recursive: true });
+    await writeFile(join(root, "..", "planted"), "planted\n");
+    await (await import("node:fs/promises")).mkdir(elsewhere);
+    await writeFile(join(elsewhere, kept!), "planted text\n");
+    await symlink(elsewhere, cache);
+    const again = await stager.prepare(input({ recentMessages }, downloads, () => LOG));
+    assert.equal(downloads.length, 2, "the linked folder is not trusted");
+    assert.deepEqual(await readFile(again.attachments[0]!.file!.path), Buffer.from(LOG));
+  });
+});
+
+test("a UTF-16 file whose UTF-8 copy is over the limit is refused, so the copy never exceeds it", async () => {
+  await withRoot(async (root) => {
+    // 4 million CJK characters: 8 MB in UTF-16, 12 MB in UTF-8.
+    const utf16 = new Uint8Array(2 + 8_000_000);
+    utf16.set([0xff, 0xfe]);
+    for (let offset = 2; offset < utf16.byteLength; offset += 2) { utf16[offset] = 0x2d; utf16[offset + 1] = 0x4e; }
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(input({ sourceMessage: { id: "msg_7", text: "x", attachments: [
+      file("att_1", "wide.log", "text/plain", utf16.byteLength),
+    ] } }, [], () => utf16));
+    assert.equal(prepared.attachments[0]!.status, "too_large");
+    assert.deepEqual(prepared.outcomes.map(item => item.outcome), ["file_too_large"]);
+  });
+});

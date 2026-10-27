@@ -572,5 +572,10 @@ test("an Open Model runtime that may not leave its project opens no staged files
   assert.equal(parseConfiguredOpenModelExternalReads({ permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" } } as never), false);
   assert.equal(parseConfiguredOpenModelExternalReads({ permission: "deny" } as never), false);
   assert.equal(parseConfiguredOpenModelExternalReads({ permission: { "*": "deny" } } as never), false);
-  assert.equal(parseConfiguredOpenModelExternalReads({} as never), true);
+  assert.equal(parseConfiguredOpenModelExternalReads({ permission: "allow" } as never), true);
+  assert.equal(parseConfiguredOpenModelExternalReads({ permission: { "*": "allow", external_directory: { "*": "deny" } } } as never), false,
+    "a rule object is not a plain allow");
+  assert.equal(parseConfiguredOpenModelExternalReads({ permission: { "*": "allow", external_directory: "ask" } } as never), false);
+  assert.equal(parseConfiguredOpenModelExternalReads({ permission: { "*": "allow", read: "deny" } } as never), false);
+  assert.equal(parseConfiguredOpenModelExternalReads({} as never), false, "with no rule OpenCode asks");
 });

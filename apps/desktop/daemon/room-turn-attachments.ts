@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm, utimes } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ProviderRoomTurnAttachment, RoomTurnAttachmentOrigin, RoomTurnFileAccess, RoomTurnImageDelivery, RoomTurnImageMimeType } from "./provider-action-port.js";
@@ -455,7 +455,7 @@ export class RoomTurnAttachmentStager {
           status(reason);
         };
         if (maxBytes < 1) { status(turnRoom <= recentRoom ? "turn_limit" : "context_limit"); continue; }
-        const cacheKey = isFile ? fileCacheKey(input.roomId, file.messageId, file.id) : null;
+        const cacheKey = isFile ? fileCacheKey(input.apiUrl, input.roomId, file.messageId, file.id) : null;
         let bytes = cacheKey ? await this.cachedFile(cacheKey, maxBytes) : null;
         if (!bytes) {
           downloadSignal ??= AbortSignal.any([input.signal, AbortSignal.timeout(this.preparationDeadlineMs)]);
@@ -500,17 +500,19 @@ export class RoomTurnAttachmentStager {
         if (detected.kind === "binary") { final("binary"); status("binary"); continue; }
         if (detected.kind === "pdf" && !input.fileAccess!.pdf) { final("cannot_read"); status("cannot_read"); continue; }
         const extension = extensionOf(file.fileName);
+        // A converted text can be longer than the bytes it came from; the copy is what the limits count.
+        const copy = detected.kind === "text" ? detected.bytes : bytes;
+        if (copy.byteLength > maxBytes) { refuseOverLimit(); continue; }
         let path: string;
         try {
-          path = await stage(detected.kind === "pdf" ? "pdf" : TEXT_FILE_EXTENSIONS.has(extension) ? extension : "txt",
-            detected.kind === "text" ? detected.bytes : bytes);
+          path = await stage(detected.kind === "pdf" ? "pdf" : TEXT_FILE_EXTENSIONS.has(extension) ? extension : "txt", copy);
         } catch {
           input.signal.throwIfAborted();
           status("unavailable");
           continue;
         }
-        budget.total += bytes.byteLength;
-        if (recent) { budget.recentCount += 1; budget.recentBytes += bytes.byteLength; }
+        budget.total += copy.byteLength;
+        if (recent) { budget.recentCount += 1; budget.recentBytes += copy.byteLength; }
         results.push({ order: file.order, attachment: { ...base, mimeType: detected.kind === "pdf" ? "application/pdf" : file.mimeType,
           status: "file", file: detected.kind === "pdf" ? { path, kind: "pdf", ...(earlier === "file" ? { repeated: true } : {}) }
             : { path, kind: "text", encoding: detected.encoding, lines: detected.lines, longestLine: detected.longestLine,
@@ -526,15 +528,17 @@ export class RoomTurnAttachmentStager {
 
   /** A file kept for an earlier turn, if it is still a plain file of this user's within the limit. */
   private async cachedFile(key: string, maxBytes: number): Promise<Uint8Array | null> {
-    const path = join(this.root, FILE_CACHE_FOLDER, key);
+    const cache = join(this.root, FILE_CACHE_FOLDER);
     try {
-      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      // The folders on the way must be this user's own plain folders, not links to somewhere else.
+      if (!await isOwnedFolder(this.root) || !await isOwnedFolder(cache)) return null;
+      const handle = await open(join(cache, key), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const stat = await handle.stat();
         if (!stat.isFile() || stat.size > maxBytes || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return null;
         const bytes = new Uint8Array(await handle.readFile());
         const now = new Date(this.now());
-        await utimes(path, now, now).catch(() => {});
+        await handle.utimes(now, now).catch(() => {});
         return bytes.byteLength <= maxBytes ? bytes : null;
       } finally { await handle.close(); }
     } catch { return null; }
@@ -570,8 +574,17 @@ export class RoomTurnAttachmentStager {
   }
 }
 
-function fileCacheKey(roomId: string, messageId: string, attachmentId: string): string {
-  return createHash("sha256").update(`${roomId}\n${messageId}\n${attachmentId}`).digest("hex");
+/** One server's room, message and attachment: two servers can use the same ids. */
+function fileCacheKey(apiUrl: string, roomId: string, messageId: string, attachmentId: string): string {
+  let origin = apiUrl;
+  try { origin = new URL(apiUrl).origin; } catch { /* A local room's address is already one name. */ }
+  return createHash("sha256").update(`${origin}\n${roomId}\n${messageId}\n${attachmentId}`).digest("hex");
+}
+
+async function isOwnedFolder(path: string): Promise<boolean> {
+  const folder = await lstat(path).catch(() => null);
+  return Boolean(folder?.isDirectory() && !folder.isSymbolicLink()
+    && (typeof process.getuid !== "function" || folder.uid === process.getuid()));
 }
 
 async function writeExclusive(path: string, bytes: Uint8Array): Promise<void> {
