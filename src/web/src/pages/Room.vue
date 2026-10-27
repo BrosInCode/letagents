@@ -6,7 +6,7 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :style="roomViewportStyle">
+  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -134,6 +134,7 @@
 
     <Composer
       v-if="activeTab === 'chat' && isConnected"
+      v-show="!hideMainComposer"
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
       :attachmentsEnabled="room?.attachmentsEnabled !== false"
@@ -164,6 +165,7 @@
 
     <RoomMobileNav
       v-if="isConnected"
+      v-show="!keyboardOpen"
       :activeTab="activeTab"
       :showEventsTab="githubEventsSupported"
       @update:activeTab="handleActiveTabChange"
@@ -196,6 +198,7 @@ import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRoomTabs } from './room/useRoomTabs'
+import { useRoomViewport } from './room/useRoomViewport'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
 import { isValidMessageId } from '@/domain/roomRoutes'
@@ -285,31 +288,10 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
-const roomViewportStyle = ref<Record<string, string>>({})
-const compactViewport = ref(false)
-
-function syncRoomViewport() {
-  const viewport = window.visualViewport
-  // The software keyboard can resize only the visual viewport. Keep the
-  // composer above it without reflowing the room during pinch-to-zoom.
-  if (!viewport || viewport.scale !== 1) return
-  compactViewport.value = viewport.height < 360
-  roomViewportStyle.value = {
-    '--room-viewport-height': `${viewport.height}px`,
-    '--room-viewport-top': `${viewport.offsetTop}px`,
-  }
-}
-
-onMounted(() => {
-  syncRoomViewport()
-  window.visualViewport?.addEventListener('resize', syncRoomViewport)
-  window.visualViewport?.addEventListener('scroll', syncRoomViewport)
-})
+const { roomViewportStyle, compactViewport, keyboardOpen, editingThread, hideMainComposer, syncRoomViewport } = useRoomViewport()
 
 onUnmounted(() => {
   messagePermalinkRequestId += 1
-  window.visualViewport?.removeEventListener('resize', syncRoomViewport)
-  window.visualViewport?.removeEventListener('scroll', syncRoomViewport)
 })
 
 const searchQuery = ref('')
@@ -338,6 +320,7 @@ const {
   githubEventsSupported,
   isConnected,
 })
+watch([activeTab, () => room.value?.identifier], () => { editingThread.value = false })
 const threadImageMessages = ref<RoomMessage[]>([])
 watch(() => room.value?.identifier, () => { threadImageMessages.value = [] })
 const imageMessages = computed(() => [...new Map([...threadImageMessages.value, ...messages.value].map(message => [message.id, message])).values()])

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from 'vue'
@@ -80,6 +81,78 @@ function mountSetup(Component: any, props: any) {
   app.mount({})
   return { vm, props: state, events, close: () => app.unmount() }
 }
+
+test('Safari keyboard layout keeps thread controls focused and restores the main composer after dismissal', async () => {
+  const { useRoomViewport } = await vite.ssrLoadModule('/src/pages/room/useRoomViewport.ts')
+  const originals = { window: globalThis.window, document: globalThis.document }
+  const viewport = Object.assign(new EventTarget(), { height: 780, offsetTop: 0, scale: 1 })
+  const body = { closest: () => null }
+  const composerTarget = (inline: boolean) => ({ closest: () => ({ classList: { contains: () => inline } }) })
+  const documentStub = { body, activeElement: body as any }
+  Object.assign(globalThis, { window: { innerHeight: 844, visualViewport: viewport }, document: documentStub })
+  const surface = mountSetup({ setup: useRoomViewport }, {})
+  let mounted = true
+  try {
+    const vm = surface.vm
+    assert.equal(vm.keyboardOpen.value, false, 'browser toolbar space does not hide navigation')
+    documentStub.activeElement = composerTarget(true)
+    vm.syncRoomViewport()
+    assert.equal(vm.hideMainComposer.value, false, 'focus alone also supports a hardware keyboard')
+    viewport.height = 320
+    viewport.offsetTop = 68
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, true)
+    assert.equal(vm.hideMainComposer.value, true)
+    assert.equal(vm.compactViewport.value, true)
+    assert.deepEqual(vm.roomViewportStyle.value, { '--room-viewport-height': '320px', '--room-viewport-top': '68px' })
+
+    documentStub.activeElement = body
+    viewport.offsetTop = 80
+    viewport.dispatchEvent(new Event('scroll'))
+    assert.equal(vm.hideMainComposer.value, true, 'touch send and picker focus gaps retain thread ownership')
+    documentStub.activeElement = composerTarget(true)
+    vm.syncRoomViewport()
+    assert.equal(vm.hideMainComposer.value, true, 'thread menu and send controls remain in the same composer')
+    documentStub.activeElement = composerTarget(false)
+    vm.syncRoomViewport()
+    assert.equal(vm.hideMainComposer.value, false, 'focusing the main composer reveals its draft')
+    documentStub.activeElement = composerTarget(true)
+    vm.syncRoomViewport()
+    viewport.scale = 2
+    viewport.height = 200
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.roomViewportStyle.value['--room-viewport-height'], '320px', 'pinch zoom does not reflow the room')
+    assert.equal(vm.hideMainComposer.value, true)
+    viewport.height = 390
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, false, 'dismissing the keyboard while zoomed restores navigation')
+    assert.equal(vm.hideMainComposer.value, false, 'the main draft is restored before zoom returns to normal')
+    assert.equal(vm.roomViewportStyle.value['--room-viewport-height'], '320px')
+    viewport.scale = 1
+    viewport.height = 780
+    viewport.offsetTop = 0
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, false)
+    assert.equal(vm.hideMainComposer.value, false)
+    assert.equal(vm.compactViewport.value, false)
+    surface.close()
+    mounted = false
+    viewport.height = 300
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, false, 'unmounted rooms release viewport listeners')
+  } finally {
+    if (mounted) surface.close()
+    Object.assign(globalThis, originals)
+  }
+})
+
+test('keyboard thread editing hides the main composer without discarding its draft or staged attachments', () => {
+  const source = readFileSync(new URL('../src/pages/Room.vue', import.meta.url), 'utf8')
+  assert.match(source, /<Composer\s+v-if="activeTab === 'chat' && isConnected"\s+v-show="!hideMainComposer"/)
+  assert.match(source, /<RoomMobileNav\s+v-if="isConnected"\s+v-show="!keyboardOpen"/)
+  assert.match(source, /@focusin="syncRoomViewport"/)
+  assert.match(source, /watch\(\[activeTab, \(\) => room\.value\?\.identifier\], \(\) => \{ editingThread\.value = false \}\)/)
+})
 
 test('opening a recent orphan reply fetches and expands its actual thread root', async () => {
   const Component = (await vite.ssrLoadModule('/src/components/room/MessageList.vue')).default
