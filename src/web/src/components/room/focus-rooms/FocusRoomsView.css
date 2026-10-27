@@ -259,3 +259,19 @@
     transform: none !important;
   }
 }
+
+.focus-rooms-panel,
+.focus-context-title { min-width: 0; }
+.focus-context-title,
+.focus-metadata-bar { overflow-wrap: anywhere; }
+@media (max-width: 640px), (pointer: coarse) {
+  .focus-primary, .focus-secondary { min-height: 44px; }
+  .web-room-settings summary { min-height: 44px; padding-block: 12px; }
+  .focus-settings-grid .app-select { --app-select-height: 44px; }
+}
+@media (max-width: 640px) {
+  .focus-rooms-panel { padding: 20px 14px max(24px, env(safe-area-inset-bottom)); }
+  .focus-panel-header, .focus-settings-heading { flex-wrap: wrap; }
+  .focus-result-textarea, .focus-closeout-grid input { font-size: 16px; }
+  .focus-share-footer { align-items: stretch; }
+}

@@ -133,7 +133,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
 </script>
 
 <style scoped>
-.chat-header { position: relative; z-index: 20; display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 20px 24px 0; border-bottom: 1px solid var(--line, #27272a); background: var(--bg-0, #09090b); }
+.chat-header { position: relative; z-index: 20; display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: max(20px, env(safe-area-inset-top, 0px)) max(24px, env(safe-area-inset-right, 0px)) 0 max(24px, env(safe-area-inset-left, 0px)); border-bottom: 1px solid var(--line, #27272a); background: var(--bg-0, #09090b); }
 .chat-header svg { width: 17px; height: 17px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .header-main, .header-navigation { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-width: 0; }
 .chat-title { flex: 1; min-width: 0; }
@@ -171,14 +171,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
   .action-btn:hover:not(:disabled), .title-rename-btn:hover, .search-close:hover { background: var(--accent-hover); color: var(--text, #fafafa); }
 }
 @media (max-width: 980px) {
-  .chat-header { flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; }
+  .chat-header { flex-direction: row; align-items: center; gap: 8px; padding: max(8px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 8px max(12px, env(safe-area-inset-left, 0px)); }
   .header-main { flex: 1; min-width: 0; gap: 6px; }
   .chat-title h2 { font-size: 1.05rem; }
   .chat-title-heading { gap: 8px; }
   .chat-title p { font-size: 0.7rem; }
   .tab-bar, .find-button kbd, .presence { display: none; }
   .action-btn, .title-rename-btn, .search-close { min-width: 44px; min-height: 44px; }
-  .title-rename-btn { min-width: 28px; padding: 0; }
+  .title-rename-btn { padding: 0; }
   .header-search { right: 12px; }
   .header-search .input { font-size: 16px; }
   .header-repository .repository-ref { display: none; }

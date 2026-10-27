@@ -1,7 +1,14 @@
 <template>
   <Teleport to="body">
-    <div v-if="open" class="message-info-backdrop" @click="close">
-      <div class="message-info-surface" @click.stop>
+    <dialog
+      v-if="open"
+      ref="dialogRef"
+      class="message-info-surface"
+      aria-label="Message info"
+      tabindex="-1"
+      @cancel.prevent="close"
+      @click="closeOnBackdrop($event, close)"
+    >
         <!-- Header -->
         <div class="message-info-header">
           <div class="header-main">
@@ -136,13 +143,13 @@
             </details>
           </div>
         </div>
-      </div>
-    </div>
+    </dialog>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { useChatDialog } from './chat-message/useChatDialog'
 import {
   invalidationCoversMessage,
   lastMessageInfoInvalidation,
@@ -206,6 +213,8 @@ interface MessageInfoResponse {
     observed_count: number
   }
 }
+
+const { dialogRef, closeOnBackdrop } = useChatDialog(() => props.open)
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -305,16 +314,7 @@ function close() {
   emit('close')
 }
 
-function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && props.open) {
-    event.stopPropagation()
-    close()
-  }
-}
-
-onMounted(() => document.addEventListener('keydown', handleKeydown, true))
 onUnmounted(() => {
-  document.removeEventListener('keydown', handleKeydown, true)
   if (refreshTimer !== null) {
     window.clearTimeout(refreshTimer)
     refreshTimer = null
@@ -335,20 +335,17 @@ watch(
 </script>
 
 <style scoped>
-.message-info-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.65);
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
+.message-info-surface::backdrop { background: rgba(0, 0, 0, 0.65); }
+.message-info-surface:focus { outline: none; }
 
 .message-info-surface {
-  width: 400px;
-  max-width: 90vw;
-  max-height: 85dvh;
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  padding: 0;
+  width: min(440px, calc(100% - 24px));
+  max-width: none;
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   background: var(--surface, #18181b);
   border: 1px solid var(--border, #27272a);
   border-radius: 12px;
@@ -405,6 +402,7 @@ watch(
 
 .message-info-content {
   min-height: 0;
+  overscroll-behavior: contain;
   padding: 16px;
   overflow-y: auto;
   display: flex;
@@ -413,6 +411,7 @@ watch(
 }
 
 .summary-line {
+  flex-wrap: wrap;
   font-size: 0.8rem;
   font-weight: 500;
   color: var(--muted, #a1a1aa);
@@ -452,6 +451,7 @@ watch(
 }
 
 .agent-avatar, .person-avatar {
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   border-radius: 50%;
@@ -504,10 +504,10 @@ watch(
 }
 .disclosure-section summary { cursor: pointer; padding: 4px 0; }
 .quiet-agents-list { padding-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-.quiet-agent-row { display: flex; justify-content: space-between; font-size: 0.72rem; }
+.quiet-agent-row { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; font-size: 0.72rem; overflow-wrap: anywhere; }
 
 .details-list { padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-.details-row { display: flex; justify-content: space-between; gap: 12px; font-size: 0.72rem; }
+.details-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; font-size: 0.72rem; overflow-wrap: anywhere; }
 .details-label { color: var(--muted, #71717a); }
 .details-copy {
   background: transparent;
@@ -532,4 +532,11 @@ watch(
   .close-btn { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
   .action-btn, .details-copy, .disclosure-section summary { min-height: 44px; }
 }
+@media (max-width: 480px) {
+  .message-info-header, .message-info-content { padding: 12px; }
+  .agent-row { flex-wrap: wrap; }
+  .agent-info { flex-basis: calc(100% - 48px); }
+  .view-reply { margin-left: 38px; }
+}
+.message-info-surface :is(button, summary):focus-visible { outline: 2px solid var(--blue-text, #60a5fa); outline-offset: 2px; }
 </style>

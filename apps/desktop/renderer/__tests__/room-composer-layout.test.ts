@@ -125,3 +125,18 @@ test('GIF trigger matches the attach button box and has no stray margin', () => 
   assert.doesNotMatch(picker, /margin:\s*0 5px/);
   assert.doesNotMatch(picker, /^button, input\s*\{/m, 'dialog button rules must not leak onto the trigger');
 });
+
+test('the activity pill starts at the composer edge, on wide and narrow windows', () => {
+  const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const shell = read('../src/styles/composer-agent-reasoning/composer-shell.css');
+  const line = read('../src/styles/room-activity-line.css');
+  const responsive = read('../src/styles/12-responsive.css');
+  // The composer is centred at min(100% - 48px, 960px), so each edge sits at max(24px, (100% - 960px) / 2).
+  assert.match(shell, /width:\s*min\(calc\(100% - 48px\), 960px\);/);
+  const rule = line.match(/\n\.room-activity-line\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rule, /--room-activity-line-inset:\s*max\(24px, calc\(\(100% - var\(--room-chat-content-max, 960px\)\) \/ 2\)\);/);
+  assert.match(rule, /left:\s*var\(--room-activity-line-inset\);/);
+  assert.match(rule, /right:\s*var\(--room-activity-line-inset\);/);
+  // Under 720px the composer is 100% - 20px wide, so 10px each side.
+  assert.match(responsive, /\.desktop-composer\s*\{\s*width:\s*calc\(100% - 20px\);\s*\}\s*\.room-activity-line\s*\{\s*--room-activity-line-inset:\s*10px;\s*\}/);
+});

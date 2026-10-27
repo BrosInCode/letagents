@@ -155,7 +155,7 @@ async function copyPrompt() {
   border-radius: 28px;
   overflow: hidden;
   border: 1px solid var(--border);
-  background: #161616;
+  background: var(--bg-card);
 }
 
 .config-header {
@@ -163,7 +163,7 @@ async function copyPrompt() {
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
   gap: 12px;
 }
@@ -193,12 +193,12 @@ async function copyPrompt() {
 
 .ide-tab:hover {
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--accent-dim);
 }
 
 .ide-tab--active {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--accent-hover);
   border-color: var(--border-strong);
 }
 
@@ -228,7 +228,7 @@ async function copyPrompt() {
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--accent-dim);
   border: 1px solid var(--border-strong);
   cursor: pointer;
   transition: all var(--duration-fast);
@@ -237,7 +237,7 @@ async function copyPrompt() {
 
 .config-copy-btn:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--accent-hover);
   border-color: var(--border-accent);
 }
 

@@ -125,7 +125,7 @@ function handleInlineReferenceClick(event: MouseEvent) {
   left: 0;
   height: 56px;
   pointer-events: none;
-  background: linear-gradient(to bottom, transparent, var(--message-surface, var(--bg-1, #111113)) 85%);
+  background: linear-gradient(to bottom, transparent, var(--message-surface, var(--chat-bubble, var(--bg-1, #111113))) 85%);
 }
 
 .long-message-actions {

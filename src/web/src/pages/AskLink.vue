@@ -63,4 +63,13 @@ async function load() {
 .ask-downloads { margin-top: 16px; font-size: 11px; color: var(--give-muted); line-height: 1.7; }
 .ask-downloads a { color: var(--give-text); text-decoration: underline; text-underline-offset: 3px; }
 @media(max-width:480px) { .ask-link { padding: 12px 10px; }.ask-link > .give-agent-panel { max-height: calc(100dvh - 24px); } }
+
+@media (max-width: 600px) {
+  .ask-link { padding: max(12px, env(safe-area-inset-top, 0px)) 12px max(12px, env(safe-area-inset-bottom, 0px)); }
+  .ask-link > .give-agent-panel { max-height: none; overflow: visible; }
+  .ask-link :deep(.give-body) { overflow: visible; }
+  .ask-link :deep(.give-primary) { min-height: 44px; }
+  .ask-downloads { font-size: 13px; }
+  .ask-downloads a { display: inline-block; padding-block: 10px; }
+}
 </style>
