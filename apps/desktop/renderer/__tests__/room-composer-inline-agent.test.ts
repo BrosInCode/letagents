@@ -380,6 +380,57 @@ test('a chosen Claude model is checked against the known list, not as a provider
   assert.equal(calls.preflight.at(-1)![1].modelSource, 'custom', 'an id the list no longer has passes as custom');
 });
 
+test('each failed check offers the one step that can fix it, so no button loops', async t => {
+  fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  const cases: Array<[Record<string, unknown>, string | null]> = [
+    [{ status: 'branch_mismatch', message: 'Choose a worktree on feat before starting Claude.', nextAction: 'choose_worktree' }, 'open-chip-where'],
+    [{ status: 'config_required', message: 'Selected model is not available.', detail: 'Choose another model.', nextAction: null }, 'open-chip'],
+    [{ status: 'error', message: 'Claude Code needs an update.', detail: 'Update to 2.1.0 or newer.', nextAction: null }, 'setup'],
+    [{ status: 'config_required', message: 'Agent setup needs refreshing.', detail: 'Choose Check again.', nextAction: null }, 'check-again'],
+  ];
+  for (const [result, action] of cases) {
+    ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, canStart: false, detail: null, ...result });
+    assert.equal((await draft.launch('Hello')).outcome, 'blocked');
+    assert.equal(draft.noticeAction.value, action, String(result.status));
+  }
+  assert.match(draft.notice.value, /Agent setup needs refreshing\. Choose Check again\./);
+});
+
+test('Check again shows Checking…, holds Enter until it ends, and keeps the step when it still fails', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  const refreshing = { status: 'config_required', canStart: false, message: 'Agent setup needs refreshing.', detail: 'Choose Check again.', nextAction: null };
+  let release!: () => void;
+  ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, ...refreshing });
+  await draft.launch('Hello');
+  ipc.workers.runAgentProviderPreflight = (id: string) => new Promise(resolve => { release = () => resolve({ providerId: id, ...refreshing }); });
+  const check = draft.runNoticeAction();
+  assert.equal(draft.notice.value, 'Checking…');
+  assert.equal(draft.checking.value, true);
+  assert.equal((await draft.launch('Hello')).outcome, 'blocked', 'Enter waits for the check');
+  assert.equal(calls.create.length, 0);
+  release();
+  await check;
+  assert.equal(draft.checking.value, false);
+  assert.match(draft.notice.value, /^Claude still can't start\. Agent setup needs refreshing\./);
+  assert.equal(draft.noticeAction.value, 'check-again');
+});
+
+test('a model chosen before its catalog loads is still checked against the provider list', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  draft.setModel('opus');
+  await draft.launch('Hello');
+  assert.equal(calls.preflight.at(-1)![1].modelSource, 'known');
+});
+
 test('a project room with no local project explains instead of starting', async t => {
   const calls = fakeIpc();
   const { host } = fakeHost({ repoRootPath: null, roomGitRoom: { ref: { type: 'branch', name: 'x' } } });
