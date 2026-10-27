@@ -19,19 +19,21 @@ import ToastContainer from '@/components/ui/ToastContainer.vue'
 const route = useRoute()
 
 // Show navbar/footer on landing and docs, hide in room view
-const showNavbar = computed(() => route.name !== 'room' && route.name !== 'messages' && route.name !== 'my-work' && route.name !== 'connectors')
-const showFooter = computed(() => route.name !== 'room' && route.name !== 'messages' && route.name !== 'my-work' && route.name !== 'connectors')
+const showNavbar = computed(() => !['room', 'messages', 'my-work', 'connectors', 'ask'].includes(String(route.name)))
+const showFooter = showNavbar
 </script>
 
 <style>
 /* App-level layout — global styles in styles/global.css */
 #letagents-app {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
 
-main {
+#letagents-app > main {
   flex: 1;
+  min-width: 0;
 }
 </style>

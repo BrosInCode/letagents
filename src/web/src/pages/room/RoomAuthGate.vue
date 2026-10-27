@@ -114,14 +114,14 @@ defineEmits<{
 
 <style scoped>
 .auth-gate {
-  --auth-bg: #0b0c10;
-  --auth-panel: #12141a;
-  --auth-panel-soft: #171a21;
-  --auth-text: #f5f7fb;
-  --auth-muted: #949aa8;
-  --auth-line: rgba(219, 225, 238, 0.12);
-  --auth-line-strong: rgba(219, 225, 238, 0.2);
-  --auth-signal: #91a7ff;
+  --auth-bg: var(--bg);
+  --auth-panel: var(--bg-elevated);
+  --auth-panel-soft: var(--bg-card);
+  --auth-text: var(--text);
+  --auth-muted: var(--text-secondary);
+  --auth-line: var(--border);
+  --auth-line-strong: var(--border-strong);
+  --auth-signal: var(--blue-text);
   position: relative;
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -256,7 +256,7 @@ defineEmits<{
   justify-content: center;
   gap: 10px;
   width: fit-content;
-  min-width: 230px;
+  min-width: 0;
   min-height: 52px;
   margin-top: 38px;
   padding: 0 18px;
@@ -300,7 +300,7 @@ defineEmits<{
 
 .auth-return-note {
   margin: 12px 0 0;
-  color: #6f7581;
+  color: var(--auth-muted);
   font-size: 0.76rem;
 }
 
@@ -427,12 +427,12 @@ defineEmits<{
 }
 
 .auth-gate-footer {
-  color: #727886;
+  color: var(--auth-muted);
   font-size: 0.72rem;
 }
 
 .auth-gate-footer a {
-  color: #aeb6c8;
+  color: var(--auth-muted);
 }
 
 .auth-gate-footer a:hover {
