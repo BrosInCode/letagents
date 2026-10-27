@@ -89,3 +89,30 @@ extension ToolbarContent {
         else { self }
     }
 }
+
+
+struct WorkspaceNotice: View {
+    let workspace: WorkspaceStore
+    @State private var confirmingReset = false
+    @State private var recovering = false
+    var body: some View {
+        if let error = workspace.saveError {
+            VStack(alignment: .leading, spacing: 8) {
+                ErrorNotice(message: error)
+                HStack {
+                    Button(workspace.needsRecovery ? "Retry loading drafts" : "Try saving again") {
+                        recovering = true
+                        Task { await workspace.retrySaving(); recovering = false }
+                    }.frame(minHeight: 44)
+                    if workspace.needsRecovery {
+                        Button("Reset saved drafts", role: .destructive) { confirmingReset = true }.frame(minHeight: 44)
+                    }
+                }.font(.footnote).disabled(recovering)
+            }.confirmationDialog("Reset saved drafts on this iPhone?", isPresented: $confirmingReset, titleVisibility: .visible) {
+                Button("Delete saved drafts", role: .destructive) { Task { await workspace.resetSavedDrafts() } }
+            } message: {
+                Text("This removes unfinished messages, quotes, attachments, and retry information on this iPhone. Messages already sent are kept.")
+            }
+        }
+    }
+}

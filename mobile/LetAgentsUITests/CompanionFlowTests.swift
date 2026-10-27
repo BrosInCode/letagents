@@ -238,3 +238,36 @@ extension CompanionFlowTests {
         XCTAssertTrue(attachment.waitForExistence(timeout: 5))
     }
 }
+
+
+extension CompanionFlowTests {
+    func testRelaunchRestoresThreadDraftAndContinueCard() {
+        let app = XCUIApplication()
+        let key = UUID().uuidString
+        app.launchArguments = ["--ui-testing", "--workspace-test-id", key]
+        app.launch(); signIn(app); openGeneral(app)
+        XCTAssertTrue(app.buttons["thread-msg_1"].waitForExistence(timeout: 5))
+        app.buttons["thread-msg_1"].tap()
+        let composer = app.textViews["thread-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.tap(); composer.typeText("Finish this after switching back")
+        XCUIDevice.shared.press(.home)
+        app.terminate()
+        app.launchArguments += ["--restore-session"]
+        app.launch()
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertEqual(composer.value as? String, "Finish this after switching back")
+        capture("Restored thread draft")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["continue-conversation"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["recent-github.com/brosincode/letagents"].exists)
+        capture("Continue and recent activity")
+        app.buttons["continue-conversation"].tap()
+        XCTAssertEqual(composer.value as? String, "Finish this after switching back")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["account-button"].tap(); app.buttons["sign-out"].tap()
+        XCTAssertTrue(app.buttons["github-sign-in"].waitForExistence(timeout: 5))
+        signIn(app)
+        XCTAssertFalse(app.buttons["continue-conversation"].exists)
+    }
+}

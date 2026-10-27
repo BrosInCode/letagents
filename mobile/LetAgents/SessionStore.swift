@@ -55,16 +55,14 @@ struct KeychainCredentialStore: CredentialStore {
     var authorizationDeadline: Date?
     var error: String?
     var restoreFailed = false
-    var drafts: [String: String] = [:]
-    @ObservationIgnored var submissions: [String: MessageSubmission] = [:]
-    var attachmentDrafts: [String: [DraftAttachment]] = [:]
-    var quotes: [String: ReplyPreview] = [:]
+    let workspace: WorkspaceStore
     var sendingDrafts: Set<String> = []
     var threadReads: [String: ThreadSummary] = [:]
 
-    init(client: APIClient = APIClient(), credentials: any CredentialStore = KeychainCredentialStore()) {
+    init(client: APIClient = APIClient(), credentials: any CredentialStore = KeychainCredentialStore(), workspace: WorkspaceStore? = nil) {
         self.client = client
         self.credentials = credentials
+        self.workspace = workspace ?? WorkspaceStore()
     }
     func restore() async {
         isRestoring = true
@@ -79,6 +77,7 @@ struct KeychainCredentialStore: CredentialStore {
                 try credentials.remove()
                 return
             }
+            await workspace.load(accountID: account.id)
             token = saved
             self.account = account
         } catch is CancellationError { }
@@ -123,6 +122,7 @@ struct KeychainCredentialStore: CredentialStore {
                         }
                         try credentials.write(token)
                         clearAccountState()
+                        await workspace.load(accountID: account.id)
                         self.token = token
                         self.account = account
                         authorization = nil
@@ -158,6 +158,7 @@ struct KeychainCredentialStore: CredentialStore {
             }
             guard token == signingOutToken else { return }
             try credentials.remove()
+            try await workspace.clear()
             clearAccountState()
             account = nil
             token = nil
@@ -165,8 +166,7 @@ struct KeychainCredentialStore: CredentialStore {
     }
     private func clearAccountState() {
         sessionID = UUID()
-        drafts.removeAll(); submissions.removeAll(); attachmentDrafts.removeAll()
-        quotes.removeAll(); threadReads.removeAll(); sendingDrafts.removeAll()
+        threadReads.removeAll(); sendingDrafts.removeAll()
     }
     func handleUnauthorized(_ error: Error, token requestToken: String) {
         guard token == requestToken, (error as? APIError)?.isUnauthorized == true else { return }
