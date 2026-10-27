@@ -10,12 +10,22 @@ export function useRoomViewport() {
   const compactComposer = computed(() => keyboardOpen.value && compactViewport.value && editingComposer.value)
   let focusedComposer: HTMLElement | null = null
   let revealRevision = 0
+  let revealFrame: number | null = null
+  let removeRevealListeners = () => {}
+
+  function cancelReveal() {
+    revealRevision++
+    if (revealFrame !== null) window.cancelAnimationFrame(revealFrame)
+    revealFrame = null
+    removeRevealListeners()
+    removeRevealListeners = () => {}
+  }
 
   function resetComposerFocus() {
     editingThread.value = false
     editingComposer.value = false
     focusedComposer = null
-    revealRevision++
+    cancelReveal()
   }
 
   function syncRoomViewport(event?: Event) {
@@ -31,7 +41,7 @@ export function useRoomViewport() {
     const previousComposer = focusedComposer
     if (composer) focusedComposer = composer
     else if (active && active !== document.body) focusedComposer = null
-    if (focusedComposer !== previousComposer) revealRevision++
+    if (focusedComposer !== previousComposer) cancelReveal()
     editingComposer.value = keyboardOpen.value && Boolean(focusedComposer)
     editingThread.value = keyboardOpen.value && Boolean(focusedComposer?.classList.contains('inline-thread-composer'))
     // A touch on a send/menu control can briefly leave body focused. Retain
@@ -40,7 +50,7 @@ export function useRoomViewport() {
     // Safari resizes the visual viewport for the keyboard. Pinch zoom keeps
     // the existing layout rather than reflowing the room at the zoomed size.
     if (viewport.scale !== 1) {
-      revealRevision++
+      cancelReveal()
       if (!keyboardOpen.value) focusedComposer = null
       return
     }
@@ -50,22 +60,35 @@ export function useRoomViewport() {
       '--room-viewport-top': `${viewport.offsetTop}px`,
     }
 
-    // Rotation changes the room's grid before Safari reveals the focused field.
-    // Move only the thread's own message scrollport, never the page or user scrolls.
+    // Rotation updates Vue's grid, then the list's ResizeObserver and Safari's
+    // scroll position. Measure after those layout frames, only in this scrollport.
     const target = focusedComposer
-    if (event?.type !== 'scroll') revealRevision++
+    if (event?.type !== 'scroll') cancelReveal()
     if (event?.type !== 'scroll' && target?.classList.contains('inline-thread-composer')) {
       const revision = revealRevision
       void nextTick(() => {
         if (revision !== revealRevision || !target.isConnected) return
         const scrollport = target.closest<HTMLElement>('.messages')
         if (!scrollport) return
-        const bounds = scrollport.getBoundingClientRect()
-        const draft = target.getBoundingClientRect()
-        if (!bounds.height || !draft.height) return
-        const delta = draft.top < bounds.top ? draft.top - bounds.top
-          : draft.bottom > bounds.bottom ? draft.bottom - bounds.bottom : 0
-        if (delta) scrollport.scrollTo({ top: scrollport.scrollTop + delta, behavior: 'instant' })
+        const inputEvents = ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'keydown']
+        inputEvents.forEach(type => scrollport.addEventListener(type, cancelReveal, { passive: true }))
+        removeRevealListeners = () => inputEvents.forEach(type => scrollport.removeEventListener(type, cancelReveal))
+        revealFrame = window.requestAnimationFrame(() => {
+          if (revision !== revealRevision) return
+          revealFrame = window.requestAnimationFrame(() => {
+            if (revision !== revealRevision) return
+            revealFrame = null
+            removeRevealListeners()
+            removeRevealListeners = () => {}
+            if (!target.isConnected) return
+            const bounds = scrollport.getBoundingClientRect()
+            const draft = target.getBoundingClientRect()
+            if (!bounds.height || !draft.height) return
+            const delta = draft.top < bounds.top ? draft.top - bounds.top
+              : draft.bottom > bounds.bottom ? draft.bottom - bounds.bottom : 0
+            if (delta) scrollport.scrollTo({ top: scrollport.scrollTop + delta, behavior: 'instant' })
+          })
+        })
       })
     }
     if (!keyboardOpen.value) focusedComposer = null
