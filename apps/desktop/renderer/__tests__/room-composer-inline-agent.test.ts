@@ -83,7 +83,7 @@ function fakeIpc(overrides: { preflight?: Record<string, any>; openModel?: any; 
       listAgentProviders: async () => [provider('claude-code', 'Claude Code'), provider('codex', 'Codex'), provider('open-model', 'Open Model'), provider('cursor', 'Cursor'), provider('antigravity', 'Antigravity')],
       runAgentProviderPreflight: async (id: string, input: any) => { calls.preflight.push([id, input]); return { providerId: id, ...preflight[id] }; },
       listAgentProviderModels: async (id: string) => ({ providerId: id, status: 'ready', defaultModel: id === 'codex' ? 'gpt-5-codex' : id === 'open-model' ? 'openai/gpt-oss-120b' : null,
-        models: id === 'claude-code' ? [{ id: 'opus', label: 'Opus 5.5', source: 'provider' }, { id: 'sonnet', label: 'Sonnet 5.5', source: 'provider' }]
+        models: id === 'claude-code' ? [{ id: 'opus', label: 'Opus 5.5', source: 'known' }, { id: 'sonnet', label: 'Sonnet 5.5', source: 'known' }]
           : id === 'open-model' ? [{ id: 'openai/gpt-oss-120b', label: 'openai/gpt-oss-120b', source: 'provider', supportedEfforts: ['low', 'medium', 'high'] }, { id: 'qwen/qwen3-coder', label: 'qwen/qwen3-coder', source: 'provider' }]
             : [] }),
     },
@@ -322,17 +322,113 @@ test('a start that failed after the agent was saved counts as started', async t 
   assert.equal(result.entry, saved);
 });
 
-test('when the check on Enter finds setup missing, the window opens at that provider and nothing starts', async t => {
+test('when the check on Enter finds sign-in missing, the chip stays, says why, and only the button opens the window', async t => {
   const calls = fakeIpc();
   const { host, opened } = fakeHost();
   const { draft } = useDraft(t, host);
   await draft.refreshProviders();
   draft.pick('claude-code');
-  ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, status: 'auth_required', canStart: false, nextAction: 'authenticate' });
-  assert.equal((await draft.launch('Hello')).outcome, 'setup');
-  assert.deepEqual(opened, [{ providerId: 'claude-code' }]);
+  ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, status: 'auth_required', canStart: false, message: 'Claude Code needs sign-in.', detail: null, nextAction: 'authenticate' });
+  assert.equal((await draft.launch('Hello')).outcome, 'blocked');
+  assert.deepEqual(opened, [], 'Enter never opens the Add agent window');
   assert.equal(calls.create.length, 0);
-  assert.ok(draft.chip.value);
+  assert.ok(draft.chip.value, 'the chip stays');
+  assert.match(draft.notice.value, /^Claude can't start yet\. Claude Code needs sign-in\. Your message is still here\.$/);
+  assert.equal(draft.noticeAction.value, 'setup');
+  await draft.runNoticeAction();
+  assert.deepEqual(opened, [{ providerId: 'claude-code' }]);
+});
+
+test('a check that only needs repeating offers Check again, which refreshes and says when it is ready', async t => {
+  fakeIpc();
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  const inputs: any[] = [];
+  let ready = false;
+  ipc.workers.runAgentProviderPreflight = async (id: string, input: any) => {
+    inputs.push(input);
+    return ready ? { providerId: id, status: 'ready', canStart: true, message: 'ok', detail: null, nextAction: null }
+      : { providerId: id, status: 'config_required', canStart: false, message: 'Agent setup needs refreshing.', detail: 'Choose Check again to apply the current provider environment.', nextAction: null };
+  };
+  assert.equal((await draft.launch('Hello')).outcome, 'blocked');
+  assert.match(draft.notice.value, /Choose Check again to apply the current provider environment\./);
+  assert.equal(draft.noticeAction.value, 'check-again');
+  ready = true;
+  await draft.runNoticeAction();
+  assert.equal(inputs.at(-1).refreshEnvironment, true);
+  assert.match(draft.notice.value, /^Claude is ready\. Press Enter to start it\.$/);
+  assert.equal(draft.noticeAction.value, null);
+  assert.deepEqual(opened, []);
+});
+
+test('a chosen Claude model is checked against the known list, not as a provider model', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  await flush();
+  draft.setModel('opus');
+  await draft.launch('Hello');
+  const [, input] = calls.preflight.at(-1)!;
+  assert.equal(input.model, 'opus');
+  assert.equal(input.modelSource, 'known');
+  draft.pick('claude-code');
+  draft.setModel('claude-old-id');
+  await draft.launch('Hello');
+  assert.equal(calls.preflight.at(-1)![1].modelSource, 'custom', 'an id the list no longer has passes as custom');
+});
+
+test('each failed check offers the one step that can fix it, so no button loops', async t => {
+  fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  const cases: Array<[Record<string, unknown>, string | null]> = [
+    [{ status: 'branch_mismatch', message: 'Choose a worktree on feat before starting Claude.', nextAction: 'choose_worktree' }, 'open-chip-where'],
+    [{ status: 'config_required', message: 'Selected model is not available.', detail: 'Choose another model.', nextAction: null }, 'open-chip'],
+    [{ status: 'error', message: 'Claude Code needs an update.', detail: 'Update to 2.1.0 or newer.', nextAction: null }, 'setup'],
+    [{ status: 'config_required', message: 'Agent setup needs refreshing.', detail: 'Choose Check again.', nextAction: null }, 'check-again'],
+  ];
+  for (const [result, action] of cases) {
+    ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, canStart: false, detail: null, ...result });
+    assert.equal((await draft.launch('Hello')).outcome, 'blocked');
+    assert.equal(draft.noticeAction.value, action, String(result.status));
+  }
+  assert.match(draft.notice.value, /Agent setup needs refreshing\. Choose Check again\./);
+});
+
+test('Check again shows Checking…, holds Enter until it ends, and keeps the step when it still fails', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  const refreshing = { status: 'config_required', canStart: false, message: 'Agent setup needs refreshing.', detail: 'Choose Check again.', nextAction: null };
+  let release!: () => void;
+  ipc.workers.runAgentProviderPreflight = async (id: string) => ({ providerId: id, ...refreshing });
+  await draft.launch('Hello');
+  ipc.workers.runAgentProviderPreflight = (id: string) => new Promise(resolve => { release = () => resolve({ providerId: id, ...refreshing }); });
+  const check = draft.runNoticeAction();
+  assert.equal(draft.notice.value, 'Checking…');
+  assert.equal(draft.checking.value, true);
+  assert.equal((await draft.launch('Hello')).outcome, 'blocked', 'Enter waits for the check');
+  assert.equal(calls.create.length, 0);
+  release();
+  await check;
+  assert.equal(draft.checking.value, false);
+  assert.match(draft.notice.value, /^Claude still can't start\. Agent setup needs refreshing\./);
+  assert.equal(draft.noticeAction.value, 'check-again');
+});
+
+test('a model chosen before its catalog loads is still checked against the provider list', async t => {
+  const calls = fakeIpc();
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('claude-code');
+  draft.setModel('opus');
+  await draft.launch('Hello');
+  assert.equal(calls.preflight.at(-1)![1].modelSource, 'known');
 });
 
 test('a project room with no local project explains instead of starting', async t => {
