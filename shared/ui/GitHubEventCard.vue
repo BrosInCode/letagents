@@ -189,7 +189,7 @@ button.github-event-task:active { background: var(--accent-active); color: var(-
 .github-event-actions :deep(.pull-request-changes-button:focus-visible),
 button.github-event-task:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
 .github-event-card.is-preview { margin-top: 6px; gap: 8px; padding: 12px 14px 8px; }
-@media (pointer: coarse) {
+@media (max-width: 640px), (pointer: coarse) {
   .github-event-action,
   .github-event-actions :deep(.pull-request-changes-button),
   button.github-event-task { min-height: 44px; }
@@ -228,7 +228,7 @@ button.github-event-task:focus-visible { outline: 2px solid var(--blue-text); ou
 .is-activity .github-event-description, .is-activity .github-event-repository, .is-activity .github-event-separator { display: none; }
 .is-activity .github-event-context,
 .is-activity .github-event-actions { grid-column: 1 / -1; }
-@media (pointer: coarse) {
+@media (max-width: 640px), (pointer: coarse) {
   .is-room-event .github-event-action,
   .is-room-event .github-event-actions :deep(.pull-request-changes-button) { min-height: 44px; }
 }
@@ -242,7 +242,7 @@ button.github-event-task:focus-visible { outline: 2px solid var(--blue-text); ou
 .is-history .github-event-header { display: grid; grid-template-columns: 15px minmax(0, 1fr) auto; gap: 10px; min-height: 44px; }
 .is-history .github-event-icon { width: 14px; height: 14px; color: var(--text-tertiary); }
 .is-history .github-event-header time { font-size: 10px; color: var(--text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.github-history-toggle { display: flex; align-items: center; gap: 8px; padding: 8px 0; border: 0; background: none; text-align: left; font-family: inherit; cursor: pointer; }
+.github-history-toggle { min-width: 0; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 8px 0; border: 0; background: none; text-align: left; font-family: inherit; cursor: pointer; }
 .github-history-toggle span { color: var(--text-tertiary); flex: none; font-size: 11px; }
 .github-history-toggle:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
 .is-history.is-activity { display: grid; }

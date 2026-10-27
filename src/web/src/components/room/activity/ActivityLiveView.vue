@@ -66,12 +66,16 @@ watch(liveAgents, agents => { if (!agents.some(agent => agent.key === openedId.v
 
 <style scoped>
 .agents-live-actions { display: flex; justify-content: flex-end; padding: 8px 0; }
-.agents-live-dialog { border: 1px solid var(--agents-line); border-radius: 18px; padding: 24px; width: 620px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 40px); background: var(--bg, #0a0a0a); color: var(--agents-text); overscroll-behavior: contain; }
+.agents-live-dialog { margin: auto; overflow: auto; border: 1px solid var(--agents-line); border-radius: 18px; padding: 24px; width: 620px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 40px); background: var(--bg, #0a0a0a); color: var(--agents-text); overscroll-behavior: contain; }
 .agents-live-dialog::backdrop { background: #0009; }
 .agents-live-dialog[open] { animation: agent-dialog-in 220ms cubic-bezier(.22,1,.36,1); }
 .agents-live-dialog[data-instant=true] { animation: none; }
 .agents-dialog-close { position: sticky; top: 0; float: right; z-index: 1; background: var(--bg, #0a0a0a); }
 .agents-live-dialog :deep(.activity-detail) { border: 0; background: transparent; padding: 0; overflow: visible; max-height: none; }
+@media (max-width: 640px) {
+  .agents-live-dialog { width: calc(100vw - 24px); max-width: none; max-height: calc(100dvh - 24px); padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); border-radius: 12px; }
+  .agents-dialog-close { min-width: 44px; min-height: 44px; }
+}
 @keyframes agent-dialog-in { from { opacity: 0; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
 @media(prefers-reduced-motion:reduce) { .agents-live-dialog[open] { animation: none; } }
 </style>
