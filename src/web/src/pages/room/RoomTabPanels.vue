@@ -404,4 +404,8 @@ defineExpose({ matchCount, openMessageInChat })
   opacity: 0;
   transform: translateX(-28px);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .room-tab-panel { transition: none; transform: none; }
+}
 </style>

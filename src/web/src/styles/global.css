@@ -2,6 +2,7 @@
 
 /* ─── Design Tokens ─── */
 :root {
+  color-scheme: dark;
   /* Colors — Dark palette */
   --bg:              #0a0a0a;
   --bg-subtle:       #111111;
@@ -177,6 +178,7 @@
 
 html {
   scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -200,6 +202,15 @@ button {
   cursor: pointer;
   border: none;
   background: none;
+}
+
+:where(button, a, input, textarea, select, summary):focus-visible {
+  outline: 2px solid var(--blue-text);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
 }
 
 img {

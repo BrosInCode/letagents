@@ -899,8 +899,8 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 
 @media (max-width: 768px) {
-  .messages { padding: 12px 18px 6px; }
-  .room-live-strip { min-height: 6px; padding: 0 18px; }
+  .messages { padding: 8px 12px 6px; }
+  .room-live-strip { min-height: 6px; padding: 0 12px; }
   .new-messages-pill { bottom: 2px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }

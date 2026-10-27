@@ -1,14 +1,6 @@
 <template>
   <div class="web-connectors">
-    <header class="web-connectors-nav">
-      <RouterLink to="/">LetAgents</RouterLink>
-      <nav aria-label="Workspace">
-        <RouterLink to="/my-work">My work</RouterLink
-        ><RouterLink to="/messages">Messages</RouterLink
-        ><RouterLink to="/connectors" aria-current="page">Connectors</RouterLink
-        ><RouterLink to="/">Home</RouterLink>
-      </nav>
-    </header>
+    <WorkspaceNav />
     <div class="web-connectors-content">
       <ConnectorsPage
         v-if="isSignedIn && user?.id && api"
@@ -27,8 +19,8 @@
   </div>
 </template>
 <script setup lang="ts">
+import WorkspaceNav from "../components/layout/WorkspaceNav.vue";
 import { onMounted, onScopeDispose, shallowRef, watch } from "vue";
-import { RouterLink } from "vue-router";
 import ConnectorsPage from "../../../../shared/ui/connectors/ConnectorsPage.vue";
 import type { ConnectorsApi } from "../../../../shared/ui/connectors/types";
 import { useAuth } from "../composables/useAuth";
@@ -78,28 +70,6 @@ onScopeDispose(() => controller?.abort());
   background: var(--bg);
   color: var(--text);
 }
-.web-connectors-nav {
-  height: 70px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 0 34px;
-  border-bottom: 1px solid var(--border);
-}
-.web-connectors-nav a {
-  text-decoration: none;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-.web-connectors-nav > a,
-.web-connectors-nav a[aria-current] {
-  color: var(--text);
-}
-.web-connectors-nav nav {
-  display: flex;
-  gap: 24px;
-}
 .web-connectors-content {
   max-width: 1098px;
   margin: 0 auto;
@@ -124,18 +94,22 @@ onScopeDispose(() => controller?.abort());
   cursor: pointer;
 }
 @media (max-width: 600px) {
-  .web-connectors-nav {
-    padding: 0 16px;
-    gap: 12px;
-  }
-  .web-connectors-nav nav {
-    gap: 14px;
-  }
-  .web-connectors-nav a {
-    font-size: 12px;
-  }
   .web-connectors-content {
     padding: 28px 16px;
   }
+}
+
+@media (max-width: 640px) {
+  .web-connectors :deep(.connectors-header) { flex-wrap: wrap; gap: 16px; }
+  .web-connectors :deep(:is(.connector-secondary, .connector-primary, .connector-danger-button, .connector-text, .connector-tabs button, .work-filter-trigger, .work-menu-option, .ghost-button, .primary-button)) { min-height: 44px; }
+  .web-connectors :deep(.connector-icon) { width: 44px; height: 44px; flex-shrink: 0; }
+  .web-connectors :deep(.connector-dialog-toolbar) { padding: max(12px, env(safe-area-inset-top, 0px)) 16px 12px; }
+  .web-connectors :deep(.connector-detail-body) { padding: 20px 16px max(20px, env(safe-area-inset-bottom, 0px)); }
+  .web-connectors :deep(:is(.connector-dialog input, .connector-dialog select, .connector-dialog textarea, .work-menu-search input)) { min-height: 44px; font-size: 16px; }
+  .web-connectors :deep(.connector-map-row) { grid-template-columns: minmax(0, 1fr) 44px; }
+  .web-connectors :deep(.connector-map-row > span) { grid-column: 1 / -1; }
+  .web-connectors :deep(:is(.connector-detail-heading, .connector-detail-state)) { flex-wrap: wrap; }
+  .web-connectors :deep(.connector-detail-heading > div) { min-width: 0; overflow-wrap: anywhere; }
+  .web-connectors :deep(.connector-catalog) { max-width: calc(100vw - 24px); }
 }
 </style>

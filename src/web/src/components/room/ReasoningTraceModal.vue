@@ -1,11 +1,7 @@
 <template>
   <Teleport to="body">
-    <div
-      v-if="open && activeSession"
-      class="reasoning-backdrop"
-      @click.self="$emit('close')"
-    >
-      <section
+    <dialog
+        v-if="open && activeSession"
         ref="dialogRef"
         class="reasoning-dialog"
         :data-live="streamState === 'live'"
@@ -14,7 +10,8 @@
         aria-modal="true"
         :aria-labelledby="titleId"
         tabindex="-1"
-        @keydown.esc="$emit('close')"
+        @cancel.prevent="emit('close')"
+        @click="closeOnBackdrop($event, () => emit('close'))"
       >
         <ReasoningTraceHeader
           :heading="heading"
@@ -44,13 +41,13 @@
             Done
           </button>
         </footer>
-      </section>
-    </div>
+    </dialog>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { useChatDialog } from './chat-message/useChatDialog'
 import type { RoomReasoningSession } from '@/composables/useRoom'
 import ReasoningHighlights from './reasoning-trace/ReasoningHighlights.vue'
 import ReasoningSummarySection from './reasoning-trace/ReasoningSummarySection.vue'
@@ -65,17 +62,18 @@ const props = defineProps<{
   session: RoomReasoningSession | null
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   close: []
 }>()
 
-const dialogRef = ref<HTMLElement | null>(null)
 const sessionDetail = ref<RoomReasoningSession | null>(null)
 const isLoadingDetail = ref(false)
 const recentlyUpdated = ref(false)
 let livePulseTimer: ReturnType<typeof setTimeout> | null = null
 
 const activeSession = computed(() => sessionDetail.value || props.session)
+const { dialogRef, closeOnBackdrop } = useChatDialog(() => props.open && Boolean(activeSession.value))
+onUnmounted(() => { if (livePulseTimer) clearTimeout(livePulseTimer) })
 const {
   currentSummary,
   heading,
@@ -98,7 +96,6 @@ watch(() => props.open, (next) => {
     }
     return
   }
-  nextTick(() => dialogRef.value?.focus())
 })
 
 watch(

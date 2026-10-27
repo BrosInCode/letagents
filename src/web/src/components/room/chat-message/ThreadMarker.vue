@@ -34,4 +34,9 @@ const emit = defineEmits<{
 .thread-marker[aria-expanded="true"] > .thread-marker-chevron { transform: rotate(180deg); }
 .thread-marker:hover { color: var(--text, #fafafa); }
 .thread-marker:focus-visible { outline: 2px solid #60a5fa; outline-offset: 4px; }
+@media (max-width: 768px), (pointer: coarse) {
+  .thread-marker { min-height: 44px; max-width: 100%; margin-top: 6px; text-align: left; }
+  .thread-marker-label { min-width: 0; overflow-wrap: anywhere; }
+  .thread-marker::before { flex-shrink: 0; }
+}
 </style>

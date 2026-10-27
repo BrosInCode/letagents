@@ -619,7 +619,7 @@
     white-space: nowrap;
   }
 }
-@media (pointer: coarse) {
+@media (max-width: 640px), (pointer: coarse) {
   .agents-ui .agents-quiet,
   .agents-ui .agents-primary,
   .agents-filters button,
@@ -659,4 +659,18 @@
   .agents-change-summary time, .agents-change-state { display: none; }
   .agents-change-mobile-state { display: inline; }
   .agents-changes .agent-disclosure-body { margin-left: 14px; }
+}
+
+@media (max-width: 640px) {
+  .agents-heading { flex-wrap: wrap; }
+  .agents-ui .agents-search, .agents-ui select { min-height: 44px; height: auto; font-size: 16px; }
+  .agents-ui .agents-row { grid-template-columns: minmax(0, 1fr) 14px; }
+  .agents-row > .agents-owner { grid-column: 1; grid-row: 2; margin: 6px 0 0 45px; max-width: none; }
+  .agents-row > .agents-chevron { grid-column: 2; }
+  .agents-row > .agents-now { grid-row: 3; margin-left: 45px; }
+  .agents-copy strong, .agents-copy small, .agents-work, .agents-record-summary strong,
+  .agents-change-summary strong { white-space: normal; overflow-wrap: anywhere; }
+  .agents-record-summary { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .agents-person-summary:not([data-past="true"]) { grid-template-columns: minmax(0, 1fr) 70px; }
+  .agent-disclosure-body, .agents-changes .agent-disclosure-body { margin-left: 8px; padding-left: 12px; }
 }
