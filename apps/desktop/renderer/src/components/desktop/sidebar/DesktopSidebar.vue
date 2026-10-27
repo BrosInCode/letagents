@@ -886,6 +886,7 @@ function revealFocusedNavigationItem(): void {
 }
 onMounted(() => {
   window.addEventListener("keydown", handleRoomSwitcherShortcut);
+  requestActiveEntryReveal(props.activeEntry.id);
   navigationHeightQuery = window.matchMedia("(max-height: 640px)");
   navigationHeightQuery.addEventListener("change", revealFocusedNavigationItem);
 });
@@ -1612,8 +1613,43 @@ function revealSearchResult(entry: RoomEntry): void {
   if (projectIsCollapsed(project.id)) emit("toggle-project", project.id);
 }
 
-// Only explicit New room navigation requests a reveal. Routine selection and
-// background room refreshes must not move the sidebar's reading position.
+// Opening a room from anywhere (the switcher, Inbox, a mention, a
+// notification) brings its row into view, opening its collapsed group if the
+// row is inside one. A row already on screen, such as one just clicked, does
+// not move the list, and a background refresh keeps the same id, so it does
+// nothing either.
+let pendingActiveReveal: string | null = null;
+function sidebarRow(entryId: string): HTMLElement | null {
+  return Array.from(sidebarElement.value?.querySelectorAll<HTMLElement>("[data-sidebar-entry-id]") || [])
+    .find((element) => element.dataset.sidebarEntryId === entryId && element.getClientRects().length > 0) ?? null;
+}
+function requestActiveEntryReveal(entryId: string | null | undefined): void {
+  pendingActiveReveal = props.activeEntry.type === "room" && entryId ? entryId : null;
+  void revealActiveEntry();
+}
+async function revealActiveEntry(): Promise<void> {
+  const entryId = pendingActiveReveal;
+  if (!entryId || !sidebarElement.value || searchOpen.value) return;
+  let row = sidebarRow(entryId);
+  if (!row) {
+    const entry = props.projectEntries.flatMap((project) => [project.parent, ...projectChildRooms(project)])
+      .find((candidate) => candidate.id === entryId);
+    // The room list may not have it yet; the next list change tries again.
+    if (!entry) return;
+    revealSearchResult(entry);
+    await nextTick();
+    if (pendingActiveReveal !== entryId) return;
+    row = sidebarRow(entryId);
+    if (!row) return;
+  }
+  pendingActiveReveal = null;
+  row.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+}
+watch(() => props.activeEntry.id, (entryId) => requestActiveEntryReveal(entryId), { flush: "post" });
+watch(() => props.projectEntries, () => { if (pendingActiveReveal) void revealActiveEntry(); }, { flush: "post" });
+watch(searchOpen, (open) => { if (!open && pendingActiveReveal) void nextTick(revealActiveEntry); });
+
+// New room navigation also clears the search and promotes the project.
 watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
   if (!request) return;
   let cancelled = false;
