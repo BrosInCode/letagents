@@ -31,52 +31,59 @@ const focus = (id = 'focus_1') => ({
 })
 const originalFetch = globalThis.fetch
 
-test('inactive room panels load on selection, retry failures on return, and reuse the loaded component', async () => {
+test('inactive room panels load on selection, reuse loaded components, and offer reload after a failure', async t => {
+  const originalWindow = globalThis.window
+  let reloads = 0
+  Object.assign(globalThis, { window: { location: { reload: () => { reloads++ } } } })
+  t.after(() => Object.assign(globalThis, { window: originalWindow }))
   const nodes: any[] = []
   const renderer = createRenderer<any, any>({ patchProp(node, key, _previous, value) { node[key] = value },
     insert(node) { nodes.push(node) }, remove(node) { const index = nodes.indexOf(node); if (index >= 0) nodes.splice(index, 1) },
     createElement: () => ({}), createText: text => ({ text }), createComment: () => ({}),
     setText(node, text) { node.text = text }, setElementText(node, text) { node.text = text }, parentNode: () => null, nextSibling: () => null })
   let loads = 0
-  let resolve!: (component: any) => void, reject!: (error: Error) => void
+  let resolve!: (component: any) => void
   const Panel = asyncRoomPanel(() => {
     loads++
-    return new Promise((success, failure) => { resolve = success; reject = failure })
+    return new Promise(success => { resolve = success })
   })
-  const selected = ref(false)
+  const UnavailablePanel = asyncRoomPanel(() => Promise.reject(new Error('Offline')))
+  const selected = ref<'none' | 'board' | 'unavailable'>('none')
   let opened = 0
-  const app = renderer.createApp({ setup: () => () => selected.value ? h(Panel, { title: 'Board', onOpen: () => { opened++ } }) : h('div') })
+  const app = renderer.createApp({ setup: () => () => selected.value === 'board'
+    ? h(Panel, { title: 'Board', onOpen: () => { opened++ } })
+    : selected.value === 'unavailable' ? h(UnavailablePanel) : h('div') })
   const errors: unknown[] = []
   app.config.errorHandler = error => { errors.push(error) }
   const flush = async () => { await new Promise(done => setImmediate(done)); await nextTick() }
   app.mount({})
   try {
     assert.equal(loads, 0)
-    selected.value = true
+    selected.value = 'board'
     await nextTick()
     assert.equal(loads, 1)
     await new Promise(done => setTimeout(done, 220))
     await nextTick()
     assert.ok(nodes.some(node => node.role === 'status' && node.text === 'Loading view…'))
-    reject(new Error('Offline'))
-    await flush()
-    assert.equal(errors.length, 1)
-    assert.ok(nodes.some(node => node.role === 'alert' && node.text.includes('switch tabs to try again')))
-    selected.value = false
-    await nextTick()
-    selected.value = true
-    await nextTick()
-    assert.equal(loads, 2)
     resolve({ props: ['title'], emits: ['open'], render() { return h('div', { 'data-panel': true, onClick: () => this.$emit('open') }, this.title) } })
     await flush()
     assert.ok(nodes.some(node => node['data-panel'] && node.text === 'Board'), 'selected panel props survive lazy loading')
     nodes.find(node => node['data-panel']).onClick()
     assert.equal(opened, 1, 'panel actions still reach the room after lazy loading')
-    selected.value = false
+    selected.value = 'none'
     await nextTick()
-    selected.value = true
+    selected.value = 'board'
     await nextTick()
-    assert.equal(loads, 2, 'returning to a loaded view must not fetch its module again')
+    assert.equal(loads, 1, 'returning to a loaded view must not fetch its module again')
+    selected.value = 'unavailable'
+    await flush()
+    assert.equal(errors.length, 1)
+    assert.ok(nodes.some(node => node.role === 'alert'))
+    assert.ok(nodes.some(node => node.text?.includes('Check your connection, then reload')))
+    const reloadButton = nodes.find(node => node.text === 'Reload view')
+    assert.equal(reloadButton.type, 'button')
+    reloadButton.onClick()
+    assert.equal(reloads, 1, 'reload starts a fresh page instead of reusing the browser failed-import cache')
   } finally { app.unmount() }
 })
 

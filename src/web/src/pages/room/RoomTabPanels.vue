@@ -390,6 +390,18 @@ defineExpose({ matchCount, openMessageInChat })
   text-align: center;
 }
 
+.room-view-viewport :deep(.room-panel-placeholder button) {
+  justify-self: center;
+  min-height: 44px;
+  padding: 8px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
 .tab-slide-forward-enter-active,
 .tab-slide-forward-leave-active,
 .tab-slide-back-enter-active,

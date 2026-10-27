@@ -9,6 +9,9 @@ export function asyncRoomPanel(loader: AsyncComponentLoader) {
     }, 'Loading view…'),
     errorComponent: () => h('div', {
       class: 'room-panel-placeholder', role: 'alert',
-    }, 'This view could not load. Check your connection, then switch tabs to try again.'),
+    }, [
+      h('p', 'This view could not load. Check your connection, then reload to try again.'),
+      h('button', { type: 'button', onClick: () => window.location.reload() }, 'Reload view'),
+    ]),
   })
 }
