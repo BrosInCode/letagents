@@ -10,6 +10,7 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
+import { claudeCodeVersionAtLeast, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
 import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
@@ -40,19 +41,46 @@ const MODEL_LIST_TIMEOUT_MS = 10_000;
 const MODEL_LIST_MAX_BUFFER = 8 * 1024 * 1024;
 const modelListCache = new Map<string, ModelListCacheEntry>();
 
-const CLAUDE_CODE_KNOWN_MODELS: DesktopAgentProviderModelOption[] = [
-  // Full model id on purpose: shipped Claude Code CLIs reject the bare
-  // "fable" alias ("issue with the selected model"), while full ids pass
-  // through to the API on every CLI version.
-  { id: "claude-fable-5", label: "Fable 5", source: "known" },
-  { id: "opus", label: "Opus (latest)", source: "known" },
-  { id: "sonnet", label: "Sonnet (latest)", source: "known" },
-  { id: "haiku", label: "Haiku (latest)", source: "known" },
+// Full model ids with their real names. The CLI has no command that lists
+// models, and an alias ("opus", "sonnet") runs a different model on each CLI
+// version, so its name cannot be shown. A CLI refuses a full id its own model
+// catalog does not describe, so a newer model is listed only from the CLI
+// version that names it. Each id was run on Claude Code 2.1.278; that CLI
+// asks for 2.1.280 for the 5.5 models.
+const CLAUDE_CODE_KNOWN_MODELS: Array<DesktopAgentProviderModelOption & { minimumCliVersion?: string }> = [
+  // "best" is the one alias kept: it means the best model the CLI has.
   { id: "best", label: "Best available", source: "known" },
-  { id: "opusplan", label: "Opus Plan", source: "known" },
-  { id: "sonnet[1m]", label: "Sonnet 1M", source: "known" },
-  { id: "opus[1m]", label: "Opus 1M", source: "known" },
+  { id: "claude-fable-5-1", label: "Fable 5.1", source: "known" },
+  { id: "claude-fable-5", label: "Fable 5", source: "known" },
+  { id: "claude-opus-5-5", label: "Opus 5.5", source: "known", minimumCliVersion: "2.1.280" },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", source: "known", minimumCliVersion: "2.1.280" },
+  { id: "claude-haiku-5-5", label: "Haiku 5.5", source: "known", minimumCliVersion: "2.1.280" },
+  { id: "claude-opus-5", label: "Opus 5", source: "known" },
+  { id: "claude-sonnet-5", label: "Sonnet 5", source: "known" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5", source: "known" },
+  { id: "claude-opus-5[1m]", label: "Opus 5 1M", source: "known" },
+  { id: "claude-sonnet-5[1m]", label: "Sonnet 5 1M", source: "known" },
 ];
+
+async function listClaudeCodeModels(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopAgentProviderModelsResult> {
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const command = resolveClaudeCodeExecutable(runtimeEnv);
+  const cacheKey = `claude-code:${command}`;
+  const cached = modelListCache.get(cacheKey);
+  if (!input.refreshModels && cached && cached.expiresAt > Date.now()) {
+    return cloneModelResult(cached.result);
+  }
+  const version = await execFileWithTimeout(command, ["--version"], { env: runtimeEnv });
+  const versionLine = version.ok ? firstNonEmptyLine(version.stdout) ?? firstNonEmptyLine(version.stderr) ?? "" : "";
+  const models = CLAUDE_CODE_KNOWN_MODELS
+    .filter((model) => !model.minimumCliVersion || claudeCodeVersionAtLeast(versionLine, model.minimumCliVersion))
+    .map(({ minimumCliVersion: _minimum, ...model }) => model);
+  const next = modelResult("claude-code", "ready", models, null, null);
+  modelListCache.set(cacheKey, { expiresAt: Date.now() + MODEL_LIST_CACHE_MS, result: next });
+  return cloneModelResult(next);
+}
 
 export function normalizeManagedAgentModel(value: string | null | undefined): string | null {
   const normalized = String(value ?? "").trim();
@@ -89,7 +117,7 @@ export async function listDesktopAgentProviderModels(
     return listCursorModels(input);
   }
   if (providerId === "claude-code") {
-    return modelResult(providerId, "ready", CLAUDE_CODE_KNOWN_MODELS, null, null);
+    return listClaudeCodeModels(input);
   }
   if (providerId === "codex") {
     return listCodexModels(input);

@@ -228,6 +228,8 @@ export function claudeCliLaunchArgs(input: {
   mcpConfigPath: string;
   policyArgs: readonly string[];
   model?: string | null;
+  /** The saved reasoning effort. Read again at each launch, so a change applies from the next start or resume. */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   session: { resume: string } | { sessionId: string };
 }): string[] {
   const instructionsOnly = input.homeHarness && claudeOwnerSetupReadsProjectInstructionsOnly(input.policyArgs);
@@ -252,6 +254,7 @@ export function claudeCliLaunchArgs(input: {
     "--mcp-config", input.mcpConfigPath,
     ...policyArgs,
     ...(input.model ? ["--model", input.model] : []),
+    ...(input.effort ? ["--effort", input.effort] : []),
     ...("resume" in input.session ? ["--resume", input.session.resume] : ["--session-id", input.session.sessionId]),
   ];
 }

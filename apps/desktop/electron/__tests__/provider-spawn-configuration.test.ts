@@ -184,7 +184,8 @@ test("managed provider spawn attestation rejects downgraded or unsupported autho
     },
   }), /authority at 'allowedTools'/);
 
-  assert.throws(() => attestProviderSpawnPolicy("claude-code", {
+  // Claude takes an effort, passed as `--effort`; Cursor takes none.
+  assert.doesNotThrow(() => attestProviderSpawnPolicy("claude-code", {
     ...request,
     reasoningEffort: "high",
     permissionProfileId: "read_only",
@@ -195,6 +196,12 @@ test("managed provider spawn attestation rejects downgraded or unsupported autho
       allowedTools: ["mcp__letagents__*"],
       settingSources: "",
     },
+  }));
+  assert.throws(() => attestProviderSpawnPolicy("cursor", {
+    ...request,
+    reasoningEffort: "high",
+    permissionProfileId: "read_only",
+    launchPolicy: { mode: "ask", force: false },
   }), /does not support.*reasoning effort/);
 
   assert.throws(() => attestProviderSpawnPolicy("cursor", {

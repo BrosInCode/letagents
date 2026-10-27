@@ -109,7 +109,7 @@ export function attestProviderSpawnPolicy(
     requireMatch(policy, "sandbox", profile === "sandboxed_write" ? "enabled" : "disabled", provider);
     if (Object.hasOwn(policy, "mode") && policy.mode !== null) throw new Error(`Cursor ${profile} launch retained a read-only mode.`);
   }
-  if (request.reasoningEffort !== null && request.reasoningEffort !== undefined && provider !== "codex"
+  if (request.reasoningEffort !== null && request.reasoningEffort !== undefined && provider !== "codex" && provider !== "claude-code"
     && !(provider === "open-model" && isOpenModelReasoningEffort(request.reasoningEffort))) {
     throw new Error(`${provider} does not support the selected reasoning effort.`);
   }

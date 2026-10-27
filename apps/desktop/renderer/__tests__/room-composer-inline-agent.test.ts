@@ -201,7 +201,8 @@ test('picking a ready provider adds a chip with the personal default; a provider
   assert.equal(draft.chip.value.model, null, 'the provider default until a model is chosen');
   await flush();
   assert.deepEqual(draft.chipModels.value.map((m: any) => m.label), ['Default', 'Opus 5.5', 'Sonnet 5.5'], 'the real catalog, title only');
-  assert.deepEqual(draft.chipEfforts.value, [], 'supervised Claude takes no effort, as in the Add agent window');
+  assert.deepEqual(draft.chipEfforts.value.map((e: any) => e.label), ['Default', 'Low', 'Medium', 'High', 'Extra high', 'Max'],
+    'supervised Claude takes its CLI levels, as in the Add agent window');
 
   draft.removeChip();
   assert.equal(draft.chip.value, null);

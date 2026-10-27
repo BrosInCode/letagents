@@ -263,6 +263,7 @@ export function useAddAgentPresentation(
   );
   const showEffortSelector = computed(() =>
     selectedProviderId.value === "codex"
+    || selectedProviderId.value === "claude-code"
     || (selectedProviderId.value === "open-model" && effortOptions.value.length > 0)
   );
   const effortSelectOptions = computed<DesktopSelectOption[]>(() => [
@@ -386,7 +387,7 @@ export function useAddAgentPresentation(
 }
 
 /**
- * Codex takes every shared effort. An Open Model agent takes exactly the
+ * Codex takes every shared effort, and Claude Code also Max. An Open Model agent takes exactly the
  * efforts its endpoint lists for the model, so a model without that list has
  * no effort setting at all.
  */

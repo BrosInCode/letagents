@@ -9,6 +9,7 @@ const { tempDir } = createElectronTestEnv({
   prefix: "letagents-managed-agent-models-",
   paths: [],
   extraCleanupEnvKeys: [
+    "LETAGENTS_CLAUDE_CODE_BIN",
     "LETAGENTS_CODEX_BIN",
     "LETAGENTS_CURSOR_AGENT_BIN",
     "LETAGENTS_CURSOR_MANAGED_HOME",
@@ -111,20 +112,59 @@ test("Codex model parser handles refreshed catalog JSON", () => {
   ]);
 });
 
-test("known and custom model validation use the selected source intentionally", async () => {
-  const claudeModels = await listDesktopAgentProviderModels("claude-code");
-  assert.deepEqual(claudeModels.models.slice(0, 4).map((model) => model.label), [
-    "Fable 5",
-    "Opus (latest)",
-    "Sonnet (latest)",
-    "Haiku (latest)",
+function fakeClaude(version: string): void {
+  const claudeBin = join(tempDir, `claude-${version}`);
+  writeFileSync(claudeBin, [
+    "#!/usr/bin/env node",
+    "if (process.argv[2] !== '--version') process.exit(2);",
+    `console.log('${version} (Claude Code)');`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = claudeBin;
+}
+
+test("Claude models are full ids with real names, and newer ones only from the CLI that knows them", async () => {
+  fakeClaude("2.1.278");
+  const older = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.equal(older.status, "ready");
+  assert.deepEqual(older.models.map((model) => [model.id, model.label]), [
+    ["best", "Best available"],
+    ["claude-fable-5-1", "Fable 5.1"],
+    ["claude-fable-5", "Fable 5"],
+    ["claude-opus-5", "Opus 5"],
+    ["claude-sonnet-5", "Sonnet 5"],
+    ["claude-haiku-4-5", "Haiku 4.5"],
+    ["claude-opus-5[1m]", "Opus 5 1M"],
+    ["claude-sonnet-5[1m]", "Sonnet 5 1M"],
   ]);
+  assert.ok(older.models.every((model) => !("minimumCliVersion" in model)));
+
+  fakeClaude("2.1.280");
+  const cached = await listDesktopAgentProviderModels("claude-code");
+  assert.equal(cached.models.some((model) => model.id === "claude-opus-5-5"), true, "a different CLI path is its own cache entry");
+  const newer = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.deepEqual(newer.models.filter((model) => model.id.endsWith("-5-5")).map((model) => model.label), ["Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
+
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = join(tempDir, "no-such-claude");
+  const missing = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.equal(missing.status, "ready", "an unreadable version still lists the models every CLI takes");
+  assert.equal(missing.models.some((model) => model.id === "claude-sonnet-5-5"), false);
+  delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
+});
+
+test("known and custom model validation use the selected source intentionally", async () => {
+  fakeClaude("2.1.278");
+  assert.deepEqual(await validateDesktopManagedAgentModel({
+    providerId: "claude-code",
+    model: "claude-sonnet-5",
+    modelSource: "known",
+  }), { model: "claude-sonnet-5", error: null });
 
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
-    model: "sonnet",
+    model: "claude-opus-5[1m]",
     modelSource: "known",
-  }), { model: "sonnet", error: null });
+  }), { model: "claude-opus-5[1m]", error: null });
 
   const invalidKnown = await validateDesktopManagedAgentModel({
     providerId: "claude-code",
@@ -134,23 +174,19 @@ test("known and custom model validation use the selected source intentionally", 
   assert.equal(invalidKnown.model, "unknown-claude-model");
   assert.match(invalidKnown.error ?? "", /not in the known model list/);
 
-  assert.deepEqual(await validateDesktopManagedAgentModel({
+  // An alias is no longer listed; a new agent may still name one as a custom id.
+  assert.match((await validateDesktopManagedAgentModel({
     providerId: "claude-code",
     model: "opusplan",
     modelSource: "known",
-  }), { model: "opusplan", error: null });
-
-  assert.deepEqual(await validateDesktopManagedAgentModel({
-    providerId: "claude-code",
-    model: "sonnet[1m]",
-    modelSource: "known",
-  }), { model: "sonnet[1m]", error: null });
+  })).error ?? "", /not in the known model list/);
 
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
     model: "unknown-claude-model",
     modelSource: "custom",
   }), { model: "unknown-claude-model", error: null });
+  delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
 });
 
 test("Codex model discovery reads debug model catalog output", async () => {

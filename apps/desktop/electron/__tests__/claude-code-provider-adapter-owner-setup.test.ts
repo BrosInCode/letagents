@@ -550,6 +550,10 @@ test("the Claude launch arguments differ only in what the owner's setup needs", 
   assert.equal(replaced[replaced.indexOf("--settings") + 1], OWNER_START_SETTINGS);
   assert.deepEqual(claudeCliLaunchArgs({ ...input, policyArgs: ["--permission-mode", "default", "--settings", "{}", "--tools", "Read"], homeHarness: false, ownerMcpStartupMs: 4_000, cwd: "/work/attempt", session: { sessionId: "s-1" } })
     .filter((arg, index, all) => all[index - 1] === "--settings"), ["{}"], "without the owner's setup the policy's own settings are passed as they are");
+  // The saved effort follows the model on a fresh start and on a resume alike.
+  assert.deepEqual(claudeCliLaunchArgs({ ...input, effort: "max", homeHarness: false, session: { resume: "s-2" } }).slice(-6),
+    ["--model", "opus", "--effort", "max", "--resume", "s-2"]);
+  assert.equal(claudeCliLaunchArgs({ ...input, effort: null, homeHarness: false, session: { sessionId: "s-1" } }).includes("--effort"), false);
 
   // An access level that names no setting sources reads the project's too: Full access.
   const full = { approvalProfileLabel: null, mcpConfigPath: "/tmp/mcp.json", policyArgs: ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"], model: null };
@@ -610,4 +614,17 @@ test("a rented Claude agent is refused the owner's own setup before anything sta
     supervisorEntryId: "supervised_rental_0123", supervisorSocketPath: "/tmp/fake-daemon.sock", supervisorExecutionGenerationId: "generation-1",
   })), /a rented agent never uses its owner's own setup/);
   assert.equal(harness.launches.length, 0);
+});
+
+test("a saved Claude effort reaches the CLI as --effort", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [ROOM_SERVER], initPermissionMode: "default" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(false),
+    model: "claude-fable-5-1", reasoningEffort: "xhigh",
+    ...SUPERVISED,
+    supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+  }));
+  const args = harness.launches[0]!.args;
+  assert.deepEqual(args.slice(args.indexOf("--model"), args.indexOf("--model") + 4), ["--model", "claude-fable-5-1", "--effort", "xhigh"]);
 });
