@@ -243,11 +243,12 @@ async function webScrollSurface() {
     ResizeObserver: class { constructor(callback: () => void) { resize = callback; } observe() {} disconnect() {} },
   });
   const calls: string[] = [];
+  const positions: any[] = [];
   let revealTop: number | null = 100;
-  const el = Object.assign(new EventTarget(), { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600,
+  const el = Object.assign(new EventTarget(), { isConnected: true, scrollHeight: 2000, clientHeight: 400, scrollTop: 1600,
     getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }),
     scrollTo: () => { el.scrollTop = el.scrollHeight - el.clientHeight; calls.push("bottom"); },
-    querySelectorAll: () => [], querySelector: () => ({ closest: () => null, scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
+    querySelectorAll: (_selector: string): any[] => [], querySelector: () => ({ closest: () => null, scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
   });
   const row = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z" });
   const props = reactive<any>({ messages: [row("msg_1"), row("msg_2")], roomIdentifier: "room", messagesLoaded: true, hasOlderMessages: false, searchQuery: "" });
@@ -256,12 +257,14 @@ async function webScrollSurface() {
   const app = renderer.createApp({ setup() {
     provideReactions(reactions); providePreviews(previews); providePins(pins);
     return () => h({ setup() {
-      vm = MessageList.setup(props, { expose() {}, emit() {} }); vm.messagesEl.value = el;
+      vm = MessageList.setup(props, { expose() {}, emit(event: string, _room: string, position: unknown) {
+        if (event === 'scrollPosition') positions.push(position);
+      } }); vm.messagesEl.value = el;
       return () => h("div");
     } });
   } });
   app.provide(ssrContextKey, { modules: new Set() }); app.mount({}); await flush(); calls.length = 0;
-  return { vm, props, el, reactions, previews, pins, calls, row,
+  return { vm, props, el, reactions, previews, pins, calls, positions, row,
     setRevealTop: (value: number | null) => { revealTop = value; },
     frame: () => { for (const [handle, callback] of [...frames]) { frames.delete(handle); callback(); } },
     advance: (duration: number) => {
@@ -310,6 +313,42 @@ test("web: typing/composer resize keeps latest visible, preserves a scrolled-up 
   try {
     s.el.clientHeight = 300; s.resize(); await flush(); assert.equal(s.el.scrollTop, 1700);
     s.el.scrollTop = 100; s.vm.checkScroll(); s.el.clientHeight = 250; s.resize(); await flush(); assert.equal(s.el.scrollTop, 100);
+  } finally { s.close(); }
+});
+
+test("web: composer growth at latest avoids measuring history but scrolling up retains an anchor", async () => {
+  const s = await webScrollSurface();
+  try {
+    s.props.messages = Array.from({ length: 1000 }, (_, index) => s.row(`msg_${index}`));
+    s.el.scrollHeight = 100_000;
+    await flush();
+    let anchorQueries = 0, anchorReads = 0;
+    const anchors = s.props.messages.map((message: any, index: number) => ({
+      dataset: { msgId: message.id },
+      getBoundingClientRect: () => {
+        anchorReads++;
+        return { top: index * 100 - s.el.scrollTop, bottom: (index + 1) * 100 - s.el.scrollTop };
+      },
+    }));
+    s.el.querySelectorAll = (selector: string) => {
+      if (!selector.startsWith(':scope')) return [];
+      anchorQueries++;
+      return anchors;
+    };
+    s.positions.length = 0;
+    s.el.clientHeight = 378; s.resize(); await flush();
+    s.el.dispatchEvent(new Event('scroll'));
+    assert.equal(s.el.scrollTop, 99_622);
+    assert.equal(anchorQueries, 0, 'resizing and its scroll event do not walk the message rows at latest');
+    assert.equal(anchorReads, 0, 'latest bookmarks need no anchor geometry');
+    assert.equal(s.positions.length, 2, 'resize follow and scroll both save the latest intent');
+    assert.ok(s.positions.every(position => position.latest && position.anchor === null && position.top === 99_622));
+
+    s.el.scrollTop = 5050; s.el.dispatchEvent(new Event('scroll'));
+    assert.ok(anchorQueries > 0 && anchorReads > 0, 'reading history still measures its visible anchor');
+    assert.deepEqual(s.positions.at(-1), { top: 5050, latest: false, anchor: { messageId: 'msg_50', offsetTop: -50 } });
+    s.el.clientHeight = 350; s.resize(); await flush();
+    assert.equal(s.el.scrollTop, 5050, 'composer growth preserves a scrolled-up reader');
   } finally { s.close(); }
 });
 
