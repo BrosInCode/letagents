@@ -22,7 +22,7 @@
   left: 0;
   right: 0;
   padding: 12px;
-  max-height: calc(100dvh - 96px);
+  max-height: calc(100dvh - 96px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
   overscroll-behavior: contain;
   border-radius: var(--radius-lg);
