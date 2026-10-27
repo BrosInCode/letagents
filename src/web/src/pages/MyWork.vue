@@ -1,14 +1,6 @@
 <template>
   <div class="web-work">
-    <header class="web-work-nav">
-      <RouterLink to="/">LetAgents</RouterLink>
-      <nav aria-label="Workspace">
-        <RouterLink to="/my-work" aria-current="page">My work</RouterLink
-        ><RouterLink to="/messages">Messages</RouterLink
-        ><RouterLink to="/connectors">Connectors</RouterLink
-        ><RouterLink to="/">Home</RouterLink>
-      </nav>
-    </header>
+    <WorkspaceNav />
     <MyWork
       v-if="isSignedIn && user?.id"
       :key="user.id"
@@ -28,8 +20,9 @@
   </div>
 </template>
 <script setup lang="ts">
+import WorkspaceNav from "../components/layout/WorkspaceNav.vue";
 import { onMounted, onScopeDispose, ref, watch } from "vue";
-import { RouterLink, useRouter } from "vue-router";
+import { useRouter } from "vue-router";
 import MyWork from "../../../../shared/ui/my-work/MyWork.vue";
 import type { MyWorkApi } from "../../../../shared/ui/my-work/types";
 import { useAuth } from "../composables/useAuth";
@@ -152,45 +145,7 @@ onScopeDispose(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-.web-work-nav {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: center;
-  padding: 0 24px;
-  min-height: 56px;
-  border-bottom: 1px solid var(--border-strong);
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.web-work-nav > a {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text);
-}
-.web-work-nav nav {
-  display: flex;
-  gap: 24px;
-}
-.web-work-nav [aria-current] {
-  color: var(--text);
-}
-@media (max-width: 600px) {
-  .web-work-nav {
-    gap: 12px;
-    padding: 10px 16px;
-    font-size: 11px;
-  }
-  .web-work-nav nav {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 8px 14px;
-  }
-  .web-work-nav a {
-    white-space: nowrap;
-  }
+  min-width: 0;
 }
 .web-work-signin {
   margin: auto;
@@ -213,5 +168,22 @@ onScopeDispose(() => {
   background: var(--text);
   color: var(--bg);
   cursor: pointer;
+}
+
+@media (max-width: 650px) {
+  .web-work :deep(.work-content) { padding: 24px 16px max(24px, env(safe-area-inset-bottom, 0px)); }
+  .web-work :deep(.work-heading) { flex-wrap: wrap; gap: 12px; }
+  .web-work :deep(.work-tabs) { overflow-x: auto; justify-content: flex-start; gap: 18px; padding-inline: 2px; }
+  .web-work :deep(.work-tabs > button) { flex-shrink: 0; font-size: 13px; min-height: 44px; padding-bottom: 10px; }
+  .web-work :deep(:is(.work-secondary, .work-primary, .work-text-button, .work-filter-trigger, .work-menu-option, .disclosure-trigger, .work-detail-tabs button)) { min-height: 44px; }
+  .web-work :deep(.work-search) { height: 44px; }
+  .web-work :deep(:is(.work-search input, .work-menu-search input)) { font-size: 16px; }
+  .web-work :deep(.work-search kbd) { display: none; }
+  .web-work :deep(.work-icon-button) { width: 44px; height: 44px; }
+  .web-work :deep(.work-detail-top) { padding: max(8px, env(safe-area-inset-top, 0px)) 16px 8px; }
+  .web-work :deep(.work-detail-body) { padding: 20px 16px; }
+  .web-work :deep(.work-detail-footer) { padding: 12px 16px max(12px, env(safe-area-inset-bottom, 0px)); }
+  .web-work :deep(:is(.work-detail-section a, .work-attention button)) { min-height: 44px; }
+  .web-work-signin { overflow-y: auto; }
 }
 </style>

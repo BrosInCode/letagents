@@ -74,10 +74,42 @@ test('Mac beta presentation rejects a current manifest older than its bundled fa
 
 test('Mac beta anchor clears the fixed navigation bar', () => {
   const heroPath = fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url))
-  const routerPath = fileURLToPath(new URL('../src/router.ts', import.meta.url))
   const heroSource = readFileSync(heroPath, 'utf8')
-  const routerSource = readFileSync(routerPath, 'utf8')
   assert.match(heroSource, /id="download-mac"/)
-  assert.match(heroSource, /scroll-margin-top:\s*92px/)
-  assert.match(routerSource, /el:\s*to\.hash,\s*top:\s*92/)
+  assert.match(heroSource, /scroll-margin-top:\s*calc\(92px \+ env\(safe-area-inset-top, 0px\)\)/)
+})
+
+test('hash navigation clears the measured navbar and respects reduced motion without changing history restoration', async () => {
+  const saved = Object.fromEntries(['window', 'document', 'location', 'history'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  let navbarBottom: number | null = 118, reduce = false
+  const location = new URL('https://letagents.test/')
+  const history = { state: { current: '/', position: 0 }, length: 1, replaceState() {}, pushState() {} }
+  const document = {
+    createElement: () => ({}),
+    querySelector: (selector: string) => selector === '.navbar' && navbarBottom !== null ? { getBoundingClientRect: () => ({ bottom: navbarBottom }) } : null,
+    addEventListener() {}, removeEventListener() {},
+  }
+  const window = { location, history, addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: reduce }) }
+  for (const [key, value] of Object.entries({ window, document, location, history })) Object.defineProperty(globalThis, key, { configurable: true, value })
+  let router: (typeof import('../src/router'))['router'] | undefined
+  try {
+    router = (await import('../src/router')).router
+    const scroll = (hash: string, position: { top: number; left: number } | null = null) => router!.options.scrollBehavior!({ hash } as any, {} as any, position)
+    assert.deepEqual(await scroll('#download-mac'), { el: '#download-mac', top: 138, behavior: 'smooth' })
+    reduce = true
+    assert.deepEqual(await scroll('#setup'), { el: '#setup', top: 138, behavior: 'instant' })
+    navbarBottom = 66
+    assert.equal((await scroll('#start') as { top: number }).top, 92)
+    navbarBottom = null
+    assert.equal((await scroll('#overview') as { top: number }).top, 92)
+    const restored = { top: 480, left: 0 }
+    assert.equal(await scroll('', restored), restored)
+    assert.deepEqual(await scroll(''), { top: 0 })
+  } finally {
+    router?.options.history.destroy()
+    for (const [key, descriptor] of Object.entries(saved)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else Reflect.deleteProperty(globalThis, key)
+    }
+  }
 })
