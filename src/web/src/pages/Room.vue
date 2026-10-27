@@ -6,7 +6,7 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :style="roomViewportStyle" @focusin="syncRoomViewport">
+  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -288,7 +288,7 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
-const { roomViewportStyle, compactViewport, keyboardOpen, editingThread, hideMainComposer, syncRoomViewport } = useRoomViewport()
+const { roomViewportStyle, compactViewport, keyboardOpen, compactComposer, hideMainComposer, syncRoomViewport, resetComposerFocus } = useRoomViewport()
 
 onUnmounted(() => {
   messagePermalinkRequestId += 1
@@ -320,7 +320,7 @@ const {
   githubEventsSupported,
   isConnected,
 })
-watch([activeTab, () => room.value?.identifier], () => { editingThread.value = false })
+watch([activeTab, () => room.value?.identifier], resetComposerFocus)
 const threadImageMessages = ref<RoomMessage[]>([])
 watch(() => room.value?.identifier, () => { threadImageMessages.value = [] })
 const imageMessages = computed(() => [...new Map([...threadImageMessages.value, ...messages.value].map(message => [message.id, message])).values()])
@@ -619,5 +619,30 @@ watch(
 .room-shell[data-compact-viewport="true"] :deep(.chat-header) { min-height: 44px; padding-block: 0; }
 .room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
+
+/* A landscape software keyboard can leave only 98px for the draft and send row. */
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto; }
+/* Keep search focusable: /search or Find restores the header through focusin. */
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-history-search),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-pin-rail),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.presence-chips) { display: none; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer) { max-height: var(--room-viewport-height); }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer) { padding-block: 2px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer .composer-card) { padding-block: 2px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.inline-thread-footer) { padding-top: 0; border-top: 0; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.inline-thread-composer) { padding: 0; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-textarea) { max-height: min(80px, max(44px, calc(var(--room-viewport-height) - 54px))); }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer-toolbar) { margin-top: 0; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.messages) { padding-block: 4px; }
+
+@media (max-width: 980px), (pointer: coarse) {
+  .room-shell[data-theme] > :deep(.composer:not(.inline-thread-composer)),
+  .room-shell[data-theme] :deep(.messages) {
+    padding-left: max(12px, env(safe-area-inset-left, 0px));
+    padding-right: max(12px, env(safe-area-inset-right, 0px));
+  }
+}
 
 </style>

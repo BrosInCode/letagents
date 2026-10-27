@@ -105,6 +105,7 @@ test('Safari keyboard layout keeps thread controls focused and restores the main
     assert.equal(vm.keyboardOpen.value, true)
     assert.equal(vm.hideMainComposer.value, true)
     assert.equal(vm.compactViewport.value, true)
+    assert.equal(vm.compactComposer.value, true)
     assert.deepEqual(vm.roomViewportStyle.value, { '--room-viewport-height': '320px', '--room-viewport-top': '68px' })
 
     documentStub.activeElement = body
@@ -117,6 +118,10 @@ test('Safari keyboard layout keeps thread controls focused and restores the main
     documentStub.activeElement = composerTarget(false)
     vm.syncRoomViewport()
     assert.equal(vm.hideMainComposer.value, false, 'focusing the main composer reveals its draft')
+    assert.equal(vm.compactComposer.value, true, 'the main draft also fits a short software-keyboard viewport')
+    documentStub.activeElement = { closest: () => null }
+    vm.syncRoomViewport()
+    assert.equal(vm.compactComposer.value, false, 'header search and other fields keep their focused controls visible')
     documentStub.activeElement = composerTarget(true)
     vm.syncRoomViewport()
     viewport.scale = 2
@@ -128,6 +133,7 @@ test('Safari keyboard layout keeps thread controls focused and restores the main
     viewport.dispatchEvent(new Event('resize'))
     assert.equal(vm.keyboardOpen.value, false, 'dismissing the keyboard while zoomed restores navigation')
     assert.equal(vm.hideMainComposer.value, false, 'the main draft is restored before zoom returns to normal')
+    assert.equal(vm.compactComposer.value, false)
     assert.equal(vm.roomViewportStyle.value['--room-viewport-height'], '320px')
     viewport.scale = 1
     viewport.height = 780
@@ -176,7 +182,74 @@ test('keyboard thread editing hides the main composer without discarding its dra
   assert.match(source, /<Composer\s+v-if="activeTab === 'chat' && isConnected"\s+v-show="!hideMainComposer"/)
   assert.match(source, /<RoomMobileNav\s+v-if="isConnected"\s+v-show="!keyboardOpen"/)
   assert.match(source, /@focusin="syncRoomViewport"/)
-  assert.match(source, /watch\(\[activeTab, \(\) => room\.value\?\.identifier\], \(\) => \{ editingThread\.value = false \}\)/)
+  assert.match(source, /watch\(\[activeTab, \(\) => room\.value\?\.identifier\], resetComposerFocus\)/)
+})
+
+test('landscape keyboard rotation reveals only the active thread scrollport after the compact layout settles', async () => {
+  const { useRoomViewport } = await vite.ssrLoadModule('/src/pages/room/useRoomViewport.ts')
+  const originals = { window: globalThis.window, document: globalThis.document }
+  const viewport = Object.assign(new EventTarget(), { height: 377, offsetTop: 0, scale: 1 })
+  const body = { closest: () => null }
+  const calls: ScrollToOptions[] = []
+  let bounds = { top: 45, bottom: 377, height: 332 }
+  let draft = { top: 250, bottom: 340, height: 90 }
+  const scrollport = { scrollTop: 919, getBoundingClientRect: () => bounds, scrollTo: (options: ScrollToOptions) => { calls.push(options); scrollport.scrollTop = options.top! } }
+  const composer = { isConnected: true, classList: { contains: () => true }, closest: (selector: string) => selector === '.messages' ? scrollport : null, getBoundingClientRect: () => draft }
+  const target = { closest: () => composer }
+  const documentStub = { body, activeElement: target as any, documentElement: { clientHeight: 714 } }
+  const windowStub = { innerHeight: 377, visualViewport: viewport }
+  Object.assign(globalThis, { window: windowStub, document: documentStub })
+  const surface = mountSetup({ setup: useRoomViewport }, {})
+  let mounted = true
+  try {
+    await nextTick()
+    assert.equal(calls.length, 0, 'an already visible reply does not move')
+    windowStub.innerHeight = 402
+    documentStub.documentElement.clientHeight = 296
+    viewport.height = 98
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(surface.vm.compactComposer.value, true)
+    assert.equal(surface.vm.hideMainComposer.value, true)
+    assert.equal(calls.length, 0, 'wait for Vue to reclaim the header and status rows')
+    bounds = { top: 0, bottom: 98, height: 98 }
+    draft = { top: -15, bottom: 73, height: 88 }
+    viewport.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    assert.deepEqual(calls, [{ top: 904, behavior: 'instant' }], 'Safari panning does not cancel the pending local reveal')
+    draft = { top: 130, bottom: 218, height: 88 }
+    viewport.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    assert.equal(calls.length, 1, 'ordinary viewport panning does not fight manual scrolling')
+    viewport.dispatchEvent(new Event('resize'))
+    await nextTick()
+    assert.deepEqual(calls.at(-1), { top: 1024, behavior: 'instant' }, 'a below-viewport draft is revealed at its bottom edge')
+
+    documentStub.activeElement = body
+    viewport.height = 402
+    viewport.dispatchEvent(new Event('resize'))
+    bounds = { top: 84, bottom: 162, height: 78 }
+    draft = { top: -15, bottom: 75, height: 90 }
+    await nextTick()
+    assert.equal(surface.vm.compactComposer.value, false)
+    assert.equal(surface.vm.hideMainComposer.value, false)
+    assert.deepEqual(calls.at(-1), { top: 925, behavior: 'instant' }, 'dismissal retains the last thread long enough to restore its reading position')
+
+    documentStub.activeElement = target
+    viewport.height = 98
+    viewport.dispatchEvent(new Event('resize'))
+    surface.vm.resetComposerFocus()
+    await nextTick()
+    assert.equal(calls.length, 3, 'room or tab changes cancel queued focus reveals')
+    assert.equal(surface.vm.compactComposer.value, false)
+    viewport.dispatchEvent(new Event('resize'))
+    surface.close()
+    mounted = false
+    await nextTick()
+    assert.equal(calls.length, 3, 'unmount cancels queued focus reveals')
+  } finally {
+    if (mounted) surface.close()
+    Object.assign(globalThis, originals)
+  }
 })
 
 test('opening a recent orphan reply fetches and expands its actual thread root', async () => {
