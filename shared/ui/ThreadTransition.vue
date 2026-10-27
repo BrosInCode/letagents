@@ -34,6 +34,9 @@ function interrupt(target?: Element) {
 }
 
 function animate(element: HTMLElement, open: boolean, done: () => void, duration = open ? 240 : 180) {
+  // Mount and v-show can both enter the same disclosure. Cancel the tracked
+  // effect before replacing it, or its fill:both height will outlive cleanup.
+  interrupt()
   const previous = interrupted
   interrupted = null
   const finish = () => {
