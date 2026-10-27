@@ -110,7 +110,7 @@ const components = {
   RoomMessageViewport: "components/desktop/content/room-chat/RoomMessageViewport.vue",
   RoomComposer: "components/desktop/content/room-chat/RoomComposer.vue",
   RoomActivityLine: "components/desktop/content/room-chat/RoomActivityLine.vue",
-  ActivityOrb: "components/desktop/content/room-chat/ActivityOrb.vue",
+  ActivityOrb: "../../../../shared/ui/ActivityOrb.vue",
   RoomAgentStartupRow: "components/desktop/content/room-chat/RoomAgentStartupRow.vue",
   RoomAgentStartupEntry: "components/desktop/content/room-chat/RoomAgentStartupEntry.vue",
   DesktopAttachmentDrafts: "components/desktop/content/DesktopAttachmentDrafts.vue",

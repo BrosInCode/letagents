@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { getEventListeners } from 'node:events'
 import { after, before, test } from 'node:test'
-import { createRenderer, createSSRApp, h, markRaw, nextTick, provide, ref } from 'vue'
+import { createRenderer, createSSRApp, h, markRaw, nextTick, provide, ref, ssrContextKey } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer } from 'vite'
 
@@ -248,4 +249,45 @@ test('inline replies keep message actions without offering to nest another threa
   assert.ok(rows.some(row => row.label === 'Reply'))
   assert.ok(rows.some(row => row.label === 'Message info'))
   assert.ok(rows.every(row => row.label !== 'Reply in thread'))
+})
+
+test('closed chat rows add no global input listeners; only the open menu listens and cleans up', async t => {
+  const originals = { window: globalThis.window, document: globalThis.document, Element: globalThis.Element, HTMLElement: globalThis.HTMLElement, Node: globalThis.Node }
+  const invoker = new AuditElement('message actions')
+  const doc = Object.assign(new EventTarget(), { activeElement: invoker })
+  const win = Object.assign(new EventTarget(), { innerWidth: 800, innerHeight: 600 })
+  Object.assign(globalThis, { document: doc, window: win, Element: AuditElement, HTMLElement: AuditElement, Node: AuditElement })
+  t.after(() => Object.assign(globalThis, originals))
+  const rows: any[] = []
+  const AuditChat = { ...Chat, setup(props: any, context: any) {
+    rows.push(Chat.setup(props, context))
+    return () => h('div')
+  } }
+  const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}),
+    createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null })
+  const app = renderer.createApp({ render: () => h('div', Array.from({ length: 100 }, (_, index) => h(AuditChat, {
+    message: { id: `msg_${index}`, text: 'Message', sender: 'Ada', source: 'browser', timestamp: '2026-10-27T00:00:00Z' },
+    roomIdentifier: 'room',
+  }))) })
+  app.provide(ssrContextKey, { modules: new Set() })
+  app.mount({})
+  let mounted = true
+  t.after(() => { if (mounted) app.unmount() })
+  const counts = () => ['pointerdown', 'keydown'].map(name => getEventListeners(doc, name).length).concat(getEventListeners(win, 'blur').length)
+  assert.deepEqual(counts(), [0, 0, 0], 'loading history must not multiply composer input handlers')
+  rows[0].openMessageActions({ currentTarget: invoker })
+  assert.deepEqual(counts(), [1, 1, 1])
+  doc.dispatchEvent(Object.assign(new Event('keydown'), { key: 'a' }))
+  assert.equal(rows[0].contextMenuOpen.value, true)
+  doc.dispatchEvent(Object.assign(new Event('keydown'), { key: 'Escape' }))
+  assert.equal(rows[0].contextMenuOpen.value, false)
+  assert.deepEqual(counts(), [0, 0, 0])
+  rows[99].openMessageActions({ currentTarget: invoker })
+  win.dispatchEvent(new Event('blur'))
+  assert.equal(rows[99].contextMenuOpen.value, false)
+  assert.deepEqual(counts(), [0, 0, 0])
+  rows[99].openMessageActions({ currentTarget: invoker })
+  app.unmount()
+  mounted = false
+  assert.deepEqual(counts(), [0, 0, 0], 'an open menu must release listeners when its row unmounts')
 })

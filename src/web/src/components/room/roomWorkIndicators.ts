@@ -2,7 +2,7 @@ import { ref, watch } from 'vue'
 import type { RoomAgentPresence, RoomMessage } from '@/composables/useRoom'
 import { sameMotionAgent } from '../../../../../shared/ui/room-message-motion'
 
-interface RoomWorkIndicator {
+export interface RoomWorkIndicator {
   id: string; session: string | null; key: string | null; name: string;
   summary: string; after: string | null; retired: boolean;
   retiredAfter?: string; retiredAt?: number;

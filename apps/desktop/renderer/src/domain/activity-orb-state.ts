@@ -1,13 +1,14 @@
 /**
  * Which thinking-orbs state a live agent shows. The drawing, and the MIT
- * notice of thinking-orbs, are in components/desktop/content/room-chat/activity-orb.ts.
+ * notice of thinking-orbs, are in shared/ui/activity-orb.ts.
  *
  * searching: a scan sweeps a dotted globe (reading, looking things up).
  * working: particles on tilted orbits (commands, tools, edits).
  * composing: an undulating band (writing the answer).
  * breathing: a slowly morphing ring (waiting: approval, retry, background work).
  */
-export type ActivityOrbState = "searching" | "working" | "composing" | "breathing";
+import type { ActivityOrbState } from "../../../../../shared/ui/activity-orb";
+export type { ActivityOrbState } from "../../../../../shared/ui/activity-orb";
 
 /** One supervisor activity event, as the daemon reports it. */
 export interface ActivityOrbEvent {

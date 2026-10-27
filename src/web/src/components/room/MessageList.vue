@@ -76,16 +76,8 @@
     <!-- Live strip: who is working or typing right now. It sits outside the
          scrolling list so it stays in view while the reader is in older history. -->
     <div ref="liveStripEl" class="room-live-strip">
-      <div v-if="agentWork.length" class="room-local-agent-work-list" role="status" aria-live="polite">
-        <div v-for="work in agentWork.slice(0, 3)" :key="work.id" class="room-local-agent-work"
-          data-motion-work :data-motion-session="work.session" :data-motion-agent="work.key" :data-motion-after="work.after">
-          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <span class="room-local-agent-work-copy"><strong>{{ work.name }}</strong><span>{{ work.summary }}</span></span>
-          <span class="room-local-agent-work-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        </div>
-        <p v-if="agentWork.length > 3" class="room-local-agent-work-overflow">+{{ agentWork.length - 3 }} more agents working</p>
-      </div>
-      <TypingIndicator :key="roomIdentifier || ''" :names="typingNames" :color-for="typingColor" />
+      <RoomWorkActivity v-if="agentWork.length" :key="roomIdentifier" :work="agentWork" />
+      <TypingIndicator v-else :key="roomIdentifier || ''" :names="typingNames" :color-for="typingColor" />
     </div>
     <MessageInfoSurface
       :open="infoSurfaceOpen"
@@ -103,7 +95,7 @@ import RoomGitHubUpdates from '../../../../../shared/ui/RoomGitHubUpdates.vue'
 import { createGitHubTimeline } from '../../../../../shared/grouped-github-updates'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 
-import "../../../../../shared/ui/room-agent-work.css";
+import RoomWorkActivity from "./RoomWorkActivity.vue";
 import { useRoomWorkIndicators } from "./roomWorkIndicators";
 import TypingIndicator from "../../../../../shared/ui/TypingIndicator.vue";
 import { useRoomTypingNames } from "@/composables/roomTyping";
@@ -827,13 +819,11 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .thread-open-status { margin: 0; padding: 6px 24px; color: var(--muted); font-size: .8rem; }
 .explicit-unread { transition: none !important; animation: none !important; display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
-.room-local-agent-work-list { margin: 6px auto 8px; }
-.room-local-agent-work { cursor: default; }
 .messages-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
 /* The list and its floating pill. The live strip sits below it, outside the scroll. */
 .messages-scroll { position: relative; flex: 1 1 0; min-height: 0; }
 /* The strip owns the space under the last message, so its rows grow into that space without moving the list twice. */
-.room-live-strip { min-height: 10px; padding: 0 20px; --room-chat-content-max: 720px; }
+.room-live-strip { flex: 0 0 44px; min-height: 44px; padding: 0 24px; --room-chat-content-max: 720px; }
 
 .messages {
   height: 100%;
@@ -900,7 +890,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 
 @media (max-width: 768px) {
   .messages { padding: 8px 12px 6px; }
-  .room-live-strip { min-height: 6px; padding: 0 12px; }
+  .room-live-strip { padding: 0 12px; }
   .new-messages-pill { bottom: 2px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }

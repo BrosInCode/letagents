@@ -183,4 +183,7 @@ onBeforeUnmount(() => { sizeObserver?.disconnect(); disposed = true; if (highlig
 .web-inline-thread :deep(.reply-preview-label) { flex: 0 0 auto; font-weight: 500; }
 .web-inline-thread :deep(.reply-preview-text) { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .72rem; }
 @media (max-width: 600px) { .inline-replies-scroll { max-height: clamp(220px, 40dvh, 360px); } }
+@media (max-width: 768px), (pointer: coarse) {
+  .inline-thread-history button, .inline-thread-latest { min-width: 44px; min-height: 44px; }
+}
 </style>

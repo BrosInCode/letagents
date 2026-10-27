@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { computed, effectScope, nextTick, reactive, ref } from 'vue'
+import { computed, createRenderer, effectScope, h, nextTick, reactive, ref } from 'vue'
+import { asyncRoomPanel } from '../src/pages/room/asyncRoomPanel'
 import { createServer, type ViteDevServer } from 'vite'
 import {
   filterRooms,
@@ -29,6 +30,63 @@ const focus = (id = 'focus_1') => ({
   created_at: '2026-09-16T10:00:00Z',
 })
 const originalFetch = globalThis.fetch
+
+test('inactive room panels load on selection, reuse loaded components, and offer reload after a failure', async t => {
+  const originalWindow = globalThis.window
+  let reloads = 0
+  Object.assign(globalThis, { window: { location: { reload: () => { reloads++ } } } })
+  t.after(() => Object.assign(globalThis, { window: originalWindow }))
+  const nodes: any[] = []
+  const renderer = createRenderer<any, any>({ patchProp(node, key, _previous, value) { node[key] = value },
+    insert(node) { nodes.push(node) }, remove(node) { const index = nodes.indexOf(node); if (index >= 0) nodes.splice(index, 1) },
+    createElement: () => ({}), createText: text => ({ text }), createComment: () => ({}),
+    setText(node, text) { node.text = text }, setElementText(node, text) { node.text = text }, parentNode: () => null, nextSibling: () => null })
+  let loads = 0
+  let resolve!: (component: any) => void
+  const Panel = asyncRoomPanel(() => {
+    loads++
+    return new Promise(success => { resolve = success })
+  })
+  const UnavailablePanel = asyncRoomPanel(() => Promise.reject(new Error('Offline')))
+  const selected = ref<'none' | 'board' | 'unavailable'>('none')
+  let opened = 0
+  const app = renderer.createApp({ setup: () => () => selected.value === 'board'
+    ? h(Panel, { title: 'Board', onOpen: () => { opened++ } })
+    : selected.value === 'unavailable' ? h(UnavailablePanel) : h('div') })
+  const errors: unknown[] = []
+  app.config.errorHandler = error => { errors.push(error) }
+  const flush = async () => { await new Promise(done => setImmediate(done)); await nextTick() }
+  app.mount({})
+  try {
+    assert.equal(loads, 0)
+    selected.value = 'board'
+    await nextTick()
+    assert.equal(loads, 1)
+    await new Promise(done => setTimeout(done, 220))
+    await nextTick()
+    assert.ok(nodes.some(node => node.role === 'status' && node.text === 'Loading view…'))
+    resolve({ props: ['title'], emits: ['open'], render() { return h('div', { 'data-panel': true, onClick: () => this.$emit('open') }, this.title) } })
+    await flush()
+    assert.ok(nodes.some(node => node['data-panel'] && node.text === 'Board'), 'selected panel props survive lazy loading')
+    nodes.find(node => node['data-panel']).onClick()
+    assert.equal(opened, 1, 'panel actions still reach the room after lazy loading')
+    selected.value = 'none'
+    await nextTick()
+    selected.value = 'board'
+    await nextTick()
+    assert.equal(loads, 1, 'returning to a loaded view must not fetch its module again')
+    selected.value = 'unavailable'
+    await flush()
+    assert.equal(errors.length, 1)
+    assert.ok(nodes.some(node => node.role === 'alert'))
+    assert.ok(nodes.some(node => node.text?.includes('Check your connection, then reload')))
+    const reloadButton = nodes.find(node => node.text === 'Reload view')
+    assert.equal(reloadButton.type, 'button')
+    reloadButton.onClick()
+    assert.equal(reloads, 1, 'reload starts a fresh page instead of reusing the browser failed-import cache')
+  } finally { app.unmount() }
+})
+
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
