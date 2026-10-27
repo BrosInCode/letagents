@@ -125,7 +125,11 @@
         @dismiss="focusInput"
       />
     </div>
-    <p v-if="agentNotice" class="desktop-composer-agent-notice" role="status" data-testid="desktop-composer-agent-notice">{{ agentNotice }}</p>
+    <p v-if="agentNotice" class="desktop-composer-agent-notice" role="status" data-testid="desktop-composer-agent-notice">
+      <span>{{ agentNotice }}</span>
+      <button v-if="agentNoticeAction" type="button" class="desktop-composer-agent-notice-action"
+        data-testid="desktop-composer-agent-notice-action" @click="agentDraft.runNoticeAction()">{{ agentNoticeActionLabel }}</button>
+    </p>
     <div class="desktop-composer-input-row">
       <RoomComposerAddMenu
         ref="addMenu"
@@ -549,8 +553,10 @@ const {
   rows: agentRows, chip: agentChip, chipReadiness: agentChipReadiness, chipModels: agentChipModels,
   chipEfforts: agentChipEfforts, chipAccessStops: agentChipAccessStops, chipWorksIn: agentChipWorksIn,
   chipWorktrees: agentChipWorktrees, openModelHost: agentOpenModelHost, launching: agentLaunching,
-  notice: agentNotice, personalAccess: agentPersonalAccess,
+  notice: agentNotice, noticeAction: agentNoticeAction, personalAccess: agentPersonalAccess,
 } = agentDraft;
+const agentNoticeActionLabel = computed(() => agentNoticeAction.value === "setup" ? "Set up…"
+  : agentNoticeAction.value === "retry-providers" ? "Try again" : "Check again");
 const agentChipElement = ref<InstanceType<typeof RoomComposerAgentChip> | null>(null);
 const agentChipName = computed(() => composerAgentName(agentDraft.chipProvider.value));
 // A new chip is a new element, so it plays its entrance once.
@@ -559,7 +565,11 @@ const agentChipFromRect = ref<DOMRect | null>(null);
 const agentCoachVisible = ref(false);
 
 // A notice about the last attempt goes away once the draft changes.
-watch(draft, () => { if (!agentLaunching.value) agentNotice.value = null; });
+watch(draft, () => {
+  if (agentLaunching.value) return;
+  agentNotice.value = null;
+  agentNoticeAction.value = null;
+});
 
 function pickAgent(providerId: DesktopAgentProviderId, from: DOMRect | null): void {
   if (agentDraft.pick(providerId) !== "chip") return;
