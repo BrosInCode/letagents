@@ -127,7 +127,6 @@ test("passive media opens in the browser tab with its own type", () => {
     "application/pdf",
     "video/mp4",
     "audio/mpeg",
-    "text/plain",
   ]) {
     assert.deepEqual(
       resolveAttachmentDownloadHeaders({ filename: "file", content_type: contentType }),
@@ -141,8 +140,8 @@ test("passive media opens in the browser tab with its own type", () => {
   );
 });
 
-test("Markdown, CSV and JSON open in the tab as plain text", () => {
-  for (const contentType of ["text/markdown", "text/csv", "application/json"]) {
+test("text, Markdown, CSV and JSON open in the tab as UTF-8 plain text", () => {
+  for (const contentType of ["text/plain", "text/markdown", "text/csv", "application/json"]) {
     assert.deepEqual(
       resolveAttachmentDownloadHeaders({ filename: "plan.md", content_type: contentType }),
       { content_disposition: 'inline; filename="plan.md"', content_type: "text/plain; charset=utf-8" },
@@ -192,7 +191,7 @@ test("filenames lose direction marks that disguise the real extension", () => {
     "invoicefdp.exe",
   );
   assert.equal(
-    formatAttachmentContentDisposition("report\u2067.pdf\u2069.exe"),
+    formatAttachmentContentDisposition("report\u2067.pdf\u2069\u061c.exe"),
     'attachment; filename="report.pdf.exe"',
   );
 });

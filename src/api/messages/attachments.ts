@@ -46,7 +46,7 @@ function sanitizeFilename(value: string): string {
   const trimmed = value.trim().replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
   const safe = trimmed
     // Control characters, and the direction marks that make "x\u202Efdp.exe" read as "xexe.pdf".
-    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
     .replace(/[<>:"|?*]/g, "_")
     .slice(0, 160)
     .trim();
@@ -153,7 +153,6 @@ const INLINE_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
   "audio/webm",
   "video/mp4",
   "video/webm",
-  "text/plain",
 ]);
 
 /** Text files that open in the tab as plain text, which a browser never runs. */
@@ -161,6 +160,7 @@ const PLAIN_TEXT_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
   "application/json",
   "text/csv",
   "text/markdown",
+  "text/plain",
 ]);
 
 /** Image tags need SVG's own type; an image tag never runs its script. */
