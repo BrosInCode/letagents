@@ -235,6 +235,8 @@ export interface DesktopApi {
       roomIdentifier: string,
       files: DesktopDroppedAttachmentContent[]
     ) => Promise<DesktopStagedAttachment[]>;
+    /** Open an HTML attachment in the locked, offline demo window. */
+    openHtmlDemo?: (href: string, fileName: string, senderLabel?: string | null) => Promise<void>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     repairStreamDelivery?: (

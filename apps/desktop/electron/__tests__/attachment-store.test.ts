@@ -178,3 +178,33 @@ test("a local SVG is served as an image that cannot run script", async () => {
   assert.match(served.headers.get("content-security-policy") ?? "", /sandbox/);
   assert.equal(served.headers.get("x-content-type-options"), "nosniff");
 });
+
+test("the cloud proxy sends the sign-in only to attachment downloads and adds safety headers", async () => {
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    return new Response("<svg onload=alert(1)>", {
+      headers: { "Content-Type": "image/svg+xml", "Content-Encoding": "gzip", "Content-Length": "999" },
+    });
+  }) as typeof fetch;
+  const href = (path: string) => `letagents-attachment://download/${Buffer.from(path, "utf8").toString("base64url")}`;
+  try {
+    const served = await handleAttachmentProtocolRequest(new Request(href("/rooms/github.com%2Fo%2Fr/messages/msg_1/attachments/att_1")));
+    assert.equal(served.status, 200);
+    assert.match(served.headers.get("content-security-policy") ?? "", /default-src 'none'.*sandbox/);
+    assert.equal(served.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(served.headers.get("content-encoding"), null);
+    assert.equal(served.headers.get("content-type"), "image/svg+xml");
+    assert.equal(await served.text(), "<svg onload=alert(1)>");
+
+    assert.equal((await handleAttachmentProtocolRequest(new Request(href("/projects/p_1/messages/msg_1/attachments/att_1")))).status, 200);
+    assert.equal((await handleAttachmentProtocolRequest(new Request(href("/auth/session")))).status, 403);
+    assert.equal((await handleAttachmentProtocolRequest(new Request(href("/auth/x/rooms/r/messages/m/attachments/a")))).status, 403);
+    assert.equal((await handleAttachmentProtocolRequest(new Request(href("/rooms/x/messages")))).status, 403);
+    assert.equal((await handleAttachmentProtocolRequest(new Request(href("/rooms/x/messages/m/attachments/a/extra")))).status, 403);
+    assert.equal(calls.length, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

@@ -136,6 +136,7 @@ const expectedDirectChannels = [
   "desktop:room:needs-you",
   "desktop:room:needs-you-room",
   "desktop:room:open-github-install",
+  "desktop:room:open-html-demo",
   "desktop:room:pick-attachments",
   "desktop:room:poll-agent-work",
   "desktop:room:release-board-manager",
@@ -359,7 +360,7 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/attachments.js", { namedExports: { handleAttachmentProtocolRequest() {} } }),
     mock.module("../main/ask-links.js", { namedExports: { claimDesktopInstance: () => true, registerAskLinks() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
-    mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", workspaceRoot: "/fixture" } }),
+    mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", htmlDemoProtocolScheme: "fixture-demo", workspaceRoot: "/fixture" } }),
     mock.module("../main/room-stream.js", { namedExports: {
       setExecutionDelegationInvalidationHandler() {}, stopDesktopRoomStream: async () => {},
     } }),

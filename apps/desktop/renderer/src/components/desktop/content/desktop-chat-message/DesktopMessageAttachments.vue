@@ -26,6 +26,25 @@
           <small>{{ attachmentDisplayMeta(attachment) }}</small>
         </span>
       </button>
+      <button
+        v-else-if="isHtmlDemoAttachment(attachment)"
+        class="room-message-attachment is-demo"
+        type="button"
+        :aria-describedby="demoErrors[attachmentKey(attachment)] ? `demo-error-${attachmentKey(attachment)}` : undefined"
+        @click="openHtmlDemo(attachment)"
+      >
+        <span>
+          <strong>{{ attachmentName(attachment) }}</strong>
+          <small title="Opens in its own locked window. It cannot load web pages or reach your LetAgents data.">Interactive demo · locked window</small>
+          <small
+            v-if="demoErrors[attachmentKey(attachment)]"
+            :id="`demo-error-${attachmentKey(attachment)}`"
+            class="room-message-attachment-error"
+            role="alert"
+          >{{ demoErrors[attachmentKey(attachment)] }}</small>
+        </span>
+        <em>{{ openingDemoKeys[attachmentKey(attachment)] ? "Opening…" : "Open demo" }}</em>
+      </button>
       <a
         v-else
         class="room-message-attachment"
@@ -53,9 +72,12 @@ import {
   attachmentDisplayMeta,
   attachmentKey,
   attachmentName,
+  htmlDemoErrorText,
   imageAttachmentId,
+  isHtmlDemoAttachment,
   isImageAttachment,
 } from "./attachments";
+import { desktopIpc } from "../../../../ipc/index.js";
 import {
   decodeManagedAgentChangeSummaryAttachment,
   fetchManagedAgentChangeSummaryAttachment,
@@ -66,6 +88,7 @@ import ManagedAgentChangeSummaryCard from "../ManagedAgentChangeSummaryCard.vue"
 const props = defineProps<{
   messageId: string;
   attachments: DesktopRoomMessageAttachment[];
+  senderLabel?: string | null;
 }>();
 
 defineEmits<{
@@ -76,6 +99,29 @@ const remoteChangeSummaries = ref<Record<string, DesktopManagedAgentPublicChange
 const loadingChangeSummaryKeys = ref<Record<string, boolean>>({});
 const failedChangeSummaryKeys = ref<Record<string, boolean>>({});
 const expandedChangeSummaryKeys = ref<Record<string, boolean>>({});
+const openingDemoKeys = ref<Record<string, boolean>>({});
+const demoErrors = ref<Record<string, string>>({});
+
+async function openHtmlDemo(attachment: DesktopRoomMessageAttachment): Promise<void> {
+  const key = attachmentKey(attachment);
+  if (openingDemoKeys.value[key]) return;
+  const { [key]: _previous, ...otherErrors } = demoErrors.value;
+  demoErrors.value = otherErrors;
+  openingDemoKeys.value = { ...openingDemoKeys.value, [key]: true };
+  try {
+    const open = desktopIpc.room?.openHtmlDemo;
+    if (!open) throw new Error("Update LetAgents to open demos.");
+    await open(attachmentHref(attachment), attachmentName(attachment), props.senderLabel ?? null);
+  } catch (error) {
+    demoErrors.value = {
+      ...demoErrors.value,
+      [key]: htmlDemoErrorText(error),
+    };
+  } finally {
+    const { [key]: _done, ...stillOpening } = openingDemoKeys.value;
+    openingDemoKeys.value = stillOpening;
+  }
+}
 
 watch(
   () => props.attachments.map(attachmentKey).join("|"),

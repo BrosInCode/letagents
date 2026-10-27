@@ -9,9 +9,23 @@ import { readStoredAuth } from "../auth.js";
 import { apiUrl } from "../paths.js";
 import { realLocalAttachmentPath, resolveLocalAttachmentPath } from "./links.js";
 
+// An image tag never runs script; this keeps it so if a file is opened as a page.
+const ATTACHMENT_RESPONSE_SECURITY_HEADERS = {
+  "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
+  "X-Content-Type-Options": "nosniff",
+} as const;
+
+/** The sign-in goes only to a message attachment download, never to another API path. */
+const CLOUD_ATTACHMENT_PATH = /^\/(?:rooms|projects)\/[^?#]+\/messages\/[^/]+\/attachments\/[^/]+$/;
+
 export async function handleAttachmentProtocolRequest(request: Request): Promise<Response> {
+  return attachmentResponse(request.url);
+}
+
+/** The bytes behind a `letagents-attachment://` link, as the screen would load them. */
+export async function attachmentResponse(href: string): Promise<Response> {
   try {
-    const requestUrl = new URL(request.url);
+    const requestUrl = new URL(href);
     const encodedTarget = requestUrl.pathname.replace(/^\/+/, "");
     if (!encodedTarget) {
       return new Response("Missing attachment target.", { status: 400 });
@@ -34,12 +48,22 @@ async function cloudAttachmentResponse(rawTarget: string): Promise<Response> {
   if (target.origin !== apiOrigin) {
     throw new Error("Attachment proxy target is outside LetAgents API.");
   }
+  if (!CLOUD_ATTACHMENT_PATH.test(target.pathname)) {
+    return new Response("Attachment proxy target is not an attachment.", { status: 403 });
+  }
   const storedAuth = await readStoredAuth();
   const headers = new Headers();
   if (storedAuth.token) {
     headers.set("Authorization", `Bearer ${storedAuth.token}`);
   }
-  return fetch(target, { headers });
+  const response = await fetch(target, { headers });
+  const proxied = new Headers(response.headers);
+  // fetch already decoded the body, so its encoding and length no longer apply.
+  proxied.delete("Content-Encoding");
+  proxied.delete("Content-Length");
+  for (const [name, value] of Object.entries(ATTACHMENT_RESPONSE_SECURITY_HEADERS)) proxied.set(name, value);
+  const body = [204, 205, 304].includes(response.status) ? null : response.body;
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: proxied });
 }
 
 async function localAttachmentResponse(relativePath: string): Promise<Response> {
@@ -59,9 +83,7 @@ async function localAttachmentResponse(relativePath: string): Promise<Response> 
     headers: {
       "Content-Type": guessMessageAttachmentMimeType(basename(filePath)),
       "Content-Length": String(info.size),
-      // An image tag never runs script; this keeps it so if a file is opened as a page.
-      "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
-      "X-Content-Type-Options": "nosniff",
+      ...ATTACHMENT_RESPONSE_SECURITY_HEADERS,
     },
   });
 }

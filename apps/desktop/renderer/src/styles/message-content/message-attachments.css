@@ -36,6 +36,25 @@
   grid-template-columns: auto minmax(0, 1fr);
 }
 
+.room-message-attachment.is-demo {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.room-message-attachment.is-demo em {
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 12px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.room-message-attachment .room-message-attachment-error {
+  color: var(--red-text, #f87171);
+  white-space: normal;
+}
+
 .room-message-attachment img {
   width: 52px;
   height: 52px;

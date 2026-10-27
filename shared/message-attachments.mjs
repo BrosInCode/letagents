@@ -20,6 +20,8 @@ const MIME_TYPES_BY_EXTENSION = Object.freeze({
   bmp: "image/bmp",
   gif: "image/gif",
   heic: "image/heic",
+  htm: "text/html",
+  html: "text/html",
   ico: "image/x-icon",
   jpeg: "image/jpeg",
   jpg: "image/jpeg",
