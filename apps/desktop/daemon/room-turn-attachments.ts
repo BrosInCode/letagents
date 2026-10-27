@@ -384,7 +384,7 @@ export class RoomTurnAttachmentStager {
       }
     }
     if (!candidates.length) return NOTHING_PREPARED;
-    // A turn that stages nothing (images in memory) still lets old kept files go.
+    // Old turn folders and kept files go at most this often, also for a turn that stages nothing (images in memory).
     if (this.now() - this.lastSweep > SWEEP_INTERVAL_MS) { this.lastSweep = this.now(); void this.sweep(); }
     let folder: string | null = null;
     let released = false;
@@ -409,10 +409,11 @@ export class RoomTurnAttachmentStager {
     const outcomes: PreparedRoomTurnAttachments["outcomes"] = [];
     let staged = 0;
     const budgets = {
-      image: { total: 0, recentCount: 0, recentBytes: 0, max: ROOM_TURN_IMAGE_MAX_BYTES, turn: ROOM_TURN_IMAGES_MAX_TOTAL_BYTES,
-        recentLimit: ROOM_TURN_RECENT_IMAGE_LIMIT, recentMax: ROOM_TURN_RECENT_IMAGES_MAX_BYTES },
-      file: { total: 0, recentCount: 0, recentBytes: 0, max: ROOM_TURN_FILE_MAX_BYTES, turn: ROOM_TURN_FILES_MAX_TOTAL_BYTES,
-        recentLimit: ROOM_TURN_RECENT_FILE_LIMIT, recentMax: ROOM_TURN_RECENT_FILES_MAX_BYTES },
+      // Downloads count what is fetched; `staged` and `recentStaged` count the copies, which a UTF-16 text can outgrow.
+      image: { total: 0, staged: 0, recentCount: 0, recentBytes: 0, recentStaged: 0, max: ROOM_TURN_IMAGE_MAX_BYTES,
+        turn: ROOM_TURN_IMAGES_MAX_TOTAL_BYTES, recentLimit: ROOM_TURN_RECENT_IMAGE_LIMIT, recentMax: ROOM_TURN_RECENT_IMAGES_MAX_BYTES },
+      file: { total: 0, staged: 0, recentCount: 0, recentBytes: 0, recentStaged: 0, max: ROOM_TURN_FILE_MAX_BYTES,
+        turn: ROOM_TURN_FILES_MAX_TOTAL_BYTES, recentLimit: ROOM_TURN_RECENT_FILE_LIMIT, recentMax: ROOM_TURN_RECENT_FILES_MAX_BYTES },
     };
     const stage = async (name: string, bytes: Uint8Array): Promise<string> => {
       folder ??= await this.createTurnFolder();
@@ -513,9 +514,11 @@ export class RoomTurnAttachmentStager {
         if (detected.kind === "binary") { final("binary"); status("binary"); continue; }
         if (detected.kind === "pdf" && !input.fileAccess!.pdf) { final("cannot_read"); status("cannot_read_pdf"); continue; }
         const extension = extensionOf(file.fileName);
-        // A converted text can be longer than the bytes it came from; the copy is what the limits count.
+        // A converted text can be longer than the bytes it came from: the copy keeps within the limits too.
         const copy = detected.kind === "text" ? detected.bytes : bytes;
-        if (copy.byteLength > maxBytes) { refuseOverLimit(); continue; }
+        if (copy.byteLength > budget.max) { final("file_too_large"); status("too_large"); continue; }
+        if (budget.staged + copy.byteLength > budget.turn) { status("turn_limit"); continue; }
+        if (recent && budget.recentStaged + copy.byteLength > budget.recentMax) { status("context_limit"); continue; }
         let path: string;
         try {
           path = await stage(detected.kind === "pdf" ? "pdf" : TEXT_FILE_EXTENSIONS.has(extension) ? extension : "txt", copy);
@@ -524,8 +527,9 @@ export class RoomTurnAttachmentStager {
           status("unavailable");
           continue;
         }
-        budget.total += copy.byteLength;
-        if (recent) { budget.recentCount += 1; budget.recentBytes += copy.byteLength; }
+        budget.total += bytes.byteLength;
+        budget.staged += copy.byteLength;
+        if (recent) { budget.recentCount += 1; budget.recentBytes += bytes.byteLength; budget.recentStaged += copy.byteLength; }
         results.push({ order: file.order, attachment: { ...base, mimeType: detected.kind === "pdf" ? "application/pdf" : file.mimeType,
           status: "file", file: detected.kind === "pdf" ? { path, kind: "pdf", ...(earlier === "file" ? { repeated: true } : {}) }
             : { path, kind: "text", encoding: detected.encoding, lines: detected.lines, longestLine: detected.longestLine,
@@ -571,7 +575,6 @@ export class RoomTurnAttachmentStager {
   }
 
   private async createTurnFolder(): Promise<string> {
-    await this.sweep();
     await this.ownedFolder(this.root);
     const folder = await mkdtemp(join(this.root, STAGED_FOLDER_PREFIX));
     this.active.add(folder);

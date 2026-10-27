@@ -316,3 +316,24 @@ test("a kept copy over the space left is refused without a new download, and old
     assert.deepEqual(await readdir(join(root, "file-cache")), []);
   });
 });
+
+test("UTF-16 files are admitted by what is fetched and kept within the limits by what is staged", async () => {
+  await withRoot(async (root) => {
+    const mib = 1024 * 1024;
+    // CJK grows from 2 to 3 bytes in UTF-8; ASCII shrinks from 2 to 1.
+    const utf16 = (bytes: number, unit: [number, number]) => {
+      const out = new Uint8Array(bytes); out.set([0xff, 0xfe]);
+      for (let offset = 2; offset + 1 < bytes; offset += 2) { out[offset] = unit[0]; out[offset + 1] = unit[1]; }
+      return out;
+    };
+    const cjk = utf16(6 * mib, [0x2d, 0x4e]);
+    const ascii = utf16(3 * mib, [0x61, 0x00]);
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(input({ sourceMessage: { id: "msg_7", text: "x", attachments: [
+      file("att_1", "a.log", "text/plain", cjk.byteLength), file("att_2", "b.log", "text/plain", cjk.byteLength),
+      file("att_3", "c.log", "text/plain", ascii.byteLength),
+    ] } }, [], (id) => id === "att_3" ? ascii : cjk));
+    assert.deepEqual(prepared.attachments.map(item => item.status), ["file", "file", "file"], "9 + 9 + 1.5 MiB of copies fit the 20 MB");
+    const sizes = await Promise.all(prepared.attachments.map(async item => (await stat(item.file!.path)).size));
+    assert.ok(sizes.reduce((sum, size) => sum + size, 0) <= 20 * mib);
+  });
+});
