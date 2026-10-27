@@ -71,6 +71,7 @@ import {
   pickAndStageDesktopAttachments,
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
+import { openHtmlDemo } from "../attachments/html-demo-window.js";
 import {
   acknowledgeDesktopRoomStreamGapRepair,
   startDesktopRoomStream,
@@ -294,6 +295,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       files: DesktopDroppedAttachmentContent[],
     ): Promise<DesktopStagedAttachment[]> =>
       stageDroppedDesktopAttachmentContents(roomIdentifier, files),
+  );
+  targetIpcMain.handle(
+    "desktop:room:open-html-demo",
+    async (_event, href: unknown, fileName: unknown, senderLabel: unknown): Promise<void> =>
+      openHtmlDemo({ href, fileName, senderLabel }),
   );
   targetIpcMain.handle(
     "desktop:room:discard-attachment",

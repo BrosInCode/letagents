@@ -235,7 +235,7 @@ const attachmentsInput = z
   .min(1)
   .max(MESSAGE_ATTACHMENT_LIMITS.maxFiles)
   .optional()
-  .describe("Optional files to attach: 1 to 4 paths inside your project folder, absolute or relative to this MCP server's working folder. Up to 25 MB each and 100 MB together. Files that may hold credentials (.env, keys, .git and similar) are refused. If any file is refused, nothing is posted.");
+  .describe("Optional files to attach: 1 to 4 paths inside your project folder, absolute or relative to this MCP server's working folder. Up to 25 MB each and 100 MB together. Files that may hold credentials (.env, keys, .git and similar) are refused. If any file is refused, nothing is posted. A single self-contained .html file opens in the LetAgents desktop app as an interactive demo in a locked, offline window: put all CSS, JavaScript and images (as data: URLs) inside the file, because it cannot load anything from the network.");
 
 export function registerSendMessageTool(server: McpServer, options: { fileAttachments?: boolean } = {}): void {
   const attachments: Record<string, typeof attachmentsInput> = options.fileAttachments ? { attachments: attachmentsInput } : {};

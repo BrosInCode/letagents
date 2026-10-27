@@ -37,8 +37,9 @@ export function assertHostApprovalSender(event: IpcMainInvokeEvent): void {
   }
 }
 
+/** Demo windows do not count: the app is open only while its main window is. */
 export function hasOpenWindows(): boolean {
-  return BrowserWindow.getAllWindows().length > 0;
+  return Boolean(mainWindow && !mainWindow.isDestroyed());
 }
 
 export function focusMainWindow(): void {

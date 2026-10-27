@@ -177,6 +177,7 @@
           v-if="message.attachments.length"
           :message-id="message.id"
           :attachments="message.attachments"
+          :sender-label="displayName"
           @open-image="$emit('open-image', $event)"
         />
       <button

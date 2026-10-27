@@ -133,6 +133,8 @@ const api: DesktopApi = {
     pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
     stageDroppedAttachmentContents: (roomIdentifier, files) =>
       ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
+    openHtmlDemo: (href: string, fileName: string, senderLabel?: string | null) =>
+      ipcRenderer.invoke("desktop:room:open-html-demo", href, fileName, senderLabel ?? null),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
     startStream: (roomIdentifier: string, afterMessageId?: string | null) =>

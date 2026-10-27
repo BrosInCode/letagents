@@ -12,7 +12,7 @@ import {
   prepareDesktopNotifications,
   setDesktopNotificationBadgeCount,
 } from "./main/notifications.js";
-import { attachmentProtocolScheme, workspaceRoot } from "./main/paths.js";
+import { attachmentProtocolScheme, htmlDemoProtocolScheme, workspaceRoot } from "./main/paths.js";
 import {
   setExecutionDelegationInvalidationHandler,
   stopDesktopRoomStream,
@@ -43,6 +43,11 @@ function startDesktopApp(): void {
         supportFetchAPI: true,
         stream: true,
       },
+    },
+    {
+      // Standard and secure so each demo window has its own origin and storage.
+      scheme: htmlDemoProtocolScheme,
+      privileges: { standard: true, secure: true },
     },
   ]);
 

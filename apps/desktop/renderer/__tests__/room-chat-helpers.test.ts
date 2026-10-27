@@ -31,7 +31,9 @@ import {
   attachmentHref,
   attachmentKey,
   attachmentMeta,
+  htmlDemoErrorText,
   imageAttachmentId,
+  isHtmlDemoAttachment,
   isImageAttachment,
 } from "../src/components/desktop/content/desktop-chat-message/attachments";
 import {
@@ -104,6 +106,35 @@ describe("room chat helpers", () => {
     assert.equal(attachmentMeta(attachment), "image/png · 1.5 KB");
     assert.equal(imageAttachmentId("msg_1", attachment), "msg_1:screen.png-1536-image/png");
     assert.equal(isImageAttachment(attachment), true);
+  });
+
+  it("opens HTML attachments as demos only through the app's attachment links", () => {
+    const html = (overrides: Partial<DesktopRoomMessageAttachment>): DesktopRoomMessageAttachment => ({
+      id: "att_1",
+      fileName: "checkout.html",
+      mimeType: "text/html",
+      sizeBytes: 2048,
+      href: "letagents-attachment://download/L3Jvb21z",
+      ...overrides,
+    });
+
+    assert.equal(isHtmlDemoAttachment(html({})), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/xhtml+xml", fileName: "page.xhtml" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/octet-stream" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/octet-stream", fileName: "page.HTM" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ href: "letagents-attachment://local/ZGVtbw" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/octet-stream", fileName: "notes.zip" })), false);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "image/svg+xml", fileName: "diagram.svg" })), false);
+    assert.equal(isHtmlDemoAttachment(html({ href: "https://example.com/checkout.html" })), false);
+    assert.equal(isHtmlDemoAttachment(html({ href: "" })), false);
+  });
+
+  it("shows why a demo did not open without Electron's IPC wrapper", () => {
+    assert.equal(
+      htmlDemoErrorText(new Error("Error invoking remote method 'desktop:room:open-html-demo': Error: Only room attachments open as demos.")),
+      "Only room attachments open as demos.",
+    );
+    assert.equal(htmlDemoErrorText(null), "The demo could not open.");
   });
 
   it("decodes managed agent change summary attachments", () => {
