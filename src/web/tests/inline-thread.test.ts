@@ -88,8 +88,9 @@ test('Safari keyboard layout keeps thread controls focused and restores the main
   const viewport = Object.assign(new EventTarget(), { height: 780, offsetTop: 0, scale: 1 })
   const body = { closest: () => null }
   const composerTarget = (inline: boolean) => ({ closest: () => ({ classList: { contains: () => inline } }) })
-  const documentStub = { body, activeElement: body as any }
-  Object.assign(globalThis, { window: { innerHeight: 844, visualViewport: viewport }, document: documentStub })
+  const documentStub = { body, activeElement: body as any, documentElement: { clientHeight: 844 } }
+  const windowStub = { innerHeight: 844, visualViewport: viewport }
+  Object.assign(globalThis, { window: windowStub, document: documentStub })
   const surface = mountSetup({ setup: useRoomViewport }, {})
   let mounted = true
   try {
@@ -135,6 +136,30 @@ test('Safari keyboard layout keeps thread controls focused and restores the main
     assert.equal(vm.keyboardOpen.value, false)
     assert.equal(vm.hideMainComposer.value, false)
     assert.equal(vm.compactViewport.value, false)
+
+    // Native iOS 26.2 Safari: innerHeight shrinks with visualViewport, but the
+    // root layout viewport remains 714px high while the keyboard is visible.
+    windowStub.innerHeight = 714
+    documentStub.documentElement.clientHeight = 714
+    viewport.height = 714
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, false)
+    windowStub.innerHeight = 377
+    viewport.height = 377
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, true, 'equal shrinking inner and visual heights still detect the iOS keyboard')
+    assert.equal(vm.hideMainComposer.value, true)
+    assert.equal(vm.roomViewportStyle.value['--room-viewport-height'], '377px')
+    windowStub.innerHeight = 320
+    documentStub.documentElement.clientHeight = 320
+    viewport.height = 320
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, false, 'orientation and browser resizing use the current layout, not a cached portrait height')
+    assert.equal(vm.hideMainComposer.value, false)
+    windowStub.innerHeight = 714
+    documentStub.documentElement.clientHeight = 714
+    viewport.height = 714
+    viewport.dispatchEvent(new Event('resize'))
     surface.close()
     mounted = false
     viewport.height = 300
