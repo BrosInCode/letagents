@@ -8,10 +8,14 @@
   padding: 0;
 }
 
+/* Same edges as the composer under it (composer-shell.css: centred,
+   min(100% - 48px, 960px) wide), so the pill starts where the composer does. */
 .room-activity-line {
+  --room-activity-line-inset: max(24px, calc((100% - var(--room-chat-content-max, 960px)) / 2));
+
   position: absolute;
-  left: max(44px, var(--room-chat-side-gutter));
-  right: var(--room-chat-side-gutter);
+  left: var(--room-activity-line-inset);
+  right: var(--room-activity-line-inset);
   bottom: 6px;
   z-index: 4;
   display: flex;
