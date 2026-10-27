@@ -241,3 +241,18 @@
     text-align: left;
   }
 }
+
+.activity-approvals { min-width: 0; overflow-wrap: anywhere; }
+.activity-approval-exact summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+@media (max-width: 640px), (pointer: coarse) {
+  .activity-approval-review,
+  .activity-approval-actions button,
+  .activity-approval-alert button,
+  .activity-approvals-more,
+  .activity-approval-exact summary { min-height: 44px; }
+  .activity-approval-exact summary { padding-block: 12px; }
+}
+@media (max-width: 640px) {
+  .activity-approvals, .activity-approval-card { padding: 12px; }
+  .activity-approval-counts, .activity-approval-summary { flex-wrap: wrap; }
+}

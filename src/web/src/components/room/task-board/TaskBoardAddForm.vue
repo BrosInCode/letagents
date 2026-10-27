@@ -101,7 +101,7 @@ function handleAdd() {
   }
 
   .add-task-form .input {
-    font-size: 0.82rem;
+    font-size: 16px;
   }
 }
 </style>

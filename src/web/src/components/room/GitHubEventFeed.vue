@@ -10,5 +10,5 @@ defineProps<{ events: readonly RoomGitHubEvent[]; roomIdentifier: string; reposi
 const emit = defineEmits<{ refresh: []; loadOlder: []; openTask: [id: string] }>()
 </script>
 <style scoped>
-.event-feed-shell { height: 100%; overflow-y: auto; background: var(--bg, #0a0a0a); }
+.event-feed-shell { height: 100%; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--bg, #0a0a0a); }
 </style>
