@@ -380,6 +380,38 @@ test('composer plus menu supports arrows, Home/End and Escape without losing the
   assert.equal(focused.at(-1), 'trigger', 'Tab resumes the composer tab order');
 });
 
+test('composer keyboard navigation reveals rows within a short menu without scrolling the page', async t => {
+  const { vm } = mount(t);
+  const item = (offsetTop: number) => ({
+    offsetTop, offsetHeight: 44,
+    focus(options: { preventScroll: boolean }) {
+      assert.equal(options.preventScroll, true, 'native focus must leave the page still');
+      (document as any).activeElement = this;
+    },
+  });
+  const items = [item(8), item(64), item(120)];
+  const menu = { scrollTop: 0, clientHeight: 72, querySelectorAll: () => items };
+  vm.addMenuEl.value = menu;
+  const assertVisible = (index: number) => {
+    const selected = items[index];
+    assert.equal((document as any).activeElement, selected);
+    assert.ok(selected.offsetTop >= menu.scrollTop, 'selected row starts within the menu viewport');
+    assert.ok(selected.offsetTop + selected.offsetHeight <= menu.scrollTop + menu.clientHeight, 'selected row ends within the menu viewport');
+  };
+  vm.handleAddTriggerKey(key('ArrowUp'));
+  await flush();
+  assertVisible(2);
+  assert.equal(menu.scrollTop, 92, 'opening on the last item scrolls the menu');
+  vm.handleAddMenuKey(key('ArrowDown'));
+  assertVisible(0);
+  vm.handleAddMenuKey(key('ArrowDown'));
+  assertVisible(1);
+  vm.handleAddMenuKey(key('End'));
+  assertVisible(2);
+  vm.handleAddMenuKey(key('Home'));
+  assertVisible(0);
+});
+
 test('composer plus attachment action preserves picker activation, availability guards and room dismissal', async t => {
   const { vm, props } = mount(t);
   let picked = 0;

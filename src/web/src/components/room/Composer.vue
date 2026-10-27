@@ -318,13 +318,26 @@ function enabledAddItems() {
   return Array.from(addMenuEl.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
 }
 
+function focusAddItem(item: HTMLButtonElement | undefined) {
+  if (!item) return
+  item.focus({ preventScroll: true })
+  const menu = addMenuEl.value
+  if (!menu) return
+  // Items are direct children of the positioned menu. Reveal the focused row
+  // inside its own scroll area without moving the transcript or page.
+  const top = item.offsetTop
+  const bottom = top + item.offsetHeight
+  if (top < menu.scrollTop || item.offsetHeight > menu.clientHeight) menu.scrollTop = top
+  else if (bottom > menu.scrollTop + menu.clientHeight) menu.scrollTop = bottom - menu.clientHeight
+}
+
 function openAddMenu(byPointer = false, focusLast = false) {
   if (addMenuDisabled.value) return
   animateAddMenu.value = byPointer && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   menuOpen.value = true
   void nextTick(() => {
     const items = enabledAddItems()
-    items[focusLast ? items.length - 1 : 0]?.focus({ preventScroll: true })
+    focusAddItem(items[focusLast ? items.length - 1 : 0])
   })
 }
 
@@ -362,7 +375,7 @@ function handleAddMenuKey(event: KeyboardEvent) {
   const current = items.indexOf(document.activeElement as HTMLButtonElement)
   const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
     : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
-  items[next]?.focus({ preventScroll: true })
+  focusAddItem(items[next])
 }
 
 function chooseAttachment() {
