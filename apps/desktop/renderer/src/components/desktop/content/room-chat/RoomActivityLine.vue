@@ -137,6 +137,27 @@
         <span class="room-activity-icon" aria-hidden="true"><Check :size="14" /></span>
         <span class="room-activity-text">Steering <strong>{{ pill.notice.displayName }}</strong>'s current turn</span>
       </div>
+      <div
+        v-else-if="pill?.kind === 'notice' && pill.notice.kind === 'calm'"
+        :key="pill.notice.id"
+        class="room-activity-pill"
+        data-kind="calm"
+        :data-tone="pill.notice.action ? undefined : 'muted'"
+        data-testid="room-activity-calm"
+      >
+        <span class="room-activity-icon" aria-hidden="true">
+          <Paperclip v-if="pill.notice.icon === 'attach'" :size="14" />
+          <Check v-else :size="14" />
+        </span>
+        <span class="room-activity-text" :title="calmNoticeText(pill.notice)">{{ pill.notice.lead }}<strong v-if="pill.notice.name">{{ pill.notice.name }}</strong>{{ pill.notice.tail ?? "" }}</span>
+        <button
+          v-if="pill.notice.action"
+          type="button"
+          class="room-activity-action"
+          data-testid="room-activity-calm-action"
+          @click="emit('calm-action', pill.notice.action.key)"
+        >{{ pill.notice.action.label }}</button>
+      </div>
       <button
         v-else-if="pill?.kind === 'live'"
         key="live"
@@ -198,14 +219,14 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Check, ChevronUp, GitBranch, GitPullRequest, MessageSquare } from "@lucide/vue";
+import { Check, ChevronUp, GitBranch, GitPullRequest, MessageSquare, Paperclip } from "@lucide/vue";
 import { typingLabel, typingSentence } from "../../../../../../../../shared/room-typing.mjs";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import ActivityOrb from "./ActivityOrb.vue";
 import { orbStateForWork } from "../../../../domain/activity-orb-state";
 import type { ComposerEventPreview } from "./composer-event-preview";
-import { elapsedLabel, joinedNames, pickActivityPill, type ActivityNotice, type ActivitySteerOffer } from "./room-activity";
+import { calmNoticeText, elapsedLabel, joinedNames, pickActivityPill, type ActivityNotice, type ActivitySteerOffer, type CalmNoticeActionKey } from "./room-activity";
 
 const props = defineProps<{
   notice: ActivityNotice | null;
@@ -221,6 +242,7 @@ const emit = defineEmits<{
   "open-agent": [work: ManagedAgentWorkIndicator];
   "open-event-preview": [preview: ComposerEventPreview];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
+  "calm-action": [key: CalmNoticeActionKey];
 }>();
 
 const root = ref<HTMLElement | null>(null);
@@ -244,6 +266,7 @@ const announcement = computed(() => {
   if (notice.kind === "join") return `${joinedNames(notice.agents)} joined`;
   if (notice.kind === "leave") return `${notice.agent.displayName} left`;
   if (notice.kind === "github") return notice.preview.headline;
+  if (notice.kind === "calm") return notice.action ? `${calmNoticeText(notice)}. ${notice.action.label} is available.` : calmNoticeText(notice);
   return `Steering ${notice.displayName}'s current turn`;
 });
 
