@@ -188,8 +188,10 @@ export type ProviderRoomTurnAttachment = {
     /** Its bytes are neither text nor a PDF. */
     | "binary"
     | "empty"
-    /** This agent cannot open such a file on this machine. */
+    /** This agent cannot open files on this machine. */
     | "cannot_read"
+    /** This agent opens text files but cannot read PDFs. */
+    | "cannot_read_pdf"
     /** Recent messages only: the turn already carries its most images from earlier messages. */
     | "context_limit"
     /** Recent messages only: an earlier turn of this agent already received it, so it is not sent again. */

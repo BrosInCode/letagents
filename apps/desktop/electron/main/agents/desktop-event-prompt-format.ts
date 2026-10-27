@@ -165,7 +165,6 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
 
 /** A text file or PDF is a path the agent opens itself; its bytes never enter the prompt. */
 function fileNote(file: ProviderRoomTurnAttachment): string {
-  const pdf = file.mimeType === "application/pdf" || file.file?.kind === "pdf";
   switch (file.status) {
     case "file": {
       if (!file.file) return "Not given: it could not be downloaded.";
@@ -182,12 +181,13 @@ function fileNote(file: ProviderRoomTurnAttachment): string {
         file.file.repeated ? "You were also given it in an earlier turn." : "",
       ].filter(Boolean).join(" ");
     }
-    case "unsupported_type": return "Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff) and PDFs reach agents.";
+    case "unsupported_type": return file.mimeType.startsWith("image/")
+      ? "Not shown: only PNG, JPEG, GIF and WebP images reach agents."
+      : "Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff) and PDFs reach agents.";
     case "binary": return "Not given: its bytes are not text or a PDF.";
     case "empty": return "Not given: the file is empty.";
-    case "cannot_read": return pdf
-      ? "Not given: this agent cannot read PDFs. If its content matters, ask the sender to share it as text."
-      : "Not given: this agent cannot open files on this machine. If its content matters, ask the sender to paste it.";
+    case "cannot_read_pdf": return "Not given: this agent cannot read PDFs. If its content matters, ask the sender to share it as text.";
+    case "cannot_read": return "Not given: this agent cannot open files on this machine. If its content matters, ask the sender to paste it.";
     case "too_large": return "Not given: it is larger than the 10 MB file limit. Ask the sender for the part that matters.";
     case "turn_limit": return "Not given: the files of this turn reached the 20 MB limit for one turn.";
     case "context_limit": return "Not given: this turn already carries the most files it takes from earlier messages.";

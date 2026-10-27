@@ -295,7 +295,7 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
 
 test("Codex bounded room turn passes included images as labelled local image paths after the prompt", async () => {
   const { adapter, input } = await codexRoomTurnInput([
-    { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "cannot_read", category: "file" },
+    { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "cannot_read_pdf", category: "file" },
     { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: 2048, status: "image",
       image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
     { index: 3, fileName: "photo.jpg", mimeType: "image/jpeg", sizeBytes: 4096, status: "image",

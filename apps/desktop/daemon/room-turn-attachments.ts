@@ -79,6 +79,7 @@ const FILE_TYPES = new Set(["text/plain", "text/markdown", "text/x-markdown", "t
 /** A file kept for a recent message is reused this long after its last turn, so a thread's log is downloaded once. */
 export const FILE_CACHE_MAX_AGE_MS = 6 * 60 * 60_000;
 const FILE_CACHE_FOLDER = "file-cache";
+const SWEEP_INTERVAL_MS = 10 * 60_000;
 /** The server's own pattern for a declared type; anything else is not trusted as a type. */
 const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 
@@ -302,6 +303,7 @@ const NOTHING_PREPARED: PreparedRoomTurnAttachments = { attachments: [], outcome
 export class RoomTurnAttachmentStager {
   /** Folders of turns that have not been released. A sweep never removes them. */
   private readonly active = new Set<string>();
+  private lastSweep = Number.NEGATIVE_INFINITY;
 
   constructor(
     /** A daemon-owned folder, e.g. ~/.letagents/room-turn-attachments. */
@@ -364,7 +366,7 @@ export class RoomTurnAttachmentStager {
     type Candidate = DeclaredAttachment & { messageId: string; origin?: RoomTurnAttachmentOrigin; kind: "image" | "file" | "other"; order: number };
     const candidates: Candidate[] = declaredRoomAttachments(input.sourceMessage)
       .map((file, order) => ({ ...file, messageId: input.sourceMessageId, kind: candidateKind(file), order }));
-    const described = { image: 0, earlierImage: 0, file: 0 };
+    const described = { image: 0, earlierImage: 0, file: 0, earlierFile: 0 };
     for (const recent of input.recentMessages ?? []) {
       const origin = { messageId: recent.messageId, sender: recent.sender, inThread: recent.inThread,
         ...(recent.preview ? { preview: recent.preview } : {}) };
@@ -375,13 +377,15 @@ export class RoomTurnAttachmentStager {
         const earlier = file.id ? input.earlierOutcomes?.get(roomTurnFileKey(recent.messageId, file.id)) : undefined;
         // A refusal for good, or a note that this agent cannot open it, was given once already.
         if (earlier && earlier !== "image" && earlier !== "file") continue;
-        // A received image never takes the place of a new one in the notes.
-        const slot = kind === "file" ? "file" : earlier === "image" ? "earlierImage" : "image";
+        // A file or image given before never takes the place of a new one in the notes.
+        const slot = kind === "file" ? (earlier === "file" ? "earlierFile" : "file") : earlier === "image" ? "earlierImage" : "image";
         if (described[slot]++ >= RECENT_DESCRIBED_LIMIT) continue;
         candidates.push({ ...file, messageId: recent.messageId, origin, kind, order: candidates.length });
       }
     }
     if (!candidates.length) return NOTHING_PREPARED;
+    // A turn that stages nothing (images in memory) still lets old kept files go.
+    if (this.now() - this.lastSweep > SWEEP_INTERVAL_MS) { this.lastSweep = this.now(); void this.sweep(); }
     let folder: string | null = null;
     let released = false;
     const release = async () => {
@@ -399,7 +403,8 @@ export class RoomTurnAttachmentStager {
       setTimeout(() => { void this.sweep(); }, STAGED_FOLDER_MAX_AGE_MS + 60_000).unref();
     };
     let downloadSignal: AbortSignal | null = null;
-    let recentSignal: AbortSignal | null = null;
+    // Recent images and recent files each have their own time, started at their first download.
+    const recentSignals: { image: AbortSignal | null; file: AbortSignal | null } = { image: null, file: null };
     const results: Array<{ order: number; attachment: ProviderRoomTurnAttachment }> = [];
     const outcomes: PreparedRoomTurnAttachments["outcomes"] = [];
     let staged = 0;
@@ -417,7 +422,11 @@ export class RoomTurnAttachmentStager {
       return path;
     };
     try {
-      const ordered = [...candidates.filter(file => file.kind === "image"), ...candidates.filter(file => file.kind !== "image")];
+      // Images first; then files, a file given before last, so it never spends a new one's limits.
+      const repeated = (file: Candidate) => Boolean(file.origin && file.id
+        && input.earlierOutcomes?.get(roomTurnFileKey(file.messageId, file.id)) === "file");
+      const ordered = [...candidates.filter(file => file.kind === "image"),
+        ...candidates.filter(file => file.kind !== "image" && !repeated(file)), ...candidates.filter(file => file.kind !== "image" && repeated(file))];
       for (const file of ordered) {
         input.signal.throwIfAborted();
         const recent = Boolean(file.origin);
@@ -431,7 +440,8 @@ export class RoomTurnAttachmentStager {
         const earlier = recent && file.id ? input.earlierOutcomes?.get(roomTurnFileKey(file.messageId, file.id)) : undefined;
         if (earlier === "image") { status("earlier_turn"); continue; }
         if (!isFile && !input.delivery) { final("provider_unsupported"); status("provider_unsupported"); continue; }
-        if (isFile && (!input.fileAccess || (declaresPdf(file) && !input.fileAccess.pdf))) { final("cannot_read"); status("cannot_read"); continue; }
+        if (isFile && !input.fileAccess) { final("cannot_read"); status("cannot_read"); continue; }
+        if (isFile && declaresPdf(file) && !input.fileAccess!.pdf) { final("cannot_read"); status("cannot_read_pdf"); continue; }
         const budget = budgets[isFile ? "file" : "image"];
         if (file.sizeBytes !== null && file.sizeBytes > budget.max) {
           // The room records each file's size, so this refusal is as final as one by the bytes.
@@ -456,12 +466,15 @@ export class RoomTurnAttachmentStager {
         };
         if (maxBytes < 1) { status(turnRoom <= recentRoom ? "turn_limit" : "context_limit"); continue; }
         const cacheKey = isFile ? fileCacheKey(input.apiUrl, input.roomId, file.messageId, file.id) : null;
-        let bytes = cacheKey ? await this.cachedFile(cacheKey, maxBytes) : null;
+        const kept = cacheKey ? await this.cachedFile(cacheKey, maxBytes) : null;
+        if (kept === "too_large") { refuseOverLimit(); continue; }
+        let bytes = kept;
         if (!bytes) {
           downloadSignal ??= AbortSignal.any([input.signal, AbortSignal.timeout(this.preparationDeadlineMs)]);
-          // Once recent files have had their time, the rest are not asked for.
-          if (recent) recentSignal ??= AbortSignal.any([downloadSignal, AbortSignal.timeout(this.recentPreparationDeadlineMs)]);
-          const signal = recent ? recentSignal! : downloadSignal;
+          // Once recent files of a kind have had their time, the rest are not asked for.
+          const kind = isFile ? "file" : "image";
+          if (recent) recentSignals[kind] ??= AbortSignal.any([downloadSignal, AbortSignal.timeout(this.recentPreparationDeadlineMs)]);
+          const signal = recent ? recentSignals[kind]! : downloadSignal;
           if (signal.aborted) { status("unavailable"); continue; }
           try {
             bytes = await input.http.downloadAttachment({
@@ -498,7 +511,7 @@ export class RoomTurnAttachmentStager {
         const detected = detectRoomTurnFile(bytes);
         if (detected.kind === "empty") { final("empty"); status("empty"); continue; }
         if (detected.kind === "binary") { final("binary"); status("binary"); continue; }
-        if (detected.kind === "pdf" && !input.fileAccess!.pdf) { final("cannot_read"); status("cannot_read"); continue; }
+        if (detected.kind === "pdf" && !input.fileAccess!.pdf) { final("cannot_read"); status("cannot_read_pdf"); continue; }
         const extension = extensionOf(file.fileName);
         // A converted text can be longer than the bytes it came from; the copy is what the limits count.
         const copy = detected.kind === "text" ? detected.bytes : bytes;
@@ -527,7 +540,7 @@ export class RoomTurnAttachmentStager {
   }
 
   /** A file kept for an earlier turn, if it is still a plain file of this user's within the limit. */
-  private async cachedFile(key: string, maxBytes: number): Promise<Uint8Array | null> {
+  private async cachedFile(key: string, maxBytes: number): Promise<Uint8Array | "too_large" | null> {
     const cache = join(this.root, FILE_CACHE_FOLDER);
     try {
       // The folders on the way must be this user's own plain folders, not links to somewhere else.
@@ -535,7 +548,9 @@ export class RoomTurnAttachmentStager {
       const handle = await open(join(cache, key), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const stat = await handle.stat();
-        if (!stat.isFile() || stat.size > maxBytes || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return null;
+        if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return null;
+        // The kept copy is the file itself: one over the space left needs no new download to be refused.
+        if (stat.size > maxBytes) return "too_large";
         const bytes = new Uint8Array(await handle.readFile());
         const now = new Date(this.now());
         await handle.utimes(now, now).catch(() => {});

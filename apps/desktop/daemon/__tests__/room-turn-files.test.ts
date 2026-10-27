@@ -107,7 +107,8 @@ test("files that are not text or PDFs, empty, too large or unreadable by this ag
         file("att_3", "empty.txt", "text/plain"), file("att_4", "big.log", "text/plain", ROOM_TURN_FILE_MAX_BYTES + 1),
         file("att_5", "spec.pdf", "application/pdf"), file("att_6", "secretly.log", "text/plain"),
       ] } }, downloads, (id) => id === "att_2" ? Uint8Array.from([0x7b, 0x00, 0x7d]) : id === "att_3" ? new Uint8Array() : id === "att_6" ? PDF : LOG));
-    assert.deepEqual(prepared.attachments.map(item => item.status), ["unsupported_type", "binary", "empty", "too_large", "cannot_read", "cannot_read"]);
+    assert.deepEqual(prepared.attachments.map(item => item.status), ["unsupported_type", "binary", "empty", "too_large", "cannot_read_pdf", "cannot_read_pdf"],
+      "a PDF by its name or by its bytes is named as a PDF this agent cannot read");
     assert.deepEqual(downloads.map(item => item.attachmentId), ["att_2", "att_3", "att_6"], "no request for a type, size or PDF this agent cannot take");
     assert.deepEqual(prepared.outcomes.map(item => [item.attachmentId, item.outcome]), [
       ["att_2", "binary"], ["att_3", "empty"], ["att_4", "file_too_large"], ["att_5", "cannot_read"], ["att_6", "cannot_read"],
@@ -259,5 +260,59 @@ test("a UTF-16 file whose UTF-8 copy is over the limit is refused, so the copy n
     ] } }, [], () => utf16));
     assert.equal(prepared.attachments[0]!.status, "too_large");
     assert.deepEqual(prepared.outcomes.map(item => item.outcome), ["file_too_large"]);
+  });
+});
+
+test("a file given before never takes a new file's place or limits", async () => {
+  await withRoot(async (root) => {
+    const earlierOutcomes = new Map([1, 2, 3, 4].map(n => [roomTurnFileKey("msg_1", `att_${n}`), "file" as const]));
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(input({ earlierOutcomes, recentMessages: [
+      recentFrom("msg_1", [1, 2, 3, 4].map(n => file(`att_${n}`, `old${n}.log`, "text/plain"))),
+      recentFrom("msg_19", [file("att_9", "new.diff", "text/x-diff")]),
+    ] }, [], () => LOG));
+    assert.deepEqual(prepared.attachments.map(item => [item.fileName, item.status]), [
+      ["old1.log", "file"], ["old2.log", "file"], ["old3.log", "file"], ["old4.log", "context_limit"], ["new.diff", "file"],
+    ], "the new file is staged first; what was given before gets what is left; the notes keep the messages' order");
+  });
+});
+
+test("recent files have their own time, apart from recent images and the activating message's files", async () => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await withRoot(async (root) => {
+      const stall = (signal: AbortSignal, ms: number, bytes: Uint8Array) => new Promise<Uint8Array>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(bytes), ms);
+        signal.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+      });
+      const prepared = await new RoomTurnAttachmentStager(root, Date.now, 5_000, 300).prepare({ ...input({
+        sourceMessage: { id: "msg_7", text: "own", attachments: [file("att_70", "own.log", "text/plain")] },
+        recentMessages: [recentFrom("msg_6", [file("att_60", "shot.png", "image/png"), file("att_61", "r.log", "text/plain")])],
+      }, [], () => LOG), http: { downloadAttachment: ({ attachmentId, signal }: { attachmentId: string; signal: AbortSignal }) =>
+        attachmentId === "att_60" ? Promise.resolve(PNG) : attachmentId === "att_70" ? stall(signal, 450, LOG) : Promise.resolve(LOG) } });
+      assert.deepEqual(prepared.attachments.map(item => [item.fileName, item.status]), [["own.log", "file"], ["shot.png", "image"], ["r.log", "file"]],
+        "a slow file of the activating message does not spend the recent files' time");
+    });
+  } finally { clearInterval(keepAlive); }
+});
+
+test("a kept copy over the space left is refused without a new download, and old kept files go without a staged turn", async () => {
+  await withRoot(async (root) => {
+    let now = Date.now();
+    const downloads: Download[] = [];
+    const stager = new RoomTurnAttachmentStager(root, () => now);
+    const six = new Uint8Array(6 * 1024 * 1024).fill(0x61);
+    const first = await stager.prepare(input({ recentMessages: [recentFrom("msg_2", [file("att_1", "a.log", "text/plain", null)])] }, downloads, () => six));
+    await first.release();
+    const crowded = await stager.prepare(input({ recentMessages: [
+      recentFrom("msg_3", [file("att_5", "b.log", "text/plain", 6 * 1024 * 1024)]), recentFrom("msg_2", [file("att_1", "a.log", "text/plain", null)]),
+    ] }, downloads, () => six));
+    assert.deepEqual(crowded.attachments.map(item => item.status), ["context_limit", "file"].reverse(), JSON.stringify(crowded.attachments.map(item => item.status)));
+    assert.deepEqual(downloads.map(item => item.attachmentId), ["att_1", "att_5"], "the kept copy is not downloaded again only to be refused");
+    await crowded.release();
+    now += FILE_CACHE_MAX_AGE_MS + 11 * 60_000;
+    // An image-only turn for a memory provider stages no folder, yet lets old kept files go.
+    await stager.prepare(input({ sourceMessage: { id: "msg_9", text: "x", attachments: [file("att_90", "s.png", "image/png")] } }, downloads, () => PNG));
+    for (let attempt = 0; attempt < 50 && (await readdir(join(root, "file-cache"))).length; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(await readdir(join(root, "file-cache")), []);
   });
 });

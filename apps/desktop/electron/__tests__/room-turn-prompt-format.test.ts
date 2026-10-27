@@ -347,7 +347,7 @@ test("every attachment status becomes one exact note after the activation line",
       attachment({ index: 1, fileName: "diagram.png", status: "image", sizeBytes: 2048, image: png }),
       attachment({ index: 2, fileName: "loop.gif", mimeType: "image/gif", status: "image", sizeBytes: Math.round(1.5 * MIB),
         image: { mimeType: "image/gif", data: IMAGE_BYTES } }),
-      attachment({ index: 3, fileName: "notes.pdf", mimeType: "application/pdf", status: "cannot_read", category: "file", sizeBytes: 500 }),
+      attachment({ index: 3, fileName: "notes.pdf", mimeType: "application/pdf", status: "cannot_read_pdf", category: "file", sizeBytes: 500 }),
       attachment({ index: 4, fileName: "huge.png", status: "too_large", sizeBytes: 11 * MIB }),
       attachment({ index: 5, fileName: "extra.jpg", mimeType: "image/jpeg", status: "turn_limit", sizeBytes: 9 * MIB }),
       attachment({ index: 6, fileName: "gone.png", status: "unavailable", sizeBytes: null }),
@@ -413,7 +413,7 @@ test("included images carry their file path when the provider reads a file", () 
 test("the context cache carries the attachment notes cold, warm and for synthetic turns", () => {
   const attachments = [
     attachment({ index: 1, fileName: "diagram.png", status: "image", sizeBytes: 2048, image: { mimeType: "image/png", data: IMAGE_BYTES } }),
-    attachment({ index: 2, fileName: "notes.pdf", mimeType: "application/pdf", status: "cannot_read", category: "file", sizeBytes: 500 }),
+    attachment({ index: 2, fileName: "notes.pdf", mimeType: "application/pdf", status: "cannot_read_pdf", category: "file", sizeBytes: 500 }),
   ];
   const notes = [
     ATTACHMENT_HEADER,
@@ -537,6 +537,8 @@ test("a text file or PDF is named with its path, never its bytes, and every refu
     fileEntry({ index: 8, fileName: "d.log", status: "cannot_read" }),
     fileEntry({ index: 9, fileName: "e.log", status: "too_large" }),
     fileEntry({ index: 10, fileName: "f.log", status: "turn_limit" }),
+    fileEntry({ index: 11, fileName: "g.heic", mimeType: "image/heic", status: "unsupported_type" }),
+    fileEntry({ index: 12, fileName: "h.pdf", mimeType: "application/pdf", status: "cannot_read" }),
   ] });
   assert.deepEqual(lines.slice(3), [
     ATTACHMENT_HEADER,
@@ -550,6 +552,8 @@ test("a text file or PDF is named with its path, never its bytes, and every refu
     '- Attachment 8: "d.log" (text/plain, 100 bytes). Not given: this agent cannot open files on this machine. If its content matters, ask the sender to paste it.',
     '- Attachment 9: "e.log" (text/plain, 100 bytes). Not given: it is larger than the 10 MB file limit. Ask the sender for the part that matters.',
     '- Attachment 10: "f.log" (text/plain, 100 bytes). Not given: the files of this turn reached the 20 MB limit for one turn.',
+    '- Attachment 11: "g.heic" (image/heic, 100 bytes). Not shown: only PNG, JPEG, GIF and WebP images reach agents.',
+    '- Attachment 12: "h.pdf" (application/pdf, 100 bytes). Not given: this agent cannot open files on this machine. If its content matters, ask the sender to paste it.',
   ]);
 
 });
