@@ -9,15 +9,10 @@ export function useRoomViewport() {
 
   function syncRoomViewport() {
     const viewport = window.visualViewport
-    // Safari resizes the visual viewport for the keyboard. Pinch zoom must
-    // keep the existing layout rather than masquerading as keyboard space.
-    if (!viewport || viewport.scale !== 1) return
-    keyboardOpen.value = window.innerHeight - viewport.height > 120
-    compactViewport.value = viewport.height < 360
-    roomViewportStyle.value = {
-      '--room-viewport-height': `${viewport.height}px`,
-      '--room-viewport-top': `${viewport.offsetTop}px`,
-    }
+    if (!viewport) return
+    // Normalize zoom before detecting keyboard space, so closing the keyboard
+    // while zoomed still restores navigation and the main draft.
+    keyboardOpen.value = window.innerHeight - viewport.height * viewport.scale > 120
 
     const active = document.activeElement
     const composer = active?.closest('.composer')
@@ -26,6 +21,15 @@ export function useRoomViewport() {
     else if (active && active !== document.body) editingThread.value = false
     // A touch on a send/menu control can briefly leave body focused. Retain
     // the current composer until another target gains focus or the keyboard closes.
+
+    // Safari resizes the visual viewport for the keyboard. Pinch zoom keeps
+    // the existing layout rather than reflowing the room at the zoomed size.
+    if (viewport.scale !== 1) return
+    compactViewport.value = viewport.height < 360
+    roomViewportStyle.value = {
+      '--room-viewport-height': `${viewport.height}px`,
+      '--room-viewport-top': `${viewport.offsetTop}px`,
+    }
   }
 
   onMounted(() => {

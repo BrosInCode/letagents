@@ -122,6 +122,12 @@ test('Safari keyboard layout keeps thread controls focused and restores the main
     viewport.height = 200
     viewport.dispatchEvent(new Event('resize'))
     assert.equal(vm.roomViewportStyle.value['--room-viewport-height'], '320px', 'pinch zoom does not reflow the room')
+    assert.equal(vm.hideMainComposer.value, true)
+    viewport.height = 390
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(vm.keyboardOpen.value, false, 'dismissing the keyboard while zoomed restores navigation')
+    assert.equal(vm.hideMainComposer.value, false, 'the main draft is restored before zoom returns to normal')
+    assert.equal(vm.roomViewportStyle.value['--room-viewport-height'], '320px')
     viewport.scale = 1
     viewport.height = 780
     viewport.offsetTop = 0
