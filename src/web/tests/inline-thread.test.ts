@@ -191,38 +191,64 @@ test('landscape keyboard rotation reveals only the active thread scrollport afte
   const viewport = Object.assign(new EventTarget(), { height: 377, offsetTop: 0, scale: 1 })
   const body = { closest: () => null }
   const calls: ScrollToOptions[] = []
+  const frames = new Map<number, FrameRequestCallback>()
+  let frameId = 0
+  const flushFrame = () => {
+    const pending = [...frames]
+    frames.clear()
+    pending.forEach(([, callback]) => callback(0))
+  }
   let bounds = { top: 45, bottom: 377, height: 332 }
   let draft = { top: 250, bottom: 340, height: 90 }
-  const scrollport = { scrollTop: 919, getBoundingClientRect: () => bounds, scrollTo: (options: ScrollToOptions) => { calls.push(options); scrollport.scrollTop = options.top! } }
+  const scrollport = Object.assign(new EventTarget(), { scrollTop: 919, getBoundingClientRect: () => bounds, scrollTo: (options: ScrollToOptions) => { calls.push(options); scrollport.scrollTop = options.top! } })
+  const inputListeners = new Set<string>()
+  const addListener = scrollport.addEventListener.bind(scrollport)
+  const removeListener = scrollport.removeEventListener.bind(scrollport)
+  scrollport.addEventListener = (type, callback, options) => { inputListeners.add(type); addListener(type, callback, options) }
+  scrollport.removeEventListener = (type, callback, options) => { inputListeners.delete(type); removeListener(type, callback, options) }
   const composer = { isConnected: true, classList: { contains: () => true }, closest: (selector: string) => selector === '.messages' ? scrollport : null, getBoundingClientRect: () => draft }
   const target = { closest: () => composer }
   const documentStub = { body, activeElement: target as any, documentElement: { clientHeight: 714 } }
-  const windowStub = { innerHeight: 377, visualViewport: viewport }
+  const windowStub = { innerHeight: 377, visualViewport: viewport,
+    requestAnimationFrame: (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId },
+    cancelAnimationFrame: (id: number) => { frames.delete(id) },
+  }
   Object.assign(globalThis, { window: windowStub, document: documentStub })
   const surface = mountSetup({ setup: useRoomViewport }, {})
   let mounted = true
   try {
     await nextTick()
+    flushFrame(); flushFrame()
     assert.equal(calls.length, 0, 'an already visible reply does not move')
     windowStub.innerHeight = 402
     documentStub.documentElement.clientHeight = 296
-    viewport.height = 98
+    viewport.height = 102
     viewport.dispatchEvent(new Event('resize'))
     assert.equal(surface.vm.compactComposer.value, true)
     assert.equal(surface.vm.hideMainComposer.value, true)
     assert.equal(calls.length, 0, 'wait for Vue to reclaim the header and status rows')
-    bounds = { top: 0, bottom: 98, height: 98 }
-    draft = { top: -15, bottom: 73, height: 88 }
+    bounds = { top: 0, bottom: 102, height: 102 }
     viewport.dispatchEvent(new Event('scroll'))
     await nextTick()
-    assert.deepEqual(calls, [{ top: 904, behavior: 'instant' }], 'Safari panning does not cancel the pending local reveal')
+    assert.equal(calls.length, 0, 'Vue nextTick precedes Safari and ResizeObserver scroll adjustments')
+    flushFrame()
+    assert.equal(calls.length, 0)
+    viewport.dispatchEvent(new Event('scroll'))
+    assert.equal(frames.size, 1, 'Safari panning preserves the pending frame without adding more')
+    scrollport.scrollTop = 905
+    draft = { top: -15.21875, bottom: 72.78125, height: 88 }
+    flushFrame()
+    assert.deepEqual(calls, [{ top: 889.78125, behavior: 'instant' }], 'the final layout frame uses the settled native Safari geometry')
+    assert.equal(frames.size, 0, 'reveal is bounded, with no ongoing scroll correction loop')
+    assert.equal(inputListeners.size, 0, 'completed reveals release their temporary input listeners')
     draft = { top: 130, bottom: 218, height: 88 }
     viewport.dispatchEvent(new Event('scroll'))
     await nextTick()
     assert.equal(calls.length, 1, 'ordinary viewport panning does not fight manual scrolling')
     viewport.dispatchEvent(new Event('resize'))
     await nextTick()
-    assert.deepEqual(calls.at(-1), { top: 1024, behavior: 'instant' }, 'a below-viewport draft is revealed at its bottom edge')
+    flushFrame(); flushFrame()
+    assert.deepEqual(calls.at(-1), { top: 1005.78125, behavior: 'instant' }, 'a below-viewport draft is revealed at its bottom edge')
 
     documentStub.activeElement = body
     viewport.height = 402
@@ -230,22 +256,47 @@ test('landscape keyboard rotation reveals only the active thread scrollport afte
     bounds = { top: 84, bottom: 162, height: 78 }
     draft = { top: -15, bottom: 75, height: 90 }
     await nextTick()
+    flushFrame(); flushFrame()
     assert.equal(surface.vm.compactComposer.value, false)
     assert.equal(surface.vm.hideMainComposer.value, false)
-    assert.deepEqual(calls.at(-1), { top: 925, behavior: 'instant' }, 'dismissal retains the last thread long enough to restore its reading position')
+    assert.deepEqual(calls.at(-1), { top: 906.78125, behavior: 'instant' }, 'dismissal retains the last thread long enough to restore its reading position')
 
     documentStub.activeElement = target
     viewport.height = 98
+    for (const type of ['wheel', 'touchmove', 'pointerdown', 'keydown']) {
+      viewport.dispatchEvent(new Event('resize'))
+      await nextTick()
+      flushFrame()
+      assert.equal(inputListeners.size, 5)
+      scrollport.dispatchEvent(new Event(type))
+      assert.equal(frames.size, 0, `${type} cancels the queued correction`)
+      assert.equal(inputListeners.size, 0, `${type} releases the temporary listeners`)
+      flushFrame()
+      assert.equal(calls.length, 3, 'manual input keeps control of the message reading position')
+    }
     viewport.dispatchEvent(new Event('resize'))
+    await nextTick()
+    flushFrame()
+    viewport.scale = 2
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(frames.size, 0, 'pinch zoom cancels the queued layout frame')
+    viewport.scale = 1
+    viewport.dispatchEvent(new Event('resize'))
+    await nextTick()
+    flushFrame()
     surface.vm.resetComposerFocus()
     await nextTick()
     assert.equal(calls.length, 3, 'room or tab changes cancel queued focus reveals')
     assert.equal(surface.vm.compactComposer.value, false)
     viewport.dispatchEvent(new Event('resize'))
+    await nextTick()
+    flushFrame()
     surface.close()
     mounted = false
     await nextTick()
     assert.equal(calls.length, 3, 'unmount cancels queued focus reveals')
+    assert.equal(frames.size, 0)
+    assert.equal(inputListeners.size, 0)
   } finally {
     if (mounted) surface.close()
     Object.assign(globalThis, originals)

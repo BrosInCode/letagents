@@ -635,7 +635,7 @@ watch(
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.inline-thread-composer) { padding: 0; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-textarea) { max-height: min(80px, max(44px, calc(var(--room-viewport-height) - 54px))); }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer-toolbar) { margin-top: 0; }
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.messages) { padding-block: 4px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.messages) { padding-block: 4px; mask-image: none; animation: none; }
 
 @media (max-width: 980px), (pointer: coarse) {
   .room-shell[data-theme] > :deep(.composer:not(.inline-thread-composer)),
