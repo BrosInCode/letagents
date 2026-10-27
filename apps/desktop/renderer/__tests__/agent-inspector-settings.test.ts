@@ -55,7 +55,7 @@ test("settings draft exposes only user-editable settings and makes saved/runtime
   assert.equal(configurationHasRuntimeLag({ ...configuration, runtimeConfigurationRevision: 4 }), false);
   assert.equal(agentInspectorProviderSupportsEffort("codex"), true);
   assert.equal(agentInspectorProviderSupportsEffort("open-model"), false);
-  assert.equal(agentInspectorProviderSupportsEffort("claude-code"), false);
+  assert.equal(agentInspectorProviderSupportsEffort("claude-code"), true);
   assert.equal(agentInspectorProviderSupportsEffort("cursor"), false);
 });
 

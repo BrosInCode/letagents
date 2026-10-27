@@ -209,7 +209,7 @@ export function settleConfigurationAlreadyApplied(
 }
 
 export function agentInspectorProviderSupportsEffort(providerId: string | null | undefined): boolean {
-  return providerId === "codex";
+  return providerId === "codex" || providerId === "claude-code";
 }
 
 export function roomMovePresentation(move: DesktopSupervisorRoomMove): { label: string; detail: string; terminal: boolean } {

@@ -19,6 +19,7 @@ import {
   supervisedProviderLaunchPolicy,
   visibleDesktopAgentProviders,
 } from "../../../../domain/managed-agents";
+import { savedModelLabel } from "../../../../domain/claude-model-labels";
 import { refreshSupervisedRuntimeEntry } from "../../../../domain/supervised-recovery";
 import { contextualAddAgentError } from "../add-agent/add-agent-errors";
 import { createSupervisedLaunchAttachments } from "../add-agent/supervised-launch-attachments";
@@ -283,18 +284,18 @@ export function useComposerAgentDraft(options: {
     const catalog = catalogs[current.providerId];
     const models = (catalog?.status === "ready" ? catalog.models : []).map((option) => ({ id: option.id as string | null, label: option.label }));
     const list = [{ id: null as string | null, label: catalog?.defaultModel ? `Default (${catalog.defaultModel})` : "Default" }, ...models];
-    if (current.model && !list.some((option) => option.id === current.model)) list.push({ id: current.model, label: current.model });
+    if (current.model && !list.some((option) => option.id === current.model)) list.push({ id: current.model, label: savedModelLabel(current.providerId, current.model) });
     return list;
   });
   /**
    * Effort, as the Add agent window offers it: Codex takes every shared level;
    * an Open Model agent takes exactly the levels its endpoint lists for the
    * model (the chosen one, or the saved default), so a model without that
-   * list has no slider. Supervised Claude takes none.
+   * list has no slider. Supervised Claude takes its CLI's five levels.
    */
   const chipEfforts = computed(() => {
     const current = chip.value;
-    if (!current || (current.providerId !== "codex" && current.providerId !== "open-model")) return [];
+    if (!current || (current.providerId !== "codex" && current.providerId !== "open-model" && current.providerId !== "claude-code")) return [];
     const catalog = catalogs[current.providerId];
     const modelId = current.model ?? catalog?.defaultModel ?? null;
     const option = catalog?.models.find((candidate) => candidate.id === modelId) ?? null;

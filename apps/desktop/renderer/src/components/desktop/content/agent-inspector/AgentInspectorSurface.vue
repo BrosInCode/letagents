@@ -135,6 +135,7 @@ import type {
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
+import { savedModelLabel } from "../../../../domain/claude-model-labels";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import { configurationHasRuntimeLag, permissionPendingBadge } from "../../../../domain/agent-inspector-settings";
 import { homeHarnessBadge } from "../../../../domain/agent-home-harness";
@@ -206,7 +207,8 @@ const overviewTab = ref<HTMLButtonElement | null>(null);
 const workTab = ref<HTMLButtonElement | null>(null);
 const selectedTab = ref<InspectorTab>(props.initialTab ?? "overview");
 const providerModelLabel = computed(() => [
-  agentInspectorProviderLabel(props.projection.provider), props.projection.model,
+  agentInspectorProviderLabel(props.projection.provider),
+  props.projection.model ? savedModelLabel(props.projection.provider, props.projection.model) : null,
   props.settingsResource.configuration?.entryId === props.projection.entryId
     && !configurationHasRuntimeLag(props.settingsResource.configuration)
     ? props.settingsResource.configuration.reasoningEffort : null,

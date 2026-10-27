@@ -319,7 +319,7 @@ test("entry validation and create replay preserve exact validation and convergen
 });
 
 test("manifest.put saves an effort only for a provider that takes it", async () => {
-  for (const [provider, reasoning_effort] of [["open-model", "max"], ["open-model", "minimal"], ["claude-code", "high"], ["cursor", "low"]] as const) {
+  for (const [provider, reasoning_effort] of [["open-model", "max"], ["open-model", "minimal"], ["claude-code", "minimal"], ["cursor", "low"]] as const) {
     const refused = harness();
     await assert.rejects(
       refused.subject.putManifestEntry(entry({ provider, reasoning_effort: reasoning_effort as DaemonManifestEntry["reasoning_effort"] })),
@@ -327,7 +327,7 @@ test("manifest.put saves an effort only for a provider that takes it", async () 
     );
     assert.deepEqual(refused.events, []);
   }
-  for (const [provider, reasoning_effort] of [["open-model", "high"], ["open-model", "xhigh"], ["codex", "max"], ["claude-code", null]] as const) {
+  for (const [provider, reasoning_effort] of [["open-model", "high"], ["open-model", "xhigh"], ["codex", "max"], ["claude-code", null], ["claude-code", "max"]] as const) {
     const saved = await harness().subject.putManifestEntry(entry({ provider, reasoning_effort }));
     assert.equal(saved.reasoning_effort, reasoning_effort);
   }
