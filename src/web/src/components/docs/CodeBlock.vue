@@ -29,7 +29,7 @@ async function copy() {
 <style scoped>
 .code-block {
   position: relative;
-  background: #111;
+  background: var(--code-bg, var(--bg-subtle));
   border: 1px solid var(--border, rgba(255,255,255,0.08));
   border-radius: 8px;
   margin-bottom: 20px;
@@ -42,10 +42,10 @@ async function copy() {
   justify-content: space-between;
   gap: 12px;
   padding: 8px 14px;
-  background: #1a1a1a;
+  background: var(--code-header-bg, var(--bg-elevated));
   border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
   font-size: 0.72rem;
-  color: var(--text-tertiary, #8b8b96);
+  color: var(--text-secondary, #a1a1aa);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -53,7 +53,7 @@ async function copy() {
 
 .copy-btn {
   background: none;
-  border: 1px solid rgba(255,255,255,0.14);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   color: var(--text-secondary, #a1a1aa);
   font-size: 0.7rem;
@@ -64,7 +64,7 @@ async function copy() {
   font-family: inherit;
   min-height: 44px;
 }
-.copy-btn:hover { background: rgba(228,228,231,0.1); color: var(--text, #fafafa); }
+.copy-btn:hover { background: var(--accent-hover); color: var(--text, #fafafa); }
 
 .code-block pre {
   padding: 16px;
@@ -72,7 +72,7 @@ async function copy() {
   font-size: 0.82rem;
   line-height: 1.65;
   overflow-x: auto;
-  color: var(--text-secondary, #a1a1aa);
+  color: var(--code-text, var(--text));
   margin: 0;
 }
 

@@ -6,16 +6,20 @@ import { renderToString } from '@vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createServer, type ViteDevServer } from 'vite'
 
-let vite: ViteDevServer, Sidebar: any, WorkspaceNav: any
+let vite: ViteDevServer, Sidebar: any, WorkspaceNav: any, DocsPage: any
 const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
 before(async () => {
   vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } })
   Sidebar = (await vite.ssrLoadModule('/src/components/docs/DocsSidebar.vue')).default
   WorkspaceNav = (await vite.ssrLoadModule('/src/components/layout/WorkspaceNav.vue')).default
+  DocsPage = (await vite.ssrLoadModule('/src/pages/Docs.vue')).default
 })
 after(async () => {
   if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
   else Reflect.deleteProperty(globalThis, 'document')
+  if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+  else Reflect.deleteProperty(globalThis, 'window')
   await vite?.close()
 })
 
@@ -54,6 +58,7 @@ test('mobile docs navigation moves focus in, contains Tab, and requests dismissa
   }
   try {
     props.open = true
+    assert.deepEqual(focused, [], 'focus waits until the component render has committed')
     await nextTick(); await nextTick()
     assert.deepEqual(focused, ['active-link'])
     assert.equal(press('Tab', true), true)
@@ -68,6 +73,34 @@ test('mobile docs navigation moves focus in, contains Tab, and requests dismissa
     assert.equal(press('Escape'), false)
     props.mobile = true; props.open = false
     assert.equal(press('Tab'), false, 'a closed drawer must not intercept keyboard navigation')
+  } finally { app.unmount() }
+})
+
+test('Escape from the docs toggle closes an open drawer and restores toggle focus', () => {
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { querySelectorAll: () => [] } })
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerWidth: 390, addEventListener() {}, removeEventListener() {} } })
+  let vm: any, focused = 0
+  const app = renderer.createApp({ setup() {
+    vm = DocsPage.setup({}, { expose() {} })
+    return () => h('div')
+  } })
+  app.provide(ssrContextKey, { modules: new Set() })
+  app.mount({})
+  vm.sidebarToggle.value = { focus: () => focused++ }
+  const press = (key: string) => {
+    let prevented = false
+    vm.handlePageKeydown({ key, preventDefault: () => { prevented = true } })
+    return prevented
+  }
+  try {
+    vm.sidebarOpen.value = true
+    assert.equal(press('Tab'), false)
+    assert.equal(vm.sidebarOpen.value, true)
+    assert.equal(press('Escape'), true)
+    assert.equal(vm.sidebarOpen.value, false)
+    assert.equal(focused, 1)
+    assert.equal(press('Escape'), false, 'closed navigation leaves Escape available to other controls')
+    assert.equal(focused, 1)
   } finally { app.unmount() }
 })
 

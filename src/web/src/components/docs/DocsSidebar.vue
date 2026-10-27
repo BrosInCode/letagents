@@ -18,7 +18,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import type { DocsNavSection } from './docs-data'
 
 const props = defineProps<{
@@ -34,11 +34,10 @@ const emit = defineEmits<{
 }>()
 
 const sidebar = ref<HTMLElement>()
-watch(() => props.open, async open => {
-  if (!open || !props.mobile) return
-  await nextTick()
-  sidebar.value?.querySelector<HTMLElement>('.sidebar-link.active, .sidebar-link')?.focus({ preventScroll: true })
-})
+watch([() => props.open, () => props.mobile, sidebar], ([open, mobile, element]) => {
+  if (!open || !mobile) return
+  element?.querySelector<HTMLElement>('.sidebar-link.active, .sidebar-link')?.focus({ preventScroll: true })
+}, { flush: 'post' })
 function handleKeydown(event: KeyboardEvent) {
   if (!props.mobile || !props.open) return
   if (event.key === 'Escape') {

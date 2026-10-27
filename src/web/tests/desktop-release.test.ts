@@ -78,6 +78,6 @@ test('Mac beta anchor clears the fixed navigation bar', () => {
   const heroSource = readFileSync(heroPath, 'utf8')
   const routerSource = readFileSync(routerPath, 'utf8')
   assert.match(heroSource, /id="download-mac"/)
-  assert.match(heroSource, /scroll-margin-top:\s*92px/)
+  assert.match(heroSource, /scroll-margin-top:\s*calc\(92px \+ env\(safe-area-inset-top, 0px\)\)/)
   assert.match(routerSource, /el:\s*to\.hash,\s*top:\s*92/)
 })

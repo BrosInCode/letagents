@@ -1,5 +1,5 @@
 <template>
-  <div class="docs-page">
+  <div class="docs-page" @keydown="handlePageKeydown">
     <div v-if="sidebarOpen" class="sidebar-overlay" @click="closeSidebar" />
 
     <div class="docs-layout">
@@ -53,6 +53,12 @@ const sidebarToggle = ref<HTMLButtonElement>()
 function closeSidebar() {
   sidebarOpen.value = false
   sidebarToggle.value?.focus({ preventScroll: true })
+}
+
+function handlePageKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !sidebarOpen.value) return
+  event.preventDefault()
+  closeSidebar()
 }
 
 function updateViewport() {
