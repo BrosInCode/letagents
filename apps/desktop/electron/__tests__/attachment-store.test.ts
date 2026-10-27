@@ -200,6 +200,7 @@ test("the cloud proxy sends the sign-in only to attachment downloads and adds sa
 
     assert.equal((await handleAttachmentProtocolRequest(new Request(href("/projects/p_1/messages/msg_1/attachments/att_1")))).status, 200);
     assert.equal((await handleAttachmentProtocolRequest(new Request(href("/auth/session")))).status, 403);
+    assert.equal((await handleAttachmentProtocolRequest(new Request(href("/auth/x/rooms/r/messages/m/attachments/a")))).status, 403);
     assert.equal((await handleAttachmentProtocolRequest(new Request(href("/rooms/x/messages")))).status, 403);
     assert.equal((await handleAttachmentProtocolRequest(new Request(href("/rooms/x/messages/m/attachments/a/extra")))).status, 403);
     assert.equal(calls.length, 2);

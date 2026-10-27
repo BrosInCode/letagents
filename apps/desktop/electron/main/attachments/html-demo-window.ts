@@ -16,11 +16,14 @@ import { attachmentResponse } from "./protocol.js";
 
 const { BrowserWindow, session } = electron as typeof import("electron");
 
+/** A page that never paints still gets a window the person can see and close. */
+const SHOW_DEMO_WINDOW_AFTER_MS = 1500;
+
 /** Demo documents by window host; a host exists only while its window is open. */
 const demoDocuments = new Map<string, string>();
 const demoWindowsByHref = new Map<string, ElectronBrowserWindow>();
 const pendingHrefs = new Set<string>();
-let demoSession: Session | null = null;
+let demoSession: Promise<Session> | null = null;
 
 /** Open a room attachment as an HTML demo, or focus the window that already shows it. */
 export async function openHtmlDemo(input: {
@@ -36,7 +39,7 @@ export async function openHtmlDemo(input: {
     return;
   }
   if (pendingHrefs.has(href)) return;
-  if (demoWindowsByHref.size >= MAX_OPEN_HTML_DEMOS) {
+  if (demoWindowsByHref.size + pendingHrefs.size >= MAX_OPEN_HTML_DEMOS) {
     throw new Error(`Close a demo window first. At most ${MAX_OPEN_HTML_DEMOS} demos can be open at once.`);
   }
   pendingHrefs.add(href);
@@ -47,7 +50,7 @@ export async function openHtmlDemo(input: {
       throw new Error(`The demo file could not be loaded (HTTP ${response.status}).`);
     }
     const html = new TextDecoder("utf-8").decode(await readHtmlDemoBytes(response));
-    const demoWindow = openHtmlDemoWindow({ html, title: htmlDemoWindowTitle(input.fileName, input.senderLabel) });
+    const demoWindow = await openHtmlDemoWindow({ html, title: htmlDemoWindowTitle(input.fileName, input.senderLabel) });
     demoWindowsByHref.set(href, demoWindow);
     demoWindow.once("closed", () => demoWindowsByHref.delete(href));
   } finally {
@@ -55,11 +58,15 @@ export async function openHtmlDemo(input: {
   }
 }
 
-/** Show an HTML document in a locked window: no network, no preload, its own origin. */
-export function openHtmlDemoWindow(input: { html: string; title: string }): ElectronBrowserWindow {
+/**
+ * Show an HTML document in a locked window: its own origin, no preload, and
+ * nothing loads over the network. The page can still cause DNS lookups (DNS
+ * prefetch, WebRTC); Electron has no per-window switch for those.
+ */
+export async function openHtmlDemoWindow(input: { html: string; title: string }): Promise<ElectronBrowserWindow> {
   const host = randomUUID().replaceAll("-", "");
   const origin = `${htmlDemoProtocolScheme}://${host}`;
-  const ses = htmlDemoSession();
+  const ses = await htmlDemoSession();
   demoDocuments.set(host, input.html);
 
   const demoWindow = new BrowserWindow({
@@ -96,10 +103,23 @@ export function openHtmlDemoWindow(input: { html: string; title: string }): Elec
   contents.on("will-attach-webview", (event) => event.preventDefault());
   // A demo cannot keep its window open with a beforeunload prompt.
   contents.on("will-prevent-unload", (event) => event.preventDefault());
+  // A demo cannot move or resize its window to cover the app or hide off-screen.
+  contents.on("content-bounds-updated", (event) => event.preventDefault());
   // The title bar is the one line the demo cannot draw, so it keeps saying what this is.
   demoWindow.on("page-title-updated", (event) => event.preventDefault());
-  demoWindow.once("ready-to-show", () => demoWindow.show());
+  // A page that hangs its renderer cannot hold the window (or a demo slot) open.
+  demoWindow.on("unresponsive", () => {
+    if (!demoWindow.isDestroyed()) demoWindow.destroy();
+  });
+  const showTimer = setTimeout(() => {
+    if (!demoWindow.isDestroyed() && !demoWindow.isVisible()) demoWindow.show();
+  }, SHOW_DEMO_WINDOW_AFTER_MS);
+  demoWindow.once("ready-to-show", () => {
+    clearTimeout(showTimer);
+    demoWindow.show();
+  });
   demoWindow.once("closed", () => {
+    clearTimeout(showTimer);
     demoDocuments.delete(host);
     void ses.clearStorageData({ origin }).catch(() => undefined);
   });
@@ -108,8 +128,12 @@ export function openHtmlDemoWindow(input: { html: string; title: string }): Elec
   return demoWindow;
 }
 
-function htmlDemoSession(): Session {
-  if (demoSession) return demoSession;
+function htmlDemoSession(): Promise<Session> {
+  demoSession ??= prepareHtmlDemoSession();
+  return demoSession;
+}
+
+async function prepareHtmlDemoSession(): Promise<Session> {
   const ses = session.fromPartition(HTML_DEMO_PARTITION);
   ses.protocol.handle(htmlDemoProtocolScheme, (request) => {
     const url = new URL(request.url);
@@ -121,12 +145,12 @@ function htmlDemoSession(): Session {
   ses.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: !isAllowedHtmlDemoRequest(details.url) });
   });
-  // Anything that slips past the request filter (WebRTC over TCP, prefetch) meets a closed port.
-  void ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" }).catch(() => undefined);
-  ses.setPermissionRequestHandler((_contents, permission, callback) => callback(permission === "clipboard-sanitized-write"));
-  ses.setPermissionCheckHandler((_contents, permission) => permission === "clipboard-sanitized-write");
+  ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  ses.setPermissionCheckHandler(() => false);
   ses.setDevicePermissionHandler(() => false);
   ses.on("will-download", (event) => event.preventDefault());
-  demoSession = ses;
+  // Connections that skip the request filter (WebRTC over TCP, preconnect) meet a
+  // closed port. Set before the first demo loads.
+  await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" }).catch(() => undefined);
   return ses;
 }

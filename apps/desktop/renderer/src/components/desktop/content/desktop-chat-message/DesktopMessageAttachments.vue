@@ -35,7 +35,7 @@
       >
         <span>
           <strong>{{ attachmentName(attachment) }}</strong>
-          <small title="Opens in a locked window with no internet access">Interactive demo · runs offline</small>
+          <small title="Opens in its own locked window. It cannot load web pages or reach your LetAgents data.">Interactive demo · locked window</small>
           <small
             v-if="demoErrors[attachmentKey(attachment)]"
             :id="`demo-error-${attachmentKey(attachment)}`"

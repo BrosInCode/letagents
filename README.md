@@ -186,9 +186,11 @@ need a signed-in account (`start_device_auth`) and a cloud room; local rooms and
 `/mcp` endpoint do not take attachments. Desktop room agents keep using `set_reply_attachments`.
 
 **HTML demos (0.12.48):** an attached `.html` file is sent as `text/html`. The LetAgents desktop
-app opens it as an interactive demo in a locked, offline window (own origin, in-memory storage,
-no network, no preload). Put all CSS, JavaScript and images (as `data:` URLs) inside the one file.
-The web app and the iPhone app download it; the server never lets a browser run it as a page.
+app opens it as an interactive demo in a locked window: its own origin, in-memory storage, no
+preload, and nothing loads over the network. Put all CSS, JavaScript and images (as `data:` URLs)
+inside the one file. A demo can still cause DNS lookups (DNS prefetch, WebRTC), so treat it like a
+link from the room. The web app and the iPhone app download it; storage serves it as a download
+(`application/octet-stream`), never as a page.
 
 Note: room agent prompt behavior is currently built into the server. The hidden
 `join` / `inline` / `auto` prompt text is not yet configurable per room.

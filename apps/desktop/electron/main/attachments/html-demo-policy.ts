@@ -2,8 +2,9 @@ import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 
 /**
  * An HTML demo is a single file someone attached to a room message. It opens
- * in its own window, offline, with no preload, no Node and no app sign-in:
- * scripts and styles must be inline, and images must be data: or blob: URLs.
+ * in its own window with no preload, no Node and no app sign-in, and nothing
+ * loads over the network: scripts and styles must be inline, and images must
+ * be data: or blob: URLs. DNS lookups (DNS prefetch, WebRTC) remain possible.
  */
 export const MAX_HTML_DEMO_BYTES = 10 * 1024 * 1024;
 export const MAX_OPEN_HTML_DEMOS = 6;
@@ -45,8 +46,7 @@ export function isAllowedHtmlDemoRequest(rawUrl: string): boolean {
   }
   return url.protocol === `${htmlDemoProtocolScheme}:`
     || url.protocol === "data:"
-    || url.protocol === "blob:"
-    || url.protocol === "devtools:";
+    || url.protocol === "blob:";
 }
 
 /** Only attachment links the app itself made may open as a demo. */
@@ -74,7 +74,8 @@ export function htmlDemoWindowTitle(fileName: unknown, senderLabel: unknown): st
 
 function cleanLabel(value: unknown): string {
   return typeof value === "string"
-    ? value.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120)
+    // Control characters, and direction marks that could reorder "from <sender>".
+    ? value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim().slice(0, 120)
     : "";
 }
 

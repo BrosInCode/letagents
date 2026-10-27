@@ -22,6 +22,7 @@ describe("HTML demo policy", () => {
       "wss://example.com/socket",
       "file:///etc/passwd",
       "letagents-attachment://download/L3Jvb21z",
+      "devtools://devtools/bundled/inspector.html",
       "not a url",
     ]) {
       assert.equal(isAllowedHtmlDemoRequest(url), false, url);
@@ -75,6 +76,7 @@ describe("HTML demo policy", () => {
   it("names the window after the file and the sender, without control characters", () => {
     assert.equal(htmlDemoWindowTitle("checkout.html", "Ada"), "Demo · checkout.html · from Ada");
     assert.equal(htmlDemoWindowTitle("x\u0007.html", null), "Demo · x.html");
+    assert.equal(htmlDemoWindowTitle("a\u202Elmth.exe", "Ada\u2066\u0085"), "Demo · almth.exe · from Ada");
     assert.equal(htmlDemoWindowTitle("", undefined), "Demo · demo.html");
     assert.equal(htmlDemoWindowTitle("a".repeat(400), "b").length < 280, true);
   });

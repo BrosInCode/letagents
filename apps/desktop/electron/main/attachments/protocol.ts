@@ -16,7 +16,7 @@ const ATTACHMENT_RESPONSE_SECURITY_HEADERS = {
 } as const;
 
 /** The sign-in goes only to a message attachment download, never to another API path. */
-const CLOUD_ATTACHMENT_PATH = /\/(?:rooms|projects)\/[^?#]+\/messages\/[^/]+\/attachments\/[^/]+$/;
+const CLOUD_ATTACHMENT_PATH = /^\/(?:rooms|projects)\/[^?#]+\/messages\/[^/]+\/attachments\/[^/]+$/;
 
 export async function handleAttachmentProtocolRequest(request: Request): Promise<Response> {
   return attachmentResponse(request.url);

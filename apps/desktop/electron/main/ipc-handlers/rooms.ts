@@ -72,6 +72,7 @@ import {
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
+import { getMainWindow } from "../window.js";
 import {
   acknowledgeDesktopRoomStreamGapRepair,
   startDesktopRoomStream,
@@ -298,8 +299,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:room:open-html-demo",
-    async (_event, href: unknown, fileName: unknown, senderLabel: unknown): Promise<void> =>
-      openHtmlDemo({ href, fileName, senderLabel }),
+    async (event, href: unknown, fileName: unknown, senderLabel: unknown): Promise<void> => {
+      if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
+      await openHtmlDemo({ href, fileName, senderLabel });
+    },
   );
   targetIpcMain.handle(
     "desktop:room:discard-attachment",
