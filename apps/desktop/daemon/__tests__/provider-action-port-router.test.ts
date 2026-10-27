@@ -1848,6 +1848,21 @@ test("the router asks the adapter how the current handle takes images, and answe
   assert.deepEqual(asked, [{ workAttemptId: "images", pid: replacement.pid }]);
 });
 
+test("the router asks the adapter which files the current handle opens, and answers none for any other handle", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "files", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  assert.equal(await router.roomTurnFileAccess(handle), null, "an adapter without the question opens none");
+  adapter.roomTurnFileAccess = () => ({ text: true, pdf: false });
+  assert.deepEqual(await router.roomTurnFileAccess(handle), { text: true, pdf: false });
+  assert.equal(await router.roomTurnFileAccess({ ...handle, workAttemptId: "never-spawned" }), null, "a handle the router never held");
+  assert.equal(await router.roomTurnFileAccess({ ...handle, pid: (handle.pid ?? 0) + 1 }), null, "a handle with another process");
+  const replacement = await router.spawn(spawn);
+  assert.equal(await router.roomTurnFileAccess(handle), null, "the replaced handle");
+  assert.deepEqual(await router.roomTurnFileAccess(replacement), { text: true, pdf: false });
+});
+
 test("the router answers no image delivery when the adapter has no such question", async () => {
   const adapter = fakeAdapter("codex", []);
   assert.equal(Object.hasOwn(adapter, "roomTurnImageDelivery"), false);

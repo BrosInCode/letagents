@@ -5221,3 +5221,20 @@ test("Open Model restores compaction progress on a result re-read and preserves 
   assert.equal(adapter.compactionProgress(handle.workAttemptId), null);
   assert.equal(harness.promptBodies.length, 0);
 });
+
+test("Open Model opens staged room files only when its running runtime may read outside its project", async () => {
+  const full = await spawnAdapter({ permissionProfileId: "full_access" });
+  const auto = await spawnAdapter({ permissionProfileId: "auto_review",
+    launchPolicy: { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" } } });
+  assert.deepEqual(full.adapter.roomTurnFileAccess(full.handle), { text: true, pdf: false });
+  assert.equal(auto.adapter.roomTurnFileAccess(auto.handle), null, "Auto refuses every folder outside the project");
+  assert.equal(full.adapter.roomTurnFileAccess(auto.handle), null, "a handle this adapter does not hold is not trusted");
+  // After a daemon restart the served configuration decides.
+  full.harness.setConfig({ model: "letagents-open-model/qwen/qwen3-coder", permission: { "*": "allow", external_directory: "deny" } });
+  const replacement = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot: full.runtimeRoot,
+    dependencies: full.harness.dependencies, startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
+  const attached = await replacement.attach({ workAttemptId: full.handle.workAttemptId,
+    providerContinuationId: full.handle.providerContinuationId!, providerConnection: null });
+  assert.ok(attached && !("state" in attached));
+  assert.equal(replacement.roomTurnFileAccess(attached), null);
+});

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../../shared/provider-permissions.js";
-import { sameProviderConnectionIdentity, PROCESS_ENDED_DURING_TURN, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderStreamEvent, type ProviderTerminalPayload, type NativeExecutionObservation, type NativeExecutionSubscription, type ControlProbeResult } from "../provider-adapter.js";
+import { sameProviderConnectionIdentity, PROCESS_ENDED_DURING_TURN, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderStreamEvent, type ProviderTerminalPayload, type NativeExecutionObservation, type NativeExecutionSubscription, type ControlProbeResult } from "../provider-adapter.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { exactClaudeStreamTerminal, recoverExactClaudeTurnFromSession, recoverExactClaudeTurnFailureFromSession } from "../claude-room-turn-evidence.js";
@@ -190,6 +190,11 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
   /** Claude Code takes base64 image blocks on stdin and resizes them itself. */
   roomTurnImageDelivery(): RoomTurnImageDelivery {
     return "memory";
+  }
+
+  /** Claude Code's Read tool opens text and PDFs anywhere on this machine, at every permission level it is launched with. */
+  roomTurnFileAccess(): RoomTurnFileAccess {
+    return { text: true, pdf: true };
   }
 
   async runRoomTurn(

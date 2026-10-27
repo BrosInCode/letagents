@@ -385,6 +385,15 @@ export function parseConfiguredOpenModelImageInput(config: OpenCodeConfig): bool
   return Array.isArray(input) && input.includes("image");
 }
 
+/** The runtime's own permission decides whether its agent may read outside its project. */
+export function parseConfiguredOpenModelExternalReads(config: OpenCodeConfig): boolean {
+  const permission = (config as { permission?: unknown }).permission;
+  if (permission === "deny") return false;
+  if (!permission || typeof permission !== "object" || Array.isArray(permission)) return true;
+  const rules = permission as Record<string, unknown>;
+  return (rules.external_directory ?? rules["*"]) !== "deny";
+}
+
 export function parseConfiguredOpenModel(config: OpenCodeConfig): string | null {
   const model = typeof config.model === "string" ? config.model : "";
   const prefix = `${OPEN_MODEL_OPENCODE_PROVIDER_ID}/`;

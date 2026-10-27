@@ -1,5 +1,5 @@
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
-import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnImageDelivery } from "../provider-action-port.js";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnFileAccess, type RoomTurnImageDelivery } from "../provider-action-port.js";
 import { ReplyTurnCompactionObserver } from "../reply-turn-compaction.js";
 import { RoomLatencyTrace } from "../room-latency-trace.js";
 import { activatingThreadRootId, recentRoomImageMessages, rememberedRoomTurnFiles, ROOM_TURN_RECENT_MESSAGE_WINDOW, type PreparedRoomTurnAttachments } from "../room-turn-attachments.js";
@@ -268,10 +268,13 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
         const handle = agent.handle;
         const delivery: RoomTurnImageDelivery = handle && this.provider.roomTurnImageDelivery
           ? await this.provider.roomTurnImageDelivery(handle).catch(() => null) : null;
+        // A guest works through the room's tools and must not read this Mac.
+        const fileAccess: RoomTurnFileAccess = handle && this.provider.roomTurnFileAccess && !agent.agentId.startsWith("supervised_rental_")
+          ? await this.provider.roomTurnFileAccess(handle).catch(() => null) : null;
         // A thread whose root the room context lacks is read, and only for an
-        // agent that can see its images. A context that holds the root holds
+        // agent that can take its files. A context that holds the root holds
         // every later reply too.
-        const threadRootId = delivery ? activatingThreadRootId(item.source_message, item.source_message_id) : null;
+        const threadRootId = delivery || fileAccess ? activatingThreadRootId(item.source_message, item.source_message_id) : null;
         const contextHasRoot = observedContext.some(message => message && typeof message === "object"
           && (message as Record<string, unknown>).id === threadRootId);
         const thread = threadRootId && !contextHasRoot && this.http.thread
@@ -290,7 +293,7 @@ export abstract class SupervisedAgentDeliveryTurn extends SupervisedAgentDeliver
           ? await this.inbox.roomTurnFileOutcomes(agent.agentId, agent.roomId, continuation, item.inbox_item_id).catch(() => new Map())
           : new Map();
         preparedAttachments = await this.roomTurnAttachments.prepare({
-          delivery,
+          delivery, fileAccess,
           localRoom: isLocalRoomApi(agent.apiUrl),
           sourceMessage: item.source_message, sourceMessageId: item.source_message_id,
           recentMessages, earlierOutcomes,
