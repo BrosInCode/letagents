@@ -65,12 +65,12 @@
             class="composer-add-btn"
             type="button"
             :disabled="addMenuDisabled"
-            :aria-label="promptMode === 'off' ? 'Add to message' : 'Add to message, agent prompts enabled'"
-            :title="promptMode === 'off' ? 'Add to message' : 'Add to message · agent prompts enabled'"
+            :aria-label="autoKeepPolling ? 'Add to message, auto read and poll enabled' : 'Add to message'"
+            :title="autoKeepPolling ? 'Add to message · auto read and poll enabled' : 'Add to message'"
             aria-haspopup="menu"
             :aria-expanded="menuOpen"
             :aria-controls="menuOpen ? `${composerId}-add-menu` : undefined"
-            :data-prompts-active="promptMode !== 'off'"
+            :data-prompts-active="autoKeepPolling"
             @click="toggleAddMenu"
             @keydown="handleAddTriggerKey"
           >
@@ -117,20 +117,6 @@
                   <span class="composer-menu-meta">Keep agents polling this room with quiet reminders every 20 seconds.</span>
                 </span>
                 <span class="composer-menu-check" aria-hidden="true">{{ autoKeepPolling ? '✓' : '' }}</span>
-              </button>
-              <button
-                class="composer-menu-item"
-                type="button"
-                role="menuitemcheckbox"
-                tabindex="-1"
-                :aria-checked="injectPrompt"
-                @click="toggleInjectPrompt"
-              >
-                <span class="composer-menu-copy">
-                  <span>Attach room prompt</span>
-                  <span class="composer-menu-meta">Include a hidden stay-in-room prompt with your message.</span>
-                </span>
-                <span class="composer-menu-check" aria-hidden="true">{{ injectPrompt ? '✓' : '' }}</span>
               </button>
             </template>
           </div>
@@ -268,10 +254,7 @@ const {
   menuEl,
   menuOpen,
   autoKeepPolling,
-  injectPrompt,
-  promptMode,
   toggleAutoKeepPolling,
-  toggleInjectPrompt,
 } = useComposerPrompts({
   enabled: computed(() => !props.inlineThread),
   roomIdentifier: roomIdentifierRef,
@@ -485,10 +468,9 @@ async function sendRoomMessage() {
   }
 
   const finishMotion = props.inlineThread ? undefined : messageMotion?.capture(trimmed, textareaEl.value)
-  const kind = injectPrompt.value ? 'inline' : null
   isSending.value = true
   try {
-    const sent = await submitComposerMessage(trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
+    const sent = await submitComposerMessage(trimmed, null, props.replyTo?.id || null, buildOutgoingAttachments())
     if (!sent || props.roomIdentifier !== submittedRoom) return
 
     typing.stop()

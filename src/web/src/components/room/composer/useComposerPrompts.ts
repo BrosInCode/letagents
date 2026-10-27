@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
 import type { OutgoingMessageAttachment } from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
@@ -19,17 +19,9 @@ export function useComposerPrompts(input: {
   const menuEl = ref<HTMLDivElement | null>(null)
   const menuOpen = ref(false)
   const autoKeepPolling = ref(false)
-  const injectPrompt = ref(false)
 
   let keepPollingTimer: ReturnType<typeof setInterval> | null = null
   let keepPollingInFlight = false
-
-  const promptMode = computed(() => {
-    if (autoKeepPolling.value && injectPrompt.value) return 'auto+inject'
-    if (autoKeepPolling.value) return 'auto'
-    if (injectPrompt.value) return 'inject'
-    return 'off'
-  })
 
   function prefsKey(): string {
     const room = input.roomIdentifier.value
@@ -40,7 +32,6 @@ export function useComposerPrompts(input: {
     try {
       localStorage.setItem(prefsKey(), JSON.stringify({
         autoKeepPolling: autoKeepPolling.value,
-        injectPrompt: injectPrompt.value,
       }))
     } catch { /* silent */ }
   }
@@ -52,10 +43,8 @@ export function useComposerPrompts(input: {
       if (!raw) return
       const saved = JSON.parse(raw)
       autoKeepPolling.value = Boolean(saved.autoKeepPolling)
-      injectPrompt.value = Boolean(saved.injectPrompt)
     } catch {
       autoKeepPolling.value = false
-      injectPrompt.value = false
     }
   }
 
@@ -100,11 +89,6 @@ export function useComposerPrompts(input: {
     }
   }
 
-  function toggleInjectPrompt() {
-    injectPrompt.value = !injectPrompt.value
-    persistPrefs()
-  }
-
   function handleDocClick(e: MouseEvent) {
     if (menuOpen.value && menuEl.value && !menuEl.value.contains(e.target as Node)) {
       menuOpen.value = false
@@ -136,10 +120,7 @@ export function useComposerPrompts(input: {
     menuEl,
     menuOpen,
     autoKeepPolling,
-    injectPrompt,
-    promptMode,
     toggleAutoKeepPolling,
-    toggleInjectPrompt,
     stopKeepPollingLoop,
   }
 }
