@@ -904,7 +904,7 @@ function imageTurn(png = pngView()): ProviderRoomTurnRequest {
     sourceMessage: { id: "message-1", text: "What is in these?" },
     activation: { decision: "activate" },
     attachments: [
-      { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "not_image" },
+      { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "cannot_read_pdf", category: "file" },
       { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: png.bytes.length, status: "image",
         image: { mimeType: "image/png", data: png.view } },
       { index: 3, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
@@ -934,7 +934,7 @@ test("Open Model sends included images as labelled data-URL file parts when its 
   const [prompt, ...rest] = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
   assert.equal(prompt!.type, "text");
   assert.match(String(prompt!.text), /Included after this text as image 1\./);
-  assert.match(String(prompt!.text), /Attachment 1: "notes\.pdf" \(application\/pdf, 500 bytes\)\. Not shown: only images/);
+  assert.match(String(prompt!.text), /Attachment 1: "notes\.pdf" \(application\/pdf, 500 bytes\)\. Not given: this agent cannot read PDFs\./);
   assert.deepEqual(rest, [
     { type: "text", text: 'Image 1: "shot \\"1\\".png"' },
     { type: "file", mime: "image/png", filename: 'shot "1".png', url: `data:image/png;base64,${Buffer.from(png.bytes).toString("base64")}` },
