@@ -56,7 +56,7 @@ const emit = defineEmits<{ refresh: []; loadOlder: []; openTask: [id: string] }>
   .activity-detail h3, .activity-reviews li, .activity-jobs li, .activity-history li
 )) { border-color: var(--border-strong); }
 .web-room-activity :deep(.activity-detail-scroll) { scrollbar-color: var(--scrollbar-thumb) transparent; }
-.web-room-activity :deep([data-tone="purple"]) { color: var(--task-assigned); }
+.web-room-activity :deep(.room-activity [data-tone="purple"]) { color: var(--task-assigned); }
 .web-room-activity :deep(:is([data-tone="red"], .activity-notice, .activity-jobs [data-state="Failed"] .activity-job-mark)) { color: var(--red-text); }
 .web-room-activity :deep(:is([data-tone="blue"], .activity-jobs [data-state="Running"] .activity-job-mark)) { color: var(--blue-text); }
 .web-room-activity :deep(:is([data-tone="green"], .activity-jobs [data-state="Passed"] .activity-job-mark)) { color: var(--green-text); }
