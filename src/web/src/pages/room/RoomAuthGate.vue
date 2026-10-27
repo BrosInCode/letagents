@@ -126,6 +126,8 @@ defineEmits<{
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 100vh;
+  min-height: 100dvh;
+  padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
   overflow: hidden;
   background:
     radial-gradient(circle at 72% 34%, rgba(145, 167, 255, 0.09), transparent 28rem),
@@ -154,7 +156,7 @@ defineEmits<{
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 22px 32px;
+  padding: max(22px, env(safe-area-inset-top, 0px)) 32px max(22px, env(safe-area-inset-bottom, 0px));
 }
 
 .auth-gate-header {
@@ -468,7 +470,7 @@ defineEmits<{
 @media (max-width: 560px) {
   .auth-gate-header,
   .auth-gate-footer {
-    padding: 18px 20px;
+    padding: max(18px, env(safe-area-inset-top, 0px)) 20px max(18px, env(safe-area-inset-bottom, 0px));
   }
 
   .auth-boundary-label {
