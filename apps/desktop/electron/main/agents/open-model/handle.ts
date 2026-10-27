@@ -21,6 +21,8 @@ export class OpenModelHandle implements ProviderHandle {
   launchNotices: readonly string[] = [];
   /** This runtime was started with image input for its model, so it takes the activating message's images. */
   imageInput = false;
+  /** This runtime may read outside its project, so it can open the room files staged for a turn. */
+  externalReads = false;
 
   constructor(
     readonly workAttemptId: string,

@@ -741,7 +741,8 @@ test("the activating message's images reach that turn only, and a staged file st
   try {
     const polled = delivery.poll(agent);
     await turnRunning.promise;
-    assert.deepEqual(seen.map(file => [file.status, file.existed]), [["image", true], ["not_image", false]]);
+    assert.deepEqual(seen.map(file => [file.status, file.existed]), [["image", true], ["cannot_read", false]],
+      "a provider that says nothing of files is given none");
     assert.deepEqual(downloads, [{ messageId: "msg_5", attachmentId: "att_1", bearer: "memory" }], "only the image is downloaded, with the worker bearer");
     finishTurn.resolve();
     await polled;

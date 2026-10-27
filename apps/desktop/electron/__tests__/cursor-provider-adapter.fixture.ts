@@ -1668,6 +1668,6 @@ export function stagedImageAttachments(folder: string) {
   return [
     { index: 1, fileName: "screen.png", mimeType: "image/png", sizeBytes: 12, status: "image" as const,
       image: { mimeType: "image/png" as const, path: join(folder, "1.png") } },
-    { index: 2, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 5, status: "not_image" as const },
+    { index: 2, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 5, status: "cannot_read_pdf" as const, category: "file" as const },
   ];
 }

@@ -2,7 +2,7 @@ import { lstatSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { cursorSandboxPathVariants } from "./cursor-sandbox-policy.js";
-import { includedRoomTurnImages } from "./desktop-event-prompt-format.js";
+import { includedRoomTurnImages, stagedRoomTurnFilePaths } from "./desktop-event-prompt-format.js";
 import type { ProviderRoomTurnRequest } from "./provider-adapter.js";
 
 /**
@@ -27,10 +27,9 @@ export function cursorRoomTurnImageLines(request: ProviderRoomTurnRequest): stri
   ];
 }
 
-/** The folders of this turn's staged images: read-only for this one launch. */
+/** The folders of this turn's staged images and files: read-only for this one launch. */
 export function cursorRoomTurnImageFolders(request: ProviderRoomTurnRequest): string[] {
-  return [...new Set(includedRoomTurnImages(request.attachments).flatMap(image => image.path ? [dirname(image.path)] : []))]
-    .filter(stagedImageFolderIsPlain);
+  return [...new Set(stagedRoomTurnFilePaths(request.attachments).map(path => dirname(path)))].filter(stagedImageFolderIsPlain);
 }
 
 /** A staged folder that was replaced by a link, or is not this user's own folder, is never opened to the sandbox. */

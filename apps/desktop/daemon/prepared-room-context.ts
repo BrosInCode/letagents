@@ -37,7 +37,13 @@ export function prepareRoomContext(messages: readonly unknown[], preparedAt: str
  * refused for good by its bytes, or noted for a provider that takes no
  * images (turning images on starts a new conversation).
  */
-export type RoomTurnFileOutcome = "image" | "not_image" | "too_large" | "provider_unsupported";
+export type RoomTurnFileOutcome = "image" | "not_image" | "too_large" | "provider_unsupported"
+  /** A text file or PDF was staged; only its notes on later turns change. */
+  | "file"
+  | "file_too_large" | "binary" | "empty"
+  /** This agent cannot open such a file; a change of that starts a new runtime and conversation. */
+  | "cannot_read";
+const RECORDED_OUTCOMES = new Set<string>(["image", "not_image", "too_large", "provider_unsupported", "file", "file_too_large", "binary", "empty", "cannot_read"]);
 /** The room files a provider turn was given or refused for good, for the conversation that holds them. */
 export type PreparedRoomTurnFiles = {
   continuation: string;
@@ -89,11 +95,12 @@ export function readPreparedRoomTurnFiles(database: DatabaseSync, input: {
     for (const file of files) {
       const entry = file && typeof file === "object" ? file as Record<string, unknown> : {};
       if (typeof entry.message_id !== "string" || typeof entry.attachment_id !== "string"
-        || !["image", "not_image", "too_large", "provider_unsupported"].includes(String(entry.outcome))) continue;
-      if (entry.outcome === "image" && Number(row.turn) > RECENT_TURNS_WITH_IMAGES) continue;
+        || !RECORDED_OUTCOMES.has(String(entry.outcome))) continue;
+      if ((entry.outcome === "image" || entry.outcome === "file") && Number(row.turn) > RECENT_TURNS_WITH_IMAGES) continue;
       const key = `${entry.message_id}\n${entry.attachment_id}`;
-      // Shown once is what matters most; a refusal never hides that.
-      if (outcomes.get(key) !== "image") outcomes.set(key, entry.outcome as RoomTurnFileOutcome);
+      // Given once is what matters most; a refusal never hides that.
+      const known = outcomes.get(key);
+      if (known !== "image" && known !== "file") outcomes.set(key, entry.outcome as RoomTurnFileOutcome);
     }
   }
   return outcomes;

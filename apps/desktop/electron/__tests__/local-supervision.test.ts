@@ -881,3 +881,32 @@ test("a local thread reply's agent reads the thread's earlier images through the
   assert.deepEqual(Buffer.from(prepared.attachments[0].image.data), png);
   await prepared.release();
 });
+
+test("a local room's log file reaches the agent as a staged copy, read from its stored file", async () => {
+  const { mkdir, writeFile, readFile: read } = await import("node:fs/promises");
+  const { pathToFileURL } = await import("node:url");
+  const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  const { RoomTurnAttachmentStager } = await import(new URL("../../daemon/room-turn-attachments.ts", import.meta.url).href);
+  const roomId = "local_files";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "files");
+  const log = Buffer.from("step 1 ok\nstep 2 failed\n");
+  const filesDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, roomId);
+  await mkdir(filesDir, { recursive: true });
+  const stored = join(filesDir, "build.log");
+  await writeFile(stored, log);
+  const message = await addLocalChatMessage(roomId, { sender: "You", source: "browser", text: "@Oak why?", attachments: [
+    { id: "local:log", file_name: "build.log", mime_type: "text/plain", size_bytes: log.byteLength,
+      url: pathToFileURL(stored).toString(), download_url: pathToFileURL(stored).toString() },
+    { id: "legacy-log", file_name: "old.log", mime_type: "text/plain", size_bytes: log.byteLength, content_base64: log.toString("base64") },
+  ] });
+  const polled = (await oak.request("messages")).messages.find((item: { id: string }) => item.id === message.id);
+  const stager = new RoomTurnAttachmentStager(join(environment.tempDir, "room-turn-files"));
+  const prepared = await stager.prepare({ delivery: "memory", fileAccess: { text: true, pdf: false }, localRoom: true,
+    sourceMessage: polled, sourceMessageId: message.id, roomId, apiUrl: origin, bearer: oak.session.worker_bearer,
+    http: productionSupervisedDeliveryHttp, signal: AbortSignal.timeout(10_000) });
+  assert.deepEqual(prepared.attachments.map((item: { status: string }) => item.status), ["file", "file"],
+    "an older row's inline copy of a text file reads too");
+  for (const item of prepared.attachments) assert.deepEqual(await read(item.file.path), log);
+  await prepared.release();
+});

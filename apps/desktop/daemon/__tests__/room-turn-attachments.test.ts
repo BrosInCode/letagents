@@ -108,8 +108,8 @@ test("only images an agent can take are downloaded; every other file gets a reas
     }, downloads, (id) => id === "att_4" ? new TextEncoder().encode("<html>not an image</html>")
       : id === "att_5" ? new RoomAttachmentDownloadError("unavailable") : PNG));
     assert.deepEqual(prepared.attachments.map(file => [file.index, file.status]), [
-      [1, "image"], [2, "not_image"], [3, "too_large"], [4, "not_image"], [5, "unavailable"], [6, "unavailable"],
-    ]);
+      [1, "image"], [2, "cannot_read"], [3, "too_large"], [4, "not_image"], [5, "unavailable"], [6, "unavailable"],
+    ], "an agent that opens no files gets the PDF as a note");
     assert.deepEqual(prepared.attachments[0], { index: 1, fileName: "att_1.png", mimeType: "image/png", sizeBytes: PNG.byteLength,
       status: "image", image: { mimeType: "image/png", data: PNG } });
     assert.deepEqual(downloads.map(item => item.attachmentId), ["att_1", "att_4", "att_5"]);
@@ -562,16 +562,16 @@ test("a recent message's images follow the activating message's, each named by i
       recentFrom("msg_5", [attachment("att_50", { filename: "bug.png" })]),
     ] }, downloads));
     assert.deepEqual(prepared.attachments.map(file => [file.origin?.messageId ?? "source", file.index, file.status]), [
-      ["source", 1, "image"], ["msg_6", 1, "image"], ["msg_5", 1, "image"],
-    ], "a recent message's other files stay out: its context lists them");
+      ["source", 1, "image"], ["msg_6", 1, "image"], ["msg_6", 2, "cannot_read"], ["msg_5", 1, "image"],
+    ], "a text file of a recent message is described too; this agent opens no files");
     assert.deepEqual(prepared.attachments[1]?.origin, { messageId: "msg_6", sender: "Sender msg_6", inThread: true });
     assert.deepEqual(downloads.map(item => [item.messageId, item.attachmentId]), [["msg_7", "att_70"], ["msg_6", "att_60"], ["msg_5", "att_50"]]);
-    assert.deepEqual(prepared.attachments.map(file => file.image?.path?.split("/").at(-1)), ["1.png", "2.png", "3.png"],
+    assert.deepEqual(prepared.attachments.map(file => file.image?.path?.split("/").at(-1)), ["1.png", "2.png", undefined, "3.png"],
       "files of two messages with the same index never collide");
     assert.deepEqual(prepared.outcomes, [
       { messageId: "msg_7", attachmentId: "att_70", outcome: "image" }, { messageId: "msg_6", attachmentId: "att_60", outcome: "image" },
-      { messageId: "msg_5", attachmentId: "att_50", outcome: "image" },
-    ]);
+      { messageId: "msg_5", attachmentId: "att_50", outcome: "image" }, { messageId: "msg_6", attachmentId: "att_61", outcome: "cannot_read" },
+    ], "images are fetched before files");
     await prepared.release();
   });
 });

@@ -1,6 +1,6 @@
 /** The Open Model provider adapter: room turns, turn control, repair, stop, listeners, permissions and the shared instance. */
 import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
-import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, type ProviderActivityEvent, type ProviderAdapter, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, type ProviderActivityEvent, type ProviderAdapter, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "../provider-adapter.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { OPEN_MODEL_OPENCODE_PROVIDER_ID } from "../opencode-launch-contract.js";
 import { nativeExecutionId } from "../provider-execution-observer.js";
@@ -17,6 +17,11 @@ export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements 
   /** Only a runtime started with image input for its model takes images. */
   roomTurnImageDelivery(rawHandle: ProviderHandle): RoomTurnImageDelivery {
     try { return this.required(rawHandle).imageInput ? "memory" : null; } catch { return null; }
+  }
+
+  /** OpenCode's read tool opens text; a runtime that may not leave its project opens nothing staged. */
+  roomTurnFileAccess(rawHandle: ProviderHandle): RoomTurnFileAccess {
+    try { return this.required(rawHandle).externalReads ? { text: true, pdf: false } : null; } catch { return null; }
   }
 
   async runRoomTurn(
