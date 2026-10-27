@@ -525,7 +525,7 @@
 .desktop-composer-under {
   display: flex;
   align-items: center;
-  margin-top: 4px;
+  min-width: 0;
 }
 
 .desktop-composer-access-wrap {
