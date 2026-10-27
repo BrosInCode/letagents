@@ -141,9 +141,9 @@
 
 .desktop-composer-ghost {
   position: absolute;
-  top: 7px;
-  right: 3px;
-  left: 3px;
+  top: 6px;
+  right: 7px;
+  left: 7px;
   overflow: hidden;
   color: var(--text-tertiary);
   font-size: 0.88rem;
