@@ -51,6 +51,8 @@ test("the spool refuses files outside the workspace, through symlinks or hard li
     await writeFile(outside, "owner secret");
     await symlink(outside, join(env.workspace, "innocent.png"));
     await symlink(env.root, join(env.workspace, "parent"));
+    // Stricter than a containment check: a link that stays inside the workspace is refused too.
+    await symlink(join(env.workspace, "shots"), join(env.workspace, "latest"));
     await link(outside, join(env.workspace, "hard.txt"));
     await mkdir(join(env.workspace, ".git"));
     await writeFile(join(env.workspace, ".git", "config"), "[remote] url = https://token@example.test");
@@ -68,6 +70,7 @@ test("the spool refuses files outside the workspace, through symlinks or hard li
       ["../outside-secret.txt", /outside your workspace/],
       ["innocent.png", /outside your workspace/],
       ["parent/outside-secret.txt", /outside your workspace/],
+      ["latest/result.png", /reached through a link/],
       ["hard.txt", /hard link/],
       [".git/config", /credentials/],
       [".env", /credentials/], [".env.local", /credentials/], [".envrc", /credentials/], ["id_ed25519", /credentials/],

@@ -61,7 +61,11 @@ export function registerTools(
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);
   registerRepoInitializationTool(tools);
-  registerMessageTools(tools, { includeDeliveryLoop: surface.deliveryLoop });
+  // The remote endpoint runs on the LetAgents server, which has none of the caller's files.
+  registerMessageTools(tools, {
+    includeDeliveryLoop: surface.deliveryLoop,
+    fileAttachments: surface.messageFileAttachments && !options.remote,
+  });
   if (profile === "supervised_room_turn") registerReplyThreadTool(tools);
   if (profile === "supervised_room_turn" && supervisedProvider === "cursor") registerSupervisedRoomTurnTools(tools);
   if (surface.onboarding) registerOnboardingTools(tools);

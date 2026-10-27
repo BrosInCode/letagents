@@ -39,6 +39,9 @@ test("the remote surface is exactly the allow list, and every stdio tool is clas
   for (const name of Object.keys(REMOTE_EXCLUDED_TOOLS)) assert.equal(stdio.has(name), true, `${name} exists in stdio`);
   for (const [name, schema] of remote) assert.equal(Object.hasOwn(schema, "cwd"), false, `${name} has no cwd input`);
   assert.equal(Object.hasOwn(stdio.get("register_agent_session")!, "cwd"), true, "stdio keeps cwd");
+  // The server has no caller files to attach; stdio reads them from the caller's workspace.
+  for (const [name, schema] of remote) assert.equal(Object.hasOwn(schema, "attachments"), false, `${name} has no attachments input`);
+  for (const name of ["send_message", "send_thread_message"]) assert.equal(Object.hasOwn(stdio.get(name)!, "attachments"), true, `stdio ${name} keeps attachments`);
 });
 
 test("the remote proxy strips cwd from registerTool and refuses shapes it does not know", () => {
@@ -49,7 +52,7 @@ test("the remote proxy strips cwd from registerTool and refuses shapes it does n
   } as unknown as McpServer;
   const remote = remoteToolServer(base);
   const callback = async () => ({ content: [] });
-  remote.registerTool("send_message", { inputSchema: { cwd: {}, text: {} } } as never, callback as never);
+  remote.registerTool("send_message", { inputSchema: { cwd: {}, attachments: {}, text: {} } } as never, callback as never);
   assert.deepEqual(Object.keys((calls[0]![2] as { inputSchema: object }).inputSchema), ["text"]);
   remote.registerTool("begin_workspace_capture", { inputSchema: { cwd: {} } } as never, callback as never);
   remote.tool("check_repo", "local", { cwd: {} } as never, callback as never);

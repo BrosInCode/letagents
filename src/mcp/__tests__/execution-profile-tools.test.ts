@@ -112,6 +112,36 @@ test('workspace capture tools are available to independent callers without dupli
   }
 });
 
+test("only the npm-package profiles offer file attachments on send_message and send_thread_message", () => {
+  const schemas = (profile: LetAgentsExecutionProfile, provider: string | null, options: Parameters<typeof registerTools>[3] = {}) => {
+    const found = new Map<string, Record<string, unknown>>();
+    const server = {
+      tool(name: string, ...registration: unknown[]) { found.set(name, (registration.at(-2) ?? {}) as Record<string, unknown>); return {}; },
+    } as unknown as McpServer;
+    registerTools(server, profile, provider, options);
+    return found;
+  };
+  const cases: Array<[LetAgentsExecutionProfile, string | null, Parameters<typeof registerTools>[3], boolean]> = [
+    ["autonomous_mcp_worker", null, {}, true],
+    ["interactive_desktop", null, {}, true],
+    // The remote endpoint runs on the LetAgents server, which has none of the caller's files.
+    ["autonomous_mcp_worker", null, { remote: true }, false],
+    // Supervised agents send through the daemon's effect journal and attach with set_reply_attachments.
+    ["supervised_room_turn", "codex", {}, false],
+    ["supervised_room_turn", "claude-code", {}, false],
+    ["supervised_room_turn", "cursor", {}, false],
+    ["supervised_room_turn", "codex", { executionOwner: "daemon" }, false],
+    ["supervised_mcp_polling", "codex", {}, false],
+  ];
+  for (const [profile, provider, options, offered] of cases) {
+    const found = schemas(profile, provider, options);
+    for (const name of ["send_message", "send_thread_message"]) {
+      assert.ok(found.has(name), `${profile} registers ${name}`);
+      assert.equal(Object.hasOwn(found.get(name)!, "attachments"), offered, `${profile} ${JSON.stringify(options)} ${name}`);
+    }
+  }
+});
+
 test("interactive desktop sessions retain rental tools", () => {
   const names = discovered("interactive_desktop");
   assert.equal(names.has("rental_list_requests"), true);
