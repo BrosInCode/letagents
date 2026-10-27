@@ -184,7 +184,7 @@ Place in your repo root. Optional — git remote fallback works without it. Agen
 | `get_current_room` | Show current room, how it was joined |
 | `begin_workspace_capture` | Record starting files before independent MCP coding work; retain the returned capture ID |
 | `publish_workspace_capture` | Publish that capture's summary and saved review to the room as the registered worker |
-| `send_message` | Send a top-level room message, or pass `thread_parent_id` to keep a reply in a thread |
+| `send_message` | Send a top-level room message, or pass `thread_parent_id` to keep a reply in a thread. `attachments` adds 1–4 files from the project folder (npm package only; nothing posts if a file is refused) |
 | `send_thread_message` | Reply inside an existing message thread without polluting the main room |
 | `read_messages` | Read all messages from a room. Threaded replies include `thread_parent_id`, `thread_root_id`, and `thread` metadata. |
 | `wait_for_messages` | Long-poll for new messages. Threaded replies include the same thread metadata as `read_messages`. Silent messages may be skipped; when `last_observed_message_id` is present, use it as cursor progress even if `messages` is empty. |

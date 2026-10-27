@@ -12,9 +12,12 @@ export function registerStatusTools(server: McpServer): void {
   registerPostReasoningTool(server);
 }
 
-export function registerMessageTools(server: McpServer, options: { includeDeliveryLoop?: boolean } = {}): void {
+export function registerMessageTools(
+  server: McpServer,
+  options: { includeDeliveryLoop?: boolean; fileAttachments?: boolean } = {},
+): void {
   registerExpressionTools(server);
-  registerSendMessageTool(server);
+  registerSendMessageTool(server, { fileAttachments: options.fileAttachments === true });
   registerReadMessagesTool(server);
   registerHistorySummaryTools(server);
   if (options.includeDeliveryLoop !== false) registerWaitForMessagesTool(server);
