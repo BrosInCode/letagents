@@ -339,3 +339,84 @@ test('room underline redirects from its visible position and skips keyboard and 
   assert.equal(calls.length, 2, 'reduced motion does not animate');
   assert.equal(indicator.style.transform, 'translate(320px, 42px)');
 });
+
+test('composer plus menu supports arrows, Home/End and Escape without losing the draft', async t => {
+  const { vm, props, sent } = mount(t);
+  const focused: string[] = [];
+  const item = (name: string) => ({ focus() { focused.push(name); (document as any).activeElement = this; } });
+  const attach = item('attach'), poll = item('poll'), prompt = item('prompt'), trigger = item('trigger');
+  vm.addTriggerEl.value = trigger;
+  vm.addMenuEl.value = { querySelectorAll: () => props.attachmentsEnabled ? [attach, poll, prompt] : [poll, prompt] };
+  vm.text.value = '/task Keep draft';
+  assert.equal(vm.suggestionsOpen.value, true);
+  props.attachmentsEnabled = false;
+  vm.handleAddTriggerKey(key('ArrowDown'));
+  await flush();
+  assert.equal(vm.menuOpen.value, true);
+  assert.equal(vm.animateAddMenu.value, false, 'keyboard opening does not animate');
+  assert.equal(focused.at(-1), 'poll', 'unavailable attachment row is skipped');
+  assert.equal(vm.suggestionsOpen.value, false, 'one suggestion surface at a time');
+  vm.handleAddMenuKey(key('ArrowDown'));
+  assert.equal(focused.at(-1), 'prompt');
+  vm.handleAddMenuKey(key('ArrowDown'));
+  assert.equal(focused.at(-1), 'poll', 'arrow selection wraps');
+  vm.handleAddMenuKey(key('End'));
+  assert.equal(focused.at(-1), 'prompt');
+  vm.handleAddMenuKey(key('Home'));
+  assert.equal(focused.at(-1), 'poll');
+  let stopped = false;
+  vm.handleAddMenuKey(key('Escape', { stopPropagation() { stopped = true; } }));
+  assert.equal(stopped, true, 'Escape does not close the containing thread');
+  assert.equal(vm.menuOpen.value, false);
+  assert.equal(focused.at(-1), 'trigger');
+  assert.equal(vm.text.value, '/task Keep draft');
+  assert.equal(vm.suggestionsOpen.value, true);
+  assert.deepEqual(sent, []);
+  vm.handleAddTriggerKey(key('ArrowUp'));
+  await flush();
+  assert.equal(focused.at(-1), 'prompt');
+  vm.handleAddMenuKey(key('Tab'));
+  assert.equal(vm.menuOpen.value, false);
+  assert.equal(focused.at(-1), 'trigger', 'Tab resumes the composer tab order');
+});
+
+test('composer plus attachment action preserves picker activation, availability guards and room dismissal', async t => {
+  const { vm, props } = mount(t);
+  let picked = 0;
+  vm.fileInputEl.value = { click() { picked++; } };
+  vm.addTriggerEl.value = { focus() {} };
+  vm.text.value = 'Draft with files';
+  vm.menuOpen.value = true;
+  vm.chooseAttachment();
+  assert.equal(picked, 1, 'picker opens synchronously within the user action');
+  assert.equal(vm.menuOpen.value, false);
+  assert.equal(vm.text.value, 'Draft with files');
+  props.attachmentsEnabled = false;
+  vm.chooseAttachment();
+  assert.equal(picked, 1);
+  props.attachmentsEnabled = true;
+  props.disabled = true;
+  vm.openAddMenu();
+  assert.equal(vm.menuOpen.value, false);
+  props.disabled = false;
+  vm.openAddMenu();
+  await flush();
+  assert.equal(vm.menuOpen.value, true);
+  props.roomIdentifier = 'room-b';
+  await flush();
+  assert.equal(vm.menuOpen.value, false, 'the old room menu closes on navigation');
+});
+
+test('composer bottom bar retains browser sign-in and exposes accessible plus and send controls', async () => {
+  const html = await renderToString(createSSRApp({ render: () => h(Composer, {
+    roomIdentifier: 'room-a', senderName: 'guest', isSignedIn: false,
+  }) }));
+  assert.match(html, /class="composer-add-btn"[^>]*aria-label="Add to message"[^>]*aria-haspopup="menu"[^>]*aria-expanded="false"/);
+  assert.match(html, /aria-label="Sending as guest"/);
+  assert.match(html, /class="composer-signin-btn"[^>]*>Sign in/);
+  assert.match(html, /aria-busy="false" aria-label="Send message"/);
+  assert.doesNotMatch(html, /composer-pills-row|prompt-trigger|class="attachment-btn"/);
+  const reply = await renderToString(createSSRApp({ render: () => h(Composer, { inlineThread: true, threadRootId: 'root-a' }) }));
+  assert.match(reply, /aria-label="Send reply"/);
+  assert.doesNotMatch(reply, /composer-signin-btn|composer-sender-label|Agent prompts/);
+});

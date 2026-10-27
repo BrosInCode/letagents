@@ -1,22 +1,6 @@
 <template>
   <form class="composer" :class="{ 'inline-thread-composer': inlineThread }" @submit.prevent="handleSend">
     <PresenceChips v-if="!inlineThread" :chips="presenceChips" />
-    <div v-if="!inlineThread" class="composer-pills-row">
-      <div class="composer-identity">
-        <span class="composer-sender-label">
-          Sending as <strong>{{ senderName }}</strong>
-        </span>
-        <button
-          v-if="!isSignedIn"
-          class="composer-signin-btn"
-          type="button"
-          @click="emit('signIn')"
-        >
-          Sign in
-        </button>
-      </div>
-      <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
-    </div>
     <div
       class="composer-card"
       :data-drag-active="isDragActive"
@@ -68,57 +52,7 @@
         />
       </div>
       <div class="composer-toolbar">
-        <div class="composer-toolbar-left">
-          <div v-if="!inlineThread" class="composer-toolbar-pills">
-            <!-- Prompt injection pill -->
-            <div class="prompt-menu" ref="menuEl">
-              <button
-                class="prompt-trigger"
-                type="button"
-                :data-mode="promptMode"
-                :aria-expanded="menuOpen"
-                :aria-controls="`${composerId}-prompt-panel`"
-                @click="menuOpen = !menuOpen"
-              >
-                <span>{{ promptLabel }}</span>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-              </button>
-              <div v-if="menuOpen" :id="`${composerId}-prompt-panel`" class="prompt-panel" @keydown.esc.stop.prevent="menuOpen = false">
-                <div class="prompt-panel-header">
-                  <strong>Agent prompts</strong>
-                </div>
-                <button
-                  class="prompt-option"
-                  type="button"
-                  :data-active="autoKeepPolling"
-                  @click="toggleAutoKeepPolling"
-                >
-                  <span class="prompt-option-copy">
-                    <span class="prompt-option-title">Auto read + poll</span>
-                    <span class="prompt-option-meta">Send quiet metadata-only reminders every 20s to keep agents polling this room.</span>
-                  </span>
-                  <span class="prompt-option-check">
-                    <template v-if="autoKeepPolling">✓</template>
-                  </span>
-                </button>
-                <button
-                  class="prompt-option"
-                  type="button"
-                  :data-active="injectPrompt"
-                  @click="toggleInjectPrompt"
-                >
-                  <span class="prompt-option-copy">
-                    <span class="prompt-option-title">Attach room prompt</span>
-                    <span class="prompt-option-meta">Send the visible message normally and attach the stay-in-room agent prompt as hidden metadata.</span>
-                  </span>
-                  <span class="prompt-option-check">
-                    <template v-if="injectPrompt">✓</template>
-                  </span>
-                </button>
-                <p class="prompt-help">Prompts stay out of the transcript. Injected visible messages get a small badge; auto-poll reminders stay hidden.</p>
-              </div>
-            </div>
-          </div>
+        <div ref="menuEl" class="composer-add-wrap">
           <input
             ref="fileInputEl"
             class="attachment-input"
@@ -127,22 +61,97 @@
             @change="handleFileSelection"
           >
           <button
-            class="attachment-btn"
+            ref="addTriggerEl"
+            class="composer-add-btn"
             type="button"
-            :disabled="disabled || isSending || !attachmentsAvailable || attachmentDrafts.length >= MAX_ATTACHMENTS"
-            @click="openFilePicker"
+            :disabled="addMenuDisabled"
+            :aria-label="promptMode === 'off' ? 'Add to message' : 'Add to message, agent prompts enabled'"
+            :title="promptMode === 'off' ? 'Add to message' : 'Add to message · agent prompts enabled'"
+            aria-haspopup="menu"
+            :aria-expanded="menuOpen"
+            :aria-controls="menuOpen ? `${composerId}-add-menu` : undefined"
+            :data-prompts-active="promptMode !== 'off'"
+            @click="toggleAddMenu"
+            @keydown="handleAddTriggerKey"
           >
-            Attach
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </button>
-          <span v-if="!attachmentsAvailable" class="attachment-count">
-            Unavailable
-          </span>
-          <span v-if="attachmentDrafts.length" class="attachment-count">
-            {{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}
-          </span>
+          <div
+            v-if="menuOpen"
+            :id="`${composerId}-add-menu`"
+            ref="addMenuEl"
+            class="composer-add-menu"
+            :data-animate="animateAddMenu || undefined"
+            role="menu"
+            aria-label="Add to message"
+            @keydown="handleAddMenuKey"
+          >
+            <button
+              class="composer-menu-item"
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              :disabled="!canAttach"
+              @click="chooseAttachment"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.4 11.6-9.2 9.2a6 6 0 0 1-8.5-8.5L13.6 2.4a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.2-9.2"/></svg>
+              <span class="composer-menu-copy">
+                <span>Attach files…</span>
+                <span v-if="!attachmentsAvailable" class="composer-menu-meta">Attachments are unavailable</span>
+                <span v-else-if="attachmentDrafts.length >= MAX_ATTACHMENTS" class="composer-menu-meta">Up to {{ MAX_ATTACHMENTS }} attachments per message</span>
+              </span>
+            </button>
+            <template v-if="!inlineThread">
+              <div class="composer-menu-separator" role="separator"></div>
+              <div class="composer-menu-heading">Agent prompts</div>
+              <button
+                class="composer-menu-item"
+                type="button"
+                role="menuitemcheckbox"
+                tabindex="-1"
+                :aria-checked="autoKeepPolling"
+                @click="toggleAutoKeepPolling"
+              >
+                <span class="composer-menu-copy">
+                  <span>Auto read + poll</span>
+                  <span class="composer-menu-meta">Keep agents polling this room with quiet reminders every 20 seconds.</span>
+                </span>
+                <span class="composer-menu-check" aria-hidden="true">{{ autoKeepPolling ? '✓' : '' }}</span>
+              </button>
+              <button
+                class="composer-menu-item"
+                type="button"
+                role="menuitemcheckbox"
+                tabindex="-1"
+                :aria-checked="injectPrompt"
+                @click="toggleInjectPrompt"
+              >
+                <span class="composer-menu-copy">
+                  <span>Attach room prompt</span>
+                  <span class="composer-menu-meta">Include a hidden stay-in-room prompt with your message.</span>
+                </span>
+                <span class="composer-menu-check" aria-hidden="true">{{ injectPrompt ? '✓' : '' }}</span>
+              </button>
+            </template>
+          </div>
         </div>
-        <button class="send-btn" type="submit" :disabled="!canSend" :aria-label="inlineThread ? 'Send reply' : 'Send message'">
-          <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+        <div class="composer-toolbar-context">
+          <div v-if="!inlineThread" class="composer-identity">
+            <span class="composer-sender-label" :title="`Sending as ${senderName}`" :aria-label="`Sending as ${senderName}`">{{ senderName }}</span>
+            <button v-if="!isSignedIn" class="composer-signin-btn" type="button" @click="emit('signIn')">Sign in</button>
+          </div>
+          <span v-if="attachmentDrafts.length" class="attachment-count" :aria-label="`${attachmentDrafts.length} of ${MAX_ATTACHMENTS} attachments`">{{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}</span>
+        </div>
+        <button
+          class="send-btn"
+          type="submit"
+          :disabled="!canSend"
+          :aria-busy="isSending || slash.busy.value"
+          :aria-label="isSending || slash.busy.value ? 'Sending…' : inlineThread ? 'Send reply' : 'Send message'"
+          title="Send · Enter (Shift+Enter for a new line)"
+        >
+          <svg v-if="isSending || slash.busy.value" class="composer-send-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 1-9 9"/></svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
         </button>
       </div>
     </div>
@@ -261,7 +270,6 @@ const {
   autoKeepPolling,
   injectPrompt,
   promptMode,
-  promptLabel,
   toggleAutoKeepPolling,
   toggleInjectPrompt,
 } = useComposerPrompts({
@@ -299,6 +307,72 @@ const {
   stageAttachmentDraft: computed(() => props.stageAttachmentDraft),
   discardAttachmentDraft: computed(() => props.discardAttachmentDraft),
 })
+
+const addTriggerEl = ref<HTMLButtonElement | null>(null)
+const addMenuEl = ref<HTMLDivElement | null>(null)
+const animateAddMenu = ref(false)
+const canAttach = computed(() => !props.disabled && !isSending.value && attachmentsAvailable.value && attachmentDrafts.value.length < MAX_ATTACHMENTS)
+const addMenuDisabled = computed(() => props.disabled || isSending.value || (props.inlineThread && !canAttach.value))
+
+function enabledAddItems() {
+  return Array.from(addMenuEl.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+}
+
+function openAddMenu(byPointer = false, focusLast = false) {
+  if (addMenuDisabled.value) return
+  animateAddMenu.value = byPointer && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  menuOpen.value = true
+  void nextTick(() => {
+    const items = enabledAddItems()
+    items[focusLast ? items.length - 1 : 0]?.focus({ preventScroll: true })
+  })
+}
+
+function closeAddMenu(restoreFocus = false) {
+  menuOpen.value = false
+  if (restoreFocus) addTriggerEl.value?.focus({ preventScroll: true })
+}
+
+function toggleAddMenu(event: MouseEvent) {
+  if (menuOpen.value) closeAddMenu()
+  else openAddMenu(event.detail !== 0)
+}
+
+function handleAddTriggerKey(event: KeyboardEvent) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+  event.preventDefault()
+  openAddMenu(false, event.key === 'ArrowUp')
+}
+
+function handleAddMenuKey(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeAddMenu(true)
+    return
+  }
+  if (event.key === 'Tab') {
+    // Resume the composer's natural tab order from the trigger after removal.
+    closeAddMenu(true)
+    return
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const items = enabledAddItems()
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+  items[next]?.focus({ preventScroll: true })
+}
+
+function chooseAttachment() {
+  if (!canAttach.value) return
+  closeAddMenu(true)
+  openFilePicker()
+}
+
+watch(() => props.roomIdentifier, () => closeAddMenu())
+watch(addMenuDisabled, disabled => { if (disabled) closeAddMenu() })
 
 const replyDisplayName = computed(() => {
   const reply = props.replyTo
@@ -359,7 +433,7 @@ const slash = useComposerSlashCommands({
     return true
   },
 })
-const suggestionsOpen = computed(() => slash.open.value || mentionMenuOpen.value)
+const suggestionsOpen = computed(() => !menuOpen.value && (slash.open.value || mentionMenuOpen.value))
 const suggestions = computed(() => slash.open.value ? slash.candidates.value : filteredMentionCandidates.value)
 const suggestionIndex = computed(() => slash.open.value ? slash.activeIndex.value : mentionActiveIndex.value)
 function selectSuggestion(candidate: { key: string }) {

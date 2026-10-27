@@ -31,16 +31,6 @@ export function useComposerPrompts(input: {
     return 'off'
   })
 
-  const promptLabel = computed(() => {
-    const labels: Record<string, string> = {
-      off: 'Inject',
-      auto: 'Auto poll',
-      inject: 'Inject on',
-      'auto+inject': 'Auto + inject',
-    }
-    return labels[promptMode.value] || 'Inject'
-  })
-
   function prefsKey(): string {
     const room = input.roomIdentifier.value
     return room ? `lac-prompt-prefs:${room}` : PREFS_KEY
@@ -148,7 +138,6 @@ export function useComposerPrompts(input: {
     autoKeepPolling,
     injectPrompt,
     promptMode,
-    promptLabel,
     toggleAutoKeepPolling,
     toggleInjectPrompt,
     stopKeepPollingLoop,
