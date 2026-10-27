@@ -1,13 +1,6 @@
 <template>
   <div ref="root" class="web-work-activity" @keydown.esc.stop.prevent="close(true)" @focusout="onFocusOut">
     <span class="web-work-announcement" role="status" aria-live="polite" aria-atomic="true">{{ label }}</span>
-    <div v-if="expanded" :id="listId" class="web-work-list" role="region" aria-label="Working agents" tabindex="0">
-      <div v-for="item in work" :key="item.id" class="web-work-row"
-        data-motion-work :data-motion-session="item.session" :data-motion-agent="item.key" :data-motion-after="item.after">
-        <span class="room-activity-pulse" aria-hidden="true"><ActivityOrb state="working" /></span>
-        <span class="room-activity-copy"><strong>{{ item.name }}</strong><span>{{ item.summary }}</span></span>
-      </div>
-    </div>
     <button ref="trigger" type="button" class="web-work-pill" :aria-expanded="expanded" :aria-controls="expanded ? listId : undefined"
       :aria-label="label" :data-motion-work="single && !expanded ? '' : undefined"
       :data-motion-session="single?.session" :data-motion-agent="single?.key" :data-motion-after="single?.after"
@@ -24,6 +17,13 @@
         </span>
       </template>
     </button>
+    <div v-if="expanded" :id="listId" class="web-work-list" role="region" aria-label="Working agents" tabindex="0">
+      <div v-for="item in work" :key="item.id" class="web-work-row"
+        data-motion-work :data-motion-session="item.session" :data-motion-agent="item.key" :data-motion-after="item.after">
+        <span class="room-activity-pulse" aria-hidden="true"><ActivityOrb state="working" /></span>
+        <span class="room-activity-copy"><strong>{{ item.name }}</strong><span>{{ item.summary }}</span></span>
+      </div>
+    </div>
   </div>
 </template>
 

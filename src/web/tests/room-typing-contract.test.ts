@@ -83,6 +83,7 @@ test('compact thinking exposes every agent and keeps one reply-flight anchor per
       for (let i = 0; i < count; i++) assert.equal((html.match(new RegExp(`data-motion-session="${i}"`, 'g')) || []).length, count === 1 && expanded ? 2 : 1)
       assert.match(html, new RegExp(`aria-expanded="${expanded}"`))
       assert.equal((html.match(/class="web-work-row"/g) || []).length, expanded ? count : 0)
+      if (expanded) assert.ok(html.indexOf('class="web-work-list"') > html.indexOf('</button>'), 'Tab reaches the scrollable list after its trigger')
       assert.equal((html.match(/<canvas/g) || []).length, expanded ? count + 1 : 1, 'collapsed activity animates one orb regardless of agent count')
       assert.doesNotMatch(html, /<script>/)
       if (count === 1 || expanded) assert.match(html, /&lt;script&gt;/)
