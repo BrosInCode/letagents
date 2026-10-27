@@ -45,7 +45,8 @@ export function canStageMessageAttachment(input: Parameters<typeof resolveMessag
 function sanitizeFilename(value: string): string {
   const trimmed = value.trim().replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
   const safe = trimmed
-    .replace(/[\u0000-\u001f\u007f]/g, "")
+    // Control characters, and the direction marks that make "x\u202Efdp.exe" read as "xexe.pdf".
+    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
     .replace(/[<>:"|?*]/g, "_")
     .slice(0, 160)
     .trim();
@@ -132,31 +133,38 @@ export function assertAttachmentTotalByteSize(attachments: readonly { byte_size:
 }
 
 /**
- * Types a browser may show in its own tab. None of them can run script when
- * opened straight from storage. Every other type downloads.
+ * Passive media a browser may show in its own tab with its own type. None of
+ * them can run script when opened straight from storage.
  */
 const INLINE_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  "image/apng",
   "image/avif",
   "image/bmp",
   "image/gif",
   "image/jpeg",
   "image/png",
+  "image/vnd.microsoft.icon",
   "image/webp",
+  "image/x-icon",
   "application/pdf",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "video/mp4",
+  "video/webm",
   "text/plain",
 ]);
 
-/**
- * Types a browser runs as a page or script. They download as plain bytes, so
- * a browser that ignores the download hint still cannot run them. SVG keeps
- * its type because image tags need it, and an image tag never runs script.
- */
-function isScriptableAttachmentContentType(contentType: string): boolean {
-  if (contentType === "image/svg+xml") {
-    return false;
-  }
-  return /^(?:text\/html|text\/xml|text\/xsl|application\/xml|text\/(?:java|ecma)script|application\/(?:x-)?(?:java|ecma)script|application\/x-shockwave-flash|multipart\/x-mixed-replace)$|\+xml$/.test(contentType);
-}
+/** Text files that open in the tab as plain text, which a browser never runs. */
+const PLAIN_TEXT_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  "application/json",
+  "text/csv",
+  "text/markdown",
+]);
+
+/** Image tags need SVG's own type; an image tag never runs its script. */
+const SVG_CONTENT_TYPE = "image/svg+xml";
 
 export function formatAttachmentContentDisposition(
   filename: string,
@@ -167,18 +175,30 @@ export function formatAttachmentContentDisposition(
 }
 
 /**
- * The headers storage sends with a download. Only passive types open in the
- * browser tab; HTML, SVG and other active types download instead, so a file
- * from a room never runs as a page on the storage domain.
+ * The headers storage sends with a download. Only passive media and plain
+ * text open in the browser tab. Everything else downloads as plain bytes, so
+ * a file from a room never runs as a page on the storage domain, even in a
+ * browser that ignores the download hint. SVG downloads but keeps its type.
  */
 export function resolveAttachmentDownloadHeaders(input: {
   filename: string;
   content_type: string;
 }): { content_disposition: string; content_type: string } {
   const contentType = normalizeContentType(input.content_type);
-  const inline = INLINE_ATTACHMENT_CONTENT_TYPES.has(contentType);
+  if (INLINE_ATTACHMENT_CONTENT_TYPES.has(contentType)) {
+    return {
+      content_disposition: formatAttachmentContentDisposition(input.filename, "inline"),
+      content_type: contentType,
+    };
+  }
+  if (PLAIN_TEXT_ATTACHMENT_CONTENT_TYPES.has(contentType)) {
+    return {
+      content_disposition: formatAttachmentContentDisposition(input.filename, "inline"),
+      content_type: "text/plain; charset=utf-8",
+    };
+  }
   return {
-    content_disposition: formatAttachmentContentDisposition(input.filename, inline ? "inline" : "attachment"),
-    content_type: isScriptableAttachmentContentType(contentType) ? "application/octet-stream" : contentType,
+    content_disposition: formatAttachmentContentDisposition(input.filename, "attachment"),
+    content_type: contentType === SVG_CONTENT_TYPE ? SVG_CONTENT_TYPE : "application/octet-stream",
   };
 }
