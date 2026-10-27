@@ -168,6 +168,15 @@
         />
         <span v-if="suggestionVisible" :id="suggestionDescriptionId" class="sr-only">{{ suggestionDescription }}</span>
       </div>
+      <div v-if="agentHost && roomIdentifier" class="desktop-composer-under">
+        <RoomComposerAccessDefault
+          :model-value="agentPersonalAccess"
+          :room-handle="roomHandle"
+          :disabled="roomLoading"
+          @update:model-value="agentDraft.setPersonalAccess"
+          @dismiss="focusInput"
+        />
+      </div>
       <button
         class="desktop-composer-send"
         type="submit"
@@ -179,15 +188,6 @@
         <LoaderCircle v-if="sending || agentLaunching" :size="16" aria-hidden="true" />
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
-    </div>
-    <div v-if="agentHost && roomIdentifier" class="desktop-composer-under">
-      <RoomComposerAccessDefault
-        :model-value="agentPersonalAccess"
-        :room-handle="roomHandle"
-        :disabled="roomLoading"
-        @update:model-value="agentDraft.setPersonalAccess"
-        @dismiss="focusInput"
-      />
     </div>
     <div v-if="selectedGif" class="desktop-composer-gif-draft" data-testid="desktop-composer-gif-draft">
       <img v-if="selectedGifPreview" class="desktop-composer-gif-draft-preview" :src="selectedGifPreview" alt="" referrerpolicy="no-referrer" />

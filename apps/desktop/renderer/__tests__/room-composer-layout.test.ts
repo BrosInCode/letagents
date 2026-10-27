@@ -68,11 +68,10 @@ async function mountInputRow(t: { after: (fn: () => void) => void }, gifEnabled:
   return row;
 }
 
-function gridTrackCount(): number {
+function gridAreas(): string[] {
   const css = readFileSync(new URL('../src/styles/composer-agent-reasoning/composer-controls.css', import.meta.url), 'utf8');
   const rule = css.match(/\.desktop-composer-input-row\s*\{([^}]*)\}/)?.[1] ?? '';
-  const columns = rule.match(/grid-template-columns:\s*([^;]+);/)?.[1] ?? '';
-  return columns.replace(/minmax\([^)]*\)/g, 'track').trim().split(/\s+/).length;
+  return (rule.match(/grid-template-areas:([^;]+);/)?.[1] ?? '').match(/"[^"]*"/g)?.map(row => row.slice(1, -1).trim()) ?? [];
 }
 
 for (const gifEnabled of [true, false]) {
@@ -80,7 +79,7 @@ for (const gifEnabled of [true, false]) {
     const row = await mountInputRow(t, gifEnabled);
     const children = elements(row);
     assert.deepEqual(children.map(child => child.props['data-testid'] ?? classOf(child)), ['desktop-composer-add-agent', 'desktop-composer-field', 'desktop-composer-send']);
-    assert.equal(children.length, gridTrackCount(), 'each input-row child has its own grid track');
+    assert.deepEqual(gridAreas(), ['field field field', 'add under send'], 'the input spans the top; "+", access and send share the bar under it');
     const field = elements(children[1]).map(child => child.props['data-testid']);
     assert.deepEqual(field, ['desktop-composer-input']);
     assert.equal(all(row).some(n => classOf(n).includes('room-gif-trigger') || n.props['data-testid'] === 'desktop-composer-attach'), false,
@@ -102,16 +101,16 @@ test('the suggested reply is faint text under the input, described to screen rea
   assert.match(all(description).map(n => n.text).join(''), /^Suggested reply to Ada: Ship it now\. Press Tab to use it, or Escape to dismiss it\.$/);
 });
 
-test('"+" and send are the same size', () => {
+test('"+" and send are the same round size in the bar under the input', () => {
   const css = readFileSync(new URL('../src/styles/composer-agent-reasoning/composer-controls.css', import.meta.url), 'utf8');
   const agent = readFileSync(new URL('../src/styles/agent-management.css', import.meta.url), 'utf8');
-  assert.match(css, /grid-template-columns:\s*34px minmax\(0, 1fr\) 34px;/);
-  const send = css.match(/\.desktop-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(css, /grid-template-columns:\s*32px minmax\(0, 1fr\) 32px;/);
+  const send = css.match(/\n\.desktop-composer-send\s*\{([^}]*)\}/)?.[1] ?? '';
   const plus = agent.match(/\n\.desktop-composer-add-agent\s*\{([^}]*)\}/)?.[1] ?? '';
   for (const rule of [send, plus]) {
-    assert.match(rule, /width:\s*34px;/);
-    assert.match(rule, /height:\s*34px;/);
-    assert.match(rule, /border-radius:\s*10px;/);
+    assert.match(rule, /width:\s*32px;/);
+    assert.match(rule, /height:\s*32px;/);
+    assert.match(rule, /border-radius:\s*50%;/);
   }
 });
 
