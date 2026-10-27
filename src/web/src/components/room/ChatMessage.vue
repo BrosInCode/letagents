@@ -196,7 +196,7 @@ import { chatSenderRole } from '../../../../../shared/chat-appearance'
 import '../../../../../shared/ui/chat-palette.css'
 import { useAuth } from '@/composables/useAuth'
 
-import { inject, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { inject, computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
@@ -492,18 +492,22 @@ function handleMenuDismiss(event: Event) {
   closeContextMenu(event.type === 'keydown')
 }
 
-onMounted(() => {
+// Closed rows must not add work to every composer keypress or pointer event.
+watch(contextMenuOpen, (open, _previous, onCleanup) => {
+  if (!open) return
   document.addEventListener('pointerdown', handleMenuDismiss, true)
   document.addEventListener('keydown', handleMenuDismiss, true)
   window.addEventListener('blur', handleMenuDismiss)
-})
+  onCleanup(() => {
+    document.removeEventListener('pointerdown', handleMenuDismiss, { capture: true })
+    document.removeEventListener('keydown', handleMenuDismiss, { capture: true })
+    window.removeEventListener('blur', handleMenuDismiss)
+  })
+}, { flush: 'sync' })
 
 onUnmounted(() => {
   stopTrackingReactions?.()
   stopTrackingPreviews?.()
-  document.removeEventListener('pointerdown', handleMenuDismiss, true)
-  document.removeEventListener('keydown', handleMenuDismiss, true)
-  window.removeEventListener('blur', handleMenuDismiss)
 })
 const identity = computed(() => resolveAgentIdentity(props.message.sender, props.message.agent_identity))
 const displayName = computed(() => props.message.source === 'browser' ? props.message.sender : identity.value.displayName || 'anonymous')

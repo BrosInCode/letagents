@@ -158,15 +158,12 @@ import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { computed, nextTick, ref, watch } from 'vue'
 
-import ActivityView from '@/components/room/ActivityView.vue'
-import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
-import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
+import { asyncRoomPanel } from './asyncRoomPanel'
 import MessageList from '@/components/room/MessageList.vue'
 import { attentionResponseAgentNames, formatMessageTime } from '@/components/room/chat-message/formatting'
 import MessageSearchResults from '../../../../../shared/ui/MessageSearchResults.vue'
 import { useRoomHistorySearch } from '@/composables/roomHistorySearch'
 import { useToast } from '@/composables/useToast'
-import TaskBoard from '@/components/room/TaskBoard.vue'
 import type {
   FocusRoomConclusionDetails,
   FocusRoomInfo,
@@ -190,6 +187,11 @@ import type {
   TaskReviewLeaseActionPayload,
   TaskUpdatePayload,
 } from './types'
+
+const ActivityView = asyncRoomPanel(() => import('@/components/room/ActivityView.vue'))
+const FocusRoomsView = asyncRoomPanel(() => import('@/components/room/FocusRoomsView.vue'))
+const GitHubEventFeed = asyncRoomPanel(() => import('@/components/room/GitHubEventFeed.vue'))
+const TaskBoard = asyncRoomPanel(() => import('@/components/room/TaskBoard.vue'))
 
 const scrollAuth = useAuth()
 const scrollKey = (room: string) => JSON.stringify([scrollAuth.user.value?.id || null, room])
@@ -377,6 +379,15 @@ defineExpose({ matchCount, openMessageInChat })
   flex: 1;
   min-width: 0;
   min-height: 0;
+}
+
+.room-view-viewport :deep(.room-panel-placeholder) {
+  display: grid;
+  place-content: center;
+  flex: 1;
+  padding: 24px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .tab-slide-forward-enter-active,
