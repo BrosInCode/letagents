@@ -1,5 +1,6 @@
 import '../../../shared/slash-commands.test.mjs';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from 'vue';
@@ -20,7 +21,7 @@ after(async () => { await vite?.close(); Object.assign(globalThis, originals); }
 const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null });
 const key = (name: string, extra = {}) => ({ key: name, preventDefault() {}, isComposing: false, ...extra });
 const flush = async () => { await nextTick(); await new Promise(resolve => setImmediate(resolve)); };
-function mount(t: { after: (fn: () => void) => void }) {
+function mount(t: { after: (fn: () => void) => void }, overrides: { inlineThread?: boolean; threadRootId?: string } = {}) {
   const events: any[] = [], tasks: string[] = [], sent: any[] = [], searches: string[] = [];
   let vm: any, header: any;
   const headerProps = reactive({ title: 'Room', subtitle: '', activeTab: 'chat', connectionState: 'live', searchQuery: '', matchCount: 0 });
@@ -28,6 +29,7 @@ function mount(t: { after: (fn: () => void) => void }) {
     openSearch: (query: string) => { searches.push(query); return header.openSearch(); },
     createTask: async (title: string) => { tasks.push(title); return true; },
     submitMessage: async (...args: any[]) => { sent.push(args); return true; },
+    ...overrides,
   });
   const app = renderer.createApp({ setup() {
     header = Header.setup(headerProps, { expose() {}, emit() {} });
@@ -344,9 +346,9 @@ test('composer plus menu supports arrows, Home/End and Escape without losing the
   const { vm, props, sent } = mount(t);
   const focused: string[] = [];
   const item = (name: string) => ({ focus() { focused.push(name); (document as any).activeElement = this; } });
-  const attach = item('attach'), poll = item('poll'), prompt = item('prompt'), trigger = item('trigger');
+  const attach = item('attach'), poll = item('poll'), trigger = item('trigger');
   vm.addTriggerEl.value = trigger;
-  vm.addMenuEl.value = { querySelectorAll: () => props.attachmentsEnabled ? [attach, poll, prompt] : [poll, prompt] };
+  vm.addMenuEl.value = { querySelectorAll: () => props.attachmentsEnabled ? [attach, poll] : [poll] };
   vm.text.value = '/task Keep draft';
   assert.equal(vm.suggestionsOpen.value, true);
   props.attachmentsEnabled = false;
@@ -356,14 +358,15 @@ test('composer plus menu supports arrows, Home/End and Escape without losing the
   assert.equal(vm.animateAddMenu.value, false, 'keyboard opening does not animate');
   assert.equal(focused.at(-1), 'poll', 'unavailable attachment row is skipped');
   assert.equal(vm.suggestionsOpen.value, false, 'one suggestion surface at a time');
+  props.attachmentsEnabled = true;
   vm.handleAddMenuKey(key('ArrowDown'));
-  assert.equal(focused.at(-1), 'prompt');
+  assert.equal(focused.at(-1), 'attach', 'arrow selection wraps');
   vm.handleAddMenuKey(key('ArrowDown'));
-  assert.equal(focused.at(-1), 'poll', 'arrow selection wraps');
-  vm.handleAddMenuKey(key('End'));
-  assert.equal(focused.at(-1), 'prompt');
-  vm.handleAddMenuKey(key('Home'));
   assert.equal(focused.at(-1), 'poll');
+  vm.handleAddMenuKey(key('End'));
+  assert.equal(focused.at(-1), 'poll');
+  vm.handleAddMenuKey(key('Home'));
+  assert.equal(focused.at(-1), 'attach');
   let stopped = false;
   vm.handleAddMenuKey(key('Escape', { stopPropagation() { stopped = true; } }));
   assert.equal(stopped, true, 'Escape does not close the containing thread');
@@ -374,7 +377,7 @@ test('composer plus menu supports arrows, Home/End and Escape without losing the
   assert.deepEqual(sent, []);
   vm.handleAddTriggerKey(key('ArrowUp'));
   await flush();
-  assert.equal(focused.at(-1), 'prompt');
+  assert.equal(focused.at(-1), 'poll');
   vm.handleAddMenuKey(key('Tab'));
   assert.equal(vm.menuOpen.value, false);
   assert.equal(focused.at(-1), 'trigger', 'Tab resumes the composer tab order');
@@ -389,7 +392,7 @@ test('composer keyboard navigation reveals rows within a short menu without scro
       (document as any).activeElement = this;
     },
   });
-  const items = [item(8), item(64), item(120)];
+  const items = [item(8), item(120)];
   const menu = { scrollTop: 0, clientHeight: 72, querySelectorAll: () => items };
   vm.addMenuEl.value = menu;
   const assertVisible = (index: number) => {
@@ -400,14 +403,14 @@ test('composer keyboard navigation reveals rows within a short menu without scro
   };
   vm.handleAddTriggerKey(key('ArrowUp'));
   await flush();
-  assertVisible(2);
+  assertVisible(1);
   assert.equal(menu.scrollTop, 92, 'opening on the last item scrolls the menu');
   vm.handleAddMenuKey(key('ArrowDown'));
   assertVisible(0);
   vm.handleAddMenuKey(key('ArrowDown'));
   assertVisible(1);
   vm.handleAddMenuKey(key('End'));
-  assertVisible(2);
+  assertVisible(1);
   vm.handleAddMenuKey(key('Home'));
   assertVisible(0);
 });
@@ -451,4 +454,81 @@ test('composer bottom bar retains browser sign-in and exposes accessible plus an
   const reply = await renderToString(createSSRApp({ render: () => h(Composer, { inlineThread: true, threadRootId: 'root-a' }) }));
   assert.match(reply, /aria-label="Send reply"/);
   assert.doesNotMatch(reply, /composer-signin-btn|composer-sender-label|Agent prompts/);
+});
+
+test('legacy Inject preferences cannot affect ordinary sends while auto-poll preferences still work', async t => {
+  const originalStorage = globalThis.localStorage;
+  const saved = new Map([
+    ['lac-prompt-prefs:room-a', JSON.stringify({ autoKeepPolling: false, injectPrompt: true })],
+    ['lac-prompt-prefs:room-b', JSON.stringify({ autoKeepPolling: true, injectPrompt: true })],
+  ]);
+  globalThis.localStorage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => saved.set(key, value) } as any;
+  t.after(() => { globalThis.localStorage = originalStorage; });
+  const { vm, props, sent } = mount(t);
+  assert.equal(vm.autoKeepPolling.value, false);
+  vm.text.value = 'Ordinary message';
+  await vm.handleSend();
+  assert.deepEqual(sent[0], ['Ordinary message', null, null, []]);
+
+  props.roomIdentifier = 'room-b';
+  await flush();
+  assert.equal(vm.autoKeepPolling.value, true, 'saved auto-poll remains available after switching rooms');
+  assert.equal(sent.length, 1, 'restoring auto-poll does not send an immediate reminder');
+  vm.text.value = 'Another ordinary message';
+  await vm.handleSend();
+  assert.deepEqual(sent.at(-1), ['Another ordinary message', null, null, []]);
+  vm.toggleAutoKeepPolling();
+  assert.deepEqual(JSON.parse(saved.get('lac-prompt-prefs:room-b')!), { autoKeepPolling: false });
+  vm.toggleAutoKeepPolling();
+  await flush();
+  assert.deepEqual(sent.at(-1), ['', 'auto', null, []], 'the retained setting sends its quiet auto-poll reminder');
+  assert.deepEqual(JSON.parse(saved.get('lac-prompt-prefs:room-b')!), { autoKeepPolling: true }, 'preference writes do not retain the removed Inject flag');
+  vm.toggleAutoKeepPolling();
+  props.roomIdentifier = 'room-a';
+  await flush();
+  props.replyTo = { id: 'msg_1', sender: 'Ada', text: 'reply' };
+  vm.text.value = 'Reply without injection';
+  await vm.handleSend();
+  assert.deepEqual(sent.at(-1), ['Reply without injection', null, 'msg_1', []]);
+});
+
+test('open composer menu exposes Attach and Auto read + poll without an Inject option', async () => {
+  const OpenComposer = { ...Composer, setup(props: any, context: any) {
+    const vm = Composer.setup(props, context);
+    vm.menuOpen.value = true;
+    return vm;
+  } };
+  const html = await renderToString(createSSRApp({ render: () => h(OpenComposer, { roomIdentifier: 'room-a' }) }));
+  assert.match(html, /Attach files…/);
+  assert.match(html, /Auto read \+ poll/);
+  assert.equal((html.match(/role="menuitemcheckbox"/g) || []).length, 1);
+  assert.doesNotMatch(html, /Attach room prompt|stay-in-room|Inject/i);
+});
+
+test('Send preserves input focus on primary pointer press and submits only through form activation', async t => {
+  const source = readFileSync(new URL('../src/components/room/Composer.vue', import.meta.url), 'utf8');
+  assert.match(source, /<button\b[^>]*class="send-btn"[^>]*@pointerdown="preserveSendFocus"[^>]*>/s, 'the actual submit control binds the focus-preserving pointer handler');
+  const main = mount(t);
+  const thread = mount(t, { inlineThread: true, threadRootId: 'msg_1' });
+  main.vm.text.value = 'Keep the main draft';
+  thread.vm.text.value = 'Send the thread reply';
+  for (const pointerType of ['touch', 'pen', 'mouse']) {
+    for (const composer of [main, thread]) {
+      const press = Object.assign(new Event('pointerdown', { cancelable: true }), { button: 0, pointerType });
+      composer.vm.preserveSendFocus(press);
+      assert.equal(press.defaultPrevented, true, `${pointerType} must not transfer focus and collapse the keyboard before click`);
+      assert.deepEqual(composer.sent, [], 'pressing alone must not submit; a cancelled gesture remains safe');
+    }
+  }
+  const secondary = Object.assign(new Event('pointerdown', { cancelable: true }), { button: 2, pointerType: 'mouse' });
+  thread.vm.preserveSendFocus(secondary);
+  assert.equal(secondary.defaultPrevented, false, 'secondary clicks retain native behavior');
+  await thread.vm.handleSend();
+  assert.deepEqual(thread.sent, [['Send the thread reply', null, null, []]]);
+  assert.equal(thread.vm.text.value, '');
+  assert.equal(main.vm.text.value, 'Keep the main draft');
+  assert.deepEqual(main.sent, []);
+  main.vm.handleKeyDown(key('Enter'));
+  await flush();
+  assert.deepEqual(main.sent, [['Keep the main draft', null, null, []]], 'keyboard submission remains independent of pointer events');
 });

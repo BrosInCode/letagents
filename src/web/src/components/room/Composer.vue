@@ -65,12 +65,12 @@
             class="composer-add-btn"
             type="button"
             :disabled="addMenuDisabled"
-            :aria-label="promptMode === 'off' ? 'Add to message' : 'Add to message, agent prompts enabled'"
-            :title="promptMode === 'off' ? 'Add to message' : 'Add to message · agent prompts enabled'"
+            :aria-label="autoKeepPolling ? 'Add to message, auto read and poll enabled' : 'Add to message'"
+            :title="autoKeepPolling ? 'Add to message · auto read and poll enabled' : 'Add to message'"
             aria-haspopup="menu"
             :aria-expanded="menuOpen"
             :aria-controls="menuOpen ? `${composerId}-add-menu` : undefined"
-            :data-prompts-active="promptMode !== 'off'"
+            :data-prompts-active="autoKeepPolling"
             @click="toggleAddMenu"
             @keydown="handleAddTriggerKey"
           >
@@ -118,20 +118,6 @@
                 </span>
                 <span class="composer-menu-check" aria-hidden="true">{{ autoKeepPolling ? '✓' : '' }}</span>
               </button>
-              <button
-                class="composer-menu-item"
-                type="button"
-                role="menuitemcheckbox"
-                tabindex="-1"
-                :aria-checked="injectPrompt"
-                @click="toggleInjectPrompt"
-              >
-                <span class="composer-menu-copy">
-                  <span>Attach room prompt</span>
-                  <span class="composer-menu-meta">Include a hidden stay-in-room prompt with your message.</span>
-                </span>
-                <span class="composer-menu-check" aria-hidden="true">{{ injectPrompt ? '✓' : '' }}</span>
-              </button>
             </template>
           </div>
         </div>
@@ -149,6 +135,7 @@
           :aria-busy="isSending || slash.busy.value"
           :aria-label="isSending || slash.busy.value ? 'Sending…' : inlineThread ? 'Send reply' : 'Send message'"
           title="Send · Enter (Shift+Enter for a new line)"
+          @pointerdown="preserveSendFocus"
         >
           <svg v-if="isSending || slash.busy.value" class="composer-send-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 1-9 9"/></svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
@@ -268,10 +255,7 @@ const {
   menuEl,
   menuOpen,
   autoKeepPolling,
-  injectPrompt,
-  promptMode,
   toggleAutoKeepPolling,
-  toggleInjectPrompt,
 } = useComposerPrompts({
   enabled: computed(() => !props.inlineThread),
   roomIdentifier: roomIdentifierRef,
@@ -471,6 +455,12 @@ async function handleSend() {
   await slash.submit(sendRoomMessage)
 }
 
+function preserveSendFocus(event: PointerEvent) {
+  // Keep Safari's keyboard viewport stable until the click submits the form.
+  // Keyboard activation still follows the button's native submit behavior.
+  if (event.button === 0) event.preventDefault()
+}
+
 const messageMotion = injectRoomMessageMotion()
 
 async function sendRoomMessage() {
@@ -485,10 +475,9 @@ async function sendRoomMessage() {
   }
 
   const finishMotion = props.inlineThread ? undefined : messageMotion?.capture(trimmed, textareaEl.value)
-  const kind = injectPrompt.value ? 'inline' : null
   isSending.value = true
   try {
-    const sent = await submitComposerMessage(trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
+    const sent = await submitComposerMessage(trimmed, null, props.replyTo?.id || null, buildOutgoingAttachments())
     if (!sent || props.roomIdentifier !== submittedRoom) return
 
     typing.stop()
