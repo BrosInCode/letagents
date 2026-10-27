@@ -21,6 +21,7 @@ import type {
   ProviderActionTerminal,
   ProviderTurnControlResult,
   RoomTurnImageDelivery,
+  RoomTurnFileAccess,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
@@ -65,6 +66,7 @@ export type NativeProviderAdapter = {
   controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   roomTurnImageDelivery?(handle: NativeHandle): RoomTurnImageDelivery;
+  roomTurnFileAccess?(handle: NativeHandle): RoomTurnFileAccess;
   recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: NativeHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<{
     handle: NativeHandle;
@@ -452,6 +454,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     try { remembered = this.required(handle); } catch { return null; }
     const adapter = await this.adapter(remembered.provider);
     return adapter.roomTurnImageDelivery?.(remembered.handle) ?? null;
+  }
+
+  /** Asked for one turn only; an unknown or replaced handle opens no files. */
+  async roomTurnFileAccess(handle: ProviderActionHandle): Promise<RoomTurnFileAccess> {
+    let remembered: ReturnType<ProviderActionPortRouter["required"]>;
+    try { remembered = this.required(handle); } catch { return null; }
+    const adapter = await this.adapter(remembered.provider);
+    return adapter.roomTurnFileAccess?.(remembered.handle) ?? null;
   }
 
   async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; settleLifecycleBeforeIdle?: () => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult> {

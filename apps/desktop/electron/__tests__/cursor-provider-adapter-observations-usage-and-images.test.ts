@@ -483,7 +483,7 @@ test("a Cursor room turn names its staged images in the prompt and may only read
     const prompt = launch.args.at(-1)!;
     assert.ok(prompt.includes([
       `- Attachment 1: "screen.png" (image/png, 12 bytes). Included after this text as image 1.`,
-      `- Attachment 2: "notes.pdf" (application/pdf, 5 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.`,
+      `- Attachment 2: "notes.pdf" (application/pdf, 5 bytes). Not given: this agent cannot read PDFs. If its content matters, ask the sender to share it as text.`,
       "The attached images are files on this machine. Open each one with your file-reading tool to see it before you answer:",
       `- Image 1 ("screen.png"): ${join(folder, "1.png")}`,
     ].join("\n")), prompt.slice(-800));

@@ -4,7 +4,7 @@ import { nativeExecutionId } from "../provider-execution-observer.js";
 import type { NativeTurnBoundary } from "../../../../shared/execution-protocol.js";
 import { extractThreadStatus, extractTurnStatus, isActiveCodexTurnStatus } from "../codex-session-status.js";
 import { buildCustodialPollingPrompt } from "../codex-start-prompt.js";
-import { sameProviderConnectionIdentity, type ProviderHandle, type CustodialPollingActivationRequest, type CustodialPollingActivationOptions, type ProviderTurnControlResult, type ProviderTurnControlOptions, ProviderTurnControlError, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnResult, type ProviderRoomTurnOptions, ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN } from "../provider-adapter.js";
+import { sameProviderConnectionIdentity, type ProviderHandle, type CustodialPollingActivationRequest, type CustodialPollingActivationOptions, type ProviderTurnControlResult, type ProviderTurnControlOptions, ProviderTurnControlError, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnResult, type ProviderRoomTurnOptions, ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN } from "../provider-adapter.js";
 import { sameProcessBirthIdentity } from "../provider-evidence.js";
 import { CodexAdapterPermissions } from "./adapter-permissions.js";
 import { CodexRoomTurnRecoveryError, boundedRoomTurnPrompt, requireLetAgentsRoomTools, roomTurnImageInput } from "./room-tools.js";
@@ -351,6 +351,11 @@ export abstract class CodexAdapterTurns extends CodexAdapterPermissions {
    */
   roomTurnImageDelivery(): RoomTurnImageDelivery {
     return "file";
+  }
+
+  /** Codex reads files with shell commands, which its sandboxes never refuse to read; it has no PDF reader. */
+  roomTurnFileAccess(): RoomTurnFileAccess {
+    return { text: true, pdf: false };
   }
 
   /** Execute one durable inbox item on this exact app-server/thread only. */

@@ -228,6 +228,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   /** The daemon stages a file that this turn's sandbox may read; see cursor-room-turn-images.ts. */
   roomTurnImageDelivery(): "file" { return "file"; }
+  /** This turn's launch may read its staged folder; cursor-agent has no PDF reader. */
+  roomTurnFileAccess(): { text: boolean; pdf: boolean } { return { text: true, pdf: false }; }
 
   async runRoomTurn(
     providerHandle: ProviderHandle,

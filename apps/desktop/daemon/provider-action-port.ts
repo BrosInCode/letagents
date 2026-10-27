@@ -150,6 +150,11 @@ export type ProviderActionStreamEvent = {
 export type RoomTurnImageDelivery = "memory" | "file" | null;
 /** An image type every image-capable provider accepts. */
 export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * Which staged room files a running provider's agent can open with its own
+ * tools, by kind. Null: none (it cannot read this machine's files).
+ */
+export type RoomTurnFileAccess = { text: boolean; pdf: boolean } | null;
 /** Where a file from the recent room context came from, so the prompt can name it. */
 export type RoomTurnAttachmentOrigin = {
   messageId: string;
@@ -176,12 +181,36 @@ export type ProviderRoomTurnAttachment = {
   mimeType: string;
   sizeBytes: number | null;
   status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported"
+    /** A text file or PDF saved where this turn's agent may read it. */
+    | "file"
+    /** Not an image, text file or PDF by its name and declared type. */
+    | "unsupported_type"
+    /** Its bytes are neither text nor a PDF. */
+    | "binary"
+    | "empty"
+    /** This agent cannot open files on this machine. */
+    | "cannot_read"
+    /** This agent opens text files but cannot read PDFs. */
+    | "cannot_read_pdf"
     /** Recent messages only: the turn already carries its most images from earlier messages. */
     | "context_limit"
     /** Recent messages only: an earlier turn of this agent already received it, so it is not sent again. */
     | "earlier_turn";
   /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
   image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
+  /** A file that is not an image: its notes say "file", not "image". */
+  category?: "file";
+  /** Only for status "file": the daemon-owned copy this turn's agent reads with its own tools. Never its bytes. */
+  file?: {
+    path: string;
+    kind: "text" | "pdf";
+    /** Text only: "utf-16" was converted to UTF-8; "unknown" is not valid UTF-8. */
+    encoding?: "utf-8" | "utf-16" | "unknown";
+    lines?: number;
+    longestLine?: number;
+    /** An earlier turn of this conversation was given it too. */
+    repeated?: boolean;
+  };
 };
 /**
  * One durable room delivery. The daemon owns retries and publication; the
@@ -310,6 +339,7 @@ export interface ProviderActionPort {
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
   /** How this running runtime takes the activating message's images; absent or null means it cannot. */
   roomTurnImageDelivery?(handle: ProviderActionHandle): Promise<RoomTurnImageDelivery>;
+  roomTurnFileAccess?(handle: ProviderActionHandle): Promise<RoomTurnFileAccess>;
   /** Recover an intent journaled before dispatch, never by spawning a second child. */
   attachAction(actionId: string, workAttemptId: string): Promise<ProviderActionAttachment>;
   resume(ref: ProviderActionRef, request: ProviderActionSpawn): Promise<ProviderActionHandle>;

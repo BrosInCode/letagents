@@ -8,7 +8,7 @@ import { LETAGENTS_NPX_ARGS } from "../../mcp-config.js";
 import { ProviderContinuationMissingError, synthesizeTerminalPayload, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderHandle, type ProviderSpawnRequest } from "../provider-adapter.js";
 import { attestProviderSpawnPolicy } from "../provider-spawn-configuration.js";
 import { sameProcessBirthIdentity, terminateFreshLaunch } from "../provider-evidence.js";
-import { credentialBoundaryPluginSource, minimalOpenCodeEnvironment, OPENCODE_SERVER_USERNAME, openCodeAuthContent, openCodeConfig, parseConfiguredOpenModel, parseConfiguredOpenModelImageInput, seedOpenCodeConfigHome, shieldOwnerInstructions, supervisedOpenCodeMcpEnvironment, workspaceOpenCodeEnvironment, supervisedOpenCodePermissionProfileId } from "../opencode-launch-contract.js";
+import { credentialBoundaryPluginSource, minimalOpenCodeEnvironment, OPENCODE_SERVER_USERNAME, openCodeAuthContent, openCodeConfig, parseConfiguredOpenModel, parseConfiguredOpenModelExternalReads, parseConfiguredOpenModelImageInput, seedOpenCodeConfigHome, shieldOwnerInstructions, supervisedOpenCodeMcpEnvironment, workspaceOpenCodeEnvironment, supervisedOpenCodePermissionProfileId } from "../opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
 import { isOpenModelReasoningEffort, resolveOpenModelEffortCatalog, type OpenModelReasoningEffort } from "../open-model-efforts.js";
 import { resolveOpenModelLimits } from "../open-model-limits.js";
@@ -287,6 +287,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     );
     handle.nativeOrderingVerified = true;
     handle.imageInput = req.imageInput === true;
+    handle.externalReads = parseConfiguredOpenModelExternalReads(config);
     const launchNotices = [launchNotice, effortNotice].filter((notice): notice is string => notice !== null);
     if (launchNotices.length) handle.launchNotices = launchNotices;
     this.handles.set(req.workAttemptId, handle);
@@ -362,6 +363,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     );
     // The runtime keeps the configuration it started with, whatever was saved since.
     handle.imageInput = parseConfiguredOpenModelImageInput(runtimeConfig);
+    handle.externalReads = parseConfiguredOpenModelExternalReads(runtimeConfig);
     this.handles.set(ref.workAttemptId, handle);
     this.observeTerminal(handle, this.deps.observeProcessExit(connection.pid, connection.processIdentity));
     if (recoveredLegacyConnection) {
