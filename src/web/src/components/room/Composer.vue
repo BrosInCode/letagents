@@ -135,6 +135,7 @@
           :aria-busy="isSending || slash.busy.value"
           :aria-label="isSending || slash.busy.value ? 'Sending…' : inlineThread ? 'Send reply' : 'Send message'"
           title="Send · Enter (Shift+Enter for a new line)"
+          @pointerdown="preserveSendFocus"
         >
           <svg v-if="isSending || slash.busy.value" class="composer-send-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 1-9 9"/></svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
@@ -452,6 +453,12 @@ const canSend = computed(() =>
 async function handleSend() {
   if (!canSend.value) return
   await slash.submit(sendRoomMessage)
+}
+
+function preserveSendFocus(event: PointerEvent) {
+  // Keep Safari's keyboard viewport stable until the click submits the form.
+  // Keyboard activation still follows the button's native submit behavior.
+  if (event.button === 0) event.preventDefault()
 }
 
 const messageMotion = injectRoomMessageMotion()

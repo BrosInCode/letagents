@@ -1,5 +1,6 @@
 import '../../../shared/slash-commands.test.mjs';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from 'vue';
@@ -20,7 +21,7 @@ after(async () => { await vite?.close(); Object.assign(globalThis, originals); }
 const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null });
 const key = (name: string, extra = {}) => ({ key: name, preventDefault() {}, isComposing: false, ...extra });
 const flush = async () => { await nextTick(); await new Promise(resolve => setImmediate(resolve)); };
-function mount(t: { after: (fn: () => void) => void }) {
+function mount(t: { after: (fn: () => void) => void }, overrides: { inlineThread?: boolean; threadRootId?: string } = {}) {
   const events: any[] = [], tasks: string[] = [], sent: any[] = [], searches: string[] = [];
   let vm: any, header: any;
   const headerProps = reactive({ title: 'Room', subtitle: '', activeTab: 'chat', connectionState: 'live', searchQuery: '', matchCount: 0 });
@@ -28,6 +29,7 @@ function mount(t: { after: (fn: () => void) => void }) {
     openSearch: (query: string) => { searches.push(query); return header.openSearch(); },
     createTask: async (title: string) => { tasks.push(title); return true; },
     submitMessage: async (...args: any[]) => { sent.push(args); return true; },
+    ...overrides,
   });
   const app = renderer.createApp({ setup() {
     header = Header.setup(headerProps, { expose() {}, emit() {} });
@@ -501,4 +503,32 @@ test('open composer menu exposes Attach and Auto read + poll without an Inject o
   assert.match(html, /Auto read \+ poll/);
   assert.equal((html.match(/role="menuitemcheckbox"/g) || []).length, 1);
   assert.doesNotMatch(html, /Attach room prompt|stay-in-room|Inject/i);
+});
+
+test('Send preserves input focus on primary pointer press and submits only through form activation', async t => {
+  const source = readFileSync(new URL('../src/components/room/Composer.vue', import.meta.url), 'utf8');
+  assert.match(source, /<button\b[^>]*class="send-btn"[^>]*@pointerdown="preserveSendFocus"[^>]*>/s, 'the actual submit control binds the focus-preserving pointer handler');
+  const main = mount(t);
+  const thread = mount(t, { inlineThread: true, threadRootId: 'msg_1' });
+  main.vm.text.value = 'Keep the main draft';
+  thread.vm.text.value = 'Send the thread reply';
+  for (const pointerType of ['touch', 'pen', 'mouse']) {
+    for (const composer of [main, thread]) {
+      const press = Object.assign(new Event('pointerdown', { cancelable: true }), { button: 0, pointerType });
+      composer.vm.preserveSendFocus(press);
+      assert.equal(press.defaultPrevented, true, `${pointerType} must not transfer focus and collapse the keyboard before click`);
+      assert.deepEqual(composer.sent, [], 'pressing alone must not submit; a cancelled gesture remains safe');
+    }
+  }
+  const secondary = Object.assign(new Event('pointerdown', { cancelable: true }), { button: 2, pointerType: 'mouse' });
+  thread.vm.preserveSendFocus(secondary);
+  assert.equal(secondary.defaultPrevented, false, 'secondary clicks retain native behavior');
+  await thread.vm.handleSend();
+  assert.deepEqual(thread.sent, [['Send the thread reply', null, null, []]]);
+  assert.equal(thread.vm.text.value, '');
+  assert.equal(main.vm.text.value, 'Keep the main draft');
+  assert.deepEqual(main.sent, []);
+  main.vm.handleKeyDown(key('Enter'));
+  await flush();
+  assert.deepEqual(main.sent, [['Keep the main draft', null, null, []]], 'keyboard submission remains independent of pointer events');
 });
