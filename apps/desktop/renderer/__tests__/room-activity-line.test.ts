@@ -19,7 +19,7 @@ import {
   type ActivityNotice,
 } from "../src/components/desktop/content/room-chat/room-activity";
 import { orbStateForActivity, orbStateForTurn, orbStateForWork } from "../src/domain/activity-orb-state";
-import { ACTIVITY_ORB_STILL_SECONDS, createActivityOrbClock, drawActivityOrb } from "../src/components/desktop/content/room-chat/activity-orb";
+import { ACTIVITY_ORB_STILL_SECONDS, createActivityOrbClock, drawActivityOrb } from "../../../../shared/ui/activity-orb";
 import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
 import { composerDrafting, type ComposerEventPreview } from "../src/components/desktop/content/room-chat/composer-event-preview";
 import type { PresenceChipAgent } from "../src/domain/presence-chips";
@@ -410,10 +410,10 @@ test("the line renders the Steer offer, notices, live work and typing as one pil
 });
 
 test("the orb component keeps the thinking-orbs MIT notice and is 20px with a 2x backing store", () => {
-  const engine = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/activity-orb.ts", import.meta.url)), "utf8");
+  const engine = readFileSync(fileURLToPath(new URL("../../../../shared/ui/activity-orb.ts", import.meta.url)), "utf8");
   assert.match(engine, /thinking-orbs/);
   assert.match(engine, /MIT License\s+\*\s+\*\s+Copyright \(c\) 2026 Jakub Antalik/);
-  const orb = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/ActivityOrb.vue", import.meta.url)), "utf8");
+  const orb = readFileSync(fileURLToPath(new URL("../../../../shared/ui/ActivityOrb.vue", import.meta.url)), "utf8");
   assert.match(orb, /withDefaults\(defineProps<\{ state: ActivityOrbState; size\?: number \}>\(\), \{ size: 20 \}\)/);
   assert.match(orb, /const backing = props\.size \* 2;/);
   assert.match(orb, /new IntersectionObserver/);

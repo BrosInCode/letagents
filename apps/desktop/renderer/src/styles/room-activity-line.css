@@ -238,11 +238,6 @@ button.room-activity-pill:focus-visible,
   0%, 60%, 100% { opacity: 0.5; }
 }
 
-.room-activity-orb {
-  display: block;
-  flex: 0 0 auto;
-}
-
 /* Who is working, opened from the live pill. */
 .room-activity-list {
   pointer-events: auto;

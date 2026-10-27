@@ -29,9 +29,7 @@
  * SOFTWARE.
  */
 
-import type { ActivityOrbState } from "../../../../domain/activity-orb-state";
-
-export type { ActivityOrbState } from "../../../../domain/activity-orb-state";
+export type ActivityOrbState = "searching" | "working" | "composing" | "breathing";
 
 export const ACTIVITY_ORB_LABELS: Record<ActivityOrbState, string> = {
   searching: "Searching",

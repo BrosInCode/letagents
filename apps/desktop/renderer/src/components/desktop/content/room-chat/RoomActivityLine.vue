@@ -223,7 +223,7 @@ import { Check, ChevronUp, GitBranch, GitPullRequest, MessageSquare, Paperclip }
 import { typingLabel, typingSentence } from "../../../../../../../../shared/room-typing.mjs";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
-import ActivityOrb from "./ActivityOrb.vue";
+import ActivityOrb from "../../../../../../../../shared/ui/ActivityOrb.vue";
 import { orbStateForWork } from "../../../../domain/activity-orb-state";
 import type { ComposerEventPreview } from "./composer-event-preview";
 import { calmNoticeText, elapsedLabel, joinedNames, pickActivityPill, type ActivityNotice, type ActivitySteerOffer, type CalmNoticeActionKey } from "./room-activity";

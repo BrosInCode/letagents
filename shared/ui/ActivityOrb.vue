@@ -62,3 +62,7 @@ onBeforeUnmount(() => {
   clock.remove(host);
 });
 </script>
+
+<style scoped>
+.room-activity-orb { display: block; flex: 0 0 auto; }
+</style>

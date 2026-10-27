@@ -184,7 +184,7 @@ before(async () => {
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopAttachmentDrafts.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomActivityLine.vue").then((module) => module.default),
-    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/ActivityOrb.vue").then((module) => module.default),
+    vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/ActivityOrb.vue", import.meta.url))).then((module) => module.default),
   ]);
   // This test mounts client templates onto SSR-loaded components. Compile the
   // timeline's transparent grouping wrapper too so ordinary message slots run.
@@ -198,7 +198,7 @@ before(async () => {
     attachClientRender(DesktopAttachmentDrafts, "components/desktop/content/DesktopAttachmentDrafts.vue"),
     attachClientRender(RoomComposer, "components/desktop/content/room-chat/RoomComposer.vue"),
     attachClientRender(RoomActivityLine, "components/desktop/content/room-chat/RoomActivityLine.vue"),
-    attachClientRender(ActivityOrb, "components/desktop/content/room-chat/ActivityOrb.vue"),
+    attachClientRender(ActivityOrb, "../../../../shared/ui/ActivityOrb.vue"),
   ]);
 });
 
