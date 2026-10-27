@@ -5,6 +5,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import { formatBytes } from "../attachments/formatting";
+import { attachmentProblemFromError, type AttachmentProblem } from "./attachment-problems";
 import { desktopIpc } from "../../../../ipc/index.js";
 import {
   hasDraggedFiles,
@@ -24,13 +25,17 @@ interface RoomAttachmentsOptions {
 export function useRoomAttachments(options: RoomAttachmentsOptions) {
   const attachmentDrafts = ref<DesktopStagedAttachment[]>([]);
   const pendingAttachmentDrafts = ref<PendingAttachmentDraft[]>([]);
-  const attachmentError = ref<string | null>(null);
+  // Each problem is a new object, so the same problem twice shows twice.
+  const attachmentProblem = ref<AttachmentProblem | null>(null);
+  // The attempt that failed, for "Try again": the picker, or the same dropped files.
+  let lastAttempt: { kind: "pick" } | { kind: "drop"; files: File[] } | null = null;
   const attaching = ref(false);
   const isDraggingAttachment = ref(false);
   let attachmentDragDepth = 0;
 
   watch(options.roomIdentifier, () => {
-    attachmentError.value = null;
+    attachmentProblem.value = null;
+    lastAttempt = null;
     attachmentDrafts.value = [];
     pendingAttachmentDrafts.value = [];
     isDraggingAttachment.value = false;
@@ -40,12 +45,13 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
   async function pickAttachments(): Promise<void> {
     if (attaching.value || !options.roomIdentifier.value) return;
     attaching.value = true;
-    attachmentError.value = null;
+    attachmentProblem.value = null;
+    lastAttempt = { kind: "pick" };
     try {
       const staged = await desktopIpc.room.pickAttachments(options.roomIdentifier.value);
       attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
     } catch (error) {
-      attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
+      attachmentProblem.value = attachmentProblemFromError(error);
     } finally {
       attaching.value = false;
     }
@@ -54,26 +60,26 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
   async function stageDroppedAttachments(files: File[]): Promise<void> {
     if (files.length === 0) return;
     if (attaching.value) {
-      attachmentError.value = "Wait for the current attachment to finish, then add this one again.";
+      attachmentProblem.value = { kind: "busy" };
       return;
     }
     if (!options.roomIdentifier.value) {
-      attachmentError.value = "Choose a room before attaching files.";
+      attachmentProblem.value = { kind: "no-room" };
       return;
     }
-    attachmentError.value = null;
+    attachmentProblem.value = null;
     const availableSlots = Math.max(0, maxAttachments - attachmentDrafts.value.length - pendingAttachmentDrafts.value.length);
     if (availableSlots <= 0) {
-      attachmentError.value = `Attach up to ${maxAttachments} files per message.`;
+      attachmentProblem.value = { kind: "too-many", max: maxAttachments };
       return;
     }
     const acceptedFiles = files.slice(0, availableSlots);
     if (files.length > availableSlots) {
-      attachmentError.value = `Attach up to ${maxAttachments} files per message.`;
+      attachmentProblem.value = { kind: "too-many", max: maxAttachments };
     }
     const validFiles = acceptedFiles.filter((file) => {
       if (file.size <= maxAttachmentBytes) return true;
-      attachmentError.value = `${file.name || "Attachment"} is larger than ${formatBytes(maxAttachmentBytes)}.`;
+      attachmentProblem.value = { kind: "too-large", fileName: file.name || null, limit: formatBytes(maxAttachmentBytes) };
       return false;
     });
     if (!validFiles.length) return;
@@ -81,6 +87,7 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     const pendingDrafts = validFiles.map(toPendingAttachmentDraft);
     pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
     attaching.value = true;
+    lastAttempt = { kind: "drop", files: validFiles };
     try {
       const stageDroppedAttachmentContents = desktopIpc.room.stageDroppedAttachmentContents;
       if (!stageDroppedAttachmentContents) {
@@ -103,12 +110,19 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
       const staged = await stageDroppedAttachmentContents(options.roomIdentifier.value, droppedFiles);
       attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
     } catch (error) {
-      attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
+      attachmentProblem.value = attachmentProblemFromError(error, validFiles.length === 1 ? validFiles[0]!.name || null : null);
     } finally {
       const pendingIds = new Set(pendingDrafts.map((attachment) => attachment.localId));
       pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.filter((attachment) => !pendingIds.has(attachment.localId));
       attaching.value = false;
     }
+  }
+
+  /** "Try again": repeat the attempt that failed, with the same files. */
+  function retryAttachments(): Promise<void> {
+    const attempt = lastAttempt;
+    if (attempt?.kind === "drop") return stageDroppedAttachments(attempt.files);
+    return pickAttachments();
   }
 
   async function removeAttachment(uploadId: string): Promise<void> {
@@ -151,7 +165,7 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
   return {
     attaching,
     attachmentDrafts,
-    attachmentError,
+    attachmentProblem,
     clearAttachmentDrafts,
     handleAttachmentDragEnter,
     handleAttachmentDragLeave,
@@ -161,6 +175,7 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     pendingAttachmentDrafts,
     pickAttachments,
     removeAttachment,
+    retryAttachments,
     stageDroppedAttachments,
   };
 }

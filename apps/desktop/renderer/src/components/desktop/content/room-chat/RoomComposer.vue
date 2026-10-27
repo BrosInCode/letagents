@@ -1,17 +1,15 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
-    <button v-if="historyApprovalCount" type="button" class="desktop-host-approval-history"
-      :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
-      {{ hostApprovalHistoryLabel(historyApprovalCount, showApprovalHistory) }}
-    </button>
     <!-- One request at a time. Arrivals join its queue or appear above it, so
-      they never move the buttons; details open over the messages on demand. -->
-    <section v-if="currentHostApproval" :key="hostApprovalIdentity(currentHostApproval)"
-      class="desktop-composer-permission-tray desktop-host-approval" data-testid="desktop-host-approval" aria-live="polite">
+      they never move the buttons; details open over the messages on demand.
+      Nothing about the approvals service shows unless a request is waiting. -->
+    <section v-if="currentHostApproval && currentCardView" :key="hostApprovalIdentity(currentHostApproval)"
+      class="desktop-composer-permission-tray desktop-host-approval" data-testid="desktop-host-approval"
+      :data-state="currentCardView.kind" aria-live="polite">
       <div class="desktop-composer-permission-main">
         <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
         <div class="desktop-composer-permission-copy">
-          <strong :title="hostApprovalHeading(currentHostApproval)">{{ hostApprovalHeading(currentHostApproval) }}</strong>
+          <strong :title="currentCardHeading">{{ currentCardHeading }}</strong>
           <span :title="hostApprovalSummary(currentHostApproval.presentation)">{{ hostApprovalSummary(currentHostApproval.presentation) }}</span>
         </div>
       </div>
@@ -33,14 +31,11 @@
           <X :size="15" aria-hidden="true" />
         </button>
       </div>
-      <!-- Notes about the request go here, above the footer, so they never move its buttons. -->
-      <p v-if="currentHostApproval.status === 'pending' && currentHostApproval.presentation.denyScope === 'session_pending'"
-        class="desktop-host-approval-note">Deny applies to all pending permissions for this agent.</p>
-      <p v-else-if="approvalBlocksTurn(currentHostApproval)" class="desktop-host-approval-note">{{ currentHostApproval.presentation.displayName }} is waiting on this request, which can't be answered here. Stopping the turn cancels it.</p>
       <div class="desktop-host-approval-footer">
         <details class="desktop-host-approval-details">
           <summary>Details</summary>
           <div class="desktop-host-approval-details-panel">
+            <p v-if="currentCardView.kind === 'blocked'" data-testid="desktop-host-approval-blocked-detail">{{ currentHostApproval.presentation.displayName }} asked its own app for this, so it can't be answered here. Stopping the turn cancels the request.</p>
             <dl>
               <template v-for="(field, index) in hostApprovalFields(currentHostApproval.presentation)" :key="index">
                 <dt>{{ field.label }}</dt>
@@ -48,35 +43,44 @@
               </template>
             </dl>
             <p v-if="currentHostApproval.detail">{{ currentHostApproval.detail }}</p>
-            <p v-if="currentHostApproval.status === 'uncertain'">Confirmation unavailable. Your decision will not be sent again.</p>
           </div>
         </details>
-        <!-- One action group per state, each in this chain, then Always allow.
-          Every action here, destructive ones included, is disabled by
-          hostApprovalDecisionsDisabled so it waits out the arming hold. The
-          row runs right to left: the chain's group sits at the right edge, and
-          Always allow takes its own line above when it would not fit beside it. -->
+        <!-- One action group per state, then Always allow. Every action here,
+          destructive ones included, is disabled by hostApprovalDecisionsDisabled
+          so it waits out the arming hold. The row runs right to left: the
+          group sits at the right edge, and Always allow takes its own line
+          above when it would not fit beside it. Retry, Check again and Stop
+          turn sit in Deny's place, never where Allow once is, so a habitual
+          click on Allow cannot stop a turn or answer a request that appears. -->
         <div class="desktop-host-approval-decisions">
-          <div v-if="currentHostApproval.status === 'pending'" class="desktop-composer-permission-actions">
+          <div v-if="currentCardView.kind === 'decide'" class="desktop-composer-permission-actions">
             <button type="button" class="desktop-composer-permission-deny desktop-host-approval-deny" :disabled="hostApprovalDecisionsDisabled"
-              @click="decideRoomHostApproval(currentHostApproval, 'deny')">Deny</button>
+              :title="currentCardView.denyTitle ?? undefined" data-testid="desktop-host-approval-deny"
+              @click="decideRoomHostApproval(currentHostApproval, 'deny')">{{ currentCardView.denyLabel }}</button>
             <button type="button" class="desktop-composer-permission-allow desktop-host-approval-allow" :disabled="hostApprovalDecisionsDisabled"
               :title="hostApprovalAllowLabel(currentHostApproval.presentation)"
               @click="decideRoomHostApproval(currentHostApproval, 'allow_once')">{{ hostApprovalBusy === currentHostApproval.id
                 ? 'Recording…' : hostApprovalAllowLabel(currentHostApproval.presentation) }}</button>
           </div>
-          <div v-else-if="currentHostApproval.status === 'decision_recorded' && currentHostApproval.retryDecision" class="desktop-composer-permission-actions">
-            <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalDecisionsDisabled"
-              @click="decideRoomHostApproval(currentHostApproval, currentHostApproval.retryDecision)">Retry recorded {{ currentHostApproval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
+          <div v-else-if="currentCardView.kind === 'offline'" class="desktop-composer-permission-actions desktop-host-approval-in-deny-slot">
+            <span class="desktop-host-approval-quiet" role="status">Can't answer right now</span>
+            <button type="button" class="desktop-composer-permission-detail" :disabled="checkingApproval || !decisionsArmed"
+              data-testid="desktop-host-approval-retry" @click="checkHostApprovalAgain(currentHostApproval, null)">{{ checkingApproval ? 'Retrying…' : 'Retry' }}</button>
           </div>
-          <!-- Stop turn sits in Deny's place, never where Allow once is, so a
-            habitual click on Allow cannot stop an agent's turn. -->
-          <div v-else-if="approvalBlocksTurn(currentHostApproval)" class="desktop-composer-permission-actions desktop-host-approval-stop">
-            <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalDecisionsDisabled"
-              @click="stopAgentTurnFor(currentHostApproval)">Stop turn</button>
+          <div v-else-if="currentCardView.kind === 'unconfirmed'" class="desktop-composer-permission-actions desktop-host-approval-in-deny-slot">
+            <span class="desktop-host-approval-quiet" role="status">{{ currentCardView.label }}</span>
+            <button type="button" class="desktop-composer-permission-detail" data-testid="desktop-host-approval-check"
+              :disabled="checkingApproval || (currentCardView.resend ? hostApprovalDecisionsDisabled : !decisionsArmed)"
+              @click="checkHostApprovalAgain(currentHostApproval, currentCardView.resend)">{{ checkingApproval ? 'Checking…' : 'Check again' }}</button>
+          </div>
+          <div v-else-if="currentCardView.kind === 'blocked'" class="desktop-composer-permission-actions desktop-host-approval-stop">
+            <!-- The room lists the request again before it stops anything, so Stop
+              turn works while the approvals service is down; it still holds. -->
+            <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalBusy !== null || !decisionsArmed"
+              data-testid="desktop-host-approval-stop-turn" @click="stopAgentTurnFor(currentHostApproval)">Stop turn</button>
           </div>
           <!-- A permanent rule is never left unlabeled, however narrow the tray. -->
-          <button v-if="currentHostApproval.status === 'pending' && currentHostApproval.presentation.alwaysAllow" type="button"
+          <button v-if="currentCardView.kind === 'decide' && currentCardView.alwaysAllow" type="button"
             class="desktop-composer-permission-allow desktop-host-approval-always" :disabled="hostApprovalDecisionsDisabled"
             :aria-label="hostApprovalAlwaysAllowLabel(currentHostApproval.presentation) ?? undefined"
             :title="`${hostApprovalAlwaysAllowLabel(currentHostApproval.presentation)}. ${HOST_APPROVAL_ALWAYS_ALLOW_HINT}`"
@@ -84,9 +88,6 @@
         </div>
       </div>
     </section>
-    <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
-      {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshRoomHostApprovals">Refresh approvals</button>
-    </p>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
@@ -225,9 +226,9 @@
       </button>
       <p v-if="slash.hint.value" role="status">{{ slash.hint.value }}</p>
     </div>
-    <div v-if="sendError || attachmentError" class="desktop-composer-footer">
+    <div v-if="sendError" class="desktop-composer-footer">
       <p class="desktop-composer-error" data-testid="desktop-composer-error">
-        {{ sendError || attachmentError }}
+        {{ sendError }}
       </p>
     </div>
   </form>
@@ -250,7 +251,8 @@ import type {
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalCardHeading, hostApprovalCardView, hostApprovalDecisionsArmed, hostApprovalDeniedAllNotice, hostApprovalFields, hostApprovalSummary, hostApprovalTrayOrder, type HostApprovalCardView } from "./host-approval-presentation";
+import type { CalmNoticeInput } from "./room-activity";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
 import { decideHostApproval, hostApprovalIdentity, hostApprovalPollDue, hostApprovalRoom, refreshHostApprovals, watchHostApprovalPushes } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
@@ -290,7 +292,6 @@ export interface RoomComposerReplyTarget {
 const props = defineProps<{
   attaching: boolean;
   attachmentDrafts: DesktopStagedAttachment[];
-  attachmentError: string | null;
   messageNamespace?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
@@ -323,6 +324,8 @@ const emit = defineEmits<{
   "remove-attachment": [uploadId: string];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "stop-agent-turn": [agentId: string, approvalId: string];
+  /** A calm line for the room's activity line: "Denied 3 requests from Juniper". */
+  "approval-notice": [notice: CalmNoticeInput];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
 }>();
 
@@ -347,7 +350,6 @@ const hostApprovalBusy = computed(() => approvalRoom.value.busy);
 const hostApprovalLoading = computed(() => approvalRoom.value.loading);
 const dismissedHostApprovalIds = ref(new Set<string>());
 const rememberedHostApprovalDismissals = ref(readHostApprovalDismissals());
-const showApprovalHistory = ref(false);
 let approvalTimer: ReturnType<typeof setInterval> | null = null;
 let stopApprovalPushes: (() => void) | null = null;
 // Moves with the approval refresh, so a request's grace can end without new data.
@@ -361,16 +363,21 @@ const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approv
 function approvalBlocksTurn(approval: DesktopHostApproval): boolean {
   return hostApprovalBlocksTurn(approval, approvalRoom.value.firstSeenAt[hostApprovalIdentity(approval)], approvalNowMs.value);
 }
-// A request its agent is still waiting on stays in view, even when it cannot be decided here.
-// Pending requests are always in view; the history toggle adds the rest.
-function shownWithoutHistory(approval: DesktopHostApproval): boolean {
-  return approval.status === "pending" || approval.status === "decision_recorded" || approvalBlocksTurn(approval);
+// The card shows what can be answered or checked here, and a request its agent
+// still waits on even when it cannot be decided here. An unavailable record no
+// turn waits on has nothing to offer here and stays out of the composer.
+function cardView(approval: DesktopHostApproval): HostApprovalCardView {
+  const pending = new Set(hostApprovals.value.filter(item => item.status === "pending"
+    && item.presentation.agentId === approval.presentation.agentId).map(hostApprovalIdentity));
+  return hostApprovalCardView(approval, {
+    blocksTurn: approvalBlocksTurn(approval),
+    serviceError: hostApprovalError.value !== null,
+    agentPending: pending.size,
+    sent: approvalRoom.value.decisions[hostApprovalIdentity(approval)],
+  });
 }
 const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
-  showApprovalHistory.value || shownWithoutHistory(approval)));
-// The history line counts only what its toggle adds to the stack, so it never names a request already in view.
-const historyApprovalCount = computed(() => hostApprovalHistoryCount(
-  unresolvedHostApprovals.value.filter(approval => !shownWithoutHistory(approval))));
+  cardView(approval).kind !== "none"));
 
 // An undecidable record stays dismissed across restarts until its status
 // changes. A live request is dismissed only for this session.
@@ -410,6 +417,9 @@ const trayApprovals = computed(() => {
 });
 const currentHostApproval = computed(() => trayApprovals.value.find(approval =>
   hostApprovalIdentity(approval) === currentApprovalKey.value) ?? trayApprovals.value[0] ?? null);
+const currentCardView = computed(() => currentHostApproval.value ? cardView(currentHostApproval.value) : null);
+const currentCardHeading = computed(() => currentHostApproval.value && currentCardView.value
+  ? hostApprovalCardHeading(currentHostApproval.value, currentCardView.value) : "");
 const currentApprovalIndex = computed(() => currentHostApproval.value ? trayApprovals.value.indexOf(currentHostApproval.value) : -1);
 const hostApprovalDecisionsDisabled = computed(() => hostApprovalBusy.value !== null || hostApprovalError.value !== null || !decisionsArmed.value);
 
@@ -453,7 +463,7 @@ function holdCardDecisions(): void {
 // when Previous, Next, a decision or a withdrawal shows a different request.
 // The same card holds again when a decision button appears on it, such as Stop turn.
 const currentCardHoldKey = computed(() => currentHostApproval.value
-  ? `${hostApprovalIdentity(currentHostApproval.value)}\n${hostApprovalActionKey(currentHostApproval.value, approvalBlocksTurn(currentHostApproval.value))}`
+  ? `${hostApprovalIdentity(currentHostApproval.value)}\n${hostApprovalActionKey(cardView(currentHostApproval.value))}`
   : null);
 watch(currentCardHoldKey, (key) => {
   if (key) holdCardDecisions();
@@ -491,9 +501,35 @@ function stopAgentTurnFor(approval: DesktopHostApproval): void {
   emit("stop-agent-turn", approval.presentation.agentId, approval.id);
 }
 
-function decideRoomHostApproval(approval: DesktopHostApproval, decision: HostApprovalSelection): Promise<void> {
-  if (!props.roomIdentifier || !decisionsArmed.value) return Promise.resolve();
-  return decideHostApproval(props.roomIdentifier, approval.id, decision);
+async function decideRoomHostApproval(approval: DesktopHostApproval, decision: HostApprovalSelection): Promise<void> {
+  if (!props.roomIdentifier || !decisionsArmed.value) return;
+  // Read before the decision: afterwards the other requests are no longer pending.
+  const view = cardView(approval);
+  const coversAll = decision === "deny" && view.kind === "decide" && view.denyLabel !== "Deny";
+  const count = coversAll ? new Set(hostApprovals.value.filter(item => item.status === "pending"
+    && item.presentation.agentId === approval.presentation.agentId).map(hostApprovalIdentity)).size : 0;
+  const status = await decideHostApproval(props.roomIdentifier, approval.id, decision);
+  // Only a confirmed deny is announced; an unconfirmed one stays on its card.
+  if (coversAll && (status === "decision_sent" || status === "resolved")) {
+    emit("approval-notice", { icon: "check", ...hostApprovalDeniedAllNotice(count, approval.presentation.displayName) });
+  }
+}
+
+/**
+ * Check again: send the recorded decision again where main offers that retry
+ * (the same decision, under the same identity), or else list the approvals
+ * again. A decision is never sent a second time otherwise.
+ */
+// Set only while the person's own Retry or Check again runs, so a background poll never relabels the button.
+const checkingApproval = ref(false);
+async function checkHostApprovalAgain(approval: DesktopHostApproval, resend: HostApprovalSelection | null): Promise<void> {
+  if (!decisionsArmed.value || checkingApproval.value) return;
+  checkingApproval.value = true;
+  try {
+    await (resend ? decideRoomHostApproval(approval, resend) : refreshRoomHostApprovals());
+  } finally {
+    checkingApproval.value = false;
+  }
 }
 
 watch(hostApprovals, (approvals) => {
@@ -647,7 +683,6 @@ watch(
   () => props.roomIdentifier,
   () => {
     dismissedHostApprovalIds.value = new Set();
-    showApprovalHistory.value = false;
     void refreshRoomHostApprovals();
     mentionQuery.value = null;
   },

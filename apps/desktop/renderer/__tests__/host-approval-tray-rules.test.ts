@@ -4,9 +4,10 @@ import type { DesktopHostApproval, HostApprovalStatus } from "../../shared/host-
 import {
   HOST_APPROVAL_ARM_MS,
   hostApprovalActionKey,
+  hostApprovalCardHeading,
+  hostApprovalCardView,
   hostApprovalDecisionsArmed,
-  hostApprovalHistoryCount,
-  hostApprovalHistoryLabel,
+  hostApprovalDeniedAllNotice,
   hostApprovalTrayOrder,
 } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 
@@ -20,19 +21,55 @@ test("a request that becomes the visible card holds its decisions for the arming
   assert.equal(hostApprovalDecisionsArmed(SHOWN_AT, SHOWN_AT + 60_000), true, "stays armed while it is shown");
 });
 
-test("a card's action key changes when a decision button appears on the same request", () => {
-  const presentation = { agentId: "agent", displayName: "Agent", provider: "open-model", title: "Run a command",
-    details: "{}", denyScope: "session_pending" } as DesktopHostApproval["presentation"];
-  const waiting = { presentation, status: "unavailable" as const, retryDecision: null };
-  const pending = { ...waiting, status: "pending" as const };
-  const recorded = { ...waiting, status: "decision_recorded" as const, retryDecision: "allow_once" as const };
-  assert.equal(hostApprovalActionKey(pending, false), "deny allow_once");
-  assert.equal(hostApprovalActionKey(recorded, false), "retry_allow_once");
-  assert.equal(hostApprovalActionKey(waiting, false), "", "an unavailable card that no turn waits on offers nothing");
+const presentation = { agentId: "agent", displayName: "Juniper", provider: "open-model", title: "Run a command",
+  details: "{}", denyScope: "session_pending" } as DesktopHostApproval["presentation"];
+const waiting = { presentation, status: "unavailable" as const, retryDecision: null };
+const pending = { ...waiting, status: "pending" as const };
+const recorded = { ...waiting, status: "decision_recorded" as const, retryDecision: "allow_once" as const };
+const uncertain = { ...waiting, status: "uncertain" as const };
+const calm = { blocksTurn: false, serviceError: false, agentPending: 1 };
+
+test("a card's action key changes when a different button appears on the same request", () => {
+  const key = (approval: typeof waiting | typeof pending | typeof recorded, input = calm) => hostApprovalActionKey(hostApprovalCardView(approval, input));
+  assert.equal(key(pending), "deny Deny allow_once");
+  assert.equal(key(recorded), "retry_allow_once");
+  assert.equal(key(waiting), "", "an unavailable card that no turn waits on offers nothing");
   // Same request, same card: only the turn starting to wait on it changes the key.
-  assert.notEqual(hostApprovalActionKey(waiting, false), hostApprovalActionKey(waiting, true), "Stop turn appears");
-  assert.equal(hostApprovalActionKey(waiting, true), "stop_turn");
-  assert.equal(hostApprovalActionKey(waiting, true), hostApprovalActionKey(waiting, true), "a steady card keeps its key");
+  assert.equal(key(waiting, { ...calm, blocksTurn: true }), "stop_turn", "Stop turn appears");
+  assert.equal(key(pending, { ...calm, serviceError: true }), "retry", "Retry takes Deny's place");
+  assert.notEqual(key(pending, { ...calm, serviceError: true }), key(pending), "Deny coming back after Retry holds again");
+  assert.notEqual(key(pending, { ...calm, agentPending: 2 }), key(pending, { ...calm, agentPending: 3 }), "a new count holds again");
+});
+
+test("each card state, in plain words", () => {
+  assert.deepEqual(hostApprovalCardView(pending, calm),
+    { kind: "decide", denyLabel: "Deny", denyTitle: "Denies this and every other request from Juniper", alwaysAllow: false });
+  assert.deepEqual(hostApprovalCardView(pending, { ...calm, agentPending: 3 }),
+    { kind: "decide", denyLabel: "Deny all 3", denyTitle: "Denies this and every other request from Juniper", alwaysAllow: false },
+    "a deny that covers the agent's other requests says so on the button");
+  const single = { ...pending, presentation: { ...presentation, provider: "codex", denyScope: "request" } } as typeof pending;
+  assert.deepEqual(hostApprovalCardView(single, { ...calm, agentPending: 3 }),
+    { kind: "decide", denyLabel: "Deny", denyTitle: null, alwaysAllow: false }, "a deny for one request stays Deny");
+  assert.deepEqual(hostApprovalCardView(pending, { ...calm, serviceError: true }), { kind: "offline" });
+  assert.deepEqual(hostApprovalCardView(waiting, { ...calm, blocksTurn: true }), { kind: "blocked" });
+  assert.deepEqual(hostApprovalCardView(waiting, { ...calm, blocksTurn: true, serviceError: true }), { kind: "blocked" },
+    "Stop turn does not wait on the approvals service");
+  assert.deepEqual(hostApprovalCardView(recorded, calm), { kind: "unconfirmed", label: "Allowed · not confirmed yet", resend: "allow_once" });
+  assert.deepEqual(hostApprovalCardView(recorded, { ...calm, serviceError: true }),
+    { kind: "unconfirmed", label: "Allowed · not confirmed yet", resend: null }, "offline, Check again only lists again");
+  assert.deepEqual(hostApprovalCardView(uncertain, { ...calm, sent: "deny" }), { kind: "unconfirmed", label: "Denied · not confirmed yet", resend: null },
+    "an uncertain decision is never sent again");
+  assert.deepEqual(hostApprovalCardView(uncertain, calm), { kind: "unconfirmed", label: "Answered · not confirmed yet", resend: null });
+  assert.deepEqual(hostApprovalCardView(pending, { ...calm, serviceError: true, sent: "allow_once" }),
+    { kind: "unconfirmed", label: "Allowed · not confirmed yet", resend: null }, "a decision whose answer failed is not 'can't answer'");
+  assert.deepEqual(hostApprovalCardView(waiting, calm), { kind: "none" });
+});
+
+test("the card heading names who waits, and on what", () => {
+  assert.equal(hostApprovalCardHeading(waiting, { kind: "blocked" }), "Juniper is waiting on a request you can't answer here");
+  assert.equal(hostApprovalCardHeading(pending, hostApprovalCardView(pending, calm)), "Juniper · Run a command");
+  assert.equal(hostApprovalCardHeading(uncertain, hostApprovalCardView(uncertain, calm)), "Juniper · Run a command");
+  assert.deepEqual(hostApprovalDeniedAllNotice(3, "Juniper"), { lead: "Denied 3 requests from ", name: "Juniper" });
 });
 
 const card = (id: string, status: HostApprovalStatus) => ({ id, status });
@@ -47,16 +84,4 @@ test("each group keeps the order it has, so a stable stack never reshuffles", ()
   const stable = [card("p2", "pending"), card("p1", "pending"), card("u2", "unavailable"), card("u1", "unavailable")];
   assert.deepEqual(hostApprovalTrayOrder(stable).map(item => item.id), ["p2", "p1", "u2", "u1"]);
   assert.deepEqual(hostApprovalTrayOrder([]), []);
-});
-
-test("the history line counts only the unavailable and unconfirmed requests", () => {
-  const every: HostApprovalStatus[] = ["pending", "decision_recorded", "decision_sent", "uncertain", "request_closed", "resolved", "unavailable"];
-  assert.equal(hostApprovalHistoryCount(every.map(status => ({ status }))), 2);
-  assert.equal(hostApprovalHistoryCount([{ status: "pending" }]), 0, "a pending request is shown, not counted");
-});
-
-test("the history label says exactly what it counts", () => {
-  assert.equal(hostApprovalHistoryLabel(1, false), "Show 1 unavailable or unconfirmed approval");
-  assert.equal(hostApprovalHistoryLabel(2, false), "Show 2 unavailable or unconfirmed approvals");
-  assert.equal(hostApprovalHistoryLabel(2, true), "Hide 2 unavailable or unconfirmed approvals");
 });

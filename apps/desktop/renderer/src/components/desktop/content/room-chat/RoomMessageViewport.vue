@@ -159,6 +159,7 @@
         @open-agent="$emit('open-agent', workIndicatorAgentTarget($event))"
         @open-event-preview="$emit('open-event-preview', $event)"
         @post-agent-answer-now="(agentId, sourceMessageId) => $emit('post-agent-answer-now', agentId, sourceMessageId)"
+        @calm-action="$emit('activity-calm-action', $event)"
       />
     </div>
   </div>
@@ -172,7 +173,7 @@ import { parseGitHubEvent } from "../desktop-chat-message/github-event";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
 import RoomActivityLine from "./RoomActivityLine.vue";
-import type { ActivityNotice, ActivitySteerOffer, PresenceTimelineLine } from "./room-activity";
+import type { ActivityNotice, ActivitySteerOffer, CalmNoticeActionKey, PresenceTimelineLine } from "./room-activity";
 import type { ComposerEventPreview } from "./composer-event-preview";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
@@ -294,6 +295,7 @@ const emit = defineEmits<{
   "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
   "activity-hold": [held: boolean];
+  "activity-calm-action": [key: CalmNoticeActionKey];
   steer: [];
   "open-event-preview": [preview: ComposerEventPreview];
   "open-image": [imageId: string];
