@@ -131,7 +131,54 @@ export function assertAttachmentTotalByteSize(attachments: readonly { byte_size:
   }
 }
 
-export function formatAttachmentContentDisposition(filename: string): string {
+/**
+ * Types a browser may show in its own tab. None of them can run script when
+ * opened straight from storage. Every other type downloads.
+ */
+const INLINE_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  "image/avif",
+  "image/bmp",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+  "text/plain",
+]);
+
+/**
+ * Types a browser runs as a page or script. They download as plain bytes, so
+ * a browser that ignores the download hint still cannot run them. SVG keeps
+ * its type because image tags need it, and an image tag never runs script.
+ */
+function isScriptableAttachmentContentType(contentType: string): boolean {
+  if (contentType === "image/svg+xml") {
+    return false;
+  }
+  return /^(?:text\/html|text\/xml|text\/xsl|application\/xml|text\/(?:java|ecma)script|application\/(?:x-)?(?:java|ecma)script|application\/x-shockwave-flash|multipart\/x-mixed-replace)$|\+xml$/.test(contentType);
+}
+
+export function formatAttachmentContentDisposition(
+  filename: string,
+  disposition: "inline" | "attachment" = "attachment",
+): string {
   const safe = sanitizeFilename(filename).replace(/["\\]/g, "_");
-  return `inline; filename="${safe}"`;
+  return `${disposition}; filename="${safe}"`;
+}
+
+/**
+ * The headers storage sends with a download. Only passive types open in the
+ * browser tab; HTML, SVG and other active types download instead, so a file
+ * from a room never runs as a page on the storage domain.
+ */
+export function resolveAttachmentDownloadHeaders(input: {
+  filename: string;
+  content_type: string;
+}): { content_disposition: string; content_type: string } {
+  const contentType = normalizeContentType(input.content_type);
+  const inline = INLINE_ATTACHMENT_CONTENT_TYPES.has(contentType);
+  return {
+    content_disposition: formatAttachmentContentDisposition(input.filename, inline ? "inline" : "attachment"),
+    content_type: isScriptableAttachmentContentType(contentType) ? "application/octet-stream" : contentType,
+  };
 }

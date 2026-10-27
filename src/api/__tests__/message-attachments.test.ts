@@ -8,6 +8,7 @@ import {
   formatAttachmentContentDisposition,
   normalizeAttachmentUploadRequest,
   normalizeMessageAttachmentReferences,
+  resolveAttachmentDownloadHeaders,
   resolveMessageAttachmentUploader,
 } from "../messages/attachments.js";
 
@@ -105,9 +106,67 @@ test("normalizeMessageAttachmentReferences rejects invalid references", () => {
   );
 });
 
-test("formatAttachmentContentDisposition escapes filenames", () => {
+test("formatAttachmentContentDisposition escapes filenames and downloads by default", () => {
   assert.equal(
     formatAttachmentContentDisposition('bad"name.png'),
+    'attachment; filename="bad_name.png"'
+  );
+  assert.equal(
+    formatAttachmentContentDisposition('bad"name.png', "inline"),
     'inline; filename="bad_name.png"'
+  );
+});
+
+test("downloads open only passive types in the browser tab", () => {
+  for (const contentType of ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"]) {
+    assert.deepEqual(
+      resolveAttachmentDownloadHeaders({ filename: "file", content_type: contentType }),
+      { content_disposition: 'inline; filename="file"', content_type: contentType },
+      contentType,
+    );
+  }
+});
+
+test("HTML and other scriptable types download as plain bytes", () => {
+  for (const contentType of [
+    "text/html",
+    "TEXT/HTML",
+    "application/xhtml+xml",
+    "text/xml",
+    "application/xml",
+    "application/rss+xml",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "text/xsl",
+    "multipart/x-mixed-replace",
+  ]) {
+    assert.deepEqual(
+      resolveAttachmentDownloadHeaders({ filename: "demo.html", content_type: contentType }),
+      { content_disposition: 'attachment; filename="demo.html"', content_type: "application/octet-stream" },
+      contentType,
+    );
+  }
+});
+
+test("SVG keeps its image type for image tags but never opens as a page", () => {
+  assert.deepEqual(
+    resolveAttachmentDownloadHeaders({ filename: "diagram.svg", content_type: "image/svg+xml" }),
+    { content_disposition: 'attachment; filename="diagram.svg"', content_type: "image/svg+xml" },
+  );
+});
+
+test("other and malformed types download with a safe type", () => {
+  assert.deepEqual(
+    resolveAttachmentDownloadHeaders({ filename: "data.json", content_type: "application/json" }),
+    { content_disposition: 'attachment; filename="data.json"', content_type: "application/json" },
+  );
+  assert.deepEqual(
+    resolveAttachmentDownloadHeaders({ filename: "page.html", content_type: "text/html; charset=utf-8" }),
+    { content_disposition: 'attachment; filename="page.html"', content_type: "application/octet-stream" },
+  );
+  assert.deepEqual(
+    resolveAttachmentDownloadHeaders({ filename: "x", content_type: "" }),
+    { content_disposition: 'attachment; filename="x"', content_type: "application/octet-stream" },
   );
 });
