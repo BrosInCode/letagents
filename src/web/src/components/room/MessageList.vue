@@ -204,6 +204,11 @@ function findRoomAnchor(messageId: string) {
 function rememberPosition(room = props.roomIdentifier || '') {
   const el = messagesEl.value
   if (restoringPosition || !el || !el.isConnected || el.clientHeight <= 0 || props.messagesLoaded === false) return
+  // Latest restores to the bottom, so composer growth needs no message measurements.
+  if (isScrolledToBottom) {
+    emit('scrollPosition', room, { top: el.scrollTop, latest: true, anchor: null })
+    return
+  }
   const top = el.getBoundingClientRect().top
   const anchor = roomAnchors().find(row => row.getBoundingClientRect().bottom > top)
   emit('scrollPosition', room, { top: el.scrollTop, latest: isScrolledToBottom,
