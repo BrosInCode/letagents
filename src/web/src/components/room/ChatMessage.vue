@@ -50,6 +50,8 @@
         @copy="copyMessageFromMenu"
         :can-react="reactable"
         :picker-open="reactionPickerAnchor !== null"
+        :actions-open="contextMenuOpen"
+        @actions="openMessageActions"
         @reply="emit('reply', message)"
         @info="emit('info', message)"
         @react="openReactionPicker"
@@ -167,6 +169,7 @@
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
         <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromMenu">Copy link to message</button>
         <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="!inlineReply" type="button" role="menuitem" @click="threadFromMenu">Reply in thread</button>
         <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
         <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
         <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromMenu">Mark unread from here</button>
@@ -275,6 +278,7 @@ const contextMenuOpen = ref(false)
 const contextMenuPosition = ref({ x: 0, y: 0 })
 const contextMenuRef = ref<HTMLElement | null>(null)
 let contextMenuRestoreFocus: HTMLElement | null = null
+let contextMenuTrigger: HTMLElement | null = null
 
 const canCopyMessageLink = computed(() => {
   return (
@@ -294,19 +298,49 @@ function openContextMenu(event: MouseEvent) {
   const selection = window.getSelection()
   if (selection && !selection.isCollapsed && target && selection.containsNode(target, true)) return
   event.preventDefault()
-  contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  showContextMenu(event.clientX, event.clientY)
+}
+
+function openMessageActions(event: MouseEvent) {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  if (!trigger) return
+  if (contextMenuOpen.value) {
+    closeContextMenu(true)
+    return
+  }
+  const bounds = trigger.getBoundingClientRect()
+  showContextMenu(bounds.right - 190, bounds.bottom + 4, trigger)
+}
+
+function showContextMenu(x: number, y: number, invoker?: HTMLElement) {
+  contextMenuTrigger = invoker ?? null
+  contextMenuRestoreFocus = invoker ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
   const menuExtraHeight =
+    (!props.inlineReply ? 32 : 0) +
     (canCopyMessageLink.value ? 32 : 0) +
     (reactable.value ? 32 : 0) +
     (pinnable.value ? 32 : 0) +
     (canMarkUnread.value ? 32 : 0)
   contextMenuPosition.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 190)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - (170 + menuExtraHeight))),
+    x: Math.max(8, Math.min(x, window.innerWidth - 190)),
+    y: Math.max(8, Math.min(y, window.innerHeight - (170 + menuExtraHeight))),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
     contextMenuRef.value?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    // Measure the real menu: touch rows and translated labels can be taller.
+    const menu = contextMenuRef.value?.getBoundingClientRect?.()
+    if (!menu) return
+    const viewport = window.visualViewport
+    const left = viewport?.offsetLeft ?? 0
+    const top = viewport?.offsetTop ?? 0
+    const width = viewport?.width ?? window.innerWidth
+    const height = viewport?.height ?? window.innerHeight
+    contextMenuPosition.value = {
+      x: Math.max(left + 8, Math.min(x, left + width - menu.width - 8)),
+      y: Math.max(top + 8, Math.min(y, top + height - menu.height - 8)),
+    }
+    contextMenuRef.value!.style.maxHeight = `${Math.max(44, height - 16)}px`
   })
 }
 
@@ -315,6 +349,7 @@ function closeContextMenu(restoreFocus = false) {
   contextMenuOpen.value = false
   if (restoreFocus && contextMenuRestoreFocus?.isConnected) contextMenuRestoreFocus.focus()
   contextMenuRestoreFocus = null
+  contextMenuTrigger = null
 }
 
 async function copyMessageFromMenu() {
@@ -341,6 +376,11 @@ async function copyMessageLinkFromMenu() {
 function replyFromMenu() {
   closeContextMenu()
   emit('reply', props.message)
+}
+
+function threadFromMenu() {
+  closeContextMenu()
+  emit('openThread', props.message.id)
 }
 
 function messageInfoFromMenu() {
@@ -448,6 +488,7 @@ function handleMenuDismiss(event: Event) {
   if (event.type === 'keydown' && (event as KeyboardEvent).key !== 'Escape') return
   // Presses inside the menu are item activations, not dismissals.
   if (event.type === 'pointerdown' && event.target instanceof Node && contextMenuRef.value?.contains(event.target)) return
+  if (event.type === 'pointerdown' && event.target instanceof Node && contextMenuTrigger?.contains(event.target)) return
   closeContextMenu(event.type === 'keydown')
 }
 
@@ -888,7 +929,9 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
   z-index: 9998;
   display: grid;
   min-width: 172px;
-  max-height: calc(100vh - 16px);
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overscroll-behavior: contain;
   overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--border, #27272a);
@@ -909,6 +952,10 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 }
 .web-message-context-menu button:hover,
 .web-message-context-menu button:focus-visible { background: rgba(255, 255, 255, 0.08); outline: none; }
+@media (max-width: 768px), (pointer: coarse) {
+  .web-message-context-menu { min-width: min(224px, calc(100vw - 16px)); }
+  .web-message-context-menu button { min-height: 44px; font-size: .875rem; }
+}
 .web-message-context-menu-separator {
   height: 1px;
   margin: 4px 6px;
@@ -937,8 +984,11 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: min(78%, 68ch); }
 .message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 56px); }
 @media (max-width: 760px) {
-  .message[data-chat-role] > .message-body { max-width: calc(100% - 64px); }
-  .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: calc(100% - 64px); }
+  .message[data-chat-role] { gap: 8px; }
+  .message[data-chat-role] > .message-body { max-width: calc(100% - 40px); }
+  .message[data-chat-role] > .message-body > .message-bubble { padding: 10px 12px; }
+  .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: calc(100% - 40px); }
+  .message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 40px); }
 }
 </style>
 
