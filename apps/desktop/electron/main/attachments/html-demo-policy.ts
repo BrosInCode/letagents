@@ -4,7 +4,8 @@ import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
  * An HTML demo is a single file someone attached to a room message. It opens
  * in its own window with no preload, no Node and no app sign-in, and nothing
  * loads over the network: scripts and styles must be inline, and images must
- * be data: or blob: URLs. DNS lookups (DNS prefetch, WebRTC) remain possible.
+ * be data: or blob: URLs. Known limits: the page can still cause DNS lookups
+ * (DNS prefetch, WebRTC), and it can read a file the person drops or picks in it.
  */
 export const MAX_HTML_DEMO_BYTES = 10 * 1024 * 1024;
 export const MAX_OPEN_HTML_DEMOS = 6;
@@ -25,6 +26,8 @@ export const HTML_DEMO_CONTENT_SECURITY_POLICY = [
   "manifest-src 'none'",
   "form-action 'none'",
   "base-uri 'none'",
+  // Scripts and its own storage only: no dialogs, printing, forms, pop-ups, downloads or top navigation.
+  "sandbox allow-scripts allow-same-origin",
 ].join("; ");
 
 export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = {

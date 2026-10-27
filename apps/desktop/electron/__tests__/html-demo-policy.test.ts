@@ -40,6 +40,7 @@ describe("HTML demo policy", () => {
     assert.equal(directives.get("object-src"), "'none'");
     assert.equal(directives.get("form-action"), "'none'");
     assert.equal(directives.get("base-uri"), "'none'");
+    assert.equal(directives.get("sandbox"), "allow-scripts allow-same-origin");
     for (const sources of directives.values()) {
       assert.doesNotMatch(sources, /https?:|\*|'self'/);
     }

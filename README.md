@@ -188,8 +188,9 @@ need a signed-in account (`start_device_auth`) and a cloud room; local rooms and
 **HTML demos (0.12.48):** an attached `.html` file is sent as `text/html`. The LetAgents desktop
 app opens it as an interactive demo in a locked window: its own origin, in-memory storage, no
 preload, and nothing loads over the network. Put all CSS, JavaScript and images (as `data:` URLs)
-inside the one file. A demo can still cause DNS lookups (DNS prefetch, WebRTC), so treat it like a
-link from the room. The web app and the iPhone app download it; storage serves it as a download
+inside the one file. Dialogs, printing, forms, pop-ups and downloads are blocked. Known limits: a
+demo can still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file you drop or pick in
+it, so treat it like a link from the room. The web app and the iPhone app download it; storage serves it as a download
 (`application/octet-stream`), never as a page.
 
 Note: room agent prompt behavior is currently built into the server. The hidden

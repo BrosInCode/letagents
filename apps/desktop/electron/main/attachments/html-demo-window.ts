@@ -61,7 +61,8 @@ export async function openHtmlDemo(input: {
 /**
  * Show an HTML document in a locked window: its own origin, no preload, and
  * nothing loads over the network. The page can still cause DNS lookups (DNS
- * prefetch, WebRTC); Electron has no per-window switch for those.
+ * prefetch, WebRTC) and read a file the person drops or picks in it; Electron
+ * has no per-window switch for those.
  */
 export async function openHtmlDemoWindow(input: { html: string; title: string }): Promise<ElectronBrowserWindow> {
   const host = randomUUID().replaceAll("-", "");
@@ -88,7 +89,8 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
       webviewTag: false,
       navigateOnDragDrop: false,
       spellcheck: false,
-      safeDialogs: true,
+      // alert() and confirm() would show the page's text in a native app dialog.
+      disableDialogs: true,
       autoplayPolicy: "user-gesture-required",
     },
   });
@@ -129,7 +131,11 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
 }
 
 function htmlDemoSession(): Promise<Session> {
-  demoSession ??= prepareHtmlDemoSession();
+  // A failed setup is not cached, so the next open tries again instead of failing forever.
+  demoSession ??= prepareHtmlDemoSession().catch((error: unknown) => {
+    demoSession = null;
+    throw error;
+  });
   return demoSession;
 }
 
@@ -150,7 +156,11 @@ async function prepareHtmlDemoSession(): Promise<Session> {
   ses.setDevicePermissionHandler(() => false);
   ses.on("will-download", (event) => event.preventDefault());
   // Connections that skip the request filter (WebRTC over TCP, preconnect) meet a
-  // closed port. Set before the first demo loads.
-  await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" }).catch(() => undefined);
+  // closed port. Set before the first demo loads; without it no demo opens.
+  try {
+    await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
+  } catch {
+    throw new Error("Demos cannot open because their network block could not be set up.");
+  }
   return ses;
 }
