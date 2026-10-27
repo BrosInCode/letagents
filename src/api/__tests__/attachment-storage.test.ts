@@ -51,3 +51,25 @@ test("createPresignedAttachmentUpload signs the exact content length", () => {
   assert.equal(url.searchParams.get("X-Amz-SignedHeaders"), "content-length;content-type;host");
   assert.ok(url.searchParams.get("X-Amz-Signature"), "expected presigned PUT signature");
 });
+
+test("createPresignedAttachmentDownload asks storage to download HTML, never show it", () => {
+  const url = new URL(createPresignedAttachmentDownload({
+    object_key: "rooms/focus_14/uploads/upl_1234567890abcdef/demo.html",
+    filename: "demo.html",
+    content_type: "text/html",
+  }));
+
+  assert.equal(url.searchParams.get("response-content-disposition"), 'attachment; filename="demo.html"');
+  assert.equal(url.searchParams.get("response-content-type"), "application/octet-stream");
+});
+
+test("createPresignedAttachmentDownload keeps images inline with their type", () => {
+  const url = new URL(createPresignedAttachmentDownload({
+    object_key: "rooms/focus_14/uploads/upl_1234567890abcdef/roomsettings.png",
+    filename: "roomsettings.png",
+    content_type: "image/png",
+  }));
+
+  assert.equal(url.searchParams.get("response-content-disposition"), 'inline; filename="roomsettings.png"');
+  assert.equal(url.searchParams.get("response-content-type"), "image/png");
+});

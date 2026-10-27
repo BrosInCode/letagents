@@ -45,7 +45,8 @@ export function canStageMessageAttachment(input: Parameters<typeof resolveMessag
 function sanitizeFilename(value: string): string {
   const trimmed = value.trim().replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
   const safe = trimmed
-    .replace(/[\u0000-\u001f\u007f]/g, "")
+    // Control characters, and the direction marks that make "x\u202Efdp.exe" read as "xexe.pdf".
+    .replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
     .replace(/[<>:"|?*]/g, "_")
     .slice(0, 160)
     .trim();
@@ -131,7 +132,73 @@ export function assertAttachmentTotalByteSize(attachments: readonly { byte_size:
   }
 }
 
-export function formatAttachmentContentDisposition(filename: string): string {
+/**
+ * Passive media a browser may show in its own tab with its own type. None of
+ * them can run script when opened straight from storage.
+ */
+const INLINE_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  "image/apng",
+  "image/avif",
+  "image/bmp",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/vnd.microsoft.icon",
+  "image/webp",
+  "image/x-icon",
+  "application/pdf",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "video/mp4",
+  "video/webm",
+]);
+
+/** Text files that open in the tab as plain text, which a browser never runs. */
+const PLAIN_TEXT_ATTACHMENT_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  "application/json",
+  "text/csv",
+  "text/markdown",
+  "text/plain",
+]);
+
+/** Image tags need SVG's own type; an image tag never runs its script. */
+const SVG_CONTENT_TYPE = "image/svg+xml";
+
+export function formatAttachmentContentDisposition(
+  filename: string,
+  disposition: "inline" | "attachment" = "attachment",
+): string {
   const safe = sanitizeFilename(filename).replace(/["\\]/g, "_");
-  return `inline; filename="${safe}"`;
+  return `${disposition}; filename="${safe}"`;
+}
+
+/**
+ * The headers storage sends with a download. Only passive media and plain
+ * text open in the browser tab. Everything else downloads as plain bytes, so
+ * a file from a room never runs as a page on the storage domain, even in a
+ * browser that ignores the download hint. SVG downloads but keeps its type.
+ */
+export function resolveAttachmentDownloadHeaders(input: {
+  filename: string;
+  content_type: string;
+}): { content_disposition: string; content_type: string } {
+  const contentType = normalizeContentType(input.content_type);
+  if (INLINE_ATTACHMENT_CONTENT_TYPES.has(contentType)) {
+    return {
+      content_disposition: formatAttachmentContentDisposition(input.filename, "inline"),
+      content_type: contentType,
+    };
+  }
+  if (PLAIN_TEXT_ATTACHMENT_CONTENT_TYPES.has(contentType)) {
+    return {
+      content_disposition: formatAttachmentContentDisposition(input.filename, "inline"),
+      content_type: "text/plain; charset=utf-8",
+    };
+  }
+  return {
+    content_disposition: formatAttachmentContentDisposition(input.filename, "attachment"),
+    content_type: contentType === SVG_CONTENT_TYPE ? SVG_CONTENT_TYPE : "application/octet-stream",
+  };
 }

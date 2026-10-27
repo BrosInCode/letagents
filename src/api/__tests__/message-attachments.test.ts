@@ -8,6 +8,7 @@ import {
   formatAttachmentContentDisposition,
   normalizeAttachmentUploadRequest,
   normalizeMessageAttachmentReferences,
+  resolveAttachmentDownloadHeaders,
   resolveMessageAttachmentUploader,
 } from "../messages/attachments.js";
 
@@ -105,9 +106,92 @@ test("normalizeMessageAttachmentReferences rejects invalid references", () => {
   );
 });
 
-test("formatAttachmentContentDisposition escapes filenames", () => {
+test("formatAttachmentContentDisposition escapes filenames and downloads by default", () => {
   assert.equal(
     formatAttachmentContentDisposition('bad"name.png'),
+    'attachment; filename="bad_name.png"'
+  );
+  assert.equal(
+    formatAttachmentContentDisposition('bad"name.png', "inline"),
     'inline; filename="bad_name.png"'
+  );
+});
+
+test("passive media opens in the browser tab with its own type", () => {
+  for (const contentType of [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/x-icon",
+    "application/pdf",
+    "video/mp4",
+    "audio/mpeg",
+  ]) {
+    assert.deepEqual(
+      resolveAttachmentDownloadHeaders({ filename: "file", content_type: contentType }),
+      { content_disposition: 'inline; filename="file"', content_type: contentType },
+      contentType,
+    );
+  }
+  assert.deepEqual(
+    resolveAttachmentDownloadHeaders({ filename: "shot.png", content_type: "  IMAGE/PNG " }),
+    { content_disposition: 'inline; filename="shot.png"', content_type: "image/png" },
+  );
+});
+
+test("text, Markdown, CSV and JSON open in the tab as UTF-8 plain text", () => {
+  for (const contentType of ["text/plain", "text/markdown", "text/csv", "application/json"]) {
+    assert.deepEqual(
+      resolveAttachmentDownloadHeaders({ filename: "plan.md", content_type: contentType }),
+      { content_disposition: 'inline; filename="plan.md"', content_type: "text/plain; charset=utf-8" },
+      contentType,
+    );
+  }
+});
+
+test("HTML and every other type download as plain bytes", () => {
+  for (const contentType of [
+    "text/html",
+    "TEXT/HTML",
+    "text/html; charset=utf-8",
+    "application/xhtml+xml",
+    "text/xml",
+    "application/xml",
+    "application/rss+xml",
+    "text/javascript",
+    "text/x-javascript",
+    "application/javascript",
+    "text/xsl",
+    "multipart/x-mixed-replace",
+    "multipart/related",
+    "message/rfc822",
+    "application/zip",
+    "image/svg+xml; charset=utf-8",
+    "",
+  ]) {
+    assert.deepEqual(
+      resolveAttachmentDownloadHeaders({ filename: "demo.html", content_type: contentType }),
+      { content_disposition: 'attachment; filename="demo.html"', content_type: "application/octet-stream" },
+      contentType,
+    );
+  }
+});
+
+test("SVG keeps its image type for image tags but never opens as a page", () => {
+  assert.deepEqual(
+    resolveAttachmentDownloadHeaders({ filename: "diagram.svg", content_type: "image/svg+xml" }),
+    { content_disposition: 'attachment; filename="diagram.svg"', content_type: "image/svg+xml" },
+  );
+});
+
+test("filenames lose direction marks that disguise the real extension", () => {
+  assert.equal(
+    normalizeAttachmentUploadRequest({ filename: "invoice\u202Efdp.exe", content_type: "application/pdf", byte_size: 10 }).filename,
+    "invoicefdp.exe",
+  );
+  assert.equal(
+    formatAttachmentContentDisposition("report\u2067.pdf\u2069\u061c.exe"),
+    'attachment; filename="report.pdf.exe"',
   );
 });

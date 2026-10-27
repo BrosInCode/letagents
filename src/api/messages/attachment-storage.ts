@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 
 import {
-  formatAttachmentContentDisposition,
   MESSAGE_ATTACHMENT_UPLOAD_TTL_SECONDS,
+  resolveAttachmentDownloadHeaders,
 } from "./attachments.js";
 
 interface AttachmentStorageConfig {
@@ -258,12 +258,13 @@ export function createPresignedAttachmentDownload(input: {
   content_type: string;
 }): string {
   const config = getAttachmentStorageConfig();
+  const headers = resolveAttachmentDownloadHeaders(input);
   return presignS3Url({
     method: "GET",
     objectKey: input.object_key,
     expiresSeconds: config.downloadExpiresSeconds,
-    responseContentDisposition: formatAttachmentContentDisposition(input.filename),
-    responseContentType: input.content_type,
+    responseContentDisposition: headers.content_disposition,
+    responseContentType: headers.content_type,
   });
 }
 
