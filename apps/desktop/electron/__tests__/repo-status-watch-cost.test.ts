@@ -6,6 +6,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import "./isolated-home.js";
+import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
 import { refreshRepoStatus } from "../repo-status.js";
 import {
   configureRepoStatusWatchForTest,
@@ -36,7 +37,7 @@ async function settled(withinMs = 5_000): Promise<void> {
   }
 }
 
-function countGitSpawns(directory: string): { count: () => number; restore: () => void } {
+async function countGitSpawns(directory: string): Promise<{ count: () => number; restore: () => void }> {
   const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
   const bin = join(directory, "bin");
   const log = join(directory, "git-spawns.log");
@@ -44,11 +45,14 @@ function countGitSpawns(directory: string): { count: () => number; restore: () =
   writeFileSync(log, "");
   writeFileSync(join(bin, "git"), `#!/bin/sh\necho "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(realGit)} "$@"\n`);
   chmodSync(join(bin, "git"), 0o755);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  resetDesktopShellEnvironmentForTests();
+  await startDesktopShellEnvironmentHydration({
+    env: { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` },
+    runCommand: async () => `__LETAGENTS_PATH_START__\n${bin}\n__LETAGENTS_PATH_END__\n`,
+  });
   return {
     count: () => readFileSync(log, "utf8").split("\n").filter(Boolean).length,
-    restore: () => { process.env.PATH = previousPath; },
+    restore: resetDesktopShellEnvironmentForTests,
   };
 }
 
@@ -70,7 +74,7 @@ test("the reconciliation tick is one git status unless repository metadata chang
     emitToMainWindow: () => undefined,
     getMainWindow: () => visibleWindow(),
   });
-  const git = countGitSpawns(temporary);
+  const git = await countGitSpawns(temporary);
   try {
     await startRepoStatusWatch(root);
     await settled();

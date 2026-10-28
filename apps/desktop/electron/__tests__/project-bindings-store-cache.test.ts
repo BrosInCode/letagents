@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import "./isolated-home.js";
+import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
 import {
   bindProjectRoot,
   listProjectBindings,
@@ -25,6 +26,14 @@ function hostedRepo(temporary: string, name = "repo"): string {
 }
 
 const hostedContext = { roomIdentifier: "github.com/acme/widgets", gitRoom: null };
+
+async function useGitPath(bin: string): Promise<void> {
+  resetDesktopShellEnvironmentForTests();
+  await startDesktopShellEnvironmentHydration({
+    env: { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` },
+    runCommand: async () => `__LETAGENTS_PATH_START__\n${bin}\n__LETAGENTS_PATH_END__\n`,
+  });
+}
 
 test("a different volume behind the same device number fails closed once the memo expires", async (t) => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-volume-"));
@@ -250,7 +259,6 @@ test("an origin that flips back during validation is never stored in the memo", 
     "",
   ].join("\n"));
   chmodSync(join(bin, "git"), 0o755);
-  const previousPath = process.env.PATH;
   const storeOptions = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
   resetProjectBindingsStoreCachesForTest();
   const counts = projectBindingValidationCountsForTest;
@@ -259,7 +267,7 @@ test("an origin that flips back during validation is never stored in the memo", 
     writeFileSync(inc, goodOrigin);
     // Same-line include: the memo is allowed, so only the origin check guards it.
     execFileSync("sh", ["-c", `printf '[core] [include] path = ${inc}\\n' >> .git/config`], { cwd: root });
-    process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+    await useGitPath(bin);
     await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
     assert.equal((await listProjectBindings(storeOptions)).length, 1);
 
@@ -272,7 +280,7 @@ test("an origin that flips back during validation is never stored in the memo", 
     assert.deepEqual(await listProjectBindings(storeOptions), [], "the evil origin is never served from the memo");
     assert.equal(counts.memo - memo, 0, "no memo hit");
   } finally {
-    process.env.PATH = previousPath;
+    resetDesktopShellEnvironmentForTests();
     resetProjectBindingsStoreCachesForTest();
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -361,7 +369,7 @@ test("a failed ROLLBACK discards the shared store connection", async () => {
 });
 
 /** Put a counting `git` first on PATH; returns a reader for the spawn count. */
-function countGitSpawns(directory: string): { count: () => number; restore: () => void } {
+async function countGitSpawns(directory: string): Promise<{ count: () => number; restore: () => void }> {
   const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
   const bin = join(directory, "bin");
   const log = join(directory, "git-spawns.log");
@@ -372,11 +380,10 @@ function countGitSpawns(directory: string): { count: () => number; restore: () =
     `#!/bin/sh\necho "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(realGit)} "$@"\n`,
   );
   chmodSync(join(bin, "git"), 0o755);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  await useGitPath(bin);
   return {
     count: () => readFileSync(log, "utf8").split("\n").filter(Boolean).length,
-    restore: () => { process.env.PATH = previousPath; },
+    restore: resetDesktopShellEnvironmentForTests,
   };
 }
 
@@ -396,7 +403,7 @@ test("validated bindings are reused until the folder, Git metadata, or stored ro
     },
   };
   resetProjectBindingsStoreCachesForTest();
-  const git = countGitSpawns(temporary);
+  const git = await countGitSpawns(temporary);
   try {
     const binding = await bindProjectRoot({
       context: { roomIdentifier: "github.com/acme/widgets", gitRoom: null },

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
 
 import {
   activeGitHubRoomIdentifier,
@@ -27,6 +28,46 @@ function commitAll(cwd: string, message: string): void {
     { cwd, stdio: "ignore" },
   );
 }
+
+test("repository detection preserves Git failures instead of inventing a local room", { skip: process.platform === "win32" }, async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-git-errors-"));
+  const executable = join(temporary, "git");
+  resetDesktopShellEnvironmentForTests();
+  try {
+    await startDesktopShellEnvironmentHydration({
+      env: { PATH: temporary }, platform: "linux", homeDirectory: temporary,
+      runCommand: async () => `__LETAGENTS_PATH_START__\n${temporary}\n__LETAGENTS_PATH_END__\n`,
+    });
+    for (const command of ["rev-parse --show-toplevel", "remote get-url origin"]) {
+      for (const [code, diagnostic] of [
+        [69, "You have not agreed to the Xcode license agreements."],
+        [128, "fatal: detected dubious ownership in repository"],
+        [128, "fatal: bad config line 1 in file .git/config"],
+        [128, "fatal: not a git repository: /broken/worktree"],
+        [2, "error: Permission denied"],
+      ] as const) {
+        writeFileSync(executable, `#!/bin/sh
+if [ "$*" = '${command}' ]; then
+  echo '${diagnostic}' >&2
+  exit ${code}
+fi
+if [ "$*" = 'rev-parse --show-toplevel' ]; then pwd; exit 0; fi
+exit 1
+`, { mode: 0o755 });
+        let originRead: unknown;
+        await assert.rejects(resolveRoomIdentifierFromPath(temporary, {
+          onOriginRemoteRead: (read) => { originRead = read; },
+        }), (error: Error) => error.message.trim() === diagnostic, command);
+        await assert.rejects(buildRepoStatus(temporary), (error: Error) => error.message.trim() === diagnostic);
+        if (command === "remote get-url origin") assert.ok((originRead as { error: unknown }).error instanceof Error);
+      }
+    }
+    await assert.rejects(resolveRoomIdentifierFromPath(join(temporary, "missing")), /ENOENT/);
+  } finally {
+    resetDesktopShellEnvironmentForTests();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
 
 test("parseGitWorktreePorcelain marks the first worktree as the main checkout", () => {
   const worktrees = parseGitWorktreePorcelain([

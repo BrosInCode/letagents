@@ -60,9 +60,13 @@ async function getRepoRoot(
   try {
     const stdout = await runGitInPath(workspaceRoot, ["rev-parse", "--show-toplevel"], options);
     return stdout.trim() || null;
-  } catch {
+  } catch (error) {
     throwIfAborted(options);
-    return null;
+    const failure = error as { code?: number; stderr?: string };
+    if (failure.code === 128 && /^fatal: not a git repository \(or any (?:of the parent directories|parent up to mount point\b)/.test(failure.stderr || "")) {
+      return null;
+    }
+    throw error;
   }
 }
 
@@ -822,21 +826,7 @@ export async function resolveRoomIdentifierFromPath(
   routingDefaultBranch: string | null;
 }> {
   throwIfAborted(options);
-  let repoRoot: string | null = null;
-  try {
-    const stdout = await runGitInPath(folderPath, ["rev-parse", "--show-toplevel"], options);
-    repoRoot = stdout.trim() || null;
-  } catch {
-    throwIfAborted(options);
-    return {
-      repoRoot: null,
-      roomIdentifier: createLocalRoomIdentifier(folderPath),
-      source: "local_folder",
-      gitRoom: null,
-      warning: "This folder is not a Git repository. LetAgents opened a plain local folder room.",
-      routingDefaultBranch: null,
-    };
-  }
+  const repoRoot = await getRepoRoot(folderPath, options);
 
   if (!repoRoot) {
     return {
@@ -899,9 +889,13 @@ export async function resolveRoomIdentifierFromPath(
         routingDefaultBranch,
       };
     }
-  } catch {
+  } catch (error) {
     throwIfAborted(options);
-    // Fall through to the local Git room below.
+    const failure = error as { code?: number; stderr?: string };
+    if (failure.code !== 2 || failure.stderr?.trim() !== "error: No such remote 'origin'") {
+      throw error;
+    }
+    // A repository without an origin still opens as a local Git room.
   }
 
   // Local-only repos are keyed by a hash of the repository root. Normalize to the

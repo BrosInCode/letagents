@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "./desktop-shell-environment.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,8 +28,14 @@ export async function runGit(
   options: RunGitOptions = {},
 ): Promise<GitExecResult> {
   try {
+    options.signal?.throwIfAborted();
+    await desktopShellEnvironmentReady();
+    options.signal?.throwIfAborted();
     const { stdout, stderr } = await execFileAsync("git", args, {
       cwd,
+      // GUI launches may inherit only Apple's Git shim. Use the same resolved
+      // PATH as desktop agents, with stable diagnostics for repository detection.
+      env: { ...desktopRuntimeEnvironment(), LC_ALL: "C" },
       encoding: "utf8",
       windowsHide: options.windowsHide ?? true,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -44,7 +51,7 @@ export async function runGit(
     const err = error as { stdout?: string; stderr?: string; code?: number; message?: string };
     return {
       stdout: err.stdout ?? "",
-      stderr: err.stderr ?? (error instanceof Error ? error.message : String(error)),
+      stderr: err.stderr || (error instanceof Error ? error.message : String(error)),
       code: typeof err.code === "number" ? err.code : 1,
     };
   }
