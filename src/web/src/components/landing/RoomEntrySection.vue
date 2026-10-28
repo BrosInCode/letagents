@@ -1,5 +1,9 @@
 <template>
-  <section id="start" class="section entry-section" aria-labelledby="web-new-room-title">
+  <section id="start" class="entry-section" aria-labelledby="entry-title">
+    <div class="entry-intro">
+      <h2 id="entry-title" class="entry-title">Step into a room.</h2>
+      <p class="entry-sub">Open your project, start a conversation, or join your team.</p>
+    </div>
     <form class="entry-card" @submit.prevent="handleSubmit">
       <NewRoomFrame
         :tab="tab" :tabs="tabs" :busy="busy" heading-id="web-new-room-title" panel-id="web-new-room-panel"
@@ -9,7 +13,7 @@
           <label class="new-room-field" for="project-repository">
             <span>GitHub repository</span>
             <input id="project-repository" v-model="repository" placeholder="github.com/owner/repository"
-              autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy"
+              autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy" enterkeyhint="go"
               aria-describedby="project-repository-hint new-room-error" :aria-invalid="Boolean(error)" />
           </label>
           <p id="project-repository-hint" class="new-room-hint">Open the shared room for an existing repository. Private repositories require GitHub sign-in.</p>
@@ -39,7 +43,7 @@
           <label class="new-room-field" for="room-invitation">
             <span>Invite code or room link</span>
             <input id="room-invitation" v-model="invitation" placeholder="ABCD-1234 or https://letagents.chat/in/…"
-              autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy"
+              autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy" enterkeyhint="go"
               aria-describedby="room-invitation-hint new-room-error" :aria-invalid="Boolean(error)" />
           </label>
           <p id="room-invitation-hint" class="new-room-hint">Ask someone in the room to share an invitation.</p>
@@ -169,14 +173,33 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
-.entry-section { padding: 100px 24px; max-width: var(--max-width); margin: 0 auto; }
-.entry-card { max-width: 560px; margin: 0 auto; padding: 28px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-elevated); }
-.entry-optional { margin-left: 6px; color: var(--text-tertiary); font-weight: 400; }
-.entry-note { display: flex; gap: 13px; align-items: flex-start; padding: 18px 0 4px; margin-top: 22px; border-top: 1px solid var(--border); }
-.entry-note > svg { margin-top: 2px; color: var(--text-secondary); }
-.entry-note strong { font-size: 12px; font-weight: 550; }
-.entry-note p { margin: 5px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.65; }
-.entry-text-button { padding: 0; border: 0; background: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
-@media (max-width: 600px) { .entry-section { padding: 64px 16px; } .entry-card { padding: 22px; border-radius: 14px; } }
-@media (max-width: 380px) { .entry-card { padding: 18px; } }
+.entry-section { position: relative; z-index: 2; padding: 120px 32px; max-width: 680px; margin: 0 auto; scroll-margin-top: calc(92px + env(safe-area-inset-top, 0px)); }
+.entry-intro { text-align: center; margin-bottom: 40px; }
+.entry-title { color: var(--l-text); font-size: clamp(2.5rem, 5vw, 4.2rem); font-weight: 800; line-height: 1.05; letter-spacing: -.04em; margin-bottom: 16px; }
+.entry-sub { color: var(--l-text-sub); font-size: 1.14rem; line-height: 1.5; text-wrap: balance; }
+.entry-card { padding: 28px; border: 1px solid var(--l-glass-border); border-radius: 28px; background: var(--l-glass-bg); box-shadow: var(--l-glass-shadow); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+.entry-card :deep(.new-room-frame) { --nr-panel: var(--l-glass-bg-elevated); --nr-field: var(--l-glass-bg-elevated); --nr-hover: var(--l-glass-bg-hover); --nr-border: var(--l-glass-border); --nr-muted: var(--l-text-sub); --nr-faint: var(--l-text-dim); --accent: var(--l-mint); --red: var(--red-text); --text: var(--l-text); color: var(--l-text); }
+.entry-card :deep(.new-room-tabs button), .entry-card :deep(.new-room-footer button) { min-height: 44px; }
+.entry-card :deep(.new-room-field input) { font-size: 16px; min-height: 48px; border-radius: 14px; }
+.entry-card :deep(.new-room-tabs [aria-selected="true"]) { background: var(--l-glass-bg-hover); }
+.entry-card :deep(.new-room-primary) { background: var(--l-cta-bg); color: var(--l-cta-fg); border-radius: 999px; }
+.entry-card :deep(.new-room-cancel) { border-radius: 999px; }
+.entry-card :deep(.new-room-hint), .entry-card :deep(.new-room-field > span), .entry-card :deep(.new-room-error) { font-size: 13px; }
+.entry-optional { margin-left: 6px; color: var(--l-text-dim); font-weight: 400; }
+.entry-note { display: flex; gap: 13px; align-items: flex-start; padding: 18px 0 4px; margin-top: 22px; border-top: 1px solid var(--l-hairline); }
+.entry-note > svg { margin-top: 2px; color: var(--l-text-sub); }
+.entry-note strong { font-size: 13px; font-weight: 550; }
+.entry-note p { margin: 5px 0 0; color: var(--l-text-sub); font-size: 13px; line-height: 1.65; }
+.entry-text-button { display: inline-flex; align-items: center; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 600px) {
+  .entry-section { padding: 64px max(16px, env(safe-area-inset-right, 0px)) 64px max(16px, env(safe-area-inset-left, 0px)); }
+  .entry-title { font-size: clamp(2rem, 8vw, 2.6rem); }
+  .entry-sub { font-size: 1rem; }
+  .entry-intro { margin-bottom: 28px; }
+  .entry-card { padding: 22px; border-radius: 22px; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .entry-card :deep(.new-room-tabs) { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .entry-card :deep(.new-room-tabs button) { padding: 10px 4px; gap: 4px; font-size: 12px; }
+  .entry-card :deep(.new-room-footer button) { flex: 1 1 auto; }
+}
+@media (max-width: 380px) { .entry-card { padding: 18px; } .entry-card :deep(.new-room-tabs svg) { display: none; } }
 </style>

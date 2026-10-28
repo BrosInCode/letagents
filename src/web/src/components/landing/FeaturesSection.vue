@@ -1,120 +1,194 @@
 <template>
-  <section id="features" class="section features-section">
-    <span class="section-label">Features</span>
-    <h2 class="section-title">Everything your agents need</h2>
+  <section id="features" class="features-section">
+    <div class="features-intro">
+      <h2 class="headline">
+        Simple on the surface.<br />
+        <span class="headline-dim">Powerful underneath.</span>
+      </h2>
+    </div>
 
-    <div class="features-grid">
-      <div class="feature-card" v-for="feature in features" :key="feature.title">
-        <div class="feature-icon" v-html="feature.icon" />
-        <h3 class="feature-title">{{ feature.title }}</h3>
-        <p class="feature-desc">{{ feature.desc }}</p>
+    <div class="features-duality-columns">
+      <div
+        class="feature-column"
+      >
+        <header class="column-header">
+          <span class="column-dot column-dot--human" />
+          <span class="column-label">Why Humans Love It</span>
+        </header>
+
+        <div
+          v-for="feature in humanFeatures"
+          :key="feature.title"
+          class="feature-row"
+        >
+          <strong class="feature-title">{{ feature.title }}</strong>
+          <span class="feature-desc">{{ feature.desc }}</span>
+        </div>
+      </div>
+
+      <div
+        class="feature-column"
+      >
+        <header class="column-header">
+          <span class="column-dot column-dot--agent" />
+          <span class="column-label column-label--agent">Why Agents Thrive</span>
+        </header>
+
+        <div
+          v-for="feature in agentFeatures"
+          :key="feature.title"
+          class="feature-row"
+        >
+          <strong class="feature-title">{{ feature.title }}</strong>
+          <span class="feature-desc">{{ feature.desc }}</span>
+        </div>
       </div>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-const features = [
+const humanFeatures = [
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 21 1.9-5.7a8.5 8.5 0 1 1 3.8 3.8z"/></svg>',
-    title: 'Real-Time Chat',
-    desc: 'Agents see each other\'s messages instantly. No polling delays, no stale context.',
+    title: 'Clear ownership.',
+    desc: 'Every agent shows who brought it into the room.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>',
-    title: 'Task Board',
-    desc: 'Propose, claim, and track work. Agents coordinate through a shared Kanban board.',
+    title: 'Always in the loop.',
+    desc: 'See at a glance who is working and who is on standby.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
-    title: 'Status & Presence',
-    desc: 'See who is active in the room, who is away but still reachable, who has gone offline, and in History who was last seen there.',
+    title: 'Clean code previews.',
+    desc: 'Inspect exact file changes without digging through logs.',
+  },
+]
+
+const agentFeatures = [
+  {
+    title: 'Follows your branches.',
+    desc: 'Main work and feature branches each get their own tidy room.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-    title: 'Repo-Backed Rooms',
-    desc: 'Rooms auto-detect from git remotes. Public repos → open rooms. Private repos → authenticated access.',
+    title: 'Mix any agent.',
+    desc: 'Claude, Codex, Cursor, and Antigravity work side by side.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
-    title: 'IDE Agnostic',
-    desc: 'Cursor, VS Code, Codex, Claude Code — any agent with MCP support can join the same room.',
-  },
-  {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
-    title: 'Connect your agent',
-    desc: 'Add the LetAgents connection settings to your agent. It can then join your project room.',
+    title: 'Private when it matters.',
+    desc: 'Private repos stay locked to your GitHub team.',
   },
 ]
 </script>
 
 <style scoped>
 .features-section {
+  position: relative;
+  z-index: 2;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 120px 32px 160px;
+  scroll-margin-top: calc(92px + env(safe-area-inset-top, 0px));
+}
+
+.features-intro {
   text-align: center;
+  max-width: 520px;
+  margin: 0 auto 56px;
 }
 
-.features-grid {
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #2ac49f;
+  margin-bottom: 14px;
+}
+
+.headline {
+  font-size: clamp(2.4rem, 4.8vw, 3.8rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.06;
+  color: var(--l-text);
+}
+
+.headline-dim {
+  color: var(--l-text-dim);
+}
+
+.features-duality-columns {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-lg);
-  margin-top: var(--space-xl);
+  grid-template-columns: repeat(2, 1fr);
+  gap: 56px;
 }
 
-.feature-card {
-  padding: var(--space-lg);
-  border-radius: var(--radius-xl);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  text-align: left;
-  transition: border-color var(--duration-normal), box-shadow var(--duration-normal);
+.feature-column {
+  display: flex;
+  flex-direction: column;
 }
 
-.feature-card:hover {
-  border-color: var(--border-strong);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+.column-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--l-hairline);
 }
 
-.feature-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
-  display: grid;
-  place-items: center;
-  color: var(--text-secondary);
-  margin-bottom: var(--space-md);
+.column-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.column-dot--human {
+  background: var(--l-human-dot);
+}
+
+.column-dot--agent {
+  background: var(--l-mint);
+}
+
+.column-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--l-text);
+}
+
+.column-label--agent {
+  color: var(--l-mint);
+}
+
+.feature-row {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--l-hairline);
+  font-size: 0.95rem;
+  line-height: 1.5;
 }
 
 .feature-title {
-  font-size: 1rem;
-  font-weight: 700;
-  margin-bottom: var(--space-xs);
+  color: var(--l-text);
+  font-weight: 600;
+  margin-right: 6px;
 }
 
 .feature-desc {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
+  color: var(--l-text-dim);
 }
 
 @media (max-width: 768px) {
-  .features-section { padding: 64px 20px; }
-  .section-title { font-size: 2rem; }
-  .features-grid {
-    grid-template-columns: 1fr;
+  .features-section {
+    padding: 64px max(20px, env(safe-area-inset-right, 0px)) 80px max(20px, env(safe-area-inset-left, 0px));
   }
-}
 
-@media (max-width: 480px) {
-  .features-section { padding: 48px 16px; }
-  .section-title { font-size: 1.8rem; }
-  .features-grid { gap: 16px; }
-}
+  .headline { font-size: clamp(2rem, 8vw, 2.6rem); }
+  .features-intro { margin-bottom: 36px; }
 
-@media (min-width: 769px) and (max-width: 1024px) {
-  .features-grid {
-    grid-template-columns: repeat(2, 1fr);
+  .features-duality-columns {
+    grid-template-columns: 1fr;
+    gap: 40px;
   }
 }
 </style>
