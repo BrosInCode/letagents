@@ -211,6 +211,32 @@ test("opening a fetched repo room preserves its identity without calculating bra
       resolvePicker({ canceled: true, filePaths: [] });
       assert.equal((await firstConnect).canceled, true);
     });
+    await t.test("connect project returns the actual Git error without changing bindings or creating rooms", async () => {
+      const { listProjectBindings } = await import("../main/project-bindings-store.js");
+      const configPath = join(repoPath, ".git", "config");
+      const config = readFileSync(configPath, "utf8");
+      const bindings = await listProjectBindings();
+      const snapshot = fetchedSnapshot;
+      const roomCount = createdRooms.length;
+      const modeCount = localModes.length;
+      dialogResult = Promise.resolve({ canceled: false, filePaths: [repoPath] });
+      try {
+        writeFileSync(configPath, "[invalid config\n");
+        const result = await connectProjectToRoom({ roomIdentifier: "github.com/example/project", gitRoom: null });
+        assert.equal(result.canceled, false);
+        assert.equal(result.binding, null);
+        assert.equal(result.repoStatus, null);
+        assert.match(result.error || "", /fatal: bad config line 1/);
+        writeFileSync(configPath, config);
+        assert.deepEqual(await listProjectBindings(), bindings);
+        assert.strictEqual(fetchedSnapshot, snapshot);
+        assert.equal(createdRooms.length, roomCount);
+        assert.equal(localModes.length, modeCount);
+      } finally {
+        writeFileSync(configPath, config);
+        dialogResult = Promise.resolve({ canceled: true, filePaths: [] });
+      }
+    });
     await t.test("reconnecting a published local project keeps its original room and never publishes chat", async () => {
       const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
       const { bindProjectRoot } = await import("../main/project-bindings-store.js");
