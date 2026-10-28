@@ -161,11 +161,11 @@ test('arrow keys, Home and End move one highlight through enabled items; Enter a
   assert.equal(events.length, count, 'a disabled item does nothing');
 });
 
-test('the menu lists Attach files, GIF, Create task and Add agent; GIF only when GIPHY is set up', t => {
+test('the menu lists Attach files, GIF, Create task, Add agent and Ask someone for an agent; GIF only when GIPHY is set up', t => {
   const { vm, props } = mountMenu(t);
-  assert.deepEqual(vm.items.value.map((item: any) => item.label), ['Attach files…', 'GIF', 'Create task…', 'Add agent']);
+  assert.deepEqual(vm.items.value.map((item: any) => item.label), ['Attach files…', 'GIF', 'Create task…', 'Add agent', 'Ask someone for an agent…']);
   props.gifAvailable = false;
-  assert.deepEqual(vm.items.value.map((item: any) => item.id), ['attach', 'task', 'agent']);
+  assert.deepEqual(vm.items.value.map((item: any) => item.id), ['attach', 'task', 'agent', 'ask']);
 });
 
 test('disabling "+" closes an open menu and keeps it closed', async t => {

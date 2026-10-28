@@ -113,13 +113,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
-import { Bot, ChevronLeft, ChevronRight, ImagePlay, ListTodo, Paperclip, Plus, Settings2 } from "@lucide/vue";
+import { Bot, ChevronLeft, ChevronRight, HandHelping, ImagePlay, ListTodo, Paperclip, Plus, Settings2 } from "@lucide/vue";
 import type { DesktopAgentProviderId } from "../../../../../../electron/ipc-types";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 import { prefersReducedMotion } from "./room-gif-search";
 import type { ComposerAgentRow } from "./useComposerAgentDraft";
 
-export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent";
+export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent" | "ask";
 
 interface MenuItem {
   id: RoomComposerAddMenuItemId;
@@ -182,6 +182,7 @@ const items = computed<MenuItem[]>(() => [
     : []),
   { id: "task", label: "Create task…", icon: ListTodo, testid: "desktop-composer-menu-task", separatorBefore: true, hint: "/task" },
   { id: "agent", label: "Add agent", icon: Bot, testid: "desktop-composer-menu-add-agent", opensDialog: true },
+  { id: "ask", label: "Ask someone for an agent…", icon: HandHelping, testid: "desktop-composer-menu-ask-agent" },
 ]);
 
 /** A click with detail 0 came from the keyboard (Enter or Space on the button). */
