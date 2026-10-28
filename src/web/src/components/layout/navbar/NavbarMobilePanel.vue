@@ -1,15 +1,6 @@
 <template>
   <div class="nav-mobile-panel">
     <div class="nav-mobile-grid">
-      <RouterLink
-        v-for="link in NAV_SECTION_LINKS"
-        :key="`mobile-${link.to}`"
-        :to="link.to"
-        class="nav-mobile-link"
-        @click="$emit('close')"
-      >
-        {{ link.label }}
-      </RouterLink>
       <RouterLink :to="DOCS_LINK.to" class="nav-mobile-link" @click="$emit('close')">
         {{ DOCS_LINK.label }}
       </RouterLink>
@@ -31,7 +22,7 @@
 
 <script setup lang="ts">
 import NavbarAuthControls from './NavbarAuthControls.vue'
-import { DOCS_LINK, GITHUB_REPOSITORY_URL, NAV_SECTION_LINKS } from './links'
+import { DOCS_LINK, GITHUB_REPOSITORY_URL } from './links'
 
 defineEmits<{
   close: []
