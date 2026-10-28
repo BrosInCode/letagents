@@ -182,7 +182,7 @@ const items = computed<MenuItem[]>(() => [
     : []),
   { id: "task", label: "Create task…", icon: ListTodo, testid: "desktop-composer-menu-task", separatorBefore: true, hint: "/task" },
   { id: "agent", label: "Add agent", icon: Bot, testid: "desktop-composer-menu-add-agent", opensDialog: true },
-  { id: "ask", label: "Ask someone for an agent…", icon: HandHelping, testid: "desktop-composer-menu-ask-agent" },
+  { id: "ask", label: "Ask someone for an agent…", icon: HandHelping, testid: "desktop-composer-menu-ask-agent", opensDialog: true },
 ]);
 
 /** A click with detail 0 came from the keyboard (Enter or Space on the button). */
