@@ -1,8 +1,10 @@
 <template>
-  <div id="letagents-app">
-    <Navbar v-if="showNavbar" />
+  <div id="letagents-app" :class="{ 'landing-theme': isLanding }">
+    <Navbar v-if="showNavbar" :landing-theme="isLanding ? theme : undefined" @toggle-theme="toggleLandingTheme" />
     <main>
-      <RouterView />
+      <RouterView v-slot="{ Component }">
+        <component :is="Component" v-bind="isLanding ? { theme } : {}" />
+      </RouterView>
     </main>
     <Footer v-if="showFooter" />
     <ToastContainer />
@@ -10,13 +12,30 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import Navbar from '@/components/layout/Navbar.vue'
 import Footer from '@/components/layout/Footer.vue'
 import ToastContainer from '@/components/ui/ToastContainer.vue'
+import './styles/landing.css'
 
 const route = useRoute()
+const isLanding = computed(() => route.name === 'landing')
+const theme = ref<'light' | 'dark'>('dark')
+
+// The room owns its existing preference controls. Read the active preference
+// when returning home instead of imposing a landing-page default on the app.
+watch(isLanding, () => {
+  if (typeof document !== 'undefined') {
+    theme.value = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
+  }
+}, { immediate: true })
+
+function toggleLandingTheme() {
+  theme.value = theme.value === 'dark' ? 'light' : 'dark'
+  document.documentElement.setAttribute('data-theme', theme.value)
+  try { localStorage.setItem('lac-theme', theme.value) } catch { /* Keep the control usable when storage is unavailable. */ }
+}
 
 // Show navbar/footer on landing and docs, hide in room view
 const showNavbar = computed(() => !['room', 'messages', 'my-work', 'connectors', 'ask'].includes(String(route.name)))

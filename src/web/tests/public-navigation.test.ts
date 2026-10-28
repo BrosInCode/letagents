@@ -6,7 +6,7 @@ import { renderToString } from '@vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { createServer, type ViteDevServer } from 'vite'
 
-let vite: ViteDevServer, Sidebar: any, WorkspaceNav: any, DocsPage: any
+let vite: ViteDevServer, Sidebar: any, WorkspaceNav: any, DocsPage: any, AppShell: any
 const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
 before(async () => {
@@ -14,6 +14,7 @@ before(async () => {
   Sidebar = (await vite.ssrLoadModule('/src/components/docs/DocsSidebar.vue')).default
   WorkspaceNav = (await vite.ssrLoadModule('/src/components/layout/WorkspaceNav.vue')).default
   DocsPage = (await vite.ssrLoadModule('/src/pages/Docs.vue')).default
+  AppShell = (await vite.ssrLoadModule('/src/App.vue')).default
 })
 after(async () => {
   if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
@@ -113,4 +114,61 @@ test('docs sidebar exposes dialog and current-location semantics only where appr
   const desktop = await render()
   assert.match(desktop, /role="navigation"/)
   assert.doesNotMatch(desktop, /aria-modal|Close navigation/)
+})
+
+test('landing theme follows the existing preference and refreshes after a room changes it', async () => {
+  let activeTheme = 'light'
+  const document = { documentElement: {
+    getAttribute: () => activeTheme,
+    setAttribute: (_name: string, value: string) => { activeTheme = value },
+  } }
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: document })
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/', name: 'landing', component: { render: () => null } },
+    { path: '/in/test', name: 'room', component: { render: () => null } },
+  ] })
+  await router.push('/')
+  let vm: any
+  const app = renderer.createApp({ setup() {
+    vm = AppShell.setup({}, { expose() {} })
+    return () => h('div')
+  } })
+  app.use(router)
+  app.provide(ssrContextKey, { modules: new Set() })
+  app.mount({})
+  try {
+    assert.equal(vm.theme.value, 'light')
+    assert.equal(activeTheme, 'light', 'opening the landing page must not impose a new preference')
+    vm.toggleLandingTheme()
+    assert.equal(vm.theme.value, 'dark')
+    assert.equal(activeTheme, 'dark')
+    await router.push('/in/test')
+    activeTheme = 'light'
+    await router.push('/')
+    await nextTick()
+    assert.equal(vm.theme.value, 'light', 'canvas and theme toggle agree with a preference changed in the room')
+  } finally { app.unmount() }
+})
+
+test('Venom styling and theme controls are confined to the landing route', async () => {
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/', name: 'landing', component: { render: () => h('p', 'Landing') } },
+    { path: '/docs', name: 'docs', component: { render: () => h('p', 'Documentation') } },
+    { path: '/in/test', name: 'room', component: { render: () => h('p', 'Room') } },
+  ] })
+  const render = async (path: string) => {
+    await router.push(path)
+    const app = createSSRApp({ render: () => h(AppShell) })
+    app.use(router)
+    return renderToString(app)
+  }
+  const landing = await render('/')
+  assert.match(landing, /class="landing-theme"/)
+  assert.match(landing, /aria-label="Switch to dark mode"/)
+  const docs = await render('/docs')
+  assert.doesNotMatch(docs, /class="landing-theme"|nav-theme-toggle/)
+  assert.match(docs, /Documentation/)
+  const room = await render('/in/test')
+  assert.doesNotMatch(room, /landing-theme|nav-theme-toggle|aria-label="Main navigation"/)
+  assert.match(room, /Room/)
 })
