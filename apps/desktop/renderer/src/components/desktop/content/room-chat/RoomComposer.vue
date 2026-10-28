@@ -951,6 +951,8 @@ function handleAddMenuSelect(item: RoomComposerAddMenuItemId): void {
     // The draft, if any, becomes the task title; nothing typed is lost.
     const text = draft.value.trimStart();
     setDraftAndFocus(/^\/task(\s|$)/.test(text) ? text : `/task ${text}`);
+  } else if (item === "ask") {
+    emit("open-ask-agent");
   } else {
     emit("open-add-agent");
   }
