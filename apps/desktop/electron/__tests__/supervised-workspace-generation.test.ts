@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   assertSupervisedWorkspaceGenerationSupported,
@@ -1265,7 +1266,7 @@ generationTest("no Git hook of the repository or the empty Git home runs in a su
     }
     try {
       // The planted hooks do run for an ordinary Git command in the repository.
-      git(repo, ["add", "tracked.txt"]);
+      git(repo, ["commit", "-q", "--allow-empty", "-m", "hooks run here"]);
       assert.equal(existsSync(marker), true);
       rmSync(marker);
 
@@ -1349,8 +1350,16 @@ windowsTest("junctions under an ignored folder (a package manager's) do not bloc
   try {
     writeFileSync(join(outside, "index.js"), "outside\n");
     await withRepository(async (repo) => {
-      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "ignored-junction" });
+      // An installed node_modules is far over the path limit; it is never walked.
+      const handle = await createSupervisedWorkspaceGeneration({
+        realWorkspace: repo,
+        turnIdentity: "ignored-junction",
+        limits: { maxChangedPaths: 50 },
+      });
       mkdirSync(join(handle.liveWorkspace, "node_modules", ".pnpm"), { recursive: true });
+      for (let index = 0; index < 120; index += 1) {
+        writeFileSync(join(handle.liveWorkspace, "node_modules", ".pnpm", `file-${index}.js`), "x\n");
+      }
       symlinkSync(outside, join(handle.liveWorkspace, "node_modules", "pkg"), "junction");
       writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
       const receipt = await handle.retireAndReconcile();
@@ -1389,12 +1398,49 @@ windowsTest("an installed read-only file keeps its attribute when the receipt is
 
 windowsTest("partial clones are refused before anything is made", async () => {
   await withRepository(async (repo) => {
+    git(repo, ["config", "uploadpack.allowFilter", "true"]);
+    const partial = join(dirname(repo), "partial");
+    git(dirname(repo), ["clone", "-q", "--filter=blob:none", pathToFileURL(repo).href, partial]);
+    const refused = (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "PARTIAL_CLONE_UNSUPPORTED";
+    await assert.rejects(assertSupervisedWorkspaceGenerationSupported(await realpathForTest(partial)), refused);
+
+    // The older marker alone, as Git before 2.32 or a hand edit leaves it.
     git(repo, ["config", "core.repositoryformatversion", "1"]);
     git(repo, ["config", "extensions.partialClone", "origin"]);
-    await assert.rejects(
-      assertSupervisedWorkspaceGenerationSupported(repo),
-      (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "PARTIAL_CLONE_UNSUPPORTED",
-    );
+    await assert.rejects(assertSupervisedWorkspaceGenerationSupported(repo), refused);
+  });
+});
+
+windowsTest("a read-only release interrupted after the journal link is gone still restores the attribute", async () => {
+  await withRepository(async (repo) => {
+    const target = join(repo, "read-only.txt");
+    writeFileSync(target, "before\n");
+    git(repo, ["add", "read-only.txt"]);
+    git(repo, ["commit", "-qm", "read-only fixture"]);
+    try {
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "read-only-release-crash" });
+      writeFileSync(join(handle.liveWorkspace, "read-only.txt"), "after\n");
+      chmodSync(join(handle.liveWorkspace, "read-only.txt"), 0o444);
+      await handle.retireAndReconcile();
+      assert.equal(lstatSync(target).mode & 0o7777, 0o444);
+      // The state a crash leaves after the release recorded the attribute,
+      // cleared it and removed the journal's link, but before it set it again.
+      const manifest = JSON.parse(readFileSync(handle.manifestPath, "utf8")) as {
+        generationRoot: string;
+        operationJournal: Array<{ id: string; relativePath: string; desiredArtifactRelativePath: string }>;
+      };
+      const operation = manifest.operationJournal.find((entry) => entry.relativePath === "read-only.txt")!;
+      const info = lstatSync(target, { bigint: true });
+      writeFileSync(join(manifest.generationRoot, "reconcile-staging", `${operation.id}.read-only`),
+        JSON.stringify({ dev: String(info.dev), ino: String(info.ino), mode: 0o444 }));
+      chmodSync(target, 0o666);
+      rmSync(join(manifest.generationRoot, operation.desiredArtifactRelativePath));
+      await removeSupervisedWorkspaceGenerationReceipt(handle.manifestPath, { settlementVerified: true });
+      assert.equal(existsSync(dirname(handle.manifestPath)), false);
+      assert.equal(lstatSync(target).mode & 0o7777, 0o444);
+    } finally {
+      chmodSync(target, 0o666);
+    }
   });
 });
 

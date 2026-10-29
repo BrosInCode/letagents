@@ -11,10 +11,10 @@
  */
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, statfs, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { isOwnerPrivate, openNoFollow, privateEntryCreated, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
-import { BASELINE_FILES_NAME, type GenerationManifest, PROVIDER_GIT_NAME, type RegularFileInfo, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport } from "./types.js";
+import { BASELINE_FILES_NAME, type GenerationManifest, PROVIDER_GIT_NAME, type RegularFileInfo, STAGING_NAME, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport } from "./types.js";
 import { GIT_ENV, ProcessExitError, canonicalGitControlTarget, cloneRegularFile, gitArgs, gitAuthorityText, gitControlPath, gitExecutable, gitHooksPath, readStableGitControlFile, runGit, runGitWithAuthority, runProcess, sourceAuthorityBuffer, sourceAuthorityText, sourceGitEnvironment } from "./git.js";
 import { assertSafeAncestors } from "./manifest.js";
 import { assertSafeRelativePath, generationError, gitRelativePath, isErrno, limitError, splitNulBuffer } from "./helpers.js";
@@ -63,15 +63,23 @@ export async function assertWindowsFreeSpace(
 /**
  * A partial clone lacks blobs that only its promisor remote can fetch, and
  * the private clones have no such remote (and lazy fetches are off). Refuse
- * it before anything is made, instead of failing in the checkout.
+ * it before anything is made, instead of failing in the checkout. Git marks
+ * one with remote.<name>.promisor / partialclonefilter (and, before 2.32 or
+ * by hand, extensions.partialClone).
  */
 export async function assertWindowsFullClone(support: SupervisedWorkspaceGenerationSupport): Promise<void> {
-  const partialClone = await sourceAuthorityText(support, ["config", "--get", "extensions.partialClone"], 1024)
+  const configured = await sourceAuthorityText(support, [
+    "config", "--get-regexp", "^(extensions\\.partialclone|remote\\..*\\.(promisor|partialclonefilter))$",
+  ], 64 * 1024)
     .catch((error) => {
       if (error instanceof ProcessExitError && error.exitCode === 1) return "";
       throw error;
     });
-  if (partialClone) {
+  const partial = configured.split("\n").filter(Boolean).some((line) => {
+    const [key, ...value] = line.split(" ");
+    return !key!.endsWith(".promisor") || /^(?:true|yes|on|1)$/i.test(value.join(" "));
+  });
+  if (partial) {
     throw generationError("Partial clones (a promisor remote) are not supported by Windows workspace generations.", "PARTIAL_CLONE_UNSUPPORTED");
   }
 }
@@ -170,24 +178,49 @@ function missingObjects(error: unknown): unknown {
  * Windows keeps one read-only attribute per file, shared by its hard links.
  * Deleting the journal's link to an installed read-only file would clear the
  * attribute on the user's file too (Node clears it to delete), so each such
- * link is removed here first and the attribute is set again.
+ * link is removed here first and the attribute set again. The attribute and
+ * the file's identity are recorded first (`<operation>.read-only` in the
+ * staging folder), so a crash after the unlink still restores it on retry.
  */
 export async function releaseReadOnlyInstalls(manifest: GenerationManifest): Promise<void> {
   for (const operation of manifest.operationJournal) {
-    if (operation.status !== "applied" || !operation.desiredArtifactRelativePath
-      || operation.desiredMode === null || (operation.desiredMode & 0o222) !== 0) continue;
+    if (operation.status !== "applied" || !operation.desiredArtifactRelativePath) continue;
     const artifact = join(manifest.generationRoot, operation.desiredArtifactRelativePath);
+    const intentPath = join(manifest.generationRoot, STAGING_NAME, `${operation.id}.read-only`);
     const target = join(manifest.realWorkspace, operation.relativePath);
-    const [artifactInfo, targetInfo] = await Promise.all([
+    const [artifactInfo, targetInfo, intent] = await Promise.all([
       lstat(artifact, { bigint: true }).catch(() => null),
       lstat(target, { bigint: true }).catch(() => null),
+      readReleaseIntent(intentPath),
     ]);
-    if (!artifactInfo || !targetInfo || artifactInfo.dev !== targetInfo.dev || artifactInfo.ino !== targetInfo.ino) continue;
-    // The file's attribute now, which the user may have changed since.
-    const mode = Number(targetInfo.mode) & 0o7777;
-    await chmod(artifact, mode | 0o222);
-    await unlink(artifact);
-    await chmod(target, mode);
+    if (!targetInfo?.isFile()) continue;
+    const sameTarget = (info: { dev: bigint; ino: bigint }) => info.dev === targetInfo.dev && info.ino === targetInfo.ino;
+    if (artifactInfo && sameTarget(artifactInfo)) {
+      // The file's attribute now (the user may have changed it), unless an
+      // earlier attempt already recorded it before clearing it.
+      const mode = intent && sameTarget(intent) ? intent.mode : Number(targetInfo.mode) & 0o7777;
+      if ((mode & 0o222) !== 0) continue;
+      if (!intent) {
+        await writeFile(intentPath, JSON.stringify({ dev: String(targetInfo.dev), ino: String(targetInfo.ino), mode }), { flag: "w" });
+      }
+      await chmod(artifact, mode | 0o222);
+      await unlink(artifact);
+      await chmod(target, mode);
+    } else if (intent && sameTarget(intent)) {
+      await chmod(target, intent.mode);
+    }
+    await unlink(intentPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
+  }
+}
+
+async function readReleaseIntent(path: string): Promise<{ dev: bigint; ino: bigint; mode: number } | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as { dev?: unknown; ino?: unknown; mode?: unknown };
+    if (typeof parsed.dev !== "string" || typeof parsed.ino !== "string" || !Number.isInteger(parsed.mode)) return null;
+    return { dev: BigInt(parsed.dev), ino: BigInt(parsed.ino), mode: (parsed.mode as number) & 0o7777 };
+  } catch {
+    // Missing, or torn by a crash before the attribute was cleared.
+    return null;
   }
 }
 

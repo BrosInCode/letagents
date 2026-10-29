@@ -130,22 +130,23 @@ export async function ensureQuarantined(
     await rm(embeddedAuthority, { recursive: true, force: true, maxRetries: 2 });
     await fsyncDirectory(retiredRoot);
   }
-  await assertNoProtectedPathAliases(retiredRoot, manifest.limits);
-  if (isWindowsGeneration()) await assertNoUnmappedLinks(manifest, retiredRoot);
+  if (isWindowsGeneration()) await assertWindowsRetiredTree(manifest, retiredRoot);
+  else await assertNoProtectedPathAliases(retiredRoot, manifest.limits);
   await assertTrustedAuthority(manifest, authorityRoot);
 }
 
 /**
- * Windows: any user can make a junction without privilege, and whether Git
- * records one as a link depends on its own settings. Before Git snapshots the
- * retired tree, refuse every link or junction Git does not ignore, except the
- * dependency junctions this generation made, and every DOS device name
- * (NUL, CON, COM1...), which Windows does not open as a plain path. The walk
- * skips an ignored folder (a package manager's junctions under node_modules
- * are not exported) unless it holds a baseline path: the agent writes the
+ * Windows, in place of assertNoProtectedPathAliases: before Git snapshots the
+ * retired tree, refuse protected-name aliases, every DOS device name (NUL,
+ * CON, COM1...), which Windows does not open as a plain path, and every link
+ * or junction Git does not ignore except the dependency junctions this
+ * generation made (any user can make a junction, and whether Git records one
+ * as a link depends on its settings). The walk skips an ignored folder, so a
+ * package manager's node_modules neither blocks retirement nor counts against
+ * the path limit, unless it holds a baseline path: the agent writes the
  * .gitignore files, and Git still refreshes tracked files under them.
  */
-export async function assertNoUnmappedLinks(manifest: GenerationManifest, retiredRoot: string): Promise<void> {
+export async function assertWindowsRetiredTree(manifest: GenerationManifest, retiredRoot: string): Promise<void> {
   const mapped = new Set(manifest.readOnlyRoots
     .filter((entry) => entry.purpose === "dependency" && entry.generationPath !== null)
     .map((entry) => safeRelative(manifest.liveSourceRoot, entry.generationPath!)));
@@ -160,8 +161,10 @@ export async function assertNoUnmappedLinks(manifest: GenerationManifest, retire
     for (const parentRelativePath of level) {
       for (const entry of await readdir(join(retiredRoot, parentRelativePath), { withFileTypes: true })) {
         const relativePath = parentRelativePath ? join(parentRelativePath, entry.name) : entry.name;
+        assertSafeRelativePath(relativePath, manifest.limits);
         visited += 1;
         if (visited > manifest.limits.maxChangedPaths) throw limitError("retired path count", manifest.limits.maxChangedPaths);
+        assertNotProtectedAlias(entry.name, relativePath);
         if (WINDOWS_DEVICE_NAME.test(entry.name)) {
           throw generationError(`A Windows device name cannot be reconciled at ${JSON.stringify(relativePath)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
         }
@@ -206,16 +209,20 @@ export async function assertNoProtectedPathAliases(
       assertSafeRelativePath(relativePath, limits);
       visited += 1;
       if (visited > limits.maxChangedPaths) throw limitError("retired path count", limits.maxChangedPaths);
-      const normalized = entry.name.normalize("NFC");
-      const folded = normalized.toLowerCase();
-      if ([".git", ".cursor", ".claude", ".letagents-fence"].includes(folded) && entry.name !== folded) {
-        throw generationError(
-          `Generation changed a case- or Unicode-normalization alias of protected workspace authority at ${JSON.stringify(relativePath)}.`,
-          "PROTECTED_GENERATION_CHANGE",
-        );
-      }
+      assertNotProtectedAlias(entry.name, relativePath);
       if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push(relativePath);
     }
+  }
+}
+
+function assertNotProtectedAlias(name: string, relativePath: string): void {
+  const normalized = name.normalize("NFC");
+  const folded = normalized.toLowerCase();
+  if ([".git", ".cursor", ".claude", ".letagents-fence"].includes(folded) && name !== folded) {
+    throw generationError(
+      `Generation changed a case- or Unicode-normalization alias of protected workspace authority at ${JSON.stringify(relativePath)}.`,
+      "PROTECTED_GENERATION_CHANGE",
+    );
   }
 }
 
