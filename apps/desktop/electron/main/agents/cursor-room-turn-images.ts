@@ -1,5 +1,6 @@
 import { lstatSync } from "node:fs";
 import { dirname } from "node:path";
+import { isOwnedByCurrentUserSync } from "../../../../../shared/owner-private-fs.mjs";
 
 import { cursorSandboxPathVariants } from "./cursor-sandbox-policy.js";
 import { includedRoomTurnImages, stagedRoomTurnFilePaths } from "./desktop-event-prompt-format.js";
@@ -36,7 +37,7 @@ export function cursorRoomTurnImageFolders(request: ProviderRoomTurnRequest): st
 function stagedImageFolderIsPlain(folder: string): boolean {
   try {
     const stat = lstatSync(folder);
-    return stat.isDirectory() && !stat.isSymbolicLink() && (typeof process.getuid !== "function" || stat.uid === process.getuid());
+    return stat.isDirectory() && !stat.isSymbolicLink() && isOwnedByCurrentUserSync(folder, stat);
   } catch { return false; }
 }
 

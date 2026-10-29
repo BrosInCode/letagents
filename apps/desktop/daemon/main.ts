@@ -6,6 +6,7 @@ import { redactCredentialText } from "./credential-redaction.js";
 import { reportStateRecoveryReady } from "./state-recovery-key.js";
 import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { defaultDaemonPaths } from "./singleton.js";
+import { isDaemonEntryPoint } from "./entry-point.js";
 import { SupervisorDaemon } from "./main/index.js";
 
 export { SupervisorDaemon };
@@ -33,7 +34,7 @@ export {
 
 export type { DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDaemonEntryPoint(import.meta.url, process.argv[1])) {
   const paths = defaultDaemonPaths();
   const lifecycle = startDaemonLifecycleDiagnostics(paths.lifecycleLogPath);
   void (async () => {

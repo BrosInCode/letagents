@@ -6,11 +6,13 @@ import {
   lstatSync,
   openSync,
   opendirSync,
-  renameSync,
+  type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
+import { renameSyncWithRetry } from "../../../../../../shared/rename-retry.mjs";
+import { everyOwnedByCurrentUserSync, isOwnedByCurrentUserSync, ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
 import { CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "../cursor-provider-constants.js";
 import {
   applyAttestedCursorPersonalIdentity,
@@ -102,13 +104,17 @@ export function relocateCursorConversationNamespace(
   const present = sourceExists ? source : target;
   const pending = [present];
   let inspected = 0;
+  // POSIX reads each entry's uid from its stat. Windows reads every owner in one call after the walk.
+  const windows = ownerPrivatePlatform() === "win32";
+  const owned: { path: string; info: Stats }[] = [];
   while (pending.length) {
     const path = pending.pop()!;
     const stat = lstatSync(path);
     if (++inspected > MAX_CURSOR_PROFILE_ENTRIES || stat.isSymbolicLink()
-      || stat.uid !== process.getuid?.() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) {
+      || (!windows && !isOwnedByCurrentUserSync(path, stat)) || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) {
       throw new Error("Cursor conversation store contains unsupported or redirected entries.");
     }
+    if (windows) owned.push({ path, info: stat });
     if (stat.isDirectory()) {
       const directory = opendirSync(path);
       try {
@@ -121,11 +127,16 @@ export function relocateCursorConversationNamespace(
       } finally { directory.closeSync(); }
     }
   }
+  if (windows && !everyOwnedByCurrentUserSync(owned)) {
+    throw new Error("Cursor conversation store contains unsupported or redirected entries.");
+  }
   const sessionStore = expectedSessionId ? join(present, expectedSessionId, "store.db") : null;
   if (!lstatSync(present).isDirectory() || (sessionStore && (!exists(sessionStore) || !lstatSync(sessionStore).isFile()))) {
     throw new Error("Cursor conversation namespace does not contain the exact session store.");
   }
-  if (sourceExists && source !== target) renameSync(source, target);
+  if (sourceExists && source !== target) renameSyncWithRetry(source, target);
+  // Windows cannot fsync a folder handle; NTFS journals the rename itself.
+  if (windows) return;
   // Also sync an already-moved target: a crash can follow rename before fsync.
   const parent = openSync(chatsRoot, constants.O_RDONLY | constants.O_NOFOLLOW);
   try { fsyncSync(parent); } finally { closeSync(parent); }

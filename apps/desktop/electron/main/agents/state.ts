@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -14,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 import { getLetAgentsLocalStatePath } from "../paths.js";
+import { ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../shared/owner-private-fs.mjs";
 
 const STATE_LOCK_WAIT_MS = 25;
 const STATE_LOCK_TIMEOUT_MS = 2_000;
@@ -163,6 +163,12 @@ export function readAgentLocalState(): SharedLetAgentsState {
 }
 
 function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState): void {
+  // Windows has no mode bits: the shared writer makes the file private before
+  // any token is written in it, and before it is published.
+  if (ownerPrivatePlatform() === "win32") {
+    writePrivateFileAtomicallySync(statePath, `${JSON.stringify(state, null, 2)}\n`, { syncDirectory: false });
+    return;
+  }
   const tempPath = `${statePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   let tempFd: number | null = null;
   try {
@@ -171,7 +177,7 @@ function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState)
     closeSync(tempFd);
     tempFd = null;
     renameSync(tempPath, statePath);
-    chmodSync(statePath, 0o600);
+    protectOwnerPrivateSync(statePath, "file");
   } finally {
     if (tempFd !== null) {
       closeSync(tempFd);

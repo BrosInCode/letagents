@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { SCHEMA_VERSION } from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
 import { DaemonStateSchema } from "./schema.js";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 
 function configureDaemonStateConnection(database: DatabaseSync): void {
   database.exec("PRAGMA foreign_keys = ON");
@@ -54,11 +55,11 @@ export function openDaemonStateObservationDatabase(path: string): DatabaseSync {
 
 /** Opens a daemon state connection with the non-negotiable durability settings. */
 export async function openDaemonStateDatabase(path: string, initializeSchema: (database: DatabaseSync) => void | Promise<void>): Promise<DatabaseSync> {
-  const { chmod, mkdir } = await import("node:fs/promises");
+  const { mkdir } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
+  await protectOwnerPrivate(directory, "directory");
   // Fresh sibling daemons can race at the one-time WAL conversion or schema
   // DDL before busy_timeout is fully effective. Close each failed handle and
   // back off outside SQLite; never turn an unrelated initialization error into
@@ -76,7 +77,7 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
       configureDaemonStateConnection(database);
-      for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await chmod(candidate, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+      for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await protectOwnerPrivate(candidate, "file"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
       await initializeSchema(database);
       return database;
     } catch (error) {

@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+
 export const TURN_START_TIMEOUT_MS = 30_000;
 
 // Native readiness and MCP capability attestation intentionally share one
@@ -15,7 +17,11 @@ export const CURSOR_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 // native handshake without turning a broken runtime into a long launch stall.
 export const CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS = 15_000;
 export const CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS = 15_000;
-export const CURSOR_MCP_CONNECTOR_PARENT = "/tmp";
+/** Cursor's sandbox profile names /tmp on macOS; Windows has no /tmp, so its per-user temporary folder stands in. */
+export function cursorMcpConnectorParent(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? tmpdir() : "/tmp";
+}
+export const CURSOR_MCP_CONNECTOR_PARENT = cursorMcpConnectorParent();
 export const CURSOR_SUPERVISED_AGENT_ENDPOINT = "https://api2.cursor.sh";
 export const CURSOR_SUPERVISED_CONTROL_PLANE_PATHS = [
   "/aiserver.v1.DashboardService/GetMe",
