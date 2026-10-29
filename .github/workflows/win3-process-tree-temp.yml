@@ -1,0 +1,87 @@
+# TEMPORARY (removed before merge): until the Windows desktop job (#1791) is
+# on staging, proves on windows-latest that every desktop electron test file
+# loads with this PR, and runs the electron suite for the record.
+name: win3 process tree desktop load (temporary)
+
+on:
+  push:
+    branches: [claude/win3-process-lifecycle-531f28]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-electron-windows-temp:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      - name: Use a scratch home and keep committed line endings
+        shell: bash
+        run: |
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          git config --global core.autocrlf false
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      - name: Run verified dependency lifecycle scripts
+        id: setup
+        shell: bash
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+          npm run build
+          node apps/desktop/native/win-process-tree/build.mjs --check
+
+      # Each file is loaded under the test runner with a name pattern that
+      # matches no test: a module that throws at import fails here.
+      - name: Every electron test file loads
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd apps/desktop
+          failed=0; total=0
+          for file in electron/__tests__/*.test.ts; do
+            total=$((total + 1))
+            if ! out=$(node --import tsx --test --experimental-test-module-mocks --test-name-pattern='^letagents-load-only-no-test-has-this-name$' "${file}" 2>&1); then
+              failed=$((failed + 1))
+              echo "LOAD FAILED: ${file}"
+              printf '%s\n' "${out}" | tail -25
+            fi
+          done
+          echo "Loaded $((total - failed)) of ${total} electron test files."
+          exit $(( failed > 0 ))
+
+      - name: Electron suite on Windows (for the record)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          cd apps/desktop
+          npm run test:electron > "${RUNNER_TEMP}/electron.log" 2>&1 || true
+          grep -E '^# (tests|pass|fail|skipped|cancelled)' "${RUNNER_TEMP}/electron.log"
+          grep -E '^not ok' "${RUNNER_TEMP}/electron.log" | head -300 || true
