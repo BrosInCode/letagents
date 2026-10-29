@@ -40,6 +40,11 @@ jobs:
           npm rebuild
           node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
+      - name: ACL diagnostic
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: node scripts/win3-acl-diagnostic.mjs
+
       - name: Owner-private helper on real Windows
         if: ${{ !cancelled() }}
         shell: bash

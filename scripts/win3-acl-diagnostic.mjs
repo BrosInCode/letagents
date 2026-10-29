@@ -1,0 +1,34 @@
+// TEMPORARY (PR #1794 iteration only): prints each ACL step on a Windows runner.
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const root = process.env.SystemRoot || "C:\\Windows";
+const icacls = join(root, "System32", "icacls.exe");
+const ps = join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+const show = (label, path) => {
+  const sddl = execFileSync(ps, ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:P).Sddl"], { env: { ...process.env, P: path }, encoding: "utf8" }).trim();
+  const text = execFileSync(icacls, [path], { encoding: "utf8" }).trim();
+  console.log(`--- ${label}\n${sddl}\n${text}`);
+};
+const run = (...args) => { try { console.log(`> icacls ${args.join(" ")}\n${execFileSync(icacls, args, { encoding: "utf8" }).trim()}`); } catch (e) { console.log(`FAILED ${e.status}: ${e.stdout}${e.stderr}`); } };
+console.log(execFileSync(join(root, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }));
+console.log(execFileSync(join(root, "System32", "whoami.exe"), ["/groups", "/fo", "csv", "/nh"], { encoding: "utf8" }).split("\n").filter(l => /S-1-5-32-544|S-1-16/.test(l)).join("\n"));
+const sid = /"(S-1-[0-9-]+)"\s*$/.exec(execFileSync(join(root, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim())[1];
+const base = mkdtempSync(join(tmpdir(), "acl-diag-"));
+show("temp parent", base);
+const dir = join(base, "d"); mkdirSync(dir);
+show("after mkdir", dir);
+run(dir, "/setowner", `*${sid}`);
+show("after setowner", dir);
+run(dir, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F");
+show("after inheritance:r + grant:r", dir);
+const dir2 = join(base, "d2"); mkdirSync(dir2);
+run(dir2, "/inheritance:r");
+show("d2 after inheritance:r alone", dir2);
+run(dir2, "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F");
+show("d2 after grant:r", dir2);
+run(dir2, "/remove:g", "*S-1-5-32-544");
+show("d2 after remove:g BA", dir2);
+const file = join(dir, "f.txt"); writeFileSync(file, "x");
+show("file in private dir", file);
