@@ -2,6 +2,7 @@ import { onBeforeUnmount, onMounted } from "vue";
 import { appendAgentInspectorLiveBatch } from "../../domain/agent-inspector-live";
 import { foldSupervisorActivityPush } from "../../domain/supervisor-entries-resource";
 import { desktopIpc } from "../../ipc/index.js";
+import { supervisedAgentsSupported } from "../../domain/supervised-agents-support";
 import type { RoomShellContextOf } from "./context";
 
 /** Mount and unmount: supervisor subscriptions, visibility listener, and cleanup. */
@@ -42,7 +43,7 @@ export function useRoomShellLifecycle(context: unknown) {
     unsubscribeSupervisorActivity = null;
     unsubscribeSupervisorAgentStream?.();
     unsubscribeSupervisorAgentStream = null;
-    void desktopIpc.supervisor?.watchAgentStream?.(null);
+    if (supervisedAgentsSupported.value) void desktopIpc.supervisor?.watchAgentStream?.(null);
     supervisorStateSubscription.unmount();
     unsubscribeSupervisorRetirement?.();
     unsubscribeSupervisorRetirement = null;

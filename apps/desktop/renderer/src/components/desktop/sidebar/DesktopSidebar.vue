@@ -10,7 +10,7 @@
     @drop.prevent="cancelSidebarDrag"
   >
     <p id="sidebar-room-reorder-instructions" class="sr-only">
-      Drag rooms to reorder them. Press Option plus Up or Down Arrow to move the focused room.
+      Drag rooms to reorder them. Press {{ reorderModifierLabel }} plus Up or Down Arrow to move the focused room.
     </p>
     <p class="sr-only" role="status" aria-live="polite">{{ reorderAnnouncement }}</p>
     <div class="sidebar-topbar" :data-selection-active="selectionActive">
@@ -663,6 +663,7 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch, type Component } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
+import { isMacPlatform } from "../../../domain/room-switcher-shortcut";
 import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
@@ -780,6 +781,7 @@ type SidebarDropTarget =
   | { kind: "parent"; projectId: string; placement: SidebarRoomDropPlacement }
   | { kind: "child"; projectId: string; entryId: string; placement: SidebarRoomDropPlacement };
 
+const reorderModifierLabel = isMacPlatform() ? "Option" : "Alt";
 const roomContextMenu = ref<RoomContextMenu | null>(null);
 const backgroundContextMenu = ref<{ x: number; y: number } | null>(null);
 const sidebarElement = ref<HTMLElement | null>(null);
