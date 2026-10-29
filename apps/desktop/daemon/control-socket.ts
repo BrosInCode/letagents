@@ -17,7 +17,11 @@ export interface DaemonControlSocketOptions {
    * on POSIX unless a test sets one.
    */
   peerProofPath?: string | null;
-  /** How long a pipe name left by the previous daemon may stay busy after it released the singleton. */
+  /**
+   * How long a pipe name left by the previous daemon may stay busy after it
+   * released the singleton. A pipe instance lives until its last handle closes,
+   * a slow client's included, so this matches a desktop start's patience.
+   */
   pipeReleaseWaitMs?: number;
 }
 
@@ -56,7 +60,7 @@ export class DaemonControlSocket {
   private async startPipe(): Promise<void> {
     if (!this.options.peerProofPath) throw new Error("A daemon pipe needs a client proof; refusing to listen without one.");
     const proof = await ensureDaemonProof(this.options.peerProofPath);
-    const deadline = Date.now() + (this.options.pipeReleaseWaitMs ?? 2_000);
+    const deadline = Date.now() + (this.options.pipeReleaseWaitMs ?? 10_000);
     for (;;) {
       const server = this.createServer(proof);
       try {

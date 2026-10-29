@@ -12,8 +12,9 @@ import { join, posix, win32 } from "node:path";
 // directory), exactly as before this module existed.
 //
 // Windows: a named pipe `\\.\pipe\letagents-daemon-<hash>`. The hash binds the
-// state directory and the user's SID, so two users (or two state roots) never
-// share a name. Node cannot give a pipe a security descriptor, so two checks
+// state directory and the account name, so two users (or two state roots)
+// never share a name. Every process computes it without a subprocess, so the
+// desktop, the daemon and workers always agree. Node cannot give a pipe a security descriptor, so two checks
 // stand in for one:
 //   1. libuv creates the first pipe instance with FILE_FLAG_FIRST_PIPE_INSTANCE.
 //      A name another process already holds fails `listen` with EADDRINUSE, and
@@ -50,27 +51,30 @@ export function isWindowsPipePath(path) {
   return typeof path === "string" && PIPE_PATTERN.test(path);
 }
 
-/** The current user's SID on Windows, from whoami in System32 (not PATH). */
+/**
+ * The current user's SID on Windows, from whoami in System32 (not PATH).
+ * Only the owner-only DACL needs it; a failure throws, so that fails closed.
+ */
 export function currentWindowsUserSid({ env = process.env, run } = {}) {
   if (cachedUserSid && !run) return cachedUserSid;
   const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
-  let sid = null;
-  try {
-    const output = String((run ?? execFileSync)(win32.join(systemRoot, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], {
-      encoding: "utf8", windowsHide: true, timeout: 10_000,
-    }));
-    sid = /"(S-1-[0-9-]+)"\s*$/.exec(output.trim())?.[1] ?? null;
-  } catch { /* fall back below */ }
-  // The name only keeps users apart; security rests on the first-instance
-  // check and the proof. Every process of one user takes the same fallback.
-  const resolved = sid ?? `user:${userInfo().username.toLowerCase()}`;
-  if (!run) cachedUserSid = resolved;
-  return resolved;
+  const output = String((run ?? execFileSync)(win32.join(systemRoot, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000,
+  }));
+  const sid = /"(S-1-[0-9]+(?:-[0-9]+)+)"\s*$/i.exec(output.trim())?.[1]?.toUpperCase();
+  if (!sid) throw new Error("The current Windows account's SID could not be read.");
+  if (!run) cachedUserSid = sid;
+  return sid;
+}
+
+/** The account name the pipe name binds: GetUserNameW through os.userInfo(), no subprocess, no environment. */
+export function currentWindowsAccount() {
+  return userInfo().username.toLowerCase();
 }
 
 /** A pipe name for `key`, unique to this user. Windows paths compare without case. */
-export function windowsPipeName(prefix, key, userSid) {
-  const digest = createHash("sha256").update(`${key}\0${userSid}`, "utf8").digest("hex").slice(0, 32);
+export function windowsPipeName(prefix, key, account) {
+  const digest = createHash("sha256").update(`${key}\0${account}`, "utf8").digest("hex").slice(0, 32);
   return `\\\\.\\pipe\\${prefix}-${digest}`;
 }
 
@@ -80,7 +84,7 @@ export function windowsPipeName(prefix, key, userSid) {
  * `proofPath` the client proof (Windows only). No caller derives a directory
  * from either path: `stateDir` is returned for that.
  */
-export function daemonEndpoint(stateDir, { platform = process.platform, userSid } = {}) {
+export function daemonEndpoint(stateDir, { platform = process.platform, account } = {}) {
   if (typeof stateDir !== "string" || !stateDir) throw new Error("The daemon state directory is required.");
   if (platform !== "win32") {
     // A Unix socket path is POSIX; this equals join() on every POSIX host.
@@ -88,7 +92,7 @@ export function daemonEndpoint(stateDir, { platform = process.platform, userSid 
     return { stateDir, transport: "unix", listenPath: socketPath, connectPath: socketPath, proofPath: null };
   }
   const normalized = win32.resolve(stateDir).toLowerCase();
-  const pipe = windowsPipeName("letagents-daemon", normalized, userSid ?? currentWindowsUserSid());
+  const pipe = windowsPipeName("letagents-daemon", normalized, account ?? currentWindowsAccount());
   const proofPath = win32.join(stateDir, DAEMON_PROOF_FILE);
   knownProofPaths.set(pipe, proofPath);
   return { stateDir, transport: "pipe", listenPath: pipe, connectPath: pipe, proofPath };
@@ -114,19 +118,52 @@ function parseProof(raw) {
   return PROOF_PATTERN.test(value) ? value : null;
 }
 
-/** Read the proof, or create it once. A valid proof survives restarts and handoffs. */
-export async function ensureDaemonProof(proofPath) {
+/**
+ * Give a Windows file an owner-only DACL: the current user owns it, and only
+ * that user and SYSTEM have access, with inheritance removed. Mirrors the
+ * shared owner-private helper (PR #1794), which replaces this once it lands.
+ * A missing SID or a failed icacls throws: the caller fails closed.
+ */
+export function protectWindowsPrivateFile(path, { env = process.env, run, userSid } = {}) {
+  const sid = userSid ?? currentWindowsUserSid({ env, ...(run ? { run } : {}) });
+  if (!/^S-1-[0-9]+(?:-[0-9]+)+$/i.test(sid)) throw new Error("The current Windows account's SID is unknown; refusing to protect the daemon proof.");
+  const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
+  const icacls = win32.join(systemRoot, "System32", "icacls.exe");
+  const options = { encoding: "utf8", windowsHide: true, timeout: 10_000 };
+  (run ?? execFileSync)(icacls, [path, "/setowner", `*${sid}`, "/q"], options);
+  (run ?? execFileSync)(icacls, [path, "/inheritance:r", "/grant:r", `*${sid}:F`, "*S-1-5-18:F", "/q"], options);
+}
+
+/**
+ * Read the proof, or create it once. A valid proof survives restarts and
+ * handoffs, so a client never races a rotation. `protect` makes a file
+ * owner-private; it runs on Windows (where mode 0600 means nothing) before the
+ * secret is written, and again on every start for a proof that exists.
+ */
+export async function ensureDaemonProof(proofPath, { protect = process.platform === "win32" ? protectWindowsPrivateFile : null } = {}) {
   try {
     const existing = parseProof(await readFile(proofPath, "utf8"));
-    if (existing) return existing;
+    if (existing) {
+      protect?.(proofPath);
+      return existing;
+    }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   const proof = randomBytes(32).toString("hex");
   const temporary = `${proofPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
-  try { await handle.writeFile(`${proof}\n`, "utf8"); await handle.sync(); }
-  finally { await handle.close(); }
+  try {
+    // The DACL is in place before the secret exists; a rename keeps it.
+    protect?.(temporary);
+    await handle.writeFile(`${proof}\n`, "utf8");
+    await handle.sync();
+  } catch (error) {
+    await handle.close();
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  await handle.close();
   try { await rename(temporary, proofPath); }
   catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
   return proof;
@@ -195,7 +232,7 @@ function untrusted(message) {
  * is ERR_LETAGENTS_DAEMON_UNTRUSTED. `handshake: true` runs it over a Unix
  * socket too, for tests on hosts without pipes.
  */
-export function connectDaemon(connectPath, { proofPath, handshake = false } = {}) {
+export function connectDaemon(connectPath, { proofPath, handshake = false, handshakeTimeoutMs = 10_000 } = {}) {
   const socket = createConnection(connectPath);
   if (!handshake && !isWindowsPipePath(connectPath)) return socket;
   let proof;
@@ -205,13 +242,24 @@ export function connectDaemon(connectPath, { proofPath, handshake = false } = {}
     proof = parseProof(readFileSync(path, "utf8"));
     if (!proof) throw untrusted("the proof file is malformed");
   } catch (error) {
-    const failure = Object.assign(new Error(`Cannot prove this client to the supervisor daemon: ${error.message}`), { code: error?.code ?? "ENOENT", cause: error });
+    // A missing or briefly locked proof (no daemon yet, an antivirus scan)
+    // reads as an absent daemon, which callers retry; an untrusted pipe does not.
+    const code = error?.code === "ERR_LETAGENTS_DAEMON_UNTRUSTED" ? error.code : "ENOENT";
+    const failure = Object.assign(new Error(`Cannot prove this client to the supervisor daemon: ${error.message}`), { code, cause: error });
     process.nextTick(() => socket.destroy(failure));
     return socket;
   }
   const emit = socket.emit;
+  const write = socket.write;
   const held = [];
   let open = false;
+  // An absolute bound on connect + handshake. A caller's own timeout may be
+  // unlimited (handoff, configuration apply) or reset by trickled bytes; this
+  // one is not. It ends once the daemon proved itself or the socket closed.
+  const deadline = setTimeout(() => socket.destroy(Object.assign(
+    new Error("The supervisor daemon did not complete its handshake in time."), { code: "ETIMEDOUT" })), handshakeTimeoutMs);
+  deadline.unref?.();
+  socket.once("close", () => clearTimeout(deadline));
   const clientNonce = nonce();
   const read = lineReader((line, rest) => {
     const frame = handshakeFrame(line, ["letagents_daemon_server", "letagents_daemon_challenge"]);
@@ -219,15 +267,24 @@ export function connectDaemon(connectPath, { proofPath, handshake = false } = {}
       socket.destroy(untrusted("The supervisor daemon pipe did not prove it belongs to this user."));
       return false;
     }
-    socket.write(`${JSON.stringify({ letagents_daemon_client: answer(proof, "client", frame.letagents_daemon_challenge) })}\n`);
+    write.call(socket, `${JSON.stringify({ letagents_daemon_client: answer(proof, "client", frame.letagents_daemon_challenge) })}\n`);
     open = true;
+    clearTimeout(deadline);
     for (const [event, args] of held) emit.call(socket, event, ...args);
     return false;
   }, () => socket.destroy(untrusted("The supervisor daemon handshake is too large.")));
+  // Node queues a write made before "connect" behind that event, which the
+  // handshake holds, so such a write would wait forever. Callers write from
+  // their "connect" listener; anything earlier ends the connection loudly.
+  socket.write = function writeAfterHandshake(...args) {
+    if (open) return write.apply(this, args);
+    socket.destroy(new Error("connectDaemon: write only after the connect event."));
+    return false;
+  };
   socket.emit = function emitAfterHandshake(event, ...args) {
     if (open) return emit.call(this, event, ...args);
     if (event === "connect") {
-      socket.write(`${JSON.stringify({ letagents_daemon_hello: clientNonce })}\n`);
+      write.call(socket, `${JSON.stringify({ letagents_daemon_hello: clientNonce })}\n`);
       held.push([event, args]);
       // net.Socket defers its first read to a "connect" listener, which runs
       // only when the held event is replayed. Start reading now; the deferred

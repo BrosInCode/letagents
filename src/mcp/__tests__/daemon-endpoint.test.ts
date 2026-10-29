@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
@@ -10,16 +10,20 @@ import {
   DAEMON_STATE_DIR_ENV,
   acceptDaemonPeer,
   connectDaemon,
+  currentWindowsAccount,
   currentWindowsUserSid,
   daemonEndpoint,
   defaultDaemonStateDir,
   ensureDaemonProof,
   isWindowsPipePath,
+  protectWindowsPrivateFile,
   resolveDaemonProofPath,
   windowsPipeName,
 } from "../../../shared/daemon-endpoint.mjs";
+import { isRetryableSupervisorBridgeError } from "../server/runtime/supervisor-bridge.js";
 
 const SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+const ACCOUNT = "owner";
 
 test("POSIX endpoint is the unchanged socket file and needs no proof", () => {
   for (const platform of ["darwin", "linux"] as const) {
@@ -38,7 +42,7 @@ test("POSIX endpoint is the unchanged socket file and needs no proof", () => {
 
 test("Windows endpoint is a per-user, per-state-root named pipe with a proof file beside the state", () => {
   const stateDir = "C:\\Users\\Owner\\.letagents";
-  const endpoint = daemonEndpoint(stateDir, { platform: "win32", userSid: SID });
+  const endpoint = daemonEndpoint(stateDir, { platform: "win32", account: ACCOUNT });
   assert.equal(endpoint.transport, "pipe");
   assert.match(endpoint.listenPath, /^\\\\\.\\pipe\\letagents-daemon-[0-9a-f]{32}$/);
   assert.equal(endpoint.connectPath, endpoint.listenPath);
@@ -49,30 +53,46 @@ test("Windows endpoint is a per-user, per-state-root named pipe with a proof fil
   assert.equal(isWindowsPipePath("/tmp/daemon.sock"), false);
 
   // Windows paths compare without case and after resolution.
-  assert.equal(daemonEndpoint("c:\\users\\owner\\.LETAGENTS\\", { platform: "win32", userSid: SID }).connectPath, endpoint.connectPath);
-  assert.notEqual(daemonEndpoint(stateDir, { platform: "win32", userSid: "S-1-5-21-9-9-9-1002" }).connectPath, endpoint.connectPath,
+  assert.equal(daemonEndpoint("c:\\users\\owner\\.LETAGENTS\\", { platform: "win32", account: ACCOUNT }).connectPath, endpoint.connectPath);
+  assert.notEqual(daemonEndpoint(stateDir, { platform: "win32", account: "someone-else" }).connectPath, endpoint.connectPath,
     "another user never shares the name");
-  assert.notEqual(daemonEndpoint("D:\\state", { platform: "win32", userSid: SID }).connectPath, endpoint.connectPath,
+  assert.notEqual(daemonEndpoint("D:\\state", { platform: "win32", account: ACCOUNT }).connectPath, endpoint.connectPath,
     "another state root never shares the name");
-  assert.equal(windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), SID), endpoint.connectPath);
+  assert.equal(windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), ACCOUNT), endpoint.connectPath);
+  // No subprocess: every process of one user computes the same name.
+  assert.equal(daemonEndpoint(stateDir, { platform: "win32" }).connectPath,
+    windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), currentWindowsAccount()));
 });
 
-test("the Windows user SID comes from System32 whoami, with a stable fallback", () => {
+test("the Windows user SID comes from System32 whoami and a failure throws", () => {
   const calls: Array<{ file: string; args: string[]; windowsHide: boolean }> = [];
   const sid = currentWindowsUserSid({
     env: { SystemRoot: "C:\\Windows" },
-    run: (file, args, options) => { calls.push({ file, args, windowsHide: options.windowsHide }); return `"host\\owner","${SID}"\r\n`; },
+    run: (file, args, options) => { calls.push({ file, args, windowsHide: options.windowsHide }); return `"host\\owner","${SID.toLowerCase()}"\r\n`; },
   });
   assert.equal(sid, SID);
   assert.deepEqual(calls, [{ file: "C:\\Windows\\System32\\whoami.exe", args: ["/user", "/fo", "csv", "/nh"], windowsHide: true }]);
-  const fallback = currentWindowsUserSid({ env: {}, run: () => { throw new Error("no whoami"); } });
-  assert.match(fallback, /^user:/);
-  assert.equal(currentWindowsUserSid({ env: {}, run: () => "garbage" }), fallback);
+  assert.throws(() => currentWindowsUserSid({ env: {}, run: () => { throw new Error("no whoami"); } }), /no whoami/);
+  assert.throws(() => currentWindowsUserSid({ env: {}, run: () => "garbage" }), /SID could not be read/);
+});
+
+test("the Windows proof gets an owner-only DACL through System32 icacls, failing closed", () => {
+  const calls: Array<{ file: string; args: string[] }> = [];
+  protectWindowsPrivateFile("C:\\state\\daemon-endpoint.proof", {
+    env: { SystemRoot: "C:\\Windows" }, userSid: SID,
+    run: (file, args) => { calls.push({ file, args }); return ""; },
+  });
+  assert.deepEqual(calls, [
+    { file: "C:\\Windows\\System32\\icacls.exe", args: ["C:\\state\\daemon-endpoint.proof", "/setowner", `*${SID}`, "/q"] },
+    { file: "C:\\Windows\\System32\\icacls.exe", args: ["C:\\state\\daemon-endpoint.proof", "/inheritance:r", "/grant:r", `*${SID}:F`, "*S-1-5-18:F", "/q"] },
+  ]);
+  assert.throws(() => protectWindowsPrivateFile("C:\\p", { userSid: "user:owner", run: () => "" }), /SID is unknown/);
+  assert.throws(() => protectWindowsPrivateFile("C:\\p", { userSid: SID, run: () => { throw new Error("icacls exited 5"); } }), /icacls exited 5/);
 });
 
 test("a worker that knows only the pipe name finds the proof through its state directories", () => {
   const stateDir = join(tmpdir(), "letagents-endpoint-worker-state");
-  const pipe = windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), currentWindowsUserSid());
+  const pipe = windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), currentWindowsAccount());
   assert.equal(resolveDaemonProofPath(pipe, { env: { [DAEMON_STATE_DIR_ENV]: stateDir }, home: join(tmpdir(), "elsewhere") }),
     win32.join(stateDir, DAEMON_PROOF_FILE));
   assert.equal(resolveDaemonProofPath("\\\\.\\pipe\\letagents-daemon-0123456789abcdef0123456789abcdef", { env: {}, home: join(tmpdir(), "elsewhere") }), null,
@@ -83,10 +103,16 @@ test("the proof is created once, private, and survives restarts", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
   try {
     const proofPath = join(root, DAEMON_PROOF_FILE);
-    const first = await ensureDaemonProof(proofPath);
+    const protectedPaths: string[] = [];
+    const first = await ensureDaemonProof(proofPath, { protect: (path) => { protectedPaths.push(path); } });
+    assert.equal(protectedPaths.length, 1);
+    assert.match(protectedPaths[0]!, /daemon-endpoint\.proof\.\d+\.[0-9a-f]+\.tmp$/, "the DACL is set on the empty temporary file before the secret is written");
     assert.match(first, /^[a-f0-9]{64}$/);
     if (process.platform !== "win32") assert.equal((await stat(proofPath)).mode & 0o777, 0o600);
-    assert.equal(await ensureDaemonProof(proofPath), first, "a handoff keeps the proof clients already read");
+    assert.equal(await ensureDaemonProof(proofPath, { protect: (path) => { protectedPaths.push(path); } }), first, "a handoff keeps the proof clients already read");
+    assert.equal(protectedPaths.at(-1), proofPath, "an existing proof is protected again on every start");
+    await assert.rejects(ensureDaemonProof(join(root, "refused.proof"), { protect: () => { throw new Error("no DACL"); } }), /no DACL/);
+    assert.deepEqual((await readdir(root)).filter((name) => name.startsWith("refused")), [], "a proof that could not be protected leaves nothing behind");
     await writeFile(proofPath, "not-a-proof\n");
     const replaced = await ensureDaemonProof(proofPath);
     assert.match(replaced, /^[a-f0-9]{64}$/);
@@ -204,6 +230,57 @@ test("a silent client is closed when the handshake deadline passes", async () =>
     const socket = createConnection(env.path);
     await new Promise<void>((resolve) => { socket.on("error", () => undefined); socket.once("close", () => resolve()); });
   } finally { await env.cleanup(); }
+});
+
+test("a client proof and its request may arrive in one write", async () => {
+  const env = await harness();
+  try {
+    const seen: string[] = [];
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => { seen.push(chunk); admitted.end("done\n"); });
+    }));
+    const client = env.connect();
+    const result = await new Promise<string>((resolve, reject) => {
+      let data = "";
+      client.setEncoding("utf8");
+      client.once("error", reject);
+      // The proof line and this request leave in the same tick and usually coalesce.
+      client.once("connect", () => client.write("é-request\n"));
+      client.on("data", (chunk: string) => { data += chunk; });
+      client.once("close", () => resolve(data));
+    });
+    assert.equal(result, "done\n");
+    assert.deepEqual(seen, ["é-request\n"]);
+  } finally { await env.cleanup(); }
+});
+
+test("a write before connect ends the connection instead of hanging", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, () => assert.fail("not admitted")));
+    const client = env.connect();
+    const error = await new Promise<Error>((resolve) => { client.once("error", resolve); client.write("too-early\n"); });
+    assert.match(error.message, /write only after the connect event/);
+  } finally { await env.cleanup(); }
+});
+
+test("a client gives up on a daemon that never finishes the handshake", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => { socket.on("data", () => undefined); /* accepts, never answers */ });
+    const client = connectDaemon(env.path, { proofPath: env.proofPath, handshake: true, handshakeTimeoutMs: 100 });
+    const result = await exchange(client, "ping\n");
+    assert.equal(result.connected, false);
+    assert.equal(result.error?.code, "ETIMEDOUT");
+  } finally { await env.cleanup(); }
+});
+
+test("bridge retries an absent or unreadable proof but never an untrusted pipe", () => {
+  assert.equal(isRetryableSupervisorBridgeError(Object.assign(new Error("no proof"), { code: "ENOENT" })), true);
+  assert.equal(isRetryableSupervisorBridgeError(Object.assign(new Error("handshake slow"), { code: "ETIMEDOUT" })), true);
+  assert.equal(isRetryableSupervisorBridgeError(Object.assign(new Error("The supervisor daemon pipe did not prove it belongs to this user."),
+    { code: "ERR_LETAGENTS_DAEMON_UNTRUSTED" })), false);
 });
 
 test("Windows refuses a second listener on a pipe name already held (first-instance semantics)", { skip: process.platform !== "win32" && "named pipes exist only on Windows" }, async () => {

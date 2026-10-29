@@ -68,7 +68,13 @@ test.after(async () => {
     if (original === undefined) delete process.env[key];
     else process.env[key] = original;
   }
-  await rm(root, { recursive: true, force: true });
+  try {
+    await rm(root, { recursive: true, force: true });
+  } catch (error) {
+    // Windows keeps the open SQLite database locked until this process exits
+    // (EBUSY); the runner's temp directory is cleaned up with the job.
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+  }
 });
 
 test("register_agent_session persists its validated supervised cwd for later bridge calls", async () => {
