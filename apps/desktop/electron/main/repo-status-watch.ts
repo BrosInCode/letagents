@@ -423,7 +423,7 @@ export function ignoredDirectoryCandidatesForTest(filename: string | null): stri
  * names are looked at: a deeper folder echo already maps to an ignored folder
  * or to the same invalidation as the event inside it, and this keeps the stat
  * off the hot path. A worktree folder whose HEAD appears after the targets
- * were listed waits for the reconciliation tick. Git directory watchers are
+ * were listed waits for the full reconciliation tick. Git directory watchers are
  * left alone: they classify each entry by its name. Other platforms report no
  * such echo, and their events are not inspected here.
  */
