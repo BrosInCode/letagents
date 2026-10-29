@@ -21,6 +21,7 @@ import {
 import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
 import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
+import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
 
 const ELECTRON = "C:\\Program Files\\LetAgents\\LetAgents.exe";
 const SHIM = [
@@ -228,4 +229,25 @@ test("an object allow entry of the account is held to the same read-only rights"
   const base = `O:${sid}G:${sid}D:PAI(A;OICI;FA;;;SY)(A;OICI;0x1e00a9;;;${sid})`;
   assert.equal(sddlIsReadOnlyFolderFor(`${base}(OA;OICI;0x1e00a9;;;${sid})`, sid), true);
   assert.equal(sddlIsReadOnlyFolderFor(`${base}(OA;OICI;0x1f01ff;;;${sid})`, sid), false);
+});
+
+test("Cursor on Windows takes its program from the shared resolver: no cmd.exe, no shim on Electron, and a missing one named", () => {
+  const at = (files: string[]) => (file: string) => files.includes(file);
+  const shim = SHIM.replace("@anthropic-ai\\claude-code\\cli.js", "cursor-agent\\index.js");
+  const native = cursorWindowsProgram("cursor-agent", { env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.exe"]) });
+  assert.deepEqual(native, { file: "C:\\npm\\cursor-agent.exe", args: [] });
+  const besideNode = cursorWindowsProgram("cursor-agent", {
+    env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.cmd"]), electron: true,
+    launchOptions: { execPath: ELECTRON, readFile: () => shim, exists: at(["C:\\npm\\node.exe"]) },
+  });
+  assert.deepEqual(besideNode, { file: "C:\\npm\\node.exe", args: ["C:\\npm\\node_modules\\cursor-agent\\index.js"] });
+  assert.throws(() => cursorWindowsProgram("cursor-agent", {
+    env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.cmd"]), electron: true,
+    launchOptions: { execPath: ELECTRON, readFile: () => shim, exists: () => false },
+  }), /runs Node\.js, and no node\.exe is beside it/);
+  assert.throws(() => cursorWindowsProgram("cursor-agent", {
+    env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.cmd"]),
+    launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
+  }), /C:\\npm\\cursor-agent\.cmd is a batch file that only cmd\.exe can run/);
+  assert.throws(() => cursorWindowsProgram("cursor-agent", { env: windowsEnv, exists: () => false }), /'cursor-agent' was not found on this computer/);
 });
