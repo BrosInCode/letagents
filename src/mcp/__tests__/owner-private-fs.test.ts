@@ -279,6 +279,21 @@ test("Windows: asynchronous reads share one long-lived reader; other paths and a
   await assert.rejects(short.read(["C:\\a"]), { code: "EOWNERPRIVATE" });
 });
 
+test("a long-lived reader that writes a line longer than any answer is stopped; the read falls back", async () => {
+  const runaway = () => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() { child.emit("exit", 1); } });
+    child.stdin.on("data", () => { for (let index = 0; index < 17; index += 1) child.stdout.write("x".repeat(1024 * 1024)); });
+    return child as unknown as ChildProcess;
+  };
+  const reader = createSddlServer(runaway);
+  await assert.rejects(reader.read(["C:\\a"]), { code: "EOWNERPRIVATE" });
+  assert.equal(reader.usable, false);
+  const overflowing = "process.stdin.once('data', () => { const chunk = 'x'.repeat(1 << 20); for (let i = 0; i < 17; i += 1) process.stdout.write(chunk); });";
+  const sync = createSyncSddlServer(syncSddlReaderWorker(process.execPath, ["-e", overflowing]));
+  assert.throws(() => sync.read(["C:\\a"]), { code: "EOWNERPRIVATE" });
+  assert.equal(sync.usable, false);
+});
+
 test("many paths are read in a few PowerShell calls, each under the Windows environment limit", async () => {
   const sizes: number[] = [];
   const security = createWindowsSecurity({
@@ -1094,10 +1109,14 @@ test("Windows: the bytes returned are the ones whose owner and DACL were checked
     let planted = false;
     const elsewhere: WindowsSecurity = {
       ...security,
-      readObjectsSync(paths) { return planted ? security.readObjectsSync!(paths) : paths.map(() => ({ sddl: PRIVATE_FILE, data: Buffer.from("our other file") })); },
+      readObjectsSync(paths) { return planted ? security.readObjectsSync!(paths) : paths.map(() => ({ sddl: PRIVATE_FILE, data: Buffer.from(other) })); },
     };
     const options = { platform: "win32" as const, windowsSecurity: elsewhere };
-    assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "our other file");
+    // Bytes of another length than the file seen around the check are never accepted.
+    let other = "our other file";
+    assert.throws(() => readOwnerPrivateFileSync(file, "utf8", options), { code: "EOWNERPRIVATE" });
+    other = "otherss";
+    assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "otherss");
     // Node's own handle then reads the path's real bytes ("checked"): they are not the bytes checked, so it is checked again.
     planted = true;
     sddl[file] = `O:${OTHER}D:PAI(A;;FA;;;${OTHER})(A;;FA;;;${USER})`;

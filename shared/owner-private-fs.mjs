@@ -31,7 +31,7 @@
  * answer that cannot be read or parsed counts as "not private".
  */
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, unlink } from "node:fs/promises";
 import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
 import { createHash, randomUUID } from "node:crypto";
@@ -1201,8 +1201,27 @@ function secretFailure(path, error, attempt) {
 /** The path's own lstat (bigint), or a throw: a link or anything but a regular file is refused. */
 function secretInfo(path, info) {
   if (info.isSymbolicLink()) throw secretRefused(path, Object.assign(new Error(`${path} is a link`), { code: "ELOOP" }));
-  if (!info.isFile()) throw secretRefused(path);
+  // No secret is larger than a handle read returns.
+  if (!info.isFile() || info.size > BigInt(OBJECT_LIMIT)) throw secretRefused(path);
   return info;
+}
+
+/**
+ * Exactly `size` bytes from an open file, or null when it holds fewer or more
+ * (it changed): never more than one byte past `size` is read.
+ */
+function readExactlySync(descriptor, size) {
+  const buffer = Buffer.alloc(size + 1);
+  let read = 0;
+  for (let count; read < buffer.length && (count = readSync(descriptor, buffer, read, buffer.length - read, null)) > 0;) read += count;
+  return read === size ? buffer.subarray(0, size) : null;
+}
+
+async function readExactly(handle, size) {
+  const buffer = Buffer.alloc(size + 1);
+  let read = 0;
+  for (let count; read < buffer.length && (count = (await handle.read(buffer, read, buffer.length - read, null)).bytesRead) > 0;) read += count;
+  return read === size ? buffer.subarray(0, size) : null;
 }
 
 /**
@@ -1276,8 +1295,8 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
         const descriptor = openNoFollowSync(path, constants.O_RDONLY, undefined, options);
         try {
           if (openedIsChecked(fstatSync(descriptor, { bigint: true }), info)) {
-            const data = readFileSync(descriptor);
-            if (digest(data) === known) return decoded(data, encoding);
+            const data = readExactlySync(descriptor, Number(info.size));
+            if (data && digest(data) === known) return decoded(data, encoding);
           }
         } finally { closeSync(descriptor); }
         // Not what was checked (other bytes under the same identity, or another file): check it again.
@@ -1287,7 +1306,8 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
         if (!security.readObjectsSync) throw secretRefused(path);
         const [object] = security.readObjectsSync([path]);
         const isPrivate = Boolean(object) && objectIsPrivateSync(path, object.sddl, currentUserSync(security), options);
-        verdict = settleSecret(path, info, isPrivate);
+        // The bytes checked must be as long as the file seen around the check, or they are not accepted.
+        verdict = settleSecret(path, info, isPrivate && BigInt(object.data.length) === info.size);
         if (verdict === "private") {
           rememberSecret(security, path, info, object.data);
           return decoded(object.data, encoding);
@@ -1323,8 +1343,8 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
         const handle = await openNoFollow(path, constants.O_RDONLY, undefined, options);
         try {
           if (openedIsChecked(await handle.stat({ bigint: true }), info)) {
-            const data = await handle.readFile();
-            if (digest(data) === known) return decoded(data, encoding);
+            const data = await readExactly(handle, Number(info.size));
+            if (data && digest(data) === known) return decoded(data, encoding);
           }
         } finally { await handle.close(); }
         forgetSecret(security, path);
@@ -1333,7 +1353,8 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
         if (!security.readObjects) throw secretRefused(path);
         const [object] = await security.readObjects([path]);
         const isPrivate = Boolean(object) && await objectIsPrivate(path, object.sddl, await currentUser(security), options);
-        verdict = settleSecret(path, info, isPrivate);
+        // The bytes checked must be as long as the file seen around the check, or they are not accepted.
+        verdict = settleSecret(path, info, isPrivate && BigInt(object.data.length) === info.size);
         if (verdict === "private") {
           rememberSecret(security, path, info, object.data);
           return decoded(object.data, encoding);
