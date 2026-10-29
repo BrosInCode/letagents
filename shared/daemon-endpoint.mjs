@@ -288,10 +288,11 @@ const kTransport = Symbol("letagents.daemonTransport");
  * end cannot act as this user, and only when the process serving it runs as
  * this user, before this process writes anything. libuv's own connect has
  * neither property and is never used for this pipe. Every instance busy: try
- * again until `cancelled()`; the wait keeps the process alive while the
- * caller's connection is `referenced()`, as a connecting socket does.
+ * again until `cancelled()`; each wait is handed to `holdWait`, so it keeps
+ * the process alive exactly while the caller's connection is referenced, as
+ * a connecting socket does.
  */
-async function openDaemonPipe(connectPath, cancelled, referenced) {
+async function openDaemonPipe(connectPath, cancelled, holdWait) {
   const addon = loadDaemonPipeAddon();
   for (;;) {
     let opened;
@@ -299,10 +300,8 @@ async function openDaemonPipe(connectPath, cancelled, referenced) {
       opened = addon.open(connectPath);
     } catch (error) {
       if (error?.code !== "EBUSY" || cancelled()) throw error;
-      await new Promise((resolve) => {
-        const retry = setTimeout(resolve, PIPE_BUSY_RETRY_MS);
-        if (!referenced()) retry.unref();
-      });
+      await new Promise((resolve) => holdWait(setTimeout(resolve, PIPE_BUSY_RETRY_MS)));
+      holdWait(null);
       continue;
     }
     // A failed N-API call returns nothing; never wrap a socket without the pipe.
@@ -336,6 +335,8 @@ class DaemonConnection extends Socket {
   #transport = null;
   #open = false;
   #referenced = true;
+  /** The busy-pipe retry timer while one runs; it follows ref() and unref(). */
+  #wait = null;
   #ended = false;
 
   constructor() {
@@ -343,8 +344,11 @@ class DaemonConnection extends Socket {
     this.connecting = true;
   }
 
-  /** Whether the caller left the connection referenced (it keeps the process alive). */
-  get referenced() { return this.#referenced; }
+  /** Hold (or, with null, drop) the timer the connection waits on before it has a transport. */
+  holdWait(timer) {
+    this.#wait = timer;
+    if (timer && !this.#referenced) timer.unref();
+  }
 
   /** The transport socket, for tests that look at its handle. */
   get [kTransport]() { return this.#transport; }
@@ -416,12 +420,14 @@ class DaemonConnection extends Socket {
 
   ref() {
     this.#referenced = true;
+    this.#wait?.ref();
     this.#transport?.ref();
     return this;
   }
 
   unref() {
     this.#referenced = false;
+    this.#wait?.unref();
     this.#transport?.unref();
     return this;
   }
@@ -477,7 +483,7 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
     if (socket.destroyed) return;
     let transport;
     try {
-      transport = pipe ? await openDaemonPipe(connectPath, () => socket.destroyed, () => socket.referenced) : await openUnixSocket(connectPath);
+      transport = pipe ? await openDaemonPipe(connectPath, () => socket.destroyed, (timer) => socket.holdWait(timer)) : await openUnixSocket(connectPath);
     } catch (error) {
       socket.destroy(error);
       return;

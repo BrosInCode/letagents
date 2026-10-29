@@ -18,6 +18,8 @@ export interface DaemonPipeAddonOptions {
   readFile?: (path: string) => Buffer;
 }
 export function sealedDaemonPipeAddonSha256(arch?: string, seal?: DaemonPipeSeal | null): string | null;
+/** InstallLocation from a `reg export` file (UTF-16LE with a byte-order mark), or null. */
+export function parseInstallLocation(bytes: Buffer): string | null;
 export function daemonPipeAddonCandidates(options?: DaemonPipeAddonOptions): string[];
 export function findDaemonPipeAddon(options?: DaemonPipeAddonOptions): { path: string; sha256: string };
 export function loadDaemonPipeAddon(options?: DaemonPipeAddonOptions): {

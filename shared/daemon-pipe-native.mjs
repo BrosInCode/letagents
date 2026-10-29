@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,7 +47,7 @@ function isFile(filePath) {
  * app ships it (Electron sets process.resourcesPath in the app and in its
  * ELECTRON_RUN_AS_NODE children), or, for a process that is not the app's
  * (`npx letagents` under Node), the same file in the folder the installer
- * recorded (InstallLocation) or else its default per-user folder, then the
+ * recorded (InstallLocation), then in its default per-user folder, then the
  * local build beside its source.
  *
  * The bytes are hashed, then loaded by path. A process that could replace
@@ -64,9 +65,9 @@ export function daemonPipeAddonCandidates(options = {}) {
   const candidates = [];
   if (resourcesPath.trim()) candidates.push(path.win32.join(resourcesPath, "app", "runtime", DAEMON_PIPE_ADDON_NAME));
   else {
-    const installed = options.installLocation === undefined ? recordedInstallLocation(env) : options.installLocation;
-    const folder = installed ?? (localAppData ? path.win32.join(localAppData, "Programs", "LetAgents") : null);
-    if (folder && /^[A-Za-z]:[\\/]/.test(folder)) {
+    const installed = options.installLocation === undefined ? recordedInstallLocation() : options.installLocation;
+    const folders = [installed, localAppData ? path.win32.join(localAppData, "Programs", "LetAgents") : null];
+    for (const folder of new Set(folders.filter((folder) => folder && /^[A-Za-z]:[\\/]/.test(folder)))) {
       candidates.push(path.win32.join(folder, "resources", "app", "runtime", DAEMON_PIPE_ADDON_NAME));
     }
   }
@@ -76,19 +77,36 @@ export function daemonPipeAddonCandidates(options = {}) {
   return candidates;
 }
 
-/** The desktop installer's InstallLocation (HKCU, per-user install), or null. Asked once per process. */
+const INSTALL_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\chat.letagents.desktop";
+
+/**
+ * The desktop installer's InstallLocation (HKCU, per-user install), or null.
+ * `reg export` writes UTF-16, so a folder name outside the console's code
+ * page reads back whole (reg query's output would not). Asked once per
+ * process; a missing key is null.
+ */
 let installLocation;
-function recordedInstallLocation(env) {
+function recordedInstallLocation() {
   if (installLocation !== undefined) return installLocation;
   installLocation = null;
   if (process.platform !== "win32") return installLocation;
+  let folder = null;
   try {
-    const reg = path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "reg.exe");
-    const output = execFileSync(reg, ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\chat.letagents.desktop", "/v", "InstallLocation"],
-      { encoding: "utf8", windowsHide: true, timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
-    installLocation = /^\s*InstallLocation\s+REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/m.exec(output)?.[1] ?? null;
+    folder = mkdtempSync(path.win32.join(tmpdir(), "letagents-install-"));
+    const exported = path.win32.join(folder, "install.reg");
+    execFileSync(path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "reg.exe"), ["export", INSTALL_KEY, exported, "/y"],
+      { windowsHide: true, timeout: 5_000, stdio: "ignore" });
+    installLocation = parseInstallLocation(readFileSync(exported));
   } catch { /* not installed */ }
+  finally { if (folder) rmSync(folder, { recursive: true, force: true }); }
   return installLocation;
+}
+
+/** InstallLocation from a `reg export` file (UTF-16LE with a byte-order mark), or null. */
+export function parseInstallLocation(bytes) {
+  const text = bytes[0] === 0xff && bytes[1] === 0xfe ? bytes.subarray(2).toString("utf16le") : bytes.toString("utf8");
+  const match = /^"InstallLocation"="((?:[^"\\]|\\.)*)"\s*$/m.exec(text);
+  return match ? match[1].replace(/\\(.)/g, "$1") : null;
 }
 
 function addonError(message) {

@@ -9,6 +9,7 @@ import {
   DAEMON_PIPE_ADDON_ENV,
   daemonPipeAddonCandidates,
   findDaemonPipeAddon,
+  parseInstallLocation,
   sealedDaemonPipeAddonSha256,
 } from "../../../../shared/daemon-pipe-native.mjs";
 
@@ -52,9 +53,20 @@ test("the app looks for the addon where it ships it, or only where it is told", 
   // A process that is not the app's (npx letagents under Node) finds the per-user install.
   const [installed] = daemonPipeAddonCandidates({ env: { LOCALAPPDATA: "C:\\Users\\Owner\\AppData\\Local" }, resourcesPath: "", arch: "x64", installLocation: null });
   assert.equal(installed, "C:\\Users\\Owner\\AppData\\Local\\Programs\\LetAgents\\resources\\app\\runtime\\letagents-daemon-pipe.node");
-  // ... or the folder the installer recorded, when it was installed elsewhere.
-  const [chosen] = daemonPipeAddonCandidates({ env: { LOCALAPPDATA: "C:\\Users\\Owner\\AppData\\Local" }, resourcesPath: "", installLocation: "D:\\Apps\\LetAgents" });
+  // ... the folder the installer recorded first, when it was installed elsewhere, then the default.
+  const [chosen, fallback] = daemonPipeAddonCandidates({ env: { LOCALAPPDATA: "C:\\Users\\Owner\\AppData\\Local" }, resourcesPath: "", installLocation: "D:\\Apps\\LetAgents", includeLocalBuild: false });
   assert.equal(chosen, "D:\\Apps\\LetAgents\\resources\\app\\runtime\\letagents-daemon-pipe.node");
+  assert.equal(fallback, installed);
+});
+
+test("the recorded install folder is read from a UTF-16 reg export, whatever its characters", () => {
+  const folder = 'D:\\Apps\\Café "x" 東京\\LetAgents';
+  const exported = ['Windows Registry Editor Version 5.00', "",
+    "[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\chat.letagents.desktop]",
+    '"DisplayName"="LetAgents"',
+    `"InstallLocation"="${folder.replace(/[\\"]/g, (character) => `\\${character}`)}"`, ""].join("\r\n");
+  assert.equal(parseInstallLocation(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(exported, "utf16le")])), folder);
+  assert.equal(parseInstallLocation(Buffer.from('[HKEY_CURRENT_USER\\x]\r\n"DisplayName"="LetAgents"\r\n')), null);
 });
 
 test("only the sealed bytes are accepted; other bytes are an error, not a reason to look further", () => {
