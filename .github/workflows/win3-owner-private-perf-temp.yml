@@ -63,6 +63,7 @@ jobs:
         shell: bash
         working-directory: apps/desktop
         run: |
+          set +e
           status=0
           for file in execution-storage-migration supervised-agent-inbox-store room-turn-files room-turn-attachments \
             supervised-agent-delivery-admission-stop supervised-agent-delivery-intake-polling supervised-agent-delivery-scheduled-follow-ups \
@@ -72,7 +73,7 @@ jobs:
             node --import tsx --test --test-timeout=600000 "daemon/__tests__/${file}.test.ts" > "${RUNNER_TEMP}/${file}.log" 2>&1; code=$?
             end=$(date +%s)
             echo "TIMING ${{ matrix.side }} daemon/${file}: $((end - start)) s, exit ${code}, $(grep -E '^# (pass|fail) ' "${RUNNER_TEMP}/${file}.log" | tr '\n' ' ')"
-            [ "${code}" = 0 ] || { status=1; grep -E "^not ok" "${RUNNER_TEMP}/${file}.log" | head -20; }
+            [ "${code}" = 0 ] || { status=1; grep -E -A12 "^not ok" "${RUNNER_TEMP}/${file}.log" | grep -E "^not ok|error:|location" | head -30; }
           done
           for file in open-model-provider-adapter owner-private-sites; do
             [ -f "electron/__tests__/${file}.test.ts" ] || continue
@@ -80,7 +81,7 @@ jobs:
             node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks "electron/__tests__/${file}.test.ts" > "${RUNNER_TEMP}/e-${file}.log" 2>&1; code=$?
             end=$(date +%s)
             echo "TIMING ${{ matrix.side }} electron/${file}: $((end - start)) s, exit ${code}, $(grep -E '^# (pass|fail) ' "${RUNNER_TEMP}/e-${file}.log" | tr '\n' ' ')"
-            [ "${code}" = 0 ] || { status=1; grep -E "^not ok" "${RUNNER_TEMP}/e-${file}.log" | head -20; }
+            [ "${code}" = 0 ] || { status=1; grep -E -A12 "^not ok" "${RUNNER_TEMP}/e-${file}.log" | grep -E "^not ok|error:|location" | head -30; }
           done
           cd ../..
           start=$(date +%s)
@@ -94,10 +95,11 @@ jobs:
         if: ${{ matrix.side == 'after-daemon-suite' }}
         shell: bash
         run: |
+          set +e
           start=$(date +%s)
           npm --prefix apps/desktop run test:daemon > "${RUNNER_TEMP}/daemon.log" 2>&1; code=$?
           end=$(date +%s)
           echo "TIMING daemon suite: $((end - start)) s, exit ${code}"
           grep -E "^# (tests|pass|fail|skipped|duration_ms) " "${RUNNER_TEMP}/daemon.log" | tail -6
-          grep -E "^not ok" "${RUNNER_TEMP}/daemon.log" | head -40
+          grep -E -A12 "^not ok" "${RUNNER_TEMP}/daemon.log" | grep -E "^not ok|error:" | head -60
           exit "${code}"
