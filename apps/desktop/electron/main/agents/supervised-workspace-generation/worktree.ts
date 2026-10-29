@@ -1,8 +1,9 @@
 /** Materializing and snapshotting worktrees, tree entries and diffs, and reading git blobs. */
 import { createHash } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
-import { lstat, mkdir, open, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, rmdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { openNoFollow } from "../../../../../../shared/owner-private-fs.mjs";
 import { GIT_ENV, cloneRegularFile, gitAuthorityBuffer, gitAuthorityText, runGit, runGitWithAuthority, runProcess, sourceAuthorityBuffer, sourceGitEnvironment } from "./git.js";
 import { type GenerationManifest, type RegularFileInfo, type SourceGitAuthority, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type TreeEntry } from "./types.js";
 import { assertSafeAncestors } from "./manifest.js";
@@ -206,7 +207,7 @@ export async function treeEntryForRegularFile(
 ): Promise<TreeEntry> {
   if (info.size > manifest.limits.maxFileBytes) throw limitError("file size", manifest.limits.maxFileBytes);
   const relativePath = relativePathForError ?? safeRelative(manifest.realWorkspace, target);
-  const descriptor = await open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  const descriptor = await openNoFollow(target, fsConstants.O_RDONLY);
   let oid: string;
   let executable = false;
   try {

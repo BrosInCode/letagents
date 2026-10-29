@@ -6,6 +6,8 @@ export const MANIFEST_NAME = "generation-manifest.json";
 export const LIVE_NAME = "live";
 export const RETIRED_NAME = "retired";
 export const AUTHORITY_NAME = "private-git";
+/** Windows only: the private clone the provider's worktree belongs to. */
+export const PROVIDER_GIT_NAME = "provider-git";
 export const BASELINE_FILES_NAME = "baseline-files";
 export const STAGING_NAME = "reconcile-staging";
 export const BASELINE_INDEX_NAME = "letagents-baseline.index";
@@ -102,6 +104,8 @@ export interface SupervisedWorkspaceGenerationHandle {
   readonly liveSourceRoot: string;
   readonly liveWorkspace: string;
   readonly readOnlyRoots: readonly SupervisedWorkspaceReadOnlyRoot[];
+  /** A line for the agent's prompt about how this workspace differs from the real one; null (or absent) on macOS. */
+  readonly workspaceNote?: string | null;
   retireAndReconcile(): Promise<SupervisedWorkspaceGenerationResult>;
   recover(options?: RecoverSupervisedWorkspaceGenerationOptions): Promise<SupervisedWorkspaceGenerationResult>;
   abandon(): Promise<SupervisedWorkspaceGenerationResult>;

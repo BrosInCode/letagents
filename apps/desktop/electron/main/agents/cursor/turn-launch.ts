@@ -245,7 +245,8 @@ export async function beginTurn(
       "--workspace", providerWorkspace,
       ...handle.policyArgs,
       ...(nativeResumeSession ? [`--resume=${nativeResumeSession}`] : []),
-      prompt,
+      // A Windows generation is a fresh Git worktree: say so before the turn's prompt.
+      workspaceGeneration?.workspaceNote ? `${workspaceGeneration.workspaceNote}\n\n${prompt}` : prompt,
     ];
     const statePath = roomTurnId && handle.supervisedProfile
       ? join(
