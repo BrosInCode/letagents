@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import type { Server, Socket } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 
@@ -23,6 +23,8 @@ export function testDaemonSocketPath(root: string): string {
 }
 
 const gatedServers = new WeakSet<Server>();
+/** Proofs listenTestDaemon wrote in this process, by path. */
+const fakeProofs = new Map<string, string>();
 
 /**
  * `server.listen(socketPath, callback)` for a fake daemon. On Windows the
@@ -35,17 +37,18 @@ export function listenTestDaemon(server: Server, socketPath: string, callback?: 
     if (!proofPath) throw new Error(`No test state directory owns ${socketPath}; build it with testDaemonSocketPath.`);
     // The product client accepts only a proof private to this account, so the
     // fake writes it the way the daemon does.
-    let proof: string;
-    try {
-      if (!isOwnerPrivateSync(proofPath, lstatSync(proofPath))) throw new Error("not private");
-      proof = readFileSync(proofPath, "utf8").trim();
-    } catch {
+    // A successor fake reuses the proof this process already wrote: the
+    // synchronous DACL read (PowerShell, about a second) would block the
+    // event loop the client's retry budget runs on.
+    let proof = fakeProofs.get(proofPath);
+    if (!proof) {
       proof = randomBytes(32).toString("hex");
       writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
+      // As the daemon does for its own proof: remember the identity just checked.
+      const checked = lstatSync(proofPath);
+      if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
+      fakeProofs.set(proofPath, proof);
     }
-    // As the daemon does for its own proof: remember the identity just checked.
-    const checked = lstatSync(proofPath);
-    if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
     for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
       server.off("connection", listener);
       server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));
