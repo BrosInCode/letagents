@@ -664,6 +664,13 @@ test("Windows: a tool that cannot start is EOWNERPRIVATE, never a missing file",
     await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: throwing }), { code: "EOWNERPRIVATE" });
     // Only a missing path itself is ENOENT.
     await assert.rejects(protectOwnerPrivate(join(root, "missing"), "file", options), { code: "ENOENT" });
+    // A path another process removes while icacls runs on it is ENOENT too (as a chmod that lost the race).
+    const vanishing = join(root, "vanishing");
+    writeFileSync(vanishing, "v");
+    const removing: WindowsSecurity = { ...fake, async protect(path) { rmSync(path); notStarting(); }, protectSync(path) { rmSync(path); notStarting(); } };
+    await assert.rejects(protectOwnerPrivate(vanishing, "file", { platform: "win32", windowsSecurity: removing }), { code: "ENOENT" });
+    writeFileSync(vanishing, "v");
+    assert.throws(() => protectOwnerPrivateSync(vanishing, "file", { platform: "win32", windowsSecurity: removing }), { code: "ENOENT" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

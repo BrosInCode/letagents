@@ -826,6 +826,18 @@ export function assertOwnerPrivateSync(path, options = {}) {
 
 // ---------------------------------------------------------------- making private paths
 
+/**
+ * A failed protect is EOWNERPRIVATE, never a tool's own ENOENT; but when the
+ * path itself is gone by then (another process removed it), the answer is the
+ * path's ENOENT, as a chmod that lost that race would give. A missing path has
+ * nothing to protect.
+ */
+function protectFailure(path, error) {
+  try { lstatSync(path); }
+  catch (missing) { if (missing?.code === "ENOENT") return missing; }
+  return error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error);
+}
+
 function notProtected(path) {
   return privateError(`Could not make ${path} private to this account: other entries remain in its permissions.`);
 }
@@ -848,7 +860,7 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
   try { await protectWindowsPath(security, path, kind); }
-  catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
+  catch (error) { throw protectFailure(path, error); }
   if (kind === "directory") rememberPrivateFolder(security, path);
   else addTo(knownEntries, security, path);
 }
@@ -884,7 +896,7 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
   try { protectWindowsPathSync(security, path, kind); }
-  catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
+  catch (error) { throw protectFailure(path, error); }
   if (kind === "directory") rememberPrivateFolder(security, path);
   else addTo(knownEntries, security, path);
 }
