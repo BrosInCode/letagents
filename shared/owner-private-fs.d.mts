@@ -63,7 +63,14 @@ export declare function forgetOwnerPrivateCache(): void;
 export declare function icaclsSetOwnerArguments(path: string, sid: string): string[];
 export declare const INHERITED_GROUP_SIDS: readonly string[];
 export declare function icaclsProtectArguments(path: string, kind: PrivateKind, sid: string): string[];
-export declare function createWindowsSecurity(options?: { run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv }): WindowsSecurity;
+export interface SddlServer { readonly usable: boolean; read(paths: readonly string[]): Promise<(string | null)[]>; stop(): void }
+/** One long-lived PowerShell reader for asynchronous reads; `start` returns its child process. */
+export declare function createSddlServer(start: () => import("node:child_process").ChildProcess): SddlServer;
+export declare function createWindowsSecurity(options?: {
+  run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv;
+  /** The long-lived reader's child process; null for none. Default: PowerShell, only with the real runners. */
+  startServer?: (() => import("node:child_process").ChildProcess) | null;
+}): WindowsSecurity;
 
 export interface ParsedSddl {
   owner: string;

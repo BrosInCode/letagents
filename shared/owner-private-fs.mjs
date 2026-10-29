@@ -235,12 +235,93 @@ function powershellArguments() {
   return ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", READ_SDDL_SCRIPT];
 }
 
+// Starting PowerShell costs about half a second, so asynchronous reads go to
+// one long-lived PowerShell per process: a path per line in, "ok:<SDDL>" or
+// "error:" per line out, and an empty line ends a request ("done:"). Only
+// printable ASCII paths go this way (no code-page guessing); any other path,
+// a reader that fails, stops or does not answer, and every synchronous read
+// use the one-shot script above, which reads the paths from the environment.
+const SERVER_SCRIPT = "$ErrorActionPreference = 'Continue'; while ($true) { $line = [Console]::In.ReadLine(); "
+  + "if ($null -eq $line) { break }; if ($line -eq '') { [Console]::Out.WriteLine('done:'); [Console]::Out.Flush(); continue }; "
+  + "try { [Console]::Out.WriteLine('ok:' + (Get-Acl -LiteralPath $line).Sddl) } catch { [Console]::Out.WriteLine('error:') } }";
+
+function startSddlServer(powershell, env) {
+  return spawn(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SERVER_SCRIPT], {
+    env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false,
+  });
+}
+
+const SERVER_PATH = /^[\x20-\x7e]+$/;
+
+/** One long-lived reader; `start` returns a child process (injectable for tests). */
+export function createSddlServer(start) {
+  let child = null;
+  let broken = false;
+  let buffer = "";
+  const lines = [];
+  let wake = null;
+  let queue = Promise.resolve();
+  const stopReader = () => { broken = true; try { child?.kill(); } catch { /* already gone */ } child = null; wake?.(); };
+  function reader() {
+    if (child) return child;
+    child = start();
+    // The reader must never keep the process alive on its own.
+    child.unref?.();
+    for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.unref?.();
+    child.stderr?.resume();
+    child.stdin.on("error", stopReader);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+        lines.push(buffer.slice(0, end).replace(/\r$/, ""));
+        buffer = buffer.slice(end + 1);
+      }
+      wake?.();
+    });
+    child.once("error", stopReader);
+    child.once("exit", stopReader);
+    return child;
+  }
+  async function request(paths) {
+    if (broken) throw privateError("The permissions reader is not available.");
+    reader().stdin.write(`${paths.join("\n")}\n\n`);
+    const deadline = Date.now() + TOOL_TIMEOUT_MS;
+    for (;;) {
+      const done = lines.indexOf("done:");
+      if (done >= 0) return parseSddlLines(lines.splice(0, done + 1).slice(0, -1).join("\n"), paths.length);
+      if (broken) throw privateError("The permissions reader stopped.");
+      const left = deadline - Date.now();
+      if (left <= 0) { stopReader(); throw privateError("The permissions reader did not answer in time."); }
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, left);
+        wake = () => { clearTimeout(timer); resolve(); };
+      });
+      wake = null;
+    }
+  }
+  return {
+    get usable() { return !broken; },
+    /** Answers for `paths`, or throws (the caller falls back to a one-shot read). */
+    read(paths) {
+      if (!paths.every(path => SERVER_PATH.test(path))) return Promise.reject(privateError("Only ASCII paths go to the reader."));
+      const answer = queue.then(() => request(paths));
+      queue = answer.catch(() => undefined);
+      return answer;
+    },
+    stop: stopReader,
+  };
+}
+
 /**
  * The Windows facts, from injectable runners. A native helper may replace
  * this object later; it only needs these six methods.
  */
-export function createWindowsSecurity({ run = runTool, runSync = runToolSync, env = process.env } = {}) {
+export function createWindowsSecurity({ run = runTool, runSync = runToolSync, env = process.env, startServer } = {}) {
   const tools = windowsToolPaths(env);
+  // The long-lived reader only with the real tools (tests that inject runners get none unless they ask).
+  const start = startServer === undefined ? (run === runTool ? () => startSddlServer(tools.powershell, env) : null) : startServer;
+  const server = start ? createSddlServer(start) : null;
   let sid = null;
   let aliases = null;
   const remember = (output) => {
@@ -261,6 +342,9 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     async currentUserAliases() { await this.currentUserSid(); return aliases; },
     currentUserAliasesSync() { this.currentUserSidSync(); return aliases; },
     async readSddl(paths) {
+      if (server?.usable && paths.length) {
+        try { return await server.read(paths); } catch { /* the one-shot read below answers instead */ }
+      }
       const result = [];
       for (const chunk of chunkPaths(paths)) {
         result.push(...parseSddlLines(await run(tools.powershell, powershellArguments(), { env: environment(chunk) }), chunk.length));

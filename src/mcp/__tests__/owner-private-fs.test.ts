@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -10,6 +12,7 @@ import {
   assertOwnerPrivateSync,
   createPrivateDir,
   createPrivateDirSync,
+  createSddlServer,
   createWindowsSecurity,
   encodeSddlPaths,
   everyOwnedByCurrentUserSync,
@@ -197,6 +200,57 @@ test("Windows: a protect refuses an entry that was replaced during it", async ()
     };
     await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: swapping }), /was replaced/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** A stand-in for the long-lived PowerShell reader: answers each path line, "done:" for an empty line. */
+function fakeReader(answer: (path: string) => string) {
+  const starts: number[] = [];
+  const children: EventEmitter[] = [];
+  const start = () => {
+    starts.push(1);
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() { child.emit("exit", 1); } });
+    let pending = "";
+    child.stdin.on("data", (chunk: Buffer) => {
+      pending += chunk.toString("utf8");
+      for (let end = pending.indexOf("\n"); end >= 0; end = pending.indexOf("\n")) {
+        const line = pending.slice(0, end);
+        pending = pending.slice(end + 1);
+        child.stdout.write(line === "" ? "done:\r\n" : `${answer(line)}\r\n`);
+      }
+    });
+    children.push(child);
+    return child as unknown as ChildProcess;
+  };
+  return { start, starts, children };
+}
+
+test("Windows: asynchronous reads share one long-lived reader; other paths and a stopped reader fall back", async () => {
+  const fake = fakeReader(path => (path.endsWith("missing") ? "error:" : `ok:${PRIVATE_FILE}`));
+  const oneShot: string[] = [];
+  const security = createWindowsSecurity({
+    env: { SystemRoot: "C:\\Windows" },
+    startServer: fake.start,
+    run: async (_file, _args, options) => {
+      const paths = options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.split("\n");
+      oneShot.push(...paths);
+      return paths.map(() => `ok:${PRIVATE_FILE}`).join("\n");
+    },
+  });
+  assert.deepEqual(await security.readSddl(["C:\\a", "C:\\b missing"]), [PRIVATE_FILE, null]);
+  assert.deepEqual(await Promise.all([security.readSddl(["C:\\c"]), security.readSddl(["C:\\d", "C:\\e"])]), [[PRIVATE_FILE], [PRIVATE_FILE, PRIVATE_FILE]]);
+  assert.equal(fake.starts.length, 1);
+  assert.deepEqual(oneShot, []);
+  // A path that is not printable ASCII goes to the one-shot read (no code-page guessing).
+  assert.deepEqual(await security.readSddl(["C:\\Users\\José\\x"]), [PRIVATE_FILE]);
+  assert.deepEqual(oneShot, ["C:\\Users\\José\\x"]);
+  // A reader that stops is not started again; reads fall back.
+  fake.children[0]!.emit("exit", 1);
+  assert.deepEqual(await security.readSddl(["C:\\f"]), [PRIVATE_FILE]);
+  assert.equal(fake.starts.length, 1);
+  assert.deepEqual(oneShot.at(-1), "C:\\f");
+  // A reader that answers the wrong number of lines is refused, not guessed.
+  const short = createSddlServer(fakeReader(() => "").start);
+  await assert.rejects(short.read(["C:\\a"]), { code: "EOWNERPRIVATE" });
 });
 
 test("many paths are read in a few PowerShell calls, each under the Windows environment limit", async () => {
@@ -729,6 +783,22 @@ test("real Windows: private folders and files pass, and every tampered ACL is re
     forgetOwnerPrivateCache();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("real Windows: the long-lived reader answers later reads without a new PowerShell start", { skip: windowsOnly }, async () => {
+  const root = scratch();
+  try {
+    const security = createWindowsSecurity();
+    let started = performance.now();
+    const first = await security.readSddl([root]);
+    const firstMs = performance.now() - started;
+    started = performance.now();
+    for (let index = 0; index < 20; index += 1) assert.match(String((await security.readSddl([root, tmpdir()]))[1]), /^O:/);
+    const laterMs = (performance.now() - started) / 20;
+    console.log(`reader: first read ${Math.round(firstMs)} ms, later reads ${Math.round(laterMs)} ms each`);
+    assert.match(String(first[0]), /^O:/);
+    assert.ok(laterMs < firstMs, `later reads (${Math.round(laterMs)} ms) are not faster than the first (${Math.round(firstMs)} ms)`);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("real Windows: one PowerShell call reads several paths, one answer per path", { skip: windowsOnly }, async () => {
