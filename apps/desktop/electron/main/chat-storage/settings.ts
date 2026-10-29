@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+
+import { letagentsHomePath } from "../../../../../shared/letagents-home.mjs";
 
 import type {
   DesktopChatStorageSettings,
@@ -21,19 +22,19 @@ const validRoomOverrideModes = new Set<RoomStorageOverrideMode>([
 
 export const chatStorageSettingsPath =
   process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() ||
-  join(homedir(), ".letagents", "chat-storage.json");
+  letagentsHomePath("chat-storage.json");
 
 export const localChatDatabasePath =
   process.env.LETAGENTS_LOCAL_CHAT_DB?.trim() ||
-  join(homedir(), ".letagents", "local-chat.sqlite");
+  letagentsHomePath("local-chat.sqlite");
 
 export const localFilesPath =
   process.env.LETAGENTS_LOCAL_FILES_DIR?.trim() ||
-  join(homedir(), ".letagents", "local-files");
+  letagentsHomePath("local-files");
 
 export const localProfilePath =
   process.env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() ||
-  join(homedir(), ".letagents", "local-profile.json");
+  letagentsHomePath("local-profile.json");
 
 type PersistedChatStorageSettings = {
   mode?: string;

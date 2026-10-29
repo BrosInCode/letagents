@@ -1,10 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
-import { join, relative, resolve, extname } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { readdir, realpath, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
+import { letagentsHome } from '../../../../shared/letagents-home.mjs';
 import { apiUrl } from './paths.js';
 import { pollDesktopRoomAgentWork } from './rooms/agent-work.js';
 
@@ -23,7 +25,8 @@ export async function localWorkspaceFile(root: string, path: string): Promise<st
     const base = await realpath(root);
     const file = await realpath(resolve(base, path));
     const inside = relative(base, file);
-    if (!inside || inside.startsWith('../') || inside === '..' || inside.startsWith('/')) return null;
+    // Windows separates with \ and may answer with another drive's absolute path.
+    if (!inside || inside.startsWith('../') || inside.startsWith(`..${sep}`) || inside === '..' || isAbsolute(inside)) return null;
     const info = await stat(file);
     return info.isFile() && !(info.mode & 0o111) ? file : null;
   } catch { return null; }
@@ -38,7 +41,7 @@ async function context(input: WorkspaceFileRequest, options: { cachedPoll?: bool
   validate(input);
   let database: DatabaseSync | undefined;
   try {
-    database = new DatabaseSync(join(homedir(), '.letagents', 'daemon-state.sqlite'), { readOnly: true });
+    database = new DatabaseSync(join(letagentsHome({ homedir }), 'daemon-state.sqlite'), { readOnly: true });
     const row = database.prepare(`SELECT c.settled_json, a.workspace_path FROM room_workspace_captures c
       JOIN room_work_publications p USING(agent_id,room_id,source_message_id)
       JOIN work_attempts a USING(work_attempt_id)
@@ -211,6 +214,7 @@ async function editorBundleFingerprint(editorPath: string): Promise<string | nul
  * never uses these memos: openLocalSourceFile queries and verifies afresh.
  */
 async function advisoryDefaultSourceEditor(path: string): Promise<{ id: string; path: string } | null> {
+  if (process.platform === 'win32') return windowsSourceEditor();
   if (process.platform !== 'darwin') return null;
   const editor = await remember(editorAssociations, extname(path).toLowerCase(), () => queryDefaultSourceEditor(path),
     () => EDITOR_ASSOCIATION_TTL_MS);
@@ -224,12 +228,46 @@ async function advisoryDefaultSourceEditor(path: string): Promise<{ id: string; 
   return verified ? editor : null;
 }
 async function findDefaultSourceEditor(path: string): Promise<{ id: string; path: string } | null> {
+  if (process.platform === 'win32') return windowsSourceEditor();
   const editor = await queryDefaultSourceEditor(path);
   return editor && await verifyEditor(editor) ? editor : null;
+}
+/**
+ * Windows has no Launch Services answer to verify, so only VS Code is used:
+ * its `bin\code.cmd` on PATH marks the install, and the Code.exe one folder
+ * up opens files directly, as Explorer's "Open with Code" does. Running the
+ * .exe needs no shell, so a file name is never parsed as a command.
+ */
+export function windowsSourceEditor(options: { env?: NodeJS.ProcessEnv; exists?: (path: string) => boolean } = {}): { id: string; path: string } | null {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  const searchPath = env.Path ?? env.PATH ?? '';
+  for (const entry of searchPath.split(';')) {
+    const folder = entry.trim().replace(/^"(.*)"$/, '$1');
+    if (!win32.isAbsolute(folder) || !exists(win32.join(folder, 'code.cmd'))) continue;
+    const executable = win32.resolve(folder, '..', 'Code.exe');
+    if (exists(executable)) return { id: 'com.microsoft.VSCode', path: executable };
+  }
+  return null;
+}
+async function openWithWindowsEditor(editorPath: string, path: string): Promise<string> {
+  // Loaded here so macOS-only callers and tests never need spawn.
+  const { spawn } = await import('node:child_process');
+  return new Promise(resolveOpen => {
+    try {
+      // Detached: a first VS Code window keeps running after LetAgents is done.
+      // Without these, Code.exe would start as plain Node instead of the editor.
+      const { ELECTRON_RUN_AS_NODE: _runAsNode, NODE_OPTIONS: _nodeOptions, ...env } = process.env;
+      const child = spawn(editorPath, [path], { detached: true, stdio: 'ignore', windowsHide: false, env });
+      child.once('error', () => resolveOpen('The default editor could not open this file.'));
+      child.once('spawn', () => { child.unref(); resolveOpen(''); });
+    } catch { resolveOpen('The default editor could not open this file.'); }
+  });
 }
 export async function openLocalSourceFile(path: string): Promise<string> {
   const editor = await defaultSourceEditor(path);
   if (!editor) return 'No supported default editor is available.';
+  if (process.platform === 'win32') return openWithWindowsEditor(editor.path, path);
   try { await run('/usr/bin/open', ['-a', editor.path, path], { timeout: 5000 }); return ''; }
   catch { return 'The default editor could not open this file.'; }
 }
