@@ -362,6 +362,20 @@ test("a kill while the helper is already waiting on a held process reports it un
   await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
 });
 
+test("a second kill while the first still waits on a held process reports it unkillable too", { skip }, async () => {
+  const started = await startTree();
+  const holder = await holdExit(started.grandchildPid, HOLD_MS);
+  // Kill A ends the job and waits (8 s) on the held grandchild; kill B then finds the job listing nothing.
+  const first = spawn(helperPath, ["kill", String(started.tree.pid), started.births.helper.slice("win32-ft:".length), "8000"], { stdio: "ignore", windowsHide: true });
+  const firstDone = exited(first);
+  await holder.held;
+  assert.equal(signalTreeOutcome(started.tree.pid, "SIGKILL", { ...noHeldTrees, identity: started.births.helper, unkillableAfterMs: 2_000 }), "unkillable");
+  assert.equal((await firstDone).code, 4);
+  assert.equal((await exited(started.tree)).code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  await holder.done;
+  await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+});
+
 test("terminateTreeOutcome reports a held tree unkillable, and terminateTree resolves false for one", { skip }, async () => {
   const first = await startTree();
   const firstHolder = await holdExit(first.grandchildPid, HOLD_MS);

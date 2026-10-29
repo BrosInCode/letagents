@@ -441,6 +441,14 @@ test("Windows: terminateTreeOutcome names an unkillable tree; terminateTree reso
   }), false);
   assert.equal(await terminateTreeOutcome(obeys as unknown as ChildProcess, { platform: "win32", liveTrees }), "unkillable");
 
+  // The same when the birth could not be read and the recorded one decided the kill.
+  const unread = new FakeChild(1805);
+  liveTrees.set(1805, { child: unread as unknown as ChildProcess, helper: HELPER });
+  const byRecord = recordingHelper({ "info 1805": { status: 121 }, "kill 1805 61": { status: 4 } });
+  assert.equal(signalTreeOutcome(1805, "SIGKILL", { platform: "win32", runHelper: byRecord.runHelper, liveTrees, identity: "win32-ft:61", probe: () => {} }), "unkillable");
+  unread.exit(0);
+  assert.equal(await terminateTreeOutcome(unread as unknown as ChildProcess, { platform: "win32", liveTrees }), "unkillable");
+
   // A child that never exits is "running"; a normal exit is "exited".
   const stuck = new FakeChild(1802);
   liveTrees.set(1802, { child: stuck as unknown as ChildProcess, helper: HELPER });

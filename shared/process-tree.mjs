@@ -458,7 +458,9 @@ function endWindowsTree(pid, options) {
     // helper's own handle-held check of the recorded birth decides.
     if (identity && !options.child && birth !== identity) {
       if (isWindowsBirth(birth) || !live?.helper || !isWindowsBirth(identity)) return "none";
-      return killOutcome(killByBirth(helper, pid, identity, options));
+      const outcome = killOutcome(killByBirth(helper, pid, identity, options));
+      if (outcome === "unkillable") unkillableTrees.add(child);
+      return outcome;
     }
     if (live?.helper && isWindowsBirth(birth)) {
       const ended = killByBirth(helper, pid, birth, options);

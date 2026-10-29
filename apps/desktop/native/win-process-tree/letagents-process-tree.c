@@ -122,10 +122,15 @@ static void job_name(wchar_t *name, size_t size, DWORD pid, u64 creation) {
   _snwprintf_s(name, size, _TRUNCATE, L"Local\\letagents-process-tree-%lu-%llu", (unsigned long)pid, creation);
 }
 
-/* The event a kill signals once it has ended that helper's job, so the
-   helper bounds its wait even while its own child has not exited. */
-static void ended_event_name(wchar_t *name, size_t size, DWORD pid, u64 creation) {
-  _snwprintf_s(name, size, _TRUNCATE, L"Local\\letagents-process-tree-%lu-%llu-ended", (unsigned long)pid, creation);
+/* A helper's named objects beside its job:
+     -ended       (event) set by a kill that ended the job, so the helper
+                  bounds its wait even while its own child has not exited;
+     -stopping    (mutex) held by whoever is ending the job and waiting on
+                  what it held (a kill, or the helper), one at a time;
+     -unkillable  (event) set by one that found a process it could not
+                  prove exited: every later stop, and the helper's exit, say so. */
+static void helper_object_name(wchar_t *name, size_t size, DWORD pid, u64 creation, const wchar_t *suffix) {
+  _snwprintf_s(name, size, _TRUNCATE, L"Local\\letagents-process-tree-%lu-%llu-%ls", (unsigned long)pid, creation, suffix);
 }
 
 static DWORD job_active_processes(HANDLE job) {
@@ -147,26 +152,34 @@ typedef struct {
   HANDLE *handles;
   DWORD count;
   int complete;
+  /* The job's limits before it was closed, to put back if it cannot be ended. */
+  int limited;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION previous;
 } held_processes;
 
 static void close_job_to_new_processes(HANDLE job, held_processes *held) {
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
-  ZeroMemory(&limits, sizeof limits);
-  if (!QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits, NULL)) {
+  held->limited = 0;
+  ZeroMemory(&held->previous, sizeof held->previous);
+  if (!QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &held->previous, sizeof held->previous, NULL)) {
     held->complete = 0;
     return;
   }
+  limits = held->previous;
   limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
   limits.BasicLimitInformation.ActiveProcessLimit = 1;
-  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits)) held->complete = 0;
+  if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits)) held->limited = 1;
+  else held->complete = 0;
 }
 
-static void hold_job_processes(HANDLE job, held_processes *held) {
+/* `close`: close the job to new processes first (not again for a second look after the end). */
+static void hold_job_processes(HANDLE job, held_processes *held, int close) {
   DWORD capacity = 64, attempt, index;
   held->handles = NULL;
   held->count = 0;
   held->complete = 1;
-  close_job_to_new_processes(job, held);
+  held->limited = 0;
+  if (close) close_job_to_new_processes(job, held);
   for (attempt = 0; attempt < 4; attempt++) {
     size_t size = offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) + (size_t)capacity * sizeof(ULONG_PTR);
     JOBOBJECT_BASIC_PROCESS_ID_LIST *list = (JOBOBJECT_BASIC_PROCESS_ID_LIST *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
@@ -230,17 +243,63 @@ static int wait_held_processes(held_processes *held, ULONGLONG deadline) {
   return all;
 }
 
+/* End the job and wait, until the deadline, for every process it held (and
+   `child`, when given), as the job's one stopper at a time: another stopper
+   (a second kill, or the helper after a kill) first waits for the one before
+   it, so it never takes the list that stopper emptied for a tree that is
+   gone, and reads the "unkillable" event that stopper set. Returns 1 only
+   when every process was proved to have exited. *error is set when the job
+   could not be ended at all.
+   Known limit: the job is closed to new processes before it is listed, but
+   Windows applies an active-process limit per job, so a descendant that runs
+   its children in a nested job of its own can still start one between the
+   list and the end. That one is ended, but not waited on. */
+static int stop_job(HANDLE job, HANDLE stopping, HANDLE unkillable, HANDLE ended, HANDLE child, ULONGLONG deadline, DWORD *error) {
+  held_processes held, late;
+  int proved = 1;
+  DWORD owned = stopping ? WaitForSingleObject(stopping, remaining_ms(deadline)) : WAIT_FAILED;
+  *error = 0;
+  if (stopping && owned != WAIT_OBJECT_0 && owned != WAIT_ABANDONED) {
+    /* The stopper before this one is still waiting on what it held: end the job anyway; nothing is proved. */
+    if (!TerminateJobObject(job, 1)) *error = GetLastError();
+    if (ended) SetEvent(ended);
+    if (unkillable) SetEvent(unkillable);
+    return 0;
+  }
+  /* No coordination at all, or a stopper that died while it held the job: not provable. */
+  if (!stopping || owned == WAIT_ABANDONED) proved = 0;
+  if (unkillable && WaitForSingleObject(unkillable, 0) == WAIT_OBJECT_0) proved = 0;
+  /* Before the job is ended: afterwards it no longer lists its processes. */
+  hold_job_processes(job, &held, 1);
+  if (!TerminateJobObject(job, 1)) {
+    *error = GetLastError();
+    if (held.limited) SetInformationJobObject(job, JobObjectExtendedLimitInformation, &held.previous, sizeof held.previous);
+    wait_held_processes(&held, 0);
+    if (stopping) ReleaseMutex(stopping);
+    return 0;
+  }
+  if (ended) SetEvent(ended);
+  /* An ended job counts nothing, so a limit of 1 lets one process join after
+     the end: hold and end that one too. */
+  hold_job_processes(job, &late, 0);
+  if (late.count) TerminateJobObject(job, 1);
+  if (!wait_held_processes(&held, deadline)) proved = 0;
+  if (!wait_held_processes(&late, deadline)) proved = 0;
+  if (child && WaitForSingleObject(child, remaining_ms(deadline)) != WAIT_OBJECT_0) proved = 0;
+  if (!proved && unkillable) SetEvent(unkillable);
+  if (stopping) ReleaseMutex(stopping);
+  return proved;
+}
+
 static int run_spawn(const wchar_t *application, const wchar_t *command_line, DWORD wait_ms) {
   FILETIME creation, exit_time, kernel, user;
-  wchar_t name[96], event_name[112];
-  HANDLE job, ended, waits[2];
-  held_processes held;
+  wchar_t name[96], object_name[128];
+  HANDLE job, ended, stopping, unkillable, waits[2];
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
   STARTUPINFOW own, startup;
   PROCESS_INFORMATION child;
   DWORD flags = CREATE_SUSPENDED;
-  DWORD exit_code = 1;
-  int emptied;
+  DWORD exit_code = 1, error = 0;
   ULONGLONG deadline;
   size_t length;
   wchar_t *mutable_line;
@@ -262,12 +321,26 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
     fail_message("a job with this helper's name already exists", ERROR_ALREADY_EXISTS);
     return EXIT_FAILED;
   }
-  ended_event_name(event_name, sizeof event_name / sizeof event_name[0], GetCurrentProcessId(), filetime_value(creation));
+  /* As for the job: an object with this helper's name that it did not make is not its own. */
+  helper_object_name(object_name, sizeof object_name / sizeof object_name[0], GetCurrentProcessId(), filetime_value(creation), L"ended");
   SetLastError(ERROR_SUCCESS);
-  ended = CreateEventW(NULL, TRUE, FALSE, event_name);
+  ended = CreateEventW(NULL, TRUE, FALSE, object_name);
   if (!ended || GetLastError() == ERROR_ALREADY_EXISTS) {
-    /* As for the job: an event with this helper's name that it did not make is not its own. */
     fail_message("cannot create this helper's ended event", ended ? ERROR_ALREADY_EXISTS : GetLastError());
+    return EXIT_FAILED;
+  }
+  helper_object_name(object_name, sizeof object_name / sizeof object_name[0], GetCurrentProcessId(), filetime_value(creation), L"stopping");
+  SetLastError(ERROR_SUCCESS);
+  stopping = CreateMutexW(NULL, FALSE, object_name);
+  if (!stopping || GetLastError() == ERROR_ALREADY_EXISTS) {
+    fail_message("cannot create this helper's stopping mutex", stopping ? ERROR_ALREADY_EXISTS : GetLastError());
+    return EXIT_FAILED;
+  }
+  helper_object_name(object_name, sizeof object_name / sizeof object_name[0], GetCurrentProcessId(), filetime_value(creation), L"unkillable");
+  SetLastError(ERROR_SUCCESS);
+  unkillable = CreateEventW(NULL, TRUE, FALSE, object_name);
+  if (!unkillable || GetLastError() == ERROR_ALREADY_EXISTS) {
+    fail_message("cannot create this helper's unkillable event", unkillable ? ERROR_ALREADY_EXISTS : GetLastError());
     return EXIT_FAILED;
   }
   ZeroMemory(&limits, sizeof limits);
@@ -331,18 +404,16 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
   waits[1] = ended;
   WaitForMultipleObjects(2, waits, FALSE, INFINITE);
   /* What the child left behind ends with it, and the helper exits with the
-     child's code only once every process of the job has exited: that exit
-     means the whole tree is gone. Termination is asynchronous (a process
-     can wait on pending I/O), so the helper waits on the processes the job
-     listed before it was ended, and on the child, for at most wait_ms: a
-     process still there then is unkillable, and the helper says so instead
-     of waiting forever. After a kill the job lists only what started since,
-     and the kill itself waits for the rest. */
+     child's code only once the child and every process the job held have
+     exited: that exit means the whole tree is gone. Termination is
+     asynchronous (a process can wait on pending I/O), so this waits on
+     process handles, for at most wait_ms: a process still there then is
+     unkillable, and the helper says so instead of waiting forever. After a
+     kill, it first waits for that kill to finish its own wait (stop_job),
+     and reports what the kill found. */
   deadline = GetTickCount64() + wait_ms;
-  hold_job_processes(job, &held);
-  if (!TerminateJobObject(job, 1)) fail_message("cannot end what the program left running", GetLastError());
-  emptied = wait_held_processes(&held, deadline);
-  if (WaitForSingleObject(child.hProcess, remaining_ms(deadline)) != WAIT_OBJECT_0 || !emptied) {
+  if (!stop_job(job, stopping, unkillable, NULL, child.hProcess, deadline, &error)) {
+    if (error) fail_message("cannot end what the program left running", error);
     fail_message("the program's job still holds processes after it was ended (unkillable)", ERROR_TIMEOUT);
     return (int)EXIT_SPAWN_UNKILLABLE;
   }
@@ -377,8 +448,8 @@ static int open_identified_process(DWORD pid, u64 creation, DWORD access, HANDLE
 }
 
 static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
-  wchar_t name[96], event_name[112];
-  HANDLE job, ended, process = NULL;
+  wchar_t name[96], object_name[128];
+  HANDLE job, ended, stopping, unkillable, process = NULL;
   int result;
   /* Hold the exact process first: nothing is ended unless <pid> still has that
      creation time, and while the handle is held the pid cannot be reused. */
@@ -398,33 +469,32 @@ static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
      checked again after the open: had the helper exited in between, its job
      could be gone and the name someone else's. */
   if (job && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
-    held_processes held;
-    ULONGLONG deadline;
-    DWORD helper_code = 0;
-    /* Before the job is ended: afterwards it no longer lists its processes. */
-    hold_job_processes(job, &held);
-    if (!TerminateJobObject(job, 1)) {
-      DWORD error = GetLastError();
-      wait_held_processes(&held, 0);
-      CloseHandle(job);
+    ULONGLONG deadline = GetTickCount64() + wait_ms;
+    DWORD helper_code = 0, error = 0;
+    int proved;
+    helper_object_name(object_name, sizeof object_name / sizeof object_name[0], pid, creation, L"ended");
+    ended = OpenEventW(EVENT_MODIFY_STATE, FALSE, object_name);
+    helper_object_name(object_name, sizeof object_name / sizeof object_name[0], pid, creation, L"stopping");
+    stopping = OpenMutexW(SYNCHRONIZE, FALSE, object_name);
+    helper_object_name(object_name, sizeof object_name / sizeof object_name[0], pid, creation, L"unkillable");
+    unkillable = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, object_name);
+    /* Ends the job, tells the helper (the "ended" event), and waits, within
+       the bound, for what the job held; it releases the stopping mutex
+       before the wait for the helper below, which needs it. */
+    proved = stop_job(job, stopping, unkillable, ended, NULL, deadline, &error);
+    if (ended) CloseHandle(ended);
+    if (stopping) CloseHandle(stopping);
+    if (unkillable) CloseHandle(unkillable);
+    CloseHandle(job);
+    if (error) {
       CloseHandle(process);
       fail_message("cannot end the job", error);
       return error == ERROR_ACCESS_DENIED ? EXIT_DENIED : EXIT_FAILED;
     }
-    /* Tell the helper its job was ended, so its own wait is bounded too. */
-    ended_event_name(event_name, sizeof event_name / sizeof event_name[0], pid, creation);
-    ended = OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name);
-    if (ended) {
-      SetEvent(ended);
-      CloseHandle(ended);
-    }
-    /* Bounded: a process of the job still there after wait_ms is unkillable.
-       So is a helper that has not exited by then, or that reports its own
-       wait ran out: it may be waiting on a process it held before this kill
+    result = proved ? 0 : EXIT_UNKILLABLE;
+    /* The helper, too, within the bound: one still waiting, or reporting its
+       own wait ran out, may be waiting on a process it held before this kill
        (it was already ending its job), which this kill's list cannot see. */
-    deadline = GetTickCount64() + wait_ms;
-    result = wait_held_processes(&held, deadline) ? 0 : EXIT_UNKILLABLE;
-    CloseHandle(job);
     if (WaitForSingleObject(process, remaining_ms(deadline)) != WAIT_OBJECT_0
         || !GetExitCodeProcess(process, &helper_code) || helper_code == EXIT_SPAWN_UNKILLABLE) {
       result = EXIT_UNKILLABLE;
