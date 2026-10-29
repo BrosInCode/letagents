@@ -11,6 +11,8 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 /** Sizes Windows picks from for the taskbar, Start menu, Explorer and Alt+Tab. */
 export const WINDOWS_ICON_SIZES = [16, 24, 32, 48, 64, 128, 256];
 export const WINDOWS_EXECUTABLE_NAME = "LetAgents.exe";
+/** The installer's APP_ID and the app's WINDOWS_APP_USER_MODEL_ID (electron/main/windows-app-identity.ts). */
+export const WINDOWS_APP_USER_MODEL_ID = "chat.letagents.desktop";
 export const WINDOWS_UNINSTALLER_NAME = "Uninstall LetAgents.exe";
 
 /** Width and height from a PNG's IHDR chunk. */
