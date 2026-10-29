@@ -69,8 +69,9 @@ const compile = [
 ].join(" ");
 const line = [
   `"${vcvarsall}" ${arch === "x64" ? "x64" : "x64_arm64"} >nul`,
-  "echo VCTOOLS=%VCToolsVersion%",
-  "echo SDK=%WindowsSDKVersion%",
+  // `set NAME` prints the value at run time; %NAME% would expand before vcvarsall ran.
+  "set VCToolsVersion",
+  "set WindowsSDKVersion",
   compile,
 ].join(" && ");
 const comSpec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
@@ -85,8 +86,8 @@ if (built.status !== 0 || !existsSync(executable)) {
 }
 rmSync(objects, { recursive: true, force: true });
 
-const vcToolsVersion = /VCTOOLS=(\S+)/.exec(built.stdout)?.[1] ?? "unknown";
-const windowsSdkVersion = (/SDK=(\S+)/.exec(built.stdout)?.[1] ?? "unknown").replace(/\\$/, "");
+const vcToolsVersion = /^VCToolsVersion=(\S+)/m.exec(built.stdout)?.[1] ?? "unknown";
+const windowsSdkVersion = (/^WindowsSDKVersion=(\S+)/m.exec(built.stdout)?.[1] ?? "unknown").replace(/\\$/, "");
 const sha256 = createHash("sha256").update(readFileSync(executable)).digest("hex");
 const result = { arch, file: executable, sha256, vcToolsVersion, windowsSdkVersion, sourceSha256: actualSource };
 console.log(JSON.stringify(result, null, 2));

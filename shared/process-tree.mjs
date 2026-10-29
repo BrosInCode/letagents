@@ -380,8 +380,14 @@ function exitedPromise(child) {
   });
 }
 
-function wait(ms) {
-  return new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
+/** Resolves true when `promise` settles first, false after `ms`; the timer never outlives the race. */
+async function settlesWithin(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([promise.then(() => true), new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -403,8 +409,7 @@ export async function terminateTree(child, options = {}) {
     } else {
       signalTree(pid, "SIGTERM", options);
     }
-    const timedOut = await Promise.race([exited.then(() => false), wait(graceMs).then(() => true)]);
-    if (!timedOut) {
+    if (await settlesWithin(exited, graceMs)) {
       // The leader exited; on POSIX its group may still hold children. Only
       // the group: the leader's own pid may already be someone else's.
       if (platform !== "win32") {
@@ -414,6 +419,6 @@ export async function terminateTree(child, options = {}) {
     }
   }
   signalTree(pid, platform === "win32" ? "SIGTERM" : "SIGKILL", { ...options, child });
-  await Promise.race([exited, wait(options.killWaitMs ?? 5_000)]);
+  await settlesWithin(exited, options.killWaitMs ?? 5_000);
   return child.exitCode !== null || child.signalCode !== null;
 }

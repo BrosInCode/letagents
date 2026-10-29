@@ -202,9 +202,10 @@ test("stdio, the exit code and every argument pass through the helper unchanged"
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const closed = new Promise((resolve) => child.once("close", resolve));
   child.stdin.end("from stdin");
   const { code } = await exited(child);
-  await new Promise((resolve) => child.once("close", resolve));
+  await closed;
   assert.equal(code, 7);
   assert.deepEqual(JSON.parse(stdout), { args, input: "from stdin" });
   assert.equal(stderr, "to stderr");
