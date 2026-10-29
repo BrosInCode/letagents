@@ -401,6 +401,30 @@ test("a failed client privacy check is asked again, not remembered", async () =>
   } finally { await env.cleanup(); }
 });
 
+test("a missing proof waits like a missing daemon: retryable, then connects once both appear", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
+  const path = process.platform === "win32" ? daemonEndpoint(root).connectPath : join(root, "daemon.sock");
+  const proofPath = join(root, DAEMON_PROOF_FILE);
+  const server = createServer();
+  try {
+    // Neither the daemon nor its proof exists yet.
+    const absent = await exchange(connectDaemon(path, { proofPath, handshake: true }), "ping\n");
+    assert.equal(absent.error?.code, "ENOENT");
+    assert.equal(isRetryableSupervisorBridgeError(absent.error), true, "the bridge keeps waiting, as for an absent socket");
+    // The daemon starts: its proof, then its listener.
+    const proof = await ensureDaemonProof(proofPath);
+    server.on("connection", (socket) => acceptDaemonPeer(socket, proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
+    assert.equal((await exchange(connectDaemon(path, { proofPath, handshake: true }), "ping\n")).data, "pong:ping\n");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a client whose proof file is missing fails like an absent daemon", async () => {
   const env = await harness();
   try {

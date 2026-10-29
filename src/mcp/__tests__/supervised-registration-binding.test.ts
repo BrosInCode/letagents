@@ -12,8 +12,8 @@ const root = await mkdtemp(join(tmpdir(), "letagents-supervised-registration-"))
 const home = join(root, "home");
 const workspace = join(root, "workspace");
 const daemonDir = join(home, ".letagents");
-const socketPath = testDaemonSocketPath(daemonDir);
 await Promise.all([mkdir(daemonDir, { recursive: true }), mkdir(workspace, { recursive: true })]);
+const socketPath = testDaemonSocketPath(daemonDir);
 
 const controlledEnvironmentKeys = [
   "HOME",

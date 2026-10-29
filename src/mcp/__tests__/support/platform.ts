@@ -19,12 +19,35 @@ import { isOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../
  * root's named pipe on Windows (the same endpoint the product computes).
  */
 export function testDaemonSocketPath(root: string): string {
-  return process.platform === "win32" ? daemonEndpoint(root).connectPath : join(root, "daemon.sock");
+  if (process.platform !== "win32") return join(root, "daemon.sock");
+  const endpoint = daemonEndpoint(root);
+  // The proof is written now, during setup: on Windows the private write runs
+  // PowerShell synchronously, which must not block a test's timed window.
+  fakeProof(endpoint.proofPath!);
+  return endpoint.connectPath;
 }
 
 const gatedServers = new WeakSet<Server>();
-/** Proofs listenTestDaemon wrote in this process, by path. */
+/** Proofs the fake daemon wrote in this process, by path. */
 const fakeProofs = new Map<string, string>();
+
+/**
+ * The fake daemon's proof for `proofPath`, written once per process as the
+ * daemon writes its own (private, then remembered by the identity checked).
+ * Later calls reuse it: the synchronous DACL read runs PowerShell (about a
+ * second) and would block the event loop a client's retry budget runs on.
+ */
+function fakeProof(proofPath: string): string {
+  let proof = fakeProofs.get(proofPath);
+  if (!proof) {
+    proof = randomBytes(32).toString("hex");
+    writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
+    const checked = lstatSync(proofPath);
+    if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
+    fakeProofs.set(proofPath, proof);
+  }
+  return proof;
+}
 
 /**
  * `server.listen(socketPath, callback)` for a fake daemon. On Windows the
@@ -37,18 +60,7 @@ export function listenTestDaemon(server: Server, socketPath: string, callback?: 
     if (!proofPath) throw new Error(`No test state directory owns ${socketPath}; build it with testDaemonSocketPath.`);
     // The product client accepts only a proof private to this account, so the
     // fake writes it the way the daemon does.
-    // A successor fake reuses the proof this process already wrote: the
-    // synchronous DACL read (PowerShell, about a second) would block the
-    // event loop the client's retry budget runs on.
-    let proof = fakeProofs.get(proofPath);
-    if (!proof) {
-      proof = randomBytes(32).toString("hex");
-      writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
-      // As the daemon does for its own proof: remember the identity just checked.
-      const checked = lstatSync(proofPath);
-      if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
-      fakeProofs.set(proofPath, proof);
-    }
+    const proof = fakeProof(proofPath);
     for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
       server.off("connection", listener);
       server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));
