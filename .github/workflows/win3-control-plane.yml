@@ -66,3 +66,55 @@ jobs:
         shell: bash
         working-directory: apps/desktop
         run: node --import tsx --test --test-timeout=180000 --test-reporter=spec daemon/__tests__/daemon-windows-control-plane.test.ts daemon/__tests__/daemon-lifecycle-handoff.test.ts
+
+  # Every desktop electron and daemon test file must LOAD on Windows (module
+  # graph and top-level code). The pattern matches no test, so no test body
+  # runs; a file whose import throws fails here.
+  windows-desktop-load:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      - name: Use a scratch home and keep committed line endings
+        shell: bash
+        run: |
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          git config --global core.autocrlf false
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      - name: Run verified dependency lifecycle scripts
+        id: setup
+        shell: bash
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      - name: Load every desktop electron and daemon test file
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        working-directory: apps/desktop
+        run: node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks --test-name-pattern='^win3-load-check-matches-no-test$' electron/__tests__/*.test.ts daemon/__tests__/*.test.ts
