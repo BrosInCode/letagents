@@ -219,14 +219,17 @@ Section "Uninstall"
   SetShellVarContext current
   Call un.CloseRunningApp
   Call un.IsRegisteredInstall
+  ; An uninstaller in any other folder removes only itself: the shortcuts,
+  ; links, Installed apps entry and updater cache belong to the registered
+  ; install.
   ${If} $InstalledHere == "1"
     !insertmacro REMOVE_LETAGENTS_PAYLOAD
+    Delete "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
+    Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
+    DeleteRegKey HKCU "${URL_KEY}"
+    DeleteRegKey HKCU "${UNINSTALL_KEY}"
+    RMDir /r "$LOCALAPPDATA\${UPDATER_CACHE}"
   ${EndIf}
   Delete "$INSTDIR\${UNINSTALLER_NAME}"
   RMDir "$INSTDIR"
-  Delete "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
-  Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
-  DeleteRegKey HKCU "${URL_KEY}"
-  DeleteRegKey HKCU "${UNINSTALL_KEY}"
-  RMDir /r "$LOCALAPPDATA\${UPDATER_CACHE}"
 SectionEnd

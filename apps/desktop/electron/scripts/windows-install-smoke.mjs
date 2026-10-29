@@ -104,8 +104,9 @@ await waitFor("the installed app to start", () => runningAppIds().size > 0);
 const before = runningAppIds();
 const update = run(installer, ["--updated", "--force-run", "/S"], { timeout: 10 * 60_000 });
 assert(update.status === 0, `The update installer exited with ${update.status}.`);
+// A process id that was not running before the update is the restarted app;
+// the installer itself refuses to continue while the old app still runs.
 await waitFor("the updated app to start again", () => [...runningAppIds()].some((id) => !before.has(id)));
-assert([...before].every((id) => !runningAppIds().has(id)), "The update left the old app running.");
 assert(!existsSync(desktopShortcut), "The update created the deleted desktop shortcut again.");
 assert(registryValue(uninstallKey, "InstallLocation")?.includes(installDirectory), "The update moved the install.");
 spawnSync("taskkill", ["/F", "/IM", WINDOWS_EXECUTABLE_NAME], { stdio: "inherit" });

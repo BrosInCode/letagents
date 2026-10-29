@@ -164,4 +164,10 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   assert.match(script, /taskkill\.exe" \/F \/IM "\$\{EXE_NAME\}"/);
   assert.doesNotMatch(script, /taskkill[^\n]*\/T/);
   assert.match(script, /Delete "\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\current\.blockmap"/);
+  // An unregistered copy's uninstaller leaves the registered install's registration alone.
+  const uninstall = script.slice(script.indexOf('Section "Uninstall"'));
+  const registeredOnly = uninstall.slice(uninstall.indexOf('${If} $InstalledHere == "1"'), uninstall.indexOf("${EndIf}"));
+  for (const removal of ['DeleteRegKey HKCU "${UNINSTALL_KEY}"', 'DeleteRegKey HKCU "${URL_KEY}"', 'RMDir /r "$LOCALAPPDATA\\${UPDATER_CACHE}"', 'Delete "$SMPROGRAMS\\${PRODUCT_NAME}.lnk"']) {
+    assert.ok(registeredOnly.includes(removal), removal);
+  }
 });
