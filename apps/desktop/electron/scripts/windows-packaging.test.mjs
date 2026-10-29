@@ -154,8 +154,14 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   assert.match(script, /!define UPDATER_CACHE "letagents-desktop-updater"/);
   assert.match(script, /"\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\installer\.exe"/);
   assert.match(script, /WriteRegStr HKCU "\$\{URL_KEY\}\\shell\\open\\command" "" '"\$INSTDIR\\\$\{EXE_NAME\}" "%1"'/);
-  // The previous payload is removed only from a folder holding a LetAgents install.
-  const guarded = /\$\{If\} \$\{FileExists\} "\$INSTDIR\\\$\{EXE_NAME\}"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
+  // The previous payload is removed only from the folder the install is registered in.
+  const guarded = /Call (?:un\.)?IsRegisteredInstall\s+\$\{If\} \$InstalledHere == "1"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
   assert.equal(script.match(guarded)?.length, 2);
+  assert.match(script, /ReadRegStr \$R0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"/);
+  assert.match(script, /^InstallDirRegKey HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"$/m);
   assert.doesNotMatch(script, /RMDir \/r "\$INSTDIR"/);
+  // electron-updater starts the installer as a child of LetAgents.exe, so no tree kill.
+  assert.match(script, /taskkill\.exe" \/F \/IM "\$\{EXE_NAME\}"/);
+  assert.doesNotMatch(script, /taskkill[^\n]*\/T/);
+  assert.match(script, /Delete "\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\current\.blockmap"/);
 });

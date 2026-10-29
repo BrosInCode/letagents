@@ -40,6 +40,9 @@ RequestExecutionLevel user
 Name "${PRODUCT_NAME}"
 OutFile "${OUTPUT_FILE}"
 InstallDir "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
+; An update or reinstall goes where the app is installed now, also after a
+; first install with a custom /D= folder.
+InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
 BrandingText "${PRODUCT_NAME} ${VERSION}"
@@ -55,6 +58,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright © LetAgents"
 
 Var Updating
 Var ForceRun
+Var InstalledHere
 
 !define MUI_ICON "${ICON_FILE}"
 !define MUI_UNICON "${ICON_FILE}"
@@ -75,7 +79,9 @@ Var ForceRun
 ; quits the app), then stop what is still running: the app's own child
 ; processes run the same LetAgents.exe. A running executable cannot be opened
 ; for writing, which is the test. taskkill without elevation stops only this
-; user's processes.
+; user's processes. No /T: electron-updater starts this installer as a child
+; of LetAgents.exe, so a tree kill would stop the installer too. A person
+; running the installer by hand is asked before the app is closed.
 !macro DEFINE_CLOSE_APP PREFIX
 Function ${PREFIX}CloseRunningApp
   ${IfNot} ${FileExists} "$INSTDIR\${EXE_NAME}"
@@ -91,7 +97,12 @@ Function ${PREFIX}CloseRunningApp
     ${EndIf}
     IntOp $R1 $R1 + 1
     ${If} $R1 = 20
-      nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM "${EXE_NAME}"'
+      ${If} $Updating != "1"
+        MessageBox MB_OKCANCEL|MB_ICONQUESTION "${PRODUCT_NAME} is running. Close it and continue?" /SD IDOK IDOK close
+        Abort "${PRODUCT_NAME} is still running."
+        close:
+      ${EndIf}
+      nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${EXE_NAME}"'
       Pop $R0
     ${EndIf}
     ${If} $R1 >= 40
@@ -106,6 +117,23 @@ FunctionEnd
 !macroend
 !insertmacro DEFINE_CLOSE_APP ""
 !insertmacro DEFINE_CLOSE_APP "un."
+
+; $INSTDIR holds LetAgents and is the folder Installed apps lists for it.
+!macro DEFINE_IS_REGISTERED_INSTALL PREFIX
+Function ${PREFIX}IsRegisteredInstall
+  StrCpy $InstalledHere "0"
+  ${IfNot} ${FileExists} "$INSTDIR\${EXE_NAME}"
+    Return
+  ${EndIf}
+  ReadRegStr $R0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ; NSIS compares strings without case, as Windows paths are.
+  ${If} $R0 == $INSTDIR
+    StrCpy $InstalledHere "1"
+  ${EndIf}
+FunctionEnd
+!macroend
+!insertmacro DEFINE_IS_REGISTERED_INSTALL ""
+!insertmacro DEFINE_IS_REGISTERED_INSTALL "un."
 
 Function .onInit
   SetShellVarContext current
@@ -132,9 +160,11 @@ FunctionEnd
 
 Section "Install"
   Call CloseRunningApp
-  ; Remove the previous version's files first, but only from a folder that
-  ; holds a LetAgents install, so a custom /D= folder is never emptied.
-  ${If} ${FileExists} "$INSTDIR\${EXE_NAME}"
+  ; Remove the previous version's files first, but only from the folder this
+  ; user's LetAgents install is registered in, so files of the same names in
+  ; any other folder are never touched.
+  Call IsRegisteredInstall
+  ${If} $InstalledHere == "1"
     !insertmacro REMOVE_LETAGENTS_PAYLOAD
   ${EndIf}
   SetOutPath "$INSTDIR"
@@ -171,6 +201,9 @@ Section "Install"
   ; of the installed version, which it looks for here.
   CreateDirectory "$LOCALAPPDATA\${UPDATER_CACHE}"
   CopyFiles /SILENT "$EXEPATH" "$LOCALAPPDATA\${UPDATER_CACHE}\installer.exe"
+  ; A blockmap kept from an earlier download may describe another version;
+  ; without it the updater fetches the installed version's own blockmap.
+  Delete "$LOCALAPPDATA\${UPDATER_CACHE}\current.blockmap"
 
   ${If} $Updating == "1"
     SetAutoClose true
@@ -185,7 +218,8 @@ SectionEnd
 Section "Uninstall"
   SetShellVarContext current
   Call un.CloseRunningApp
-  ${If} ${FileExists} "$INSTDIR\${EXE_NAME}"
+  Call un.IsRegisteredInstall
+  ${If} $InstalledHere == "1"
     !insertmacro REMOVE_LETAGENTS_PAYLOAD
   ${EndIf}
   Delete "$INSTDIR\${UNINSTALLER_NAME}"

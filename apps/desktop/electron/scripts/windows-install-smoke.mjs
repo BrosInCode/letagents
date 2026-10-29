@@ -1,6 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { desktopAssetNames } from "./release-metadata.mjs";
@@ -9,7 +11,8 @@ import { WINDOWS_EXECUTABLE_NAME, WINDOWS_UNINSTALLER_NAME } from "./windows-pac
 // Installs the built Windows installer silently for the current user, runs
 // the installed app's smoke check (LETAGENTS_DESKTOP_SMOKE_CHECK=1 loads the
 // real window against seeded local state and exits 0 when it renders), then
-// uninstalls it and checks that the install folder and registration are gone.
+// updates the running app the way electron-updater does, and uninstalls it
+// and checks that the install folder and registration are gone.
 // For CI runners: it installs into the runner user's own profile.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -19,6 +22,7 @@ const installDirectory = join(process.env.LOCALAPPDATA ?? "", "Programs", "LetAg
 const executable = join(installDirectory, WINDOWS_EXECUTABLE_NAME);
 const uninstallKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\chat.letagents.desktop";
 const urlKey = "HKCU\\Software\\Classes\\letagents\\shell\\open\\command";
+const desktopShortcut = join(homedir(), "Desktop", "LetAgents.lnk");
 
 if (process.platform !== "win32") throw new Error("The Windows install smoke check must run on Windows.");
 if (!process.env.LOCALAPPDATA) throw new Error("LOCALAPPDATA is not set.");
@@ -41,6 +45,20 @@ function registryValue(key, name) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+/** Process ids of this user's running LetAgents.exe processes. */
+function runningAppIds() {
+  const result = spawnSync("tasklist", ["/FI", `IMAGENAME eq ${WINDOWS_EXECUTABLE_NAME}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+  return new Set([...result.stdout.matchAll(/^"[^"]+","(\d+)"/gm)].map((match) => match[1]));
+}
+
+async function waitFor(label, predicate, timeoutMs = 60_000) {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error(`Timed out waiting for ${label}.`);
+    await delay(500);
+  }
 }
 
 const install = run(installer, ["/S"], { timeout: 10 * 60_000 });
@@ -75,6 +93,24 @@ if (smoke.error?.code === "ETIMEDOUT") {
 if (smoke.error) throw smoke.error;
 assert(smoke.status === 0, `The installed app's smoke check exited with ${smoke.status ?? smoke.signal}.`);
 
+// Update the running app as electron-updater does: the installer gets
+// --updated --force-run, must close the app (here it does not quit by
+// itself, so the forced close runs), replace the files and start it again.
+// A desktop shortcut the user deleted stays deleted.
+assert(existsSync(desktopShortcut), "The first install did not create the desktop shortcut.");
+rmSync(desktopShortcut);
+spawn(executable, [], { detached: true, stdio: "ignore" }).unref();
+await waitFor("the installed app to start", () => runningAppIds().size > 0);
+const before = runningAppIds();
+const update = run(installer, ["--updated", "--force-run", "/S"], { timeout: 10 * 60_000 });
+assert(update.status === 0, `The update installer exited with ${update.status}.`);
+await waitFor("the updated app to start again", () => [...runningAppIds()].some((id) => !before.has(id)));
+assert([...before].every((id) => !runningAppIds().has(id)), "The update left the old app running.");
+assert(!existsSync(desktopShortcut), "The update created the deleted desktop shortcut again.");
+assert(registryValue(uninstallKey, "InstallLocation")?.includes(installDirectory), "The update moved the install.");
+spawnSync("taskkill", ["/F", "/IM", WINDOWS_EXECUTABLE_NAME], { stdio: "inherit" });
+await waitFor("the updated app to stop", () => runningAppIds().size === 0);
+
 // `_?=` runs the uninstaller in place and waits for it (by default it copies
 // itself to %TEMP% and returns at once). In place it cannot delete its own
 // file, so the folder itself is left; the checks below are for the payload.
@@ -86,4 +122,4 @@ assert(!existsSync(join(installDirectory, "resources")), "The uninstaller left t
 assert(registryValue(uninstallKey, "DisplayVersion") === null, "The uninstaller left the Installed apps entry.");
 assert(registryValue(urlKey) === null, "The uninstaller left the letagents:// registration.");
 
-console.log(`LetAgents ${version} installed, passed its smoke check and uninstalled.`);
+console.log(`LetAgents ${version} installed, passed its smoke check, updated in place and uninstalled.`);
