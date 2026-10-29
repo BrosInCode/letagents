@@ -366,6 +366,20 @@ export function sddlIsOwnerPrivate(sddl, sid) {
 }
 
 /**
+ * The access a new folder in a user profile inherits: owned by the user, and
+ * allow entries for only the user, SYSTEM and Administrators (inherited or
+ * not). A folder in this state was never open to another non-administrator
+ * account through its DACL, so it may be made private in place.
+ */
+export function sddlHasProfileDefaultAccess(sddl, sid) {
+  const parsed = parseSddl(sddl);
+  const user = who(sid);
+  if (!parsed || !sidIsUser(parsed.owner, user) || !parsed.dacl || parsed.dacl.flags.includes("NO_ACCESS_CONTROL")) return false;
+  return parsed.dacl.aces.every(ace => DENY_TYPES.has(ace.type)
+    || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ["SY", SYSTEM_SID, "BA", "S-1-5-32-544"].includes(ace.sid))));
+}
+
+/**
  * The SIDs whose allow entries keep a descriptor from being private, when
  * removing them is all it needs; null when something else is wrong (owner,
  * inheritance, an alias that names no fixed SID, an unknown entry type).
@@ -480,6 +494,17 @@ export async function isOwnerPrivate(path, info, options = {}) {
     if (!pathIsInfo(path, info)) return false;
     const [sddl] = await security.readSddl([path]);
     return pathIsInfo(path, info) && sddlIsOwnerPrivate(sddl, await currentUser(security));
+  } catch { return false; }
+}
+
+/** Windows only: see sddlHasProfileDefaultAccess. POSIX answers as isOwnerPrivate. */
+export async function hasProfileDefaultAccess(path, info, options = {}) {
+  if (!isWindows(options)) return posixPrivate(info, options.exactMode);
+  const security = windowsSecurity(options);
+  try {
+    if (!pathIsInfo(path, info)) return false;
+    const [sddl] = await security.readSddl([path]);
+    return pathIsInfo(path, info) && sddlHasProfileDefaultAccess(sddl, await currentUser(security));
   } catch { return false; }
 }
 

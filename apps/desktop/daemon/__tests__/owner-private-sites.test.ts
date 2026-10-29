@@ -128,6 +128,12 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     assert.equal(await readDaemonMaintenance(join(fresh, "daemon-maintenance.json")), null);
     assert.equal(fake.isProtected(fresh), true);
     assert.equal(await readDaemonMaintenance(join(root, "missing", "daemon-maintenance.json")), null);
+    // A folder another non-administrator account had access to is not hardened in place.
+    const shared = join(root, "shared");
+    await mkdir(shared);
+    fake.share(shared);
+    await assert.rejects(readDaemonMaintenance(join(shared, "daemon-maintenance.json")), /Unsafe service maintenance folder/);
+    assert.equal(fake.isProtected(shared), false);
   });
 });
 
@@ -154,6 +160,17 @@ test("real Windows: a maintenance hold passes the real ACL check, and an extra e
   const { windowsSystemTool } = await import("../../../../shared/owner-private-fs.mjs");
   execFileSync(windowsSystemTool("icacls.exe"), [path, "/grant", "*S-1-1-0:R"], { stdio: "ignore", windowsHide: true });
   await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+});
+
+test("Windows: when the ACL tools fail, a missing maintenance record is not read as no hold", async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const broken = { ...fake, security: { ...fake.security,
+    async readSddl(): Promise<(string | null)[]> { throw Object.assign(new Error("spawn icacls.exe ENOENT"), { code: "ENOENT" }); },
+  } };
+  await asWindows(broken, async () => {
+    await assert.rejects(readDaemonMaintenance(join(root, "daemon-maintenance.json")), /Unsafe service maintenance folder/);
+  });
 });
 
 // ---------------------------------------------------------------- ephemeral workspace

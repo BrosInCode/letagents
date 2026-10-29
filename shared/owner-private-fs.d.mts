@@ -62,6 +62,7 @@ export interface ParsedSddl {
 export declare function parseSddl(sddl: string | null | undefined): ParsedSddl | null;
 export declare function sddlIsOwnedBy(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlExtraGrantSids(sddl: string | null | undefined, sid: UserIdentity): string[] | null;
+export declare function sddlHasProfileDefaultAccess(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlIsOwnerPrivate(sddl: string | null | undefined, sid: UserIdentity): boolean;
 
 export declare function isOwnedByCurrentUser(path: string, info: StatLike, options?: OwnerPrivateOptions): Promise<boolean>;
@@ -69,6 +70,8 @@ export declare function isOwnedByCurrentUserSync(path: string, info: StatLike, o
 export declare function everyOwnedByCurrentUserSync(entries: readonly { path: string; info: StatLike }[], options?: OwnerPrivateOptions): boolean;
 export declare function everyOwnerPrivateSync(entries: readonly { path: string; info: StatLike }[], options?: OwnerPrivateCheckOptions): boolean;
 export declare function isOwnerPrivate(path: string, info: StatLike, options?: OwnerPrivateCheckOptions): Promise<boolean>;
+/** Windows: owned by the user, allow entries only for the user, SYSTEM and Administrators (a fresh profile folder). */
+export declare function hasProfileDefaultAccess(path: string, info: StatLike, options?: OwnerPrivateCheckOptions): Promise<boolean>;
 export declare function isOwnerPrivateSync(path: string, info: StatLike, options?: OwnerPrivateCheckOptions): boolean;
 export declare function assertOwnerPrivate(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Promise<Stats>;
 export declare function assertOwnerPrivateSync(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Stats;

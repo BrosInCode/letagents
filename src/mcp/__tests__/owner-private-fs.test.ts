@@ -29,6 +29,7 @@ import {
   protectOwnerPrivate,
   protectOwnerPrivateSync,
   sddlExtraGrantSids,
+  sddlHasProfileDefaultAccess,
   sddlIsOwnerPrivate,
   userSidAliases,
   syncDirectory,
@@ -454,6 +455,15 @@ test("Windows: protect reads the result back, removes leftover entries by SID, a
     // A missing path keeps chmod's ENOENT.
     await assert.rejects(protectOwnerPrivate(join(root, "missing"), "file", { platform: "win32", windowsSecurity: security }), { code: "ENOENT" });
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a fresh profile folder's access (user, SYSTEM, Administrators) is told apart from a shared one", () => {
+  assert.equal(sddlHasProfileDefaultAccess(`O:${USER}D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;${USER})`, USER), true);
+  assert.equal(sddlHasProfileDefaultAccess(PRIVATE_FOLDER, USER), true);
+  assert.equal(sddlHasProfileDefaultAccess(`O:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${USER})(A;ID;0x1301bf;;;BU)`, USER), false);
+  assert.equal(sddlHasProfileDefaultAccess(`O:${USER}D:AI(A;ID;FA;;;${OTHER})`, USER), false);
+  assert.equal(sddlHasProfileDefaultAccess(`O:${OTHER}D:AI(A;ID;FA;;;SY)`, USER), false);
+  assert.equal(sddlHasProfileDefaultAccess(`O:${USER}D:NO_ACCESS_CONTROL`, USER), false);
 });
 
 test("only extra allow entries with a known SID can be removed; anything else needs a new DACL", () => {

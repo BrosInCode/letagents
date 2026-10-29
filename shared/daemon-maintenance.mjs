@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { letagentsHome } from "./letagents-home.mjs";
 import {
-  createPrivateDir, createPrivateStagingFolder, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform,
+  createPrivateDir, createPrivateStagingFolder, hasProfileDefaultAccess, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform,
   protectOwnerPrivate, syncDirectory as syncFolder,
 } from "./owner-private-fs.mjs";
 
@@ -29,22 +29,28 @@ async function privateParent(path) {
  * Windows: "no record" is trusted only where no other account could have
  * deleted one. A hold is only ever written into a private folder, so a folder
  * of this account's that is not private yet has never held one: it is made
- * private now and the absence stands. A missing folder holds nothing. A
- * folder another account owns fails closed.
+ * private now and the absence stands. A missing folder holds nothing. Any
+ * other answer (another account's folder, a tool failure) fails closed.
  */
 async function absenceIsTrusted(path) {
-  try { await ensurePrivateParent(path); }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
+  try { await lstat(dirname(path)); }
+  catch (error) { if (error.code === "ENOENT") return; throw error; }
+  await ensurePrivateParent(path);
 }
 
-/** Windows: make this account's own state folder private if it is not yet (the daemon does the same at start). */
+/**
+ * Windows: make this account's own state folder private if it is not yet
+ * (the daemon does the same at start). Only a folder with a fresh profile
+ * folder's access (this account, SYSTEM, Administrators) is changed in place;
+ * one that grants any other account is refused.
+ */
 async function ensurePrivateParent(path) {
   const folder = dirname(path);
   const info = await lstat(folder);
-  if (!info.isDirectory() || info.isSymbolicLink() || !await isOwnedByCurrentUser(folder, info)) {
-    throw new Error("Unsafe service maintenance folder.");
-  }
-  if (!await isOwnerPrivate(folder, info)) await protectOwnerPrivate(folder, "directory");
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe service maintenance folder.");
+  if (await isOwnerPrivate(folder, info)) return;
+  if (!await hasProfileDefaultAccess(folder, info)) throw new Error("Unsafe service maintenance folder.");
+  await protectOwnerPrivate(folder, "directory");
 }
 
 /** Only ENOENT means normal operation. Corruption or an unsafe path must fail closed. */
