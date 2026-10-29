@@ -423,6 +423,14 @@ test("Windows: terminateTreeOutcome names an unkillable tree; terminateTree reso
   });
   assert.equal(await outcome, "unkillable");
   assert.deepEqual(child.kills, []);
+  // The answer stays for this child, whatever exit code its helper reports later.
+  const later = new FakeChild(1804);
+  const laterHelper = recordingHelper({ "info 1804": info(1804, "51"), "kill 1804 51": { status: 4 } });
+  liveTrees.set(1804, { child: later as unknown as ChildProcess, helper: HELPER });
+  assert.equal(signalTreeOutcome(1804, "SIGKILL", { platform: "win32", runHelper: laterHelper.runHelper, liveTrees }), "unkillable");
+  later.exit(1);
+  assert.equal(await terminateTreeOutcome(later as unknown as ChildProcess, { platform: "win32", liveTrees }), "unkillable");
+  assert.equal(await terminateTree(later as unknown as ChildProcess, { platform: "win32", liveTrees }), false);
 
   // The program obeyed the stop message, but what it left behind could not be ended: the helper says so.
   const obeys = new FakeChild(1801);

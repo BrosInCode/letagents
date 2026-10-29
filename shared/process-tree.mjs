@@ -46,6 +46,8 @@ const SEAL_URL = new URL("./letagents-process-tree.seal.json", import.meta.url);
 
 /** Children this process started through the helper and that have not exited. */
 const liveTrees = new Map();
+/** Helper children a kill reported unkillable: later answers about them stay unkillable. */
+const unkillableTrees = new WeakSet();
 
 const MAX_FILETIME = 2n ** 64n - 1n;
 
@@ -460,7 +462,8 @@ function endWindowsTree(pid, options) {
     }
     if (live?.helper && isWindowsBirth(birth)) {
       const ended = killByBirth(helper, pid, birth, options);
-      // Unkillable: the helper process stays to report it with its exit code.
+      // Unkillable: the helper process stays, and the answer is kept for this child.
+      if (ended === "unkillable") unkillableTrees.add(child);
       if (ended === "ended" || ended === "unkillable") return ended;
       if (ended === "absent") return "none";
     }
@@ -556,8 +559,11 @@ async function terminateChildTree(child, options) {
   const exited = exitedPromise(child);
   const pid = child.pid;
   const hasExited = () => child.exitCode !== null || child.signalCode !== null;
-  // A Windows helper exits with this code instead of its program's when the job it ended did not empty.
-  const exitOutcome = () => (platform === "win32" && child.exitCode === PROCESS_TREE_UNKILLABLE_EXIT_CODE ? "unkillable" : "exited");
+  // A Windows helper exits with this code instead of its program's when the job it ended did not empty;
+  // a kill's earlier unkillable answer about this child stands too.
+  const exitOutcome = () => (platform === "win32" && (child.exitCode === PROCESS_TREE_UNKILLABLE_EXIT_CODE || unkillableTrees.has(child))
+    ? "unkillable"
+    : "exited");
   if (!Number.isSafeInteger(pid) || pid < 1) return hasExited() ? exitOutcome() : "running";
   if (hasExited()) {
     // Already exited: no stop request (it could only fail), only what is
@@ -585,6 +591,9 @@ async function terminateChildTree(child, options) {
   // The kill's answer wins over the helper's exit code: once a kill has ended
   // the job, the job no longer lists the processes the kill waited on, so the
   // helper cannot see one that is still there.
-  if (signalled === "unkillable") return "unkillable";
+  if (signalled === "unkillable") {
+    unkillableTrees.add(child);
+    return "unkillable";
+  }
   return hasExited() ? exitOutcome() : "running";
 }

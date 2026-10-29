@@ -13,25 +13,29 @@
  *       exact <command-line>, suspended, put it in the job, then resume it.
  *       The child inherits this helper's standard handles and C runtime
  *       descriptors (so a Node IPC channel passes through) and its current
- *       directory and environment. When the child exits, or when a `kill`
- *       ends the job (it signals this helper's "ended" event), the rest of
- *       the job is ended and this helper exits with the child's exit code
- *       once the job is empty. If the job still holds processes <wait-ms>
- *       (default 5000) after that, even the child itself, they are reported
- *       unkillable: this helper exits with 0xE04C5401 instead of the child's
- *       code. If this helper is killed, its job handle closes and Windows
- *       ends the job. Exit 120:
+ *       directory and environment. When the child exits, the rest of the job
+ *       is ended, and this helper exits with the child's exit code once the
+ *       child and every process the job held have exited. After a `kill`
+ *       (which ends the job itself and signals this helper's "ended" event,
+ *       and waits for what the job held), it waits for the child and for
+ *       anything the job still lists. Whatever it waits for that has not
+ *       exited <wait-ms> (default 5000) later is unkillable: this helper then
+ *       exits with 0xE04C5401 instead of the child's code. If this helper is
+ *       killed, its job handle closes and Windows ends the job. Exit 120:
  *       usage; 121: job setup failed; 122: the child could not be started
  *       (the reason is on stderr).
  *
  *   kill <pid> <creation-time> [<wait-ms>]
  *       Only if process <pid> has that creation time (checked while a handle
  *       to it is held, so the pid cannot be reused in between): end its job
- *       when it is a running helper, else end that one process. Exit 0: job ended and empty;
- *       5: the single process was ended (it had no job); 2: nothing with that
- *       identity exists, nothing was ended; 3: access denied; 4: unkillable,
- *       the job (or the process) was ended but processes remained <wait-ms>
- *       (default 5000) later; 120: usage; 121: error.
+ *       when it is a running helper, else end that one process. Exit 0: the
+ *       job was ended, every process it held has exited, and so has the
+ *       helper, not reporting its own wait run out; 5: the single process was
+ *       ended (it had no job); 2: nothing with that identity exists, nothing
+ *       was ended; 3: access denied; 4: unkillable: the job (or the process)
+ *       was ended, but <wait-ms> (default 5000) later a process it held, or
+ *       the helper, had not exited, or the helper reported unkillable, or
+ *       what the job held could not all be held; 120: usage; 121: error.
  *
  *   query <pid> <creation-time>
  *       Print the number of live processes in the job named for that helper.
@@ -134,42 +138,77 @@ static DWORD job_active_processes(HANDLE job) {
 /* Handles to a job's processes, taken while the job still lists them. An
    ended job cannot be waited on through its own counts: TerminateJobObject
    stops counting each process (ActiveProcesses, the process list) at once,
-   before it has exited. Only a process handle shows when it is gone. */
+   before it has exited. Only a process handle shows when it is gone. So the
+   job is first closed to new processes (an active-process limit of 1: a
+   process that would join is ended before it runs), then every process it
+   lists is held, then it is ended. `complete` is 0 when any listed process
+   could not be held: nothing can then prove the job's processes all exited. */
 typedef struct {
   HANDLE *handles;
   DWORD count;
+  int complete;
 } held_processes;
+
+static void close_job_to_new_processes(HANDLE job, held_processes *held) {
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+  ZeroMemory(&limits, sizeof limits);
+  if (!QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits, NULL)) {
+    held->complete = 0;
+    return;
+  }
+  limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+  limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits)) held->complete = 0;
+}
 
 static void hold_job_processes(HANDLE job, held_processes *held) {
   DWORD capacity = 64, attempt, index;
   held->handles = NULL;
   held->count = 0;
+  held->complete = 1;
+  close_job_to_new_processes(job, held);
   for (attempt = 0; attempt < 4; attempt++) {
     size_t size = offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) + (size_t)capacity * sizeof(ULONG_PTR);
     JOBOBJECT_BASIC_PROCESS_ID_LIST *list = (JOBOBJECT_BASIC_PROCESS_ID_LIST *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
-    if (!list) return;
+    if (!list) break;
     if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, list, (DWORD)size, NULL) && GetLastError() != ERROR_MORE_DATA) {
       HeapFree(GetProcessHeap(), 0, list);
-      return;
+      break;
     }
-    /* More processes than room: read again with room for them (a few times at most). */
-    if (list->NumberOfAssignedProcesses > list->NumberOfProcessIdsInList && attempt < 3) {
+    /* More processes than room: read again with room for them. */
+    if (list->NumberOfAssignedProcesses > list->NumberOfProcessIdsInList) {
       capacity = list->NumberOfAssignedProcesses + 16;
       HeapFree(GetProcessHeap(), 0, list);
       continue;
     }
     held->handles = (HANDLE *)HeapAlloc(GetProcessHeap(), 0, ((size_t)list->NumberOfProcessIdsInList + 1) * sizeof(HANDLE));
-    for (index = 0; held->handles && index < list->NumberOfProcessIdsInList; index++) {
+    if (!held->handles) {
+      HeapFree(GetProcessHeap(), 0, list);
+      break;
+    }
+    for (index = 0; index < list->NumberOfProcessIdsInList; index++) {
       BOOL in_job = FALSE;
       HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)list->ProcessIdList[index]);
-      if (!process) continue;
-      /* The pid may name another process by now: only a process in this job counts. */
-      if (IsProcessInJob(process, job, &in_job) && in_job) held->handles[held->count++] = process;
-      else CloseHandle(process);
+      if (!process) {
+        /* Invalid parameter: it has exited since the list was read. Anything else leaves it unproved. */
+        if (GetLastError() != ERROR_INVALID_PARAMETER) held->complete = 0;
+        continue;
+      }
+      /* The pid may name another process by now (the listed one exited): only a process in this job counts. */
+      if (!IsProcessInJob(process, job, &in_job)) {
+        held->complete = 0;
+        CloseHandle(process);
+      } else if (in_job) {
+        held->handles[held->count++] = process;
+      } else {
+        CloseHandle(process);
+      }
     }
     HeapFree(GetProcessHeap(), 0, list);
     return;
   }
+  /* The list could not be read whole. */
+  held->complete = 0;
 }
 
 static DWORD remaining_ms(ULONGLONG deadline) {
@@ -177,9 +216,9 @@ static DWORD remaining_ms(ULONGLONG deadline) {
   return now >= deadline ? 0 : (DWORD)(deadline - now);
 }
 
-/* Wait for each held process until the deadline, then let them go: 1 when every one exited. */
+/* Wait for each held process until the deadline, then let them go: 1 when every one exited and all were held. */
 static int wait_held_processes(held_processes *held, ULONGLONG deadline) {
-  int all = 1;
+  int all = held->complete;
   DWORD index;
   for (index = 0; index < held->count; index++) {
     if (WaitForSingleObject(held->handles[index], remaining_ms(deadline)) != WAIT_OBJECT_0) all = 0;
@@ -350,13 +389,18 @@ static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
     return EXIT_ABSENT;
   }
   job_name(name, sizeof name / sizeof name[0], pid, creation);
-  job = OpenJobObjectW(JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY, FALSE, name);
+  job = OpenJobObjectW(JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY | JOB_OBJECT_SET_ATTRIBUTES, FALSE, name);
+  /* Without the right to close it to new processes, the job can still be
+     ended; its processes are then not provably all held (unkillable at worst). */
+  if (!job && GetLastError() == ERROR_ACCESS_DENIED) job = OpenJobObjectW(JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY, FALSE, name);
   /* A running helper holds the job it created under this name (spawn refuses
      a name that already exists), so while it runs the name is its job. It is
      checked again after the open: had the helper exited in between, its job
      could be gone and the name someone else's. */
   if (job && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
     held_processes held;
+    ULONGLONG deadline;
+    DWORD helper_code = 0;
     /* Before the job is ended: afterwards it no longer lists its processes. */
     hold_job_processes(job, &held);
     if (!TerminateJobObject(job, 1)) {
@@ -374,12 +418,17 @@ static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
       SetEvent(ended);
       CloseHandle(ended);
     }
-    /* Bounded: a process of the job still there after wait_ms is unkillable. */
-    result = wait_held_processes(&held, GetTickCount64() + wait_ms) ? 0 : EXIT_UNKILLABLE;
+    /* Bounded: a process of the job still there after wait_ms is unkillable.
+       So is a helper that has not exited by then, or that reports its own
+       wait ran out: it may be waiting on a process it held before this kill
+       (it was already ending its job), which this kill's list cannot see. */
+    deadline = GetTickCount64() + wait_ms;
+    result = wait_held_processes(&held, deadline) ? 0 : EXIT_UNKILLABLE;
     CloseHandle(job);
-    /* The helper exits once its program has: a short wait, so this command
-       stays well inside its caller's timeout. */
-    WaitForSingleObject(process, 1000);
+    if (WaitForSingleObject(process, remaining_ms(deadline)) != WAIT_OBJECT_0
+        || !GetExitCodeProcess(process, &helper_code) || helper_code == EXIT_SPAWN_UNKILLABLE) {
+      result = EXIT_UNKILLABLE;
+    }
     CloseHandle(process);
     return result;
   }

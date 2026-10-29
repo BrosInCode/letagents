@@ -341,10 +341,34 @@ test("a helper whose own bounded wait runs out exits with the unkillable code", 
   await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
 });
 
+test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
+  // The program exits by itself, so the helper ends its job and waits (5 s) on the held grandchild;
+  // a kill then finds the job listing nothing, and must not call that a clean stop.
+  const { shim } = setup();
+  const id = Math.random().toString(36).slice(2);
+  const childFile = join(folder, `child-${id}.pid`);
+  const grandchildFile = join(folder, `grandchild-${id}.pid`);
+  const tree = spawnTree(shim, [childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, helper);
+  const treeBirth = processBirth(tree.pid, helper);
+  const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
+  const grandchildBirth = processBirth(grandchildPid, helper);
+  const holder = await holdExit(grandchildPid, HOLD_MS);
+  writeFileSync(`${childFile}.go`, "");
+  await holder.held;
+  assert.equal(signalTreeOutcome(tree.pid, "SIGKILL", { ...noHeldTrees, identity: treeBirth, unkillableAfterMs: 1_000 }), "unkillable");
+  const { code } = await exited(tree);
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  await holder.done;
+  await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
+});
+
 test("terminateTreeOutcome reports a held tree unkillable, and terminateTree resolves false for one", { skip }, async () => {
   const first = await startTree();
   const firstHolder = await holdExit(first.grandchildPid, HOLD_MS);
   assert.equal(await terminateTreeOutcome(first.tree, { ...helper, unkillableAfterMs: 1_000 }), "unkillable");
+  // Asked again after its helper exited, whatever code the helper exited with: still unkillable.
+  await exited(first.tree);
+  assert.equal(await terminateTreeOutcome(first.tree, helper), "unkillable");
   const second = await startTree();
   const secondHolder = await holdExit(second.grandchildPid, HOLD_MS);
   assert.equal(await terminateTree(second.tree, { ...helper, unkillableAfterMs: 1_000 }), false);
