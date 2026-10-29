@@ -1,5 +1,6 @@
 import {
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   renameSync,
@@ -11,9 +12,24 @@ import { dirname, join } from "node:path";
 import { redactCredentialText } from "./credential-redaction.js";
 import { setRoomLatencyReporter } from "./room-latency-trace.js";
 import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
-import { protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
+import { ownerPrivatePlatform, privateEntryCreatedSync, protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
+
+/** Windows only: the log does not exist yet, so the open below makes it. */
+function logIsNew(path: string): boolean {
+  return ownerPrivatePlatform() === "win32" && !existsSync(path);
+}
+
+/**
+ * Make the log private. POSIX: chmod 0600 as before. Windows: a log the open
+ * just made inherits its verified private folder (no tool runs at daemon
+ * start); an existing one is protected.
+ */
+function protectLog(path: string, made: boolean): void {
+  if (made) privateEntryCreatedSync(path, "file");
+  else protectOwnerPrivateSync(path, "file");
+}
 
 export type DaemonLifecycleEvent = {
   event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency"
@@ -39,8 +55,9 @@ export class DaemonLifecycleLog {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+      const made = logIsNew(path);
       this.descriptor = openSync(path, "a", 0o600);
-      protectOwnerPrivateSync(path, "file");
+      protectLog(path, made);
     } catch {
       this.descriptor = null;
     }
@@ -55,8 +72,9 @@ export class DaemonLifecycleLog {
         closeSync(this.descriptor);
         this.descriptor = null;
         renameSync(this.path, `${this.path}.previous`);
+        const made = logIsNew(this.path);
         this.descriptor = openSync(this.path, "a", 0o600);
-        protectOwnerPrivateSync(this.path, "file");
+        protectLog(this.path, made);
       }
       const detail = event.detail == null
         ? null

@@ -16,9 +16,10 @@ import {
   readDaemonMaintenance,
   withDaemonMaintenanceOperation,
 } from "../../../../shared/daemon-maintenance.mjs";
-import { isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { forgetOwnerPrivateCache, isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 import { openDaemonStateDatabase } from "../daemon-state-database.js";
 import { isDaemonEntryPoint } from "../entry-point.js";
+import { DaemonLifecycleLog } from "../lifecycle-log.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { RoomTurnAttachmentStager } from "../room-turn-attachments.js";
 import { decryptStateRecoveryBackup, prepareStateRecoveryBackup } from "../state-recovery-backup.js";
@@ -262,6 +263,23 @@ test("Windows: the state database folder and files get the private DACL", async 
       assert.equal(fake.isProtected(path), true);
       // A -wal or -shm file SQLite makes later inherits the folder's private entries.
     } finally { database.close(); }
+  });
+});
+
+test("Windows: a new lifecycle log inherits its folder; an existing one is protected", async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const path = join(root, "logs", "daemon-lifecycle.jsonl");
+  await asWindows(fake, async () => {
+    new DaemonLifecycleLog(path);
+    // The folder is protected; the log it made needs no tool of its own.
+    assert.deepEqual(fake.protects, [`protect:directory:${dirname(path)}`]);
+    assert.equal(fake.isProtected(path), true);
+    // A later process finds the log already there: it is protected in full.
+    forgetOwnerPrivateCache();
+    fake.protects.length = 0;
+    new DaemonLifecycleLog(path);
+    assert.deepEqual(fake.protects, [`protect:directory:${dirname(path)}`, `protect:file:${path}`]);
   });
 });
 
