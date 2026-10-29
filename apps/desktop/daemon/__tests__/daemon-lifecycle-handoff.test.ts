@@ -40,6 +40,10 @@ import {
 // catches a hang. It stays below the stop path's callback deadline, so a
 // handoff that waited for wedged callbacks still fails the guard.
 const DAEMON_LIFECYCLE_HANG_GUARD_MS = STOP_CALLBACKS_DEADLINE_MS / 2;
+// A replacement start only has to be caught if it hangs; it needs no relation
+// to the callback deadline. On Windows each private-file check reads the DACL
+// through PowerShell, so a start takes several seconds there.
+const DAEMON_START_HANG_GUARD_MS = process.platform === "win32" ? 60_000 : DAEMON_LIFECYCLE_HANG_GUARD_MS;
 
 test("simulated flock reacquires the persistent lock inode after release", async () => {
   const env = await fixture();
@@ -1021,7 +1025,7 @@ test("version handoff releases authority without waiting for wedged callbacks an
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
-    })(), "replacement daemon authority after handoff", DAEMON_LIFECYCLE_HANG_GUARD_MS);
+    })(), "replacement daemon authority after handoff", DAEMON_START_HANG_GUARD_MS);
     assert.doesNotThrow(() => process.kill(provider.pid!, 0), "handoff detaches daemon observers without killing provider work");
   } finally {
     await second?.stop();
@@ -1071,7 +1075,7 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
     } finally { probe.close(); }
 
     second = new SupervisorDaemon(paths, "darwin");
-    await within(second.start(), "replacement authority after failed observer cleanup", DAEMON_LIFECYCLE_HANG_GUARD_MS);
+    await within(second.start(), "replacement authority after failed observer cleanup", DAEMON_START_HANG_GUARD_MS);
     assert.equal(((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation, 2);
   } finally {
     await second?.stop();
