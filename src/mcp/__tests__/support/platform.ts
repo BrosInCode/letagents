@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import type { Server, Socket } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 
@@ -104,20 +103,8 @@ const windowsSystemVariables = [
  * gives it: PATH, the variables Windows itself needs, and `variables`. A child
  * started with PATH alone exits at once on Windows.
  */
-// TEMPORARY CI DIAGNOSTIC (to be removed): Windows owner-private timings of this test process and its children.
-if (process.platform === "win32") process.env.LETAGENTS_OWNER_PRIVATE_TRACE ??= join(tmpdir(), `owner-private-trace-${process.pid}.txt`);
-/** TEMPORARY CI DIAGNOSTIC: print the trace (last lines) to the test output. */
-export function printOwnerPrivateTrace(label: string): void {
-  const file = process.env.LETAGENTS_OWNER_PRIVATE_TRACE;
-  if (!file) return;
-  let lines: string[] = [];
-  try { lines = readFileSync(file, "utf8").trim().split("\n"); } catch { return; }
-  console.log(`owner-private trace (${label}), ${lines.length} lines:\n${lines.slice(-150).join("\n")}`);
-}
-
 export function childProcessEnv(variables: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
-  if (process.env.LETAGENTS_OWNER_PRIVATE_TRACE) env.LETAGENTS_OWNER_PRIVATE_TRACE = process.env.LETAGENTS_OWNER_PRIVATE_TRACE;
   for (const name of ["PATH", ...(process.platform === "win32" ? windowsSystemVariables : [])]) {
     const value = process.env[name];
     if (value !== undefined) env[name] = value;

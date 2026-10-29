@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,7 +10,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { printOwnerPrivateTrace, childProcessEnv, connectOrExplain } from "./support/platform.js";
+import { childProcessEnv, connectOrExplain } from "./support/platform.js";
 
 import { AGENT_SESSION_ENDED_ADVICE } from "../../shared/request-headers.js";
 
@@ -77,8 +77,6 @@ async function harness() {
       env: childProcessEnv({ LETAGENTS_API_URL: apiUrl, LETAGENTS_STATE_PATH: statePath,
         LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: storagePath, LETAGENTS_LOCAL_CHAT_DB: join(temp, "chat.sqlite"),
         LETAGENTS_EXECUTION_PROFILE: "autonomous_mcp_worker" }), stderr: "pipe" });
-    // TEMPORARY CI DIAGNOSTIC (to be removed): the server's stderr goes into the trace.
-    transport.stderr?.on("data", (chunk: Buffer) => { const file = process.env.LETAGENTS_OWNER_PRIVATE_TRACE; if (file) appendFileSync(file, `child-stderr ${chunk.toString().slice(0, 2000)}\n`); });
     const client = new Client({ name: "worker-name-recovery-test", version: "1" });
     clients.push(client);
     await connectOrExplain(client, transport);
@@ -235,6 +233,3 @@ test("a worker told its session has ended starts another instead of answering fr
     await h.close();
   }
 });
-
-// TEMPORARY CI DIAGNOSTIC (to be removed).
-test.after(() => printOwnerPrivateTrace(import.meta.url));
