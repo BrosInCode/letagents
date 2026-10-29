@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../../shared/daemon-maintenance.mjs";
-import { connectDaemon, daemonEndpoint, defaultDaemonStateDir } from "../../../../../shared/daemon-endpoint.mjs";
+import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
+import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
 import { desktopRoot } from "../paths.js";
 import { loadHostApprovalSigner, type HostApprovalSigner } from "../host-approval-auth.js";
@@ -108,7 +109,7 @@ export abstract class SupervisorDaemonClientBase {
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.loadApprovalSigner = options.loadApprovalSigner ?? loadHostApprovalSigner;
-    this.stateDir = options.stateDir ?? defaultDaemonStateDir();
+    this.stateDir = options.stateDir ?? letagentsHome();
     const endpoint = daemonEndpoint(this.stateDir);
     this.socketPath = options.socketPath ?? endpoint.connectPath;
     this.peerProofPath = options.socketPath === undefined ? endpoint.proofPath : null;

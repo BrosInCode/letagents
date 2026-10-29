@@ -13,7 +13,6 @@ import {
   currentWindowsAccount,
   currentWindowsUserSid,
   daemonEndpoint,
-  defaultDaemonStateDir,
   ensureDaemonProof,
   isWindowsPipePath,
   protectWindowsPrivateFile,
@@ -36,7 +35,6 @@ test("POSIX endpoint is the unchanged socket file and needs no proof", () => {
       proofPath: null,
     });
   }
-  assert.equal(defaultDaemonStateDir({ home: "/Users/owner" }), join("/Users/owner", ".letagents"));
   assert.throws(() => daemonEndpoint("", { platform: "darwin" }), /state directory is required/);
 });
 

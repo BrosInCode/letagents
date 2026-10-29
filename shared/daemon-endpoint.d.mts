@@ -11,7 +11,6 @@ export interface DaemonEndpoint {
 export const DAEMON_SOCKET_FILE: string;
 export const DAEMON_PROOF_FILE: string;
 export const DAEMON_STATE_DIR_ENV: string;
-export function defaultDaemonStateDir(options?: { home?: string }): string;
 export function isWindowsPipePath(path: unknown): boolean;
 export function currentWindowsUserSid(options?: {
   env?: NodeJS.ProcessEnv;

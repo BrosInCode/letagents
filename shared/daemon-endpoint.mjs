@@ -3,8 +3,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { homedir, userInfo } from "node:os";
-import { join, posix, win32 } from "node:path";
+import { userInfo } from "node:os";
+import { posix, win32 } from "node:path";
+
+import { letagentsHome } from "./letagents-home.mjs";
 
 // Where the desktop, the supervisor daemon and MCP workers meet.
 //
@@ -38,14 +40,6 @@ const PIPE_PATTERN = /^\\\\[.?]\\pipe\\/i;
 /** Proof paths of endpoints this process computed, by connect path. */
 const knownProofPaths = new Map();
 let cachedUserSid = null;
-
-/**
- * The default state directory. Session A's state-root helper replaces this;
- * until then it is the home directory's `.letagents`, as it always was.
- */
-export function defaultDaemonStateDir({ home = homedir() } = {}) {
-  return join(home, ".letagents");
-}
 
 export function isWindowsPipePath(path) {
   return typeof path === "string" && PIPE_PATTERN.test(path);
@@ -105,7 +99,7 @@ export function daemonEndpoint(stateDir, { platform = process.platform, account 
 export function resolveDaemonProofPath(connectPath, { env = process.env, home } = {}) {
   const known = knownProofPaths.get(connectPath);
   if (known) return known;
-  const candidates = [env[DAEMON_STATE_DIR_ENV]?.trim(), defaultDaemonStateDir(home ? { home } : {})].filter(Boolean);
+  const candidates = [env[DAEMON_STATE_DIR_ENV]?.trim(), letagentsHome(home ? { homedir: () => home } : {})].filter(Boolean);
   for (const stateDir of candidates) {
     const endpoint = daemonEndpoint(stateDir, { platform: "win32" });
     if (endpoint.connectPath === connectPath) return endpoint.proofPath;

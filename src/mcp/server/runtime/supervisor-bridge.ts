@@ -4,7 +4,8 @@ import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 
 import { parsePositivePgIntegerScopedId } from "../../../../shared/message-contracts.mjs";
-import { connectDaemon, daemonEndpoint, defaultDaemonStateDir } from "../../../../shared/daemon-endpoint.mjs";
+import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { letagentsHome } from "../../../../shared/letagents-home.mjs";
 
 import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
@@ -858,7 +859,7 @@ async function resolveSupervisorCoordinates(
   }
   return {
     ...context,
-    socketPath: options.trustedDaemonSocketPath ?? daemonEndpoint(defaultDaemonStateDir()).connectPath,
+    socketPath: options.trustedDaemonSocketPath ?? daemonEndpoint(letagentsHome()).connectPath,
   };
 }
 

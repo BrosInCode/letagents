@@ -2,7 +2,8 @@ import { constants } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { daemonEndpoint, defaultDaemonStateDir } from "../../../shared/daemon-endpoint.mjs";
+import { daemonEndpoint } from "../../../shared/daemon-endpoint.mjs";
+import { letagentsHome } from "../../../shared/letagents-home.mjs";
 import { assertSupervisorDaemonPlatform } from "./platform.js";
 
 export class DaemonFenceLostError extends Error {}
@@ -149,7 +150,7 @@ export class DaemonSingleton {
   }
 }
 
-export function defaultDaemonPaths(root = defaultDaemonStateDir(), platform = process.platform): { stateDir: string; lockPath: string; socketPath: string; peerProofPath: string | null; manifestPath: string; legacyManifestPath: string; auditPath: string; lifecycleLogPath: string; attemptsPath: string; attemptsRoot: string; workspaceRoot: string; workerBindingsPath: string } {
+export function defaultDaemonPaths(root = letagentsHome(), platform = process.platform): { stateDir: string; lockPath: string; socketPath: string; peerProofPath: string | null; manifestPath: string; legacyManifestPath: string; auditPath: string; lifecycleLogPath: string; attemptsPath: string; attemptsRoot: string; workspaceRoot: string; workerBindingsPath: string } {
   const endpoint = daemonEndpoint(root, { platform });
   return {
     stateDir: root,
