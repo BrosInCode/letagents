@@ -41,6 +41,16 @@ export function resolveWindowsCommand(command, options = {}) {
   return null;
 }
 
+function isBareName(command) {
+  return !path.win32.isAbsolute(command) && !/[\\/]/.test(command);
+}
+
+/** Where a program that is on no PATH entry is "spawned": a folder below the Windows folder that nothing makes. */
+function notFoundPath(command, env) {
+  const systemRoot = env.SystemRoot?.trim() || env.windir?.trim() || "C:\\Windows";
+  return path.win32.join(systemRoot, "letagents-not-on-path", command);
+}
+
 /** The `node <script>` an npm or pnpm shim runs, read as codexLaunchCommand reads it; null for any other batch file. */
 function nodeShimOf(program, execPath, launchOptions = {}) {
   const readFile = launchOptions.readFile ?? ((filePath) => readFileSync(filePath, "utf8"));
@@ -64,7 +74,9 @@ export class ProviderBatchFileError extends Error {
  * What to spawn for the provider program `command <args>`.
  *
  * POSIX: `{ file: command, args }`, nothing else. Windows: `resolved` is the
- * program found for `command` (null when none was), and `file`/`args` are
+ * program found for `command` (null when none was; a bare name then gets a
+ * path that cannot exist, so the spawn fails with ENOENT and never runs a
+ * program of that name from the working directory), and `file`/`args` are
  * what starts it, with no shell: a native program as it is, an npm or pnpm
  * shim as the node and script it runs, followed by `args` unchanged.
  * `envAdditions` is `{ ELECTRON_RUN_AS_NODE: "1" }` when that script runs on
@@ -80,7 +92,9 @@ export function providerLaunchCommand(command, args, options = {}) {
   const env = options.env ?? process.env;
   const resolved = resolveWindowsCommand(command, { env, cwd: options.cwd, exists: options.exists });
   const execPath = options.launchOptions?.execPath ?? process.execPath;
-  const program = resolved ?? command;
+  // Not found: a bare name given to spawn as it is would be looked for in the working directory
+  // first, which is the user's repository. A path that cannot exist fails with Node's own ENOENT.
+  const program = resolved ?? (isBareName(command) ? notFoundPath(command, env) : command);
   // Decided before any argument is quoted for cmd.exe: a shim's script runs with no shell, anything else is refused.
   if (options.allowCmd !== true && isWindowsBatchExecutable(program, platform) && !nodeShimOf(program, execPath, options.launchOptions)) {
     throw new ProviderBatchFileError(program);

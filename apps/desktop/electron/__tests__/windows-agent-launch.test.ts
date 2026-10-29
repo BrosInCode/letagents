@@ -20,7 +20,7 @@ import {
 } from "../main/agents/windows-child-environment.js";
 import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
-import { icaclsReadOnlyFolderArguments } from "../main/agents/codex-agent-home.js";
+import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
 
 const ELECTRON = "C:\\Program Files\\LetAgents\\LetAgents.exe";
 const SHIM = [
@@ -194,4 +194,28 @@ test("Windows: a batch file that is no npm shim is refused, never handed to cmd.
   });
   assert.equal(plain.windowsVerbatimArguments, true);
   assert.equal(plain.envAdditions, null);
+});
+
+test("Windows: a program that is on no PATH entry is never looked for in the working directory", () => {
+  const missing = providerLaunchCommand("claude", ["--version"], { platform: "win32", env: windowsEnv, cwd: "C:\\repo", exists: () => false });
+  assert.equal(missing.resolved, null);
+  assert.equal(missing.file, "C:\\Windows\\letagents-not-on-path\\claude");
+  assert.deepEqual(missing.args, ["--version"]);
+  // A path the caller gave keeps its meaning.
+  assert.equal(providerLaunchCommand(".\\bin\\claude.exe", [], { platform: "win32", env: windowsEnv, cwd: "C:\\repo", exists: () => false }).file, ".\\bin\\claude.exe");
+});
+
+test("the read-only rules folder is accepted only as exactly the account's read-only entry and SYSTEM", () => {
+  const sid = "S-1-5-21-1-2-3-1001";
+  const readOnly = `O:${sid}G:${sid}D:PAI(A;OICI;FA;;;SY)(A;OICI;0x1e00a9;;;${sid})`;
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly, sid), true);
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace("0x1e00a9", "0x1f01ff"), sid), false, "full access");
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace("0x1e00a9", "0x1e00ab"), sid), false, "add a file");
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace("0x1e00a9", "FR"), sid), false, "a right that is not a number is not read");
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace("D:PAI", "D:AI"), sid), false, "inheritance on");
+  assert.equal(sddlIsReadOnlyFolderFor(`${readOnly}(A;OICI;0x1200a9;;;S-1-5-5-0-123)`, sid), false, "a logon session's entry");
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace(`O:${sid}`, "O:BA"), sid), false, "owned by Administrators");
+  assert.equal(sddlIsReadOnlyFolderFor(`${readOnly}(D;OICI;FA;;;WD)`, sid), true, "a deny entry only takes away");
+  assert.equal(sddlIsReadOnlyFolderFor(null, sid), false);
+  assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace(sid + ")", "LA)"), { sid, aliases: ["LA"] }), true, "the account by its alias");
 });

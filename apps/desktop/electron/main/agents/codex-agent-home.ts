@@ -17,7 +17,7 @@ import {
   projectKeysRefusal,
   type CodexSettingsInspection,
 } from "./codex-home-harness.js";
-import { createWindowsSecurity, icaclsSetOwnerArguments, INHERITED_GROUP_SIDS, protectOwnerPrivateSync, sddlExtraGrantSids, SYSTEM_SID, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
+import { createWindowsSecurity, icaclsSetOwnerArguments, INHERITED_GROUP_SIDS, parseSddl, protectOwnerPrivateSync, sddlExtraGrantSids, sddlIsOwnerPrivate, SYSTEM_SID, type UserIdentity, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
 import { shadowProfileEnvironment, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 // An owner can save "always allow" command rules in the `rules` folder of
@@ -139,6 +139,41 @@ function isFileLink(path: string, target: string, platform: NodeJS.Platform = pr
  */
 const WINDOWS_OWN_DATABASE = /\.(?:sqlite3?|db)(?:-wal|-shm|-journal)?$/i;
 
+/**
+ * Windows: the hard links this code made in the agents' home, by name, with
+ * the file each was when it was last seen linked. A hard link is a file like
+ * any other, so without this record a link whose owner's file was replaced
+ * (an editor's save, a sign-out and sign-in) could not be told from a file
+ * the agents' Codex made, and would be kept for good. An entry that is still
+ * exactly that file is a former link: nothing wrote it since, so it is
+ * removed and linked again. One that changed is an entry of its own.
+ */
+const WINDOWS_LINK_RECORD = ".letagents-links.json";
+type LinkedFileState = { id: string; size: number; mtimeMs: number };
+
+function linkedFileState(path: string): LinkedFileState | null {
+  try {
+    const entry = lstatSync(path, { bigint: true });
+    if (!entry.isFile() || entry.ino === 0n) return null;
+    return { id: `${entry.dev}:${entry.ino}`, size: Number(entry.size), mtimeMs: Number(entry.mtimeMs) };
+  } catch {
+    return null;
+  }
+}
+
+function readLinkRecord(home: string): Record<string, LinkedFileState> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(home, WINDOWS_LINK_RECORD), "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, LinkedFileState] => {
+      const state = entry[1] as Partial<LinkedFileState> | null;
+      return typeof state?.id === "string" && typeof state.size === "number" && typeof state.mtimeMs === "number";
+    }));
+  } catch {
+    return {};
+  }
+}
+
 /** The variables a Codex check is run with, besides its own home: what Codex needs to be found and to run. */
 function codexCheckEnvironment(env: NodeJS.ProcessEnv): Record<string, string | undefined> {
   return {
@@ -165,7 +200,28 @@ export function icaclsReadOnlyFolderArguments(path: string, sid: string): string
     "/grant:r", `*${sid}:(OI)(CI)(RD,REA,X,RA,RC,S,WDAC,WO)`, `*${SYSTEM_SID}:(OI)(CI)F`, "/q"];
 }
 
-let rulesFolderSecurity: ReturnType<typeof createWindowsSecurity> | null = null;
+/** Every right of the account's read-only grant: RD, REA, X, RA, RC, S, WDAC, WO. */
+const READ_ONLY_FOLDER_MASK = 0x1e00a9;
+
+/**
+ * Whether a folder's descriptor is the read-only one: owned by the account,
+ * protected, and allow entries for only the account and SYSTEM, the
+ * account's with no right beyond READ_ONLY_FOLDER_MASK. A right written as
+ * anything but a number is not read, and refuses.
+ */
+export function sddlIsReadOnlyFolderFor(sddl: string | null | undefined, user: UserIdentity): boolean {
+  if (!sddlIsOwnerPrivate(sddl, user)) return false;
+  const { sid, aliases = [] } = typeof user === "string" ? { sid: user } : user;
+  const isUser = (ace: string) => ace === sid.toUpperCase() || aliases.includes(ace);
+  return parseSddl(sddl)!.dacl!.aces.every((ace) => {
+    if (ace.type !== "A" || !isUser(ace.sid)) return true;
+    if (!/^0x[0-9a-f]{1,8}$/i.test(ace.rights)) return false;
+    return (Number.parseInt(ace.rights, 16) & ~READ_ONLY_FOLDER_MASK) === 0;
+  });
+}
+
+/** The default backend: it has every optional method, which this check needs. */
+let rulesFolderSecurity: Required<ReturnType<typeof createWindowsSecurity>> | null = null;
 
 /**
  * Make the empty `rules` folder one nothing can be saved into: mode 0555 on
@@ -178,7 +234,7 @@ export function lockRulesFolder(rules: string, platform: NodeJS.Platform = proce
     chmodSync(rules, 0o555);
     return;
   }
-  rulesFolderSecurity ??= createWindowsSecurity();
+  rulesFolderSecurity ??= createWindowsSecurity() as Required<ReturnType<typeof createWindowsSecurity>>;
   const user = rulesFolderSecurity.currentUserSidSync();
   const icacls = (args: string[]) => execFileSync(windowsSystemTool("icacls.exe"), args, { stdio: "ignore", windowsHide: true, timeout: 30_000 });
   // The account owns it, as a private folder: an elevated process's new folder belongs to Administrators.
@@ -186,9 +242,18 @@ export function lockRulesFolder(rules: string, platform: NodeJS.Platform = proce
   icacls(icaclsReadOnlyFolderArguments(rules, user));
   // A profile can pass on entries that no fixed list names (a logon session's, a domain group's):
   // read the result back and remove every other allow entry by its SID, as a private folder does.
-  const [sddl] = rulesFolderSecurity.readSddlSync([rules]);
-  const others = sddlExtraGrantSids(sddl, { sid: user, aliases: rulesFolderSecurity.currentUserAliasesSync?.() ?? [] });
-  if (others?.length) rulesFolderSecurity.removeGrantsSync?.(rules, others);
+  const identity = { sid: user, aliases: rulesFolderSecurity.currentUserAliasesSync() };
+  let [sddl] = rulesFolderSecurity.readSddlSync([rules]);
+  const others = sddlExtraGrantSids(sddl, identity);
+  if (others?.length) {
+    rulesFolderSecurity.removeGrantsSync(rules, others);
+    [sddl] = rulesFolderSecurity.readSddlSync([rules]);
+  }
+  // Exactly the account's read-only entry and SYSTEM, as read back: anything else, or what cannot be read, is refused.
+  if (!sddlIsReadOnlyFolderFor(sddl, identity)) {
+    throw Object.assign(new Error("The rules folder of the agents' Codex home could not be made read-only: other entries remain in its permissions."), { code: "EPERM" });
+  }
+  // And the effect, for this account's own token.
   const probe = join(rules, ".letagents-read-only-check");
   try {
     writeFileSync(probe, "", { flag: "wx" });
@@ -334,9 +399,16 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
   const sameName = (left: string, right: string) => windows ? foldedPath(resolve(left)) === foldedPath(resolve(right)) : left === right;
   // Windows: a file of the owner's home is linked by a second name of the same file.
   const linkedFile = (path: string, entry: Stats, name: string) => windows && entry.isFile() && isFileLink(path, join(owner, name), platform);
+  // Windows: a hard link of this code's whose owner's file is gone or replaced, and that nothing wrote since.
+  const record = windows ? readLinkRecord(home) : {};
+  const formerLink = (path: string, entry: Stats, name: string) => {
+    if (!windows || !entry.isFile() || !record[name] || linkedFile(path, entry, name)) return false;
+    const now = linkedFileState(path);
+    return now !== null && now.id === record[name].id && now.size === record[name].size && now.mtimeMs === record[name].mtimeMs;
+  };
   // The folder is looked at before anything in it is changed: a launch that is refused leaves it as it was.
-  const before = readdirSync(home).filter((name) => name !== "rules").sort().map((name) => ({ name, path: join(home, name), entry: lstatSync(join(home, name)) }));
-  if (before.some(({ name, path, entry }) => name === SIGN_IN_FILE && !entry.isSymbolicLink() && !linkedFile(path, entry, name))) {
+  const before = readdirSync(home).filter((name) => name !== "rules" && !(windows && name === WINDOWS_LINK_RECORD)).sort().map((name) => ({ name, path: join(home, name), entry: lstatSync(join(home, name)) }));
+  if (before.some(({ name, path, entry }) => name === SIGN_IN_FILE && !entry.isSymbolicLink() && !linkedFile(path, entry, name) && !formerLink(path, entry, name))) {
     throw new CodexAgentHomeSignInError(
       `LetAgents found a Codex sign-in file of its own (${SIGN_IN_FILE}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
       + "Two sign-in files can sign you out of Codex, so LetAgents will not start a sandboxed Codex agent. "
@@ -374,6 +446,11 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
       toLink.delete(name);
       continue;
     }
+    if (formerLink(path, entry, name)) {
+      // Still exactly the owner's former file: removed, and linked again below when the owner has one.
+      unlinkSync(path);
+      continue;
+    }
     const empty = entry.isDirectory() ? readdirSync(path).length === 0 : entry.isFile() && entry.size === 0;
     if (toLink.has(name) && empty) {
       // Removed only while still empty: neither call removes anything that has content.
@@ -393,6 +470,16 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
     const kind = statSync(join(owner, name), { throwIfNoEntry: false });
     if (kind?.isDirectory()) symlinkSync(join(owner, name), join(home, name), "junction");
     else if (kind) linkSync(realpathSync(join(owner, name)), join(home, name));
+  }
+  if (windows) {
+    // Every file that is a link now, as it is now. Without the record a stale link is only kept, never lost.
+    const linked = Object.fromEntries(readdirSync(home).flatMap((name) => {
+      const path = join(home, name);
+      const entry = lstatSync(path);
+      const state = name !== WINDOWS_LINK_RECORD && linkedFile(path, entry, name) ? linkedFileState(path) : null;
+      return state ? [[name, state]] : [];
+    }));
+    try { writeFileSync(join(home, WINDOWS_LINK_RECORD), JSON.stringify(linked)); } catch { /* the next launch keeps what it cannot tell */ }
   }
   const rules = join(home, "rules");
   if (lstatSync(rules, { throwIfNoEntry: false })?.isDirectory()) protectOwnerPrivateSync(rules, "directory");
@@ -869,6 +956,9 @@ export async function codexHomeForSandboxedLaunch(
           `The folder LetAgents keeps for sandboxed Codex agents (${shownAgentHome(agentHome)}) holds entries of its own with the same names as entries of your Codex home: ${shown}`
           + `${linked.inPlaceOfOwners.length > 5 ? ` and ${linked.inPlaceOfOwners.length - 5} more` : ""}. `
           + "That happens when a sandboxed agent's Codex makes an entry before your Codex home has it, for example the first time after a Codex update adds one. "
+          + (process.platform === "win32"
+            ? "On Windows it also happens when a file of your Codex home is saved as a new file after an agent changed it, because that folder holds a second name of each of your files, not a link. "
+            : "")
           + "Sandboxed agents use those, not yours, so they do not see what you or your own Codex later put in yours. "
           + "LetAgents never deletes them, because they can hold conversations; an empty one it replaces with a link to yours by itself. "
           + "To use your own again, stop the sandboxed Codex agents and delete those entries from that folder.",

@@ -62,21 +62,29 @@ test("Windows: nothing can be saved into the agents' rules folder, and the next 
   assert.deepEqual(readdirSync(join(agents, "rules")), []);
 });
 
-test("Windows: a sign-in file of the agents' own stops the launch; a file the owner replaced is kept and reported", { skip: windowsOnly }, (t) => {
+test("Windows: a link whose owner's file was replaced is linked again while nothing wrote it, and kept or refused once something did", { skip: windowsOnly }, (t) => {
   const { owner, agents, remove } = fixture();
   t.after(remove);
   linkCodexAgentHome(owner, agents);
-  // The owner's config is saved by rename (as an editor does): the agents' hard link keeps the old file.
-  writeFileSync(join(owner, "config.toml.new"), "model = \"newer\"\n");
-  rmSync(join(owner, "config.toml"));
-  writeFileSync(join(owner, "config.toml"), readFileSync(join(owner, "config.toml.new")));
-  rmSync(join(owner, "config.toml.new"));
-  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: ["config.toml"], inPlaceOfOwners: ["config.toml"] });
-  assert.equal(readFileSync(join(agents, "config.toml"), "utf8"), "model = \"gpt\"\n", "content is never deleted");
+  const replace = (name: string, content: string) => {
+    // Saved as a new file, as an editor saves: the agents' hard link keeps the old one.
+    writeFileSync(join(owner, `${name}.new`), content);
+    rmSync(join(owner, name));
+    writeFileSync(join(owner, name), readFileSync(join(owner, `${name}.new`)));
+    rmSync(join(owner, `${name}.new`));
+  };
+  replace("config.toml", "model = \"newer\"\n");
+  replace("auth.json", "{\"tokens\":\"signed in again\"}");
+  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
+  assert.ok(sameFile(join(agents, "config.toml"), join(owner, "config.toml")), "the old file is replaced by a link to the new one");
+  assert.ok(sameFile(join(agents, "auth.json"), join(owner, "auth.json")), "after a sign-out and sign-in, the new sign-in is linked");
 
-  // The same for the sign-in: a separate file is two sign-ins, and nothing starts.
-  rmSync(join(owner, "auth.json"));
-  writeFileSync(join(owner, "auth.json"), "{\"tokens\":\"signed in again\"}");
+  // Written after it stopped being the owner's: content is never deleted, and a second sign-in stops the launch.
+  replace("config.toml", "model = \"newest\"\n");
+  appendFileSync(join(agents, "config.toml"), "# the agents' Codex wrote this\n");
+  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: ["config.toml"], inPlaceOfOwners: ["config.toml"] });
+  assert.match(readFileSync(join(agents, "config.toml"), "utf8"), /the agents' Codex wrote this/);
+  replace("auth.json", "{\"tokens\":\"third\"}");
   appendFileSync(join(agents, "auth.json"), " ");
   assert.throws(() => linkCodexAgentHome(owner, agents), CodexAgentHomeSignInError);
 });
