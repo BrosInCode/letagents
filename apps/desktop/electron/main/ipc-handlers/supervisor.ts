@@ -47,6 +47,8 @@ import {
 } from "../supervisor-retirement-operations.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
 import { assertHostApprovalSender, emitToMainWindow } from "../window.js";
+import { gateSupervisedAgentIpc } from "./supervised-agent-gate.js";
+import { supervisedAgentsSupported } from "../platform-capabilities.js";
 
 let supervisorActivityBridgeRegistered = false;
 let supervisorStateBridgeRegistered = false;
@@ -72,7 +74,9 @@ function normalizeLaunchId(creationRequestId?: string | null): string {
   return randomUUID();
 }
 
-export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): void {
+export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
+  // Where agents are unsupported, every channel answers without the supervisor.
+  const targetIpcMain = gateSupervisedAgentIpc(ipcMain);
   targetIpcMain.handle("desktop:supervisor:list-host-tool-rules", async (event, agentId: string) => {
     assertHostApprovalSender(event);
     const result = await supervisorDaemonClient.listHostToolRules(agentId);
@@ -456,6 +460,19 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     const committed = await supervisorDaemonClient.purgeAgent(input.entryId, input.daemonGeneration, prepared.agentSessionId, false, true);
     return finishPurge(committed.outcome === "revocation_required" ? { outcome: "invalid" as const, error: "Purge credential revocation was not durably acknowledged." } : committed);
   });
+  // Each bridge subscribes to a supervisor watch; there is none to watch here.
+  if (supervisedAgentsSupported()) registerSupervisorEventBridges();
+  targetIpcMain.handle(
+    "desktop:supervisor:watch-agent-stream",
+    // The renderer focuses the live feed on the inspected agent, or clears it
+    // (null) when the inspector closes. Only one agent streams at a time.
+    async (_event, entryId?: string | null): Promise<void> => {
+      setFocusedAgentStream(typeof entryId === "string" && entryId.trim() ? entryId : null);
+    },
+  );
+}
+
+function registerSupervisorEventBridges(): void {
   if (!supervisorActivityBridgeRegistered) {
     supervisorActivityBridgeRegistered = true;
     onSupervisorActivity((payload) => emitToMainWindow("desktop:supervisor:activity", payload));
@@ -476,12 +493,4 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     supervisorAgentStreamBridgeRegistered = true;
     onSupervisorAgentStream((batch) => emitToMainWindow("desktop:supervisor:agent-stream", batch));
   }
-  targetIpcMain.handle(
-    "desktop:supervisor:watch-agent-stream",
-    // The renderer focuses the live feed on the inspected agent, or clears it
-    // (null) when the inspector closes. Only one agent streams at a time.
-    async (_event, entryId?: string | null): Promise<void> => {
-      setFocusedAgentStream(typeof entryId === "string" && entryId.trim() ? entryId : null);
-    },
-  );
 }

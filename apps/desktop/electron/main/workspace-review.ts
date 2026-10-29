@@ -1,9 +1,8 @@
 import { LOCAL_ROOM_API_ORIGIN } from '../../../../shared/room-api-origin.mjs';
+import { letagentsHomePath } from '../../../../shared/letagents-home.mjs';
 import { localRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from './rooms/local-store.js';
 import { readLocalSupervisorWorkEntry } from './rooms/local-supervision-runtime.js';
 import { Worker } from 'node:worker_threads';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
 import { parseWorkspaceReviewPage, type WorkspaceReview, type WorkspaceReviewPage } from '../../../../shared/workspace-review.mjs';
 import type { WorkspaceDiffPage, WorkspaceDiffPageOptions } from '../../../../shared/workspace-diff.mjs';
@@ -79,7 +78,7 @@ export class WorkspaceReviewSession {
   async open(): Promise<WorkspaceReviewResult> {
     try {
       const summary = await this.authorize();
-      let review = await this.rpc<WorkspaceReview | null>('local', { ...this.input, roomId: this.localRoomId ?? this.input.roomId, apiOrigin: this.localRoomId ? LOCAL_ROOM_API_ORIGIN : apiUrl, databasePath: this.options.databasePath ?? join(homedir(), '.letagents', 'daemon-state.sqlite') });
+      let review = await this.rpc<WorkspaceReview | null>('local', { ...this.input, roomId: this.localRoomId ?? this.input.roomId, apiOrigin: this.localRoomId ? LOCAL_ROOM_API_ORIGIN : apiUrl, databasePath: this.options.databasePath ?? letagentsHomePath('daemon-state.sqlite') });
       if (review) { try { this.verify(review, summary); } catch { review = null; } }
       if (!review) {
         const status = await loadWorkspaceReviewPages(index => this.fetch(`?review_page=${index}`), pages => this.rpc('append', pages), this.abort.signal);
