@@ -46,7 +46,8 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
       try {
         const stat = await file.stat();
         if (!stat.isFile() || stat.size > 16_384 || stat.size < 1
-          || !await isOwnerPrivate(path!, stat, { exactMode: 0o600 })) throw unavailable();
+          // A high-value secret: on Windows its own DACL is read every time (checkObject).
+          || !await isOwnerPrivate(path!, stat, { exactMode: 0o600, checkObject: true })) throw unavailable();
         const stored = JSON.parse(await file.readFile("utf8")) as { version?: unknown; sealedKey?: unknown };
         if (stored.version !== 1 || typeof stored.sealedKey !== "string" || !stored.sealedKey
           || Object.keys(stored).length !== 2 || Buffer.from(stored.sealedKey, "base64").toString("base64") !== stored.sealedKey) throw unavailable();
