@@ -60,7 +60,8 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 //                    read through it: "ok:<SDDL>|<base64>";
 //   "upgrade:<path>" if the handle's owner is this account or Administrators
 //                    and only this account, SYSTEM and Administrators are
-//                    allowed in, make it this account's with a protected DACL
+//                    allowed in (plain allow and deny entries only), make it
+//                    this account's with a protected DACL
 //                    for only this account and SYSTEM, through that handle:
 //                    "ok:<new SDDL>"; anything else is "error:".
 const ANSWER_FUNCTION = [
@@ -85,6 +86,8 @@ const ANSWER_FUNCTION = [
   "        $allowed = @($me.Value, 'S-1-5-18', 'S-1-5-32-544'); $acl = $fs.GetAccessControl()",
   "        $owner = $acl.GetOwner($sid).Value",
   "        if ($owner -ne $me.Value -and $owner -ne 'S-1-5-32-544') { return 'error:' }",
+  // GetAccessRules leaves out entries it cannot express (a conditional allow, say): only plain allow and deny pass.
+  "        if (([regex]::Matches($acl.GetSecurityDescriptorSddlForm('Access'), '\\(([A-Z]+);') | Where-Object { $_.Groups[1].Value -ne 'A' -and $_.Groups[1].Value -ne 'D' }).Count -gt 0) { return 'error:' }",
   "        foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) { if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $rule.IdentityReference.Value) { return 'error:' } }",
   "        $new = New-Object System.Security.AccessControl.FileSecurity",
   "        $new.SetOwner($me); $new.SetAccessRuleProtection($true, $false)",
@@ -585,18 +588,19 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     },
     /** Per path, the owner, DACL and bytes read through one handle ("object:"), or null. */
     async readObjects(paths) {
-      return (await this.readSddl(paths.map(path => `object:${path}`))).map(parseObjectAnswer);
+      return (await this.readSddl(paths.map(path => `object:${resolve(path)}`))).map(parseObjectAnswer);
     },
     readObjectsSync(paths) {
-      return this.readSddlSync(paths.map(path => `object:${path}`)).map(parseObjectAnswer);
+      // Absolute: PowerShell runs in its own folder, not the caller's.
+      return this.readSddlSync(paths.map(path => `object:${resolve(path)}`)).map(parseObjectAnswer);
     },
     /** Make an Administrators-only file private through one handle ("upgrade:"): its new SDDL, or null when refused. */
     async upgradeObject(path) {
-      const [answer] = await this.readSddl([`upgrade:${path}`]);
+      const [answer] = await this.readSddl([`upgrade:${resolve(path)}`]);
       return answer;
     },
     upgradeObjectSync(path) {
-      const [answer] = this.readSddlSync([`upgrade:${path}`]);
+      const [answer] = this.readSddlSync([`upgrade:${resolve(path)}`]);
       return answer;
     },
     async protect(path, kind) {
