@@ -44,20 +44,24 @@ function sourceGitHome(): string {
  * The config file Git reads as empty. POSIX keeps /dev/null. Git for Windows
  * cannot open os.devNull (`\\.\nul`: "unable to access ... Invalid argument",
  * seen on windows-latest with Git 2.56), but it opens the DOS device name `nul`.
+ * Git opens this name as given (it is not joined to a folder), and a bare
+ * device name is the device on every Windows version.
  */
 export function gitEmptyConfigPath(): string {
   return ownerPrivatePlatform() === "win32" ? "nul" : nullDevice();
 }
 
 /**
- * core.hooksPath for every command. POSIX keeps /dev/null. Windows uses the
- * DOS device `nul`, which can hold no hook. Not an empty folder: clone and
- * remote run reference-transaction, and read-tree, add and update-index run
- * post-index-change, so a hook put in that folder later would run in the
- * supervisor.
+ * core.hooksPath for every command. POSIX keeps /dev/null. Windows has no
+ * absolute path Git opens as the null device, and a relative value is joined
+ * to the working tree (`<tree>\nul\post-index-change` is an ordinary path the
+ * agent can create). So it names an existing FILE no user can write,
+ * System32's icacls.exe: no hook can exist under a file. Not an empty
+ * folder either: clone and remote run reference-transaction, and read-tree,
+ * add and update-index run post-index-change.
  */
 export function gitHooksPath(): string {
-  return ownerPrivatePlatform() === "win32" ? "nul" : nullDevice();
+  return ownerPrivatePlatform() === "win32" ? windowsSystemTool("icacls.exe") : nullDevice();
 }
 
 /** Windows: the folders a Git child needs on PATH and the variables Windows itself needs. */

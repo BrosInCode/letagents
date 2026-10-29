@@ -183,9 +183,11 @@ export async function releaseReadOnlyInstalls(manifest: GenerationManifest): Pro
       lstat(target, { bigint: true }).catch(() => null),
     ]);
     if (!artifactInfo || !targetInfo || artifactInfo.dev !== targetInfo.dev || artifactInfo.ino !== targetInfo.ino) continue;
-    await chmod(artifact, operation.desiredMode | 0o222);
+    // The file's attribute now, which the user may have changed since.
+    const mode = Number(targetInfo.mode) & 0o7777;
+    await chmod(artifact, mode | 0o222);
     await unlink(artifact);
-    await chmod(target, operation.desiredMode);
+    await chmod(target, mode);
   }
 }
 
@@ -224,8 +226,9 @@ async function sourceLineEndings(support: SupervisedWorkspaceGenerationSupport):
 /**
  * Make the worktree's tracked files the workspace's own: every tracked path
  * whose raw bytes differ from the checkout (an edit, a staged or unstaged
- * deletion, a rename, a file replaced by a folder or back, or a file the
- * user's Git converted differently) is removed or copied, deletions first.
+ * deletion, a rename, a staged file/folder replacement, or a file the user's
+ * Git converted differently) is removed or copied, deletions first. A tracked
+ * folder replaced by a file but not staged is refused, as on macOS.
  * The source side is built from an EMPTY index holding only the tracked
  * paths that are regular files now, so a deleted path cannot survive from
  * HEAD. Then the read-only attributes are reproduced, and the workspace's

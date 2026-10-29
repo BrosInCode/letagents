@@ -14,13 +14,14 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  statSync,
   rmSync,
   symlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -35,7 +36,7 @@ import {
   type SupervisedWorkspaceGenerationFailpoint,
   type SupervisedWorkspaceGenerationHandle,
 } from "../main/agents/supervised-workspace-generation.js";
-import { GIT_ENV, findWindowsGitExecutable } from "../main/agents/supervised-workspace-generation/git.js";
+import { GIT_ENV, findWindowsGitExecutable, gitHooksPath } from "../main/agents/supervised-workspace-generation/git.js";
 import { WINDOWS_FRESH_WORKTREE_NOTE } from "../main/agents/supervised-workspace-generation/worktree-windows.js";
 
 const windows = process.platform === "win32";
@@ -1278,6 +1279,52 @@ generationTest("no Git hook of the repository or the empty Git home runs in a su
       for (const path of planted) rmSync(path, { force: true });
     }
   });
+});
+
+windowsTest("a hook the agent plants under a folder named nul never runs, and the name is refused", async () => {
+  await withRepository(async (repo) => {
+    // A relative core.hooksPath would be joined to the working tree.
+    assert.equal(isAbsolute(gitHooksPath()) && statSync(gitHooksPath()).isFile(), true);
+    const marker = join(dirname(repo), "nul-hook-ran");
+    const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "nul-hooks" });
+    const planted = `\\\\?\\${join(handle.liveWorkspace, "nul")}`;
+    mkdirSync(planted);
+    for (const name of ["post-index-change", "reference-transaction"]) {
+      writeFileSync(`${planted}\\${name}`, `#!/bin/sh\necho "$0" >> '${shellPath(marker)}'\n`);
+    }
+    writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
+    await assert.rejects(
+      handle.retireAndReconcile(),
+      (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "UNSUPPORTED_GIT_TREE_ENTRY",
+    );
+    assert.equal(existsSync(marker), false);
+    assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "base\n");
+  });
+});
+
+windowsTest("the agent's .gitignore cannot hide a junction that replaces a tracked folder", async () => {
+  const outside = mkdtempSync(join(tmpdir(), "letagents-generation-hidden-junction-"));
+  try {
+    writeFileSync(join(outside, "a.txt"), "outside\n");
+    await withRepository(async (repo) => {
+      mkdirSync(join(repo, "src", "lib"), { recursive: true });
+      writeFileSync(join(repo, "src", "lib", "a.txt"), "tracked\n");
+      git(repo, ["add", "."]);
+      git(repo, ["commit", "-qm", "tracked folder"]);
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "hidden-junction" });
+      writeFileSync(join(handle.liveWorkspace, ".gitignore"), "src/\nnode_modules/\n");
+      rmSync(join(handle.liveWorkspace, "src", "lib"), { recursive: true });
+      symlinkSync(outside, join(handle.liveWorkspace, "src", "lib"), "junction");
+      await assert.rejects(
+        handle.retireAndReconcile(),
+        (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "UNSUPPORTED_GIT_TREE_ENTRY",
+      );
+      assert.equal(readFileSync(join(repo, "src", "lib", "a.txt"), "utf8"), "tracked\n");
+      assert.equal(readFileSync(join(outside, "a.txt"), "utf8"), "outside\n");
+    });
+  } finally {
+    rmSync(outside, { force: true, recursive: true });
+  }
 });
 
 windowsTest("an 8.3 short name cannot reach a protected folder of the real workspace", async (t) => {

@@ -5,10 +5,10 @@ import { dirname, join, sep } from "node:path";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, FINAL_INDEX_NAME, type GenerationManifest, RETIRED_NAME, type ReconcileOperation, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type TreeEntry } from "./types.js";
 import { FileInspectionSession, assertCanonicalDirectoryIdentity, canonicalDirectoryIdentity, ensureDesiredArtifact, inspectExactFile, matchesOperationState, restoreDisplacedWithoutOverwrite, validateAppliedOperationArtifacts } from "./file-inspection.js";
 import { assertNoShortNameAncestors, assertSafeAncestors, cleanupTrees, transition, validateManifest } from "./manifest.js";
-import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, gitRelativePath, invokeFailpoint, isErrno, isProtectedPath, isWindowsGeneration, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, treeEntryEqual } from "./helpers.js";
+import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, gitRelativePath, invokeFailpoint, isErrno, isProtectedPath, isWindowsGeneration, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, splitNul, treeEntryEqual } from "./helpers.js";
 import { assertTreeHasNoNormalizedPathCollisions, diffTreeEntries, readGitBlob, snapshotWorktree, treeEntryForRegularFile } from "./worktree.js";
 import { assertTrustedAuthority } from "./source-authority.js";
-import { cloneRegularFile } from "./git.js";
+import { cloneRegularFile, gitAuthorityBuffer } from "./git.js";
 import { WINDOWS_DEFAULT_FILE_MODE, assertGenerationObjectsComplete, ignoredGitPaths, inheritWorkspaceAcl, readWindowsBaselineModes, windowsFileMetadataDigest } from "./worktree-windows.js";
 
 export async function retireAndReconcile(
@@ -139,14 +139,19 @@ export async function ensureQuarantined(
  * Windows: any user can make a junction without privilege, and whether Git
  * records one as a link depends on its own settings. Before Git snapshots the
  * retired tree, refuse every link or junction Git does not ignore, except the
- * dependency junctions this generation made. The walk never enters an ignored
- * folder: a package manager's junctions under node_modules are not exported.
+ * dependency junctions this generation made, and every DOS device name
+ * (NUL, CON, COM1...), which Windows does not open as a plain path. The walk
+ * skips an ignored folder (a package manager's junctions under node_modules
+ * are not exported) unless it holds a baseline path: the agent writes the
+ * .gitignore files, and Git still refreshes tracked files under them.
  */
 export async function assertNoUnmappedLinks(manifest: GenerationManifest, retiredRoot: string): Promise<void> {
   const mapped = new Set(manifest.readOnlyRoots
     .filter((entry) => entry.purpose === "dependency" && entry.generationPath !== null)
     .map((entry) => safeRelative(manifest.liveSourceRoot, entry.generationPath!)));
   const authorityRoot = join(manifest.generationRoot, AUTHORITY_NAME);
+  const trackedFiles = new Set(await treePaths(authorityRoot, manifest.baselineTreeOid!, manifest.limits));
+  const trackedFolders = new Set([...trackedFiles].flatMap(ancestorPaths));
   let level = [""];
   let visited = 0;
   while (level.length > 0) {
@@ -157,6 +162,9 @@ export async function assertNoUnmappedLinks(manifest: GenerationManifest, retire
         const relativePath = parentRelativePath ? join(parentRelativePath, entry.name) : entry.name;
         visited += 1;
         if (visited > manifest.limits.maxChangedPaths) throw limitError("retired path count", manifest.limits.maxChangedPaths);
+        if (WINDOWS_DEVICE_NAME.test(entry.name)) {
+          throw generationError(`A Windows device name cannot be reconciled at ${JSON.stringify(relativePath)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
+        }
         if (entry.isSymbolicLink()) {
           if (!mapped.has(relativePath)) links.push(relativePath);
         } else if (entry.isDirectory()) folders.push(relativePath);
@@ -166,12 +174,22 @@ export async function assertNoUnmappedLinks(manifest: GenerationManifest, retire
       ...links.map(gitRelativePath),
       ...folders.map((folder) => `${gitRelativePath(folder)}/`),
     ], manifest.limits);
-    const exported = links.find((link) => !ignored.has(gitRelativePath(link)));
+    const exported = links.find((link) => !ignored.has(gitRelativePath(link))
+      || trackedFiles.has(link) || trackedFolders.has(link));
     if (exported !== undefined) {
       throw generationError(`Symlink, junction, or unsupported tree entry denied at ${JSON.stringify(exported)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
     }
-    level = folders.filter((folder) => !ignored.has(`${gitRelativePath(folder)}/`));
+    level = folders.filter((folder) => !ignored.has(`${gitRelativePath(folder)}/`) || trackedFolders.has(folder));
   }
+}
+
+/** CON, PRN, AUX, NUL, COM1-9, LPT1-9 (also with an extension or trailing dots and spaces). */
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.[^.]*)?[. ]*$/i;
+
+async function treePaths(gitDirectory: string, treeOid: string, limits: SupervisedWorkspaceGenerationLimits): Promise<string[]> {
+  const paths = splitNul(await gitAuthorityBuffer(gitDirectory, null, ["ls-tree", "-r", "--name-only", "-z", treeOid], limits.maxPatchBytes));
+  if (paths.length > limits.maxChangedPaths) throw limitError("tree path count", limits.maxChangedPaths);
+  return paths;
 }
 
 export async function assertNoProtectedPathAliases(
