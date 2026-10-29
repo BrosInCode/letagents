@@ -68,6 +68,9 @@ function recordInvalidations(platform: NodeJS.Platform, watch: typeof import("no
   const restore = configureRepoStatusWatchForTest({
     watch,
     platform,
+    // The answer Git gives for these repositories, without a Git process
+    // whose start time could outlast the settle wait.
+    isIgnoredDirectory: async (_rootPath, directory) => directory === "node_modules",
     refreshRepoStatus: async (_rootPath, previous, invalidation) => {
       invalidations.push(invalidation);
       return previous;

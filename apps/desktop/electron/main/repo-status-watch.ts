@@ -412,16 +412,20 @@ export function ignoredDirectoryCandidatesForTest(filename: string | null): stri
 }
 
 /**
- * Windows reports a "change" on a folder whenever a file inside it is
- * written, because the folder's last-write time moves, and it does so even to
- * a non-recursive watcher of the folder above. Such an echo carries nothing:
- * where the write itself is watched it arrives as its own event, and adding or
- * removing the folder arrives as "rename". Without this check a write in a
+ * Windows reports a "change" on a folder when an entry inside it is added,
+ * removed or renamed (and, where last-access updates are on, read), even to a
+ * non-recursive watcher of the folder above. Such an echo carries nothing:
+ * where the entry itself is watched it arrives as its own event, and adding
+ * or removing the folder arrives as "rename". Without this check a write in a
  * linked worktree's metadata folder reached the `worktrees` watcher as a ref
- * and worktree change, and a write below an ignored folder reached the
- * working-tree watcher as an unignored top-level event. Git directory
- * watchers are left alone: they classify each entry by its name. Other
- * platforms report no such echo, and their events are not inspected here.
+ * and worktree change, and a folder below the working tree reached the
+ * working-tree watcher as an unignored top-level event. Only one-segment
+ * names are looked at: a deeper folder echo already maps to an ignored folder
+ * or to the same invalidation as the event inside it, and this keeps the stat
+ * off the hot path. A worktree folder whose HEAD appears after the targets
+ * were listed waits for the reconciliation tick. Git directory watchers are
+ * left alone: they classify each entry by its name. Other platforms report no
+ * such echo, and their events are not inspected here.
  */
 function isWindowsFolderChangeEcho(
   target: RepoStatusWatchTarget,
@@ -431,8 +435,10 @@ function isWindowsFolderChangeEcho(
 ): boolean {
   if (platform !== "win32" || eventType !== "change" || filename === null) return false;
   if (target.reopenOnRename || target.gitDirectory) return false;
+  const name = String(filename);
+  if (/[\\/]/.test(name)) return false;
   try {
-    return statSync(join(target.path, String(filename))).isDirectory();
+    return lstatSync(join(target.path, name)).isDirectory();
   } catch {
     return false;
   }
