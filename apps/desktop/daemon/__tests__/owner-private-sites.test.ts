@@ -111,18 +111,19 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     fake.giveAway(`${path}.lock`);
     await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
     // A record is trusted only in a private folder; an operation repairs this account's own folder.
-    await rm(`${path}.lock`);
-    await fake.security.protect(path, "file");
-    fake.tamper(dirname(path));
-    await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
-    assert.equal((await withDaemonMaintenanceOperation(owner => owner.read(), path))?.id, hold.id);
-    assert.equal(fake.isProtected(dirname(path)), true);
-    fake.giveAway(dirname(path));
-    await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance folder/);
+    // (A second folder: the fake remembers files by inode, which Linux reuses at once after a delete.)
+    const second = join(root, "home2", ".letagents", "daemon-maintenance.json");
+    const secondHold = await createDaemonMaintenance(second);
+    fake.tamper(dirname(second));
+    await assert.rejects(readDaemonMaintenance(second), /Unsafe service maintenance record/);
+    assert.equal((await withDaemonMaintenanceOperation(owner => owner.read(), second))?.id, secondHold.id);
+    assert.equal(fake.isProtected(dirname(second)), true);
+    fake.giveAway(dirname(second));
+    await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, second), /Unsafe service maintenance folder/);
     // "No record" is trusted only in this account's folder: one that is not private yet
     // (it never held a hold) is made private; another account's folder fails closed.
-    await rm(path);
-    await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance folder/);
+    await rm(second);
+    await assert.rejects(readDaemonMaintenance(second), /Unsafe service maintenance folder/);
     const fresh = join(root, "fresh", ".letagents");
     await mkdir(fresh, { recursive: true });
     assert.equal(await readDaemonMaintenance(join(fresh, "daemon-maintenance.json")), null);

@@ -2,6 +2,8 @@
 // macOS or Linux host. A "protected" file is remembered by its identity (dev
 // and ino), so, as on NTFS, its DACL moves with a rename and is shared by a
 // hard link. Everything else reads as an inherited, non-private DACL.
+// Linux reuses an inode at once after a delete, so a test must not delete and
+// recreate a path it has marked (tamper, giveAway, share) and expect a fresh file.
 import { lstatSync } from "node:fs";
 import {
   overrideOwnerPrivatePlatformForTesting,
