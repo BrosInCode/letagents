@@ -1,8 +1,10 @@
 // Slice of the Cursor turn wrapper program (see turn-launcher.ts):
 // the wrapper's argv and state, stream inspection, and native process-group
 // reaping.
-// The slices concatenate in order into one script run with `node -e`; keep
-// each slice's text exactly as the wrapper needs it.
+// The slices concatenate in order into one script run with `node -e` (on
+// Windows from an owner-private file); keep each slice's text exactly as the
+// wrapper needs it. Windows-only text is chosen by `platform`, so the macOS
+// program stays byte-for-byte the same.
 
 import {
   CURSOR_LIVE_MCP_CAPABILITY_TIMEOUT_MS,
@@ -14,14 +16,23 @@ import {
   MAX_DURABLE_TURN_STREAM_BYTES,
 } from "../cursor-provider-constants.js";
 import { escapeCursorSandboxRegex } from "../cursor-sandbox-policy.js";
+import type { CursorWindowsTurnValues } from "./windows-turn.js";
 
 /**
  * The connector-root pattern is built when a wrapper program is assembled, never
  * at module load: on Windows the parent is a `C:\\...` temporary folder, which
  * the sandbox-regex escape refuses, and a throw at load broke every main-process
- * module that imports this one (Cursor does not launch on Windows yet).
+ * module that imports this one. Windows builds its own pattern below.
  */
-export function cursorMcpConnectorRootPattern(parent: string = CURSOR_MCP_CONNECTOR_PARENT): string {
+export function cursorMcpConnectorRootPattern(
+  parent: string = CURSOR_MCP_CONNECTOR_PARENT,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    // The wrapper only matches this pattern; there is no sandbox profile to escape it for.
+    const escaped = parent.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    return `^${escaped}\\\\letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`;
+  }
   return `^${escapeCursorSandboxRegex(parent)}/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`;
 }
 
@@ -30,10 +41,17 @@ export interface CursorWrapperLaunchValues {
   agentUpstreamEndpoint: string;
   controlPlaneUpstreamEndpoint: string;
   deniedDelegatingExecutablePaths: string[];
+  /** Required on Windows: how the wrapper starts Cursor and where its connector listens. */
+  windows?: CursorWindowsTurnValues;
 }
 
-export function cursorWrapperSetupSource(values: CursorWrapperLaunchValues): string {
+export function cursorWrapperSetupSource(
+  values: CursorWrapperLaunchValues,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const { agentUpstreamEndpoint, controlPlaneUpstreamEndpoint, deniedDelegatingExecutablePaths } = values;
+  const windows = platform === "win32";
+  if (windows && !values.windows) throw new Error("The Windows Cursor wrapper needs its launch values.");
   return String.raw`const { appendFileSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } = require("node:fs");
 const { spawn, spawnSync } = require("node:child_process");
 const { randomBytes, randomUUID } = require("node:crypto");
@@ -85,8 +103,8 @@ const supervisedAgentEndpoint = ${JSON.stringify(agentUpstreamEndpoint)};
 const supervisedControlPlaneEndpoint = ${JSON.stringify(controlPlaneUpstreamEndpoint)};
 const supervisedControlPlanePaths = new Set(${JSON.stringify(CURSOR_SUPERVISED_CONTROL_PLANE_PATHS)});
 const deniedDelegatingExecutables = ${JSON.stringify(deniedDelegatingExecutablePaths)};
-const mcpConnectorRootPattern = new RegExp(${JSON.stringify(cursorMcpConnectorRootPattern())});
-let started = false;
+const mcpConnectorRootPattern = new RegExp(${JSON.stringify(cursorMcpConnectorRootPattern(CURSOR_MCP_CONNECTOR_PARENT, platform))});
+${windows ? windowsTurnSource(values.windows!) : ""}let started = false;
 let startPromise = null;
 let native = null;
 let authorityProxy = null;
@@ -399,45 +417,7 @@ function ownGroupMembers() {
   // descendant is gone.
   return processGroupMembers(process.pid, process.pid);
 }
-function signalNativeGroup(signal) {
-  if (!native) return;
-  if (process.platform === "win32") {
-    try { native.kill(signal); } catch {}
-    return;
-  }
-  try { process.kill(-process.pid, signal); }
-  catch (error) { if (!error || error.code !== "ESRCH") throw error; }
-}
-async function reapNativeGroup() {
-  // macOS exposes no cgroup/job-object equivalent to an unprivileged desktop
-  // process. A deliberately detached setsid child can leave this PGID. The
-  // wrapper therefore records this exact scope (never "all descendants") and
-  // revokes every remote turn capability/proxy separately before terminal
-  // evidence. Filesystem authority is retired by the supervisor's distinct
-  // workspace-generation boundary, never inferred from this process-group
-  // observation.
-  if (!native) return true;
-  if (process.platform === "win32") return false;
-  let members = ownGroupMembers();
-  if (members === null || members.length > 0) {
-    signalNativeGroup("SIGTERM");
-    const graceDeadline = Date.now() + 500;
-    while (Date.now() < graceDeadline) {
-      await wait(25);
-      members = ownGroupMembers();
-      if (members !== null && members.length === 0) break;
-    }
-  }
-  if (members === null || members.length > 0) {
-    // The still-live wrapper is the exact group leader, so its PGID cannot be
-    // recycled. A forced group kill also kills this wrapper; leave no possibly
-    // truncated terminal record and let successor recovery fail closed.
-    signalNativeGroup("SIGKILL");
-    await new Promise(() => {});
-  }
-  return true;
-}
-function beginReaping() {
+${windows ? WINDOWS_NATIVE_REAP_SOURCE : POSIX_NATIVE_REAP_SOURCE}function beginReaping() {
   if (!reapPromise) reapPromise = reapNativeGroup();
   return reapPromise;
 }
@@ -501,3 +481,185 @@ function failMcpCapabilityAttestation(detail) {
 }
 `;
 }
+
+/**
+ * Windows declarations: the launch values, and the native command line. Main
+ * quoted Cursor's program and the adapter's arguments (quoteWindowsArgument);
+ * the wrapper adds only its own proxy flags, which are plain tokens.
+ */
+function windowsTurnSource(values: CursorWindowsTurnValues): string {
+  return String.raw`const windowsTurn = ${JSON.stringify(values)};
+let nativeHelperBirth = null;
+let windowsConnectorProof = null;
+let windowsConnectorRejections = 0;
+let windowsConnectorsPending = 0;
+function windowsProveConnector(socket, admit) {
+  // The pipe's default DACL lets other local accounts connect. Only a client
+  // that sends this turn's proof, which only this account can read, is
+  // Cursor's connector; anyone else is closed before any MCP byte flows.
+  if (finalizing || authorityRetiring || mcpConnectorAdmitted || !windowsConnectorProof
+    || windowsConnectorsPending >= 8) { socket.destroy(); return; }
+  windowsConnectorsPending += 1;
+  let received = Buffer.alloc(0);
+  let settled = false;
+  const settle = () => {
+    settled = true;
+    windowsConnectorsPending -= 1;
+    clearTimeout(timer);
+    socket.removeListener("close", refuse);
+  };
+  const refuse = () => {
+    if (settled) return;
+    settle();
+    socket.destroy();
+    // Before Cursor's connector is admitted, many unproven clients fail the
+    // turn closed; once it is admitted, they can no longer touch the turn.
+    if (mcpConnectorAdmitted || finalizing || authorityRetiring) return;
+    windowsConnectorRejections += 1;
+    if (windowsConnectorRejections > 16) {
+      failMcpCapabilityAttestation("Too many connections without the turn's proof reached Cursor's MCP connector pipe.");
+    }
+  };
+  const timer = setTimeout(refuse, 5000);
+  socket.on("error", refuse);
+  socket.once("close", refuse);
+  const onData = (chunk) => {
+    if (settled) return;
+    received = Buffer.concat([received, chunk]);
+    const newline = received.indexOf(10);
+    if (newline < 0) {
+      if (received.length > 128) refuse();
+      return;
+    }
+    socket.pause();
+    socket.removeListener("data", onData);
+    const offered = received.subarray(0, newline);
+    const expected = Buffer.from(windowsConnectorProof, "utf8");
+    if (offered.length !== expected.length || !require("node:crypto").timingSafeEqual(offered, expected)) {
+      refuse();
+      return;
+    }
+    settle();
+    socket.removeListener("error", refuse);
+    const rest = received.subarray(newline + 1);
+    if (rest.length) socket.unshift(rest);
+    admit(socket);
+  };
+  socket.on("data", onData);
+}
+function windowsNativeCommandLine(cursorArgs) {
+  const added = cursorArgs.slice(0, cursorArgs.length - args.length);
+  if (added.some((arg) => typeof arg !== "string" || !/^[A-Za-z0-9_.:/=-]+$/.test(arg))) {
+    throw new Error("Cursor's proxy arguments are not plain tokens.");
+  }
+  return [windowsTurn.head, ...added, windowsTurn.tail].filter(Boolean).join(" ");
+}
+function readNativeHelperBirth(pid) {
+  // The creation time of the exact helper while this wrapper holds it, so its
+  // pid cannot be reused before the helper ends that job.
+  try {
+    const info = spawnSync(windowsTurn.helper, ["info", String(pid)], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 10000,
+    });
+    if (info.error || info.status !== 0) return null;
+    const parsed = JSON.parse(String(info.stdout).trim());
+    return parsed && parsed.pid === pid && typeof parsed.creationTime === "string" && /^[0-9]+$/.test(parsed.creationTime)
+      ? parsed.creationTime
+      : null;
+  } catch { return null; }
+}
+`;
+}
+
+// macOS and Linux: the process-group reaping the wrapper has always done.
+const POSIX_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(signal) {
+  if (!native) return;
+  if (process.platform === "win32") {
+    try { native.kill(signal); } catch {}
+    return;
+  }
+  try { process.kill(-process.pid, signal); }
+  catch (error) { if (!error || error.code !== "ESRCH") throw error; }
+}
+async function reapNativeGroup() {
+  // macOS exposes no cgroup/job-object equivalent to an unprivileged desktop
+  // process. A deliberately detached setsid child can leave this PGID. The
+  // wrapper therefore records this exact scope (never "all descendants") and
+  // revokes every remote turn capability/proxy separately before terminal
+  // evidence. Filesystem authority is retired by the supervisor's distinct
+  // workspace-generation boundary, never inferred from this process-group
+  // observation.
+  if (!native) return true;
+  if (process.platform === "win32") return false;
+  let members = ownGroupMembers();
+  if (members === null || members.length > 0) {
+    signalNativeGroup("SIGTERM");
+    const graceDeadline = Date.now() + 500;
+    while (Date.now() < graceDeadline) {
+      await wait(25);
+      members = ownGroupMembers();
+      if (members !== null && members.length === 0) break;
+    }
+  }
+  if (members === null || members.length > 0) {
+    // The still-live wrapper is the exact group leader, so its PGID cannot be
+    // recycled. A forced group kill also kills this wrapper; leave no possibly
+    // truncated terminal record and let successor recovery fail closed.
+    signalNativeGroup("SIGKILL");
+    await new Promise(() => {});
+  }
+  return true;
+}
+`;
+
+// Windows: native Cursor runs inside letagents-process-tree.exe's job, named
+// for the helper's pid and creation time. Ending the job goes through the
+// helper with that recorded birth; it waits until the job is empty. The
+// helper's own exit is not the proof, because a process in Cursor's tree can
+// end the helper itself: the job must be gone, or hold no process.
+const WINDOWS_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(signal) {
+  if (!native) return;
+  // Ending the helper closes its job, and Windows ends every process in it.
+  try { native.kill(signal); } catch {}
+}
+function endNativeJob() {
+  if (!nativeHelperBirth) return null;
+  try {
+    const ended = spawnSync(windowsTurn.helper, ["kill", String(native.pid), nativeHelperBirth], {
+      stdio: "ignore", windowsHide: true, timeout: 15000,
+    });
+    // 0: the job was ended and is empty; 2: no helper with that birth is running.
+    return ended.error ? null : ended.status;
+  } catch { return null; }
+}
+function nativeJobEmpty() {
+  if (!nativeHelperBirth) return false;
+  try {
+    const query = spawnSync(windowsTurn.helper, ["query", String(native.pid), nativeHelperBirth], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 10000,
+    });
+    if (query.error) return false;
+    // 2: the job no longer exists; 0: the count of its live processes follows.
+    if (query.status === 2) return true;
+    return query.status === 0 && String(query.stdout).trim() === "0";
+  } catch { return false; }
+}
+async function reapNativeGroup() {
+  if (!native) return true;
+  // A helper that could not start (ENOENT, EACCES) started nothing.
+  if (!Number.isSafeInteger(native.pid)) return true;
+  if (native.exitCode === null && native.signalCode === null) {
+    const exited = new Promise((resolve) => { native.once("exit", resolve); native.once("error", resolve); });
+    const status = endNativeJob();
+    if (status !== 0 && status !== 2) signalNativeGroup("SIGKILL");
+    await exited;
+  }
+  // A closed job's processes end shortly after the close; wait a bounded moment.
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    if (nativeJobEmpty()) return true;
+    if (Date.now() >= deadline) return false;
+    await wait(50);
+  }
+}
+`;

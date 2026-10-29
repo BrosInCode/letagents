@@ -67,3 +67,12 @@ export function thisComputerLabel(platform?: string | null): string {
 export function credentialStoreLabel(platform?: string | null): string {
   return isMacPlatform(platform ?? undefined) ? "macOS Keychain" : "the system credential store";
 }
+
+/** The exact words main uses too (CURSOR_WINDOWS_UNSANDBOXED_NOTICE in cursor-permission-profile.ts). */
+export const CURSOR_WINDOWS_UNSANDBOXED_NOTICE =
+  "On Windows, Cursor runs without an operating-system sandbox. LetAgents still limits it to this room's folder and permissions.";
+
+/** Shown where Cursor is chosen on Windows; null for another provider or platform. */
+export function cursorWindowsSandboxNotice(providerId: string | null | undefined, platform?: string | null): string | null {
+  return providerId === "cursor" && isWindowsPlatform(platform) ? CURSOR_WINDOWS_UNSANDBOXED_NOTICE : null;
+}

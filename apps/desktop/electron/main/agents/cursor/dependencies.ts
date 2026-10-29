@@ -4,6 +4,7 @@ import { writeFileSync } from "node:fs";
 import type { ProviderActivityEvent, ProviderStreamEvent } from "../provider-adapter.js";
 import { assertCursorPersonalIdentity } from "../cursor-identity.js";
 import { defaultLaunchTurn, type CursorCliChild } from "./turn-launcher.js";
+import { requestCursorWrapperStop } from "./windows-turn.js";
 import { defaultGetProcessIdentity, defaultSignalProcess } from "../provider-evidence.js";
 import {
   bindCursorSupervisedIdentity,
@@ -100,12 +101,23 @@ export interface CursorProviderAdapterOptions {
   }) => CursorManagedProfile;
 }
 
+/**
+ * Windows has no SIGTERM: for a wrapper this process holds, the stop request
+ * is its IPC "terminate" message, and the tree is ended after the grace
+ * period (requestCursorWrapperStop). SIGKILL, and any pid not held here,
+ * keep the shared path: the process tree ended by its recorded birth.
+ */
+export function defaultCursorSignalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void {
+  if (signal === "SIGTERM" && process.platform === "win32" && requestCursorWrapperStop(pid)) return;
+  defaultSignalProcess(pid, signal, identity);
+}
+
 export const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   launchTurn: defaultLaunchTurn,
   attestSupervisedMcp: assertCursorSupervisedMcpAuthority,
   attestPersonalIdentity: assertCursorPersonalIdentity,
   bindPersonalIdentity: bindCursorSupervisedIdentity,
-  signalProcess: defaultSignalProcess,
+  signalProcess: defaultCursorSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   prepareTurnState: (path) => writeFileSync(path, "", { flag: "wx", mode: 0o600 }),
   relocateConversationNamespace: relocateCursorConversationNamespace,

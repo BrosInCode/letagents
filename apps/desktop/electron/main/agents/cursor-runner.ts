@@ -96,6 +96,8 @@ export function cursorDaemonChildEnv(
 }
 
 const CURSOR_CHILD_ENV_ALLOWLIST = new Set([
+  // Windows: the private profile's roaming settings folder (managed-profile.ts).
+  "APPDATA",
   "COMSPEC",
   "CURSOR_API_KEY",
   "CURSOR_AUTH_TOKEN",

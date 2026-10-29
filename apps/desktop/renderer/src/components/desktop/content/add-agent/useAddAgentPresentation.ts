@@ -24,7 +24,7 @@ import {
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
 import type { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import type { useAddAgentSetup } from "./useAddAgentSetup";
-import { thisComputerLabel } from "../../../../domain/supervised-agents-support";
+import { cursorWindowsSandboxNotice, thisComputerLabel } from "../../../../domain/supervised-agents-support";
 
 interface AddAgentPresentationProps {
   roomIdentifier: string;
@@ -326,6 +326,13 @@ export function useAddAgentPresentation(
     if (!profile || profile.status !== "available") return null;
     const providerName = selectedProvider.value?.name?.trim() || "this agent";
     if (selectedProviderId.value === "cursor") {
+      // Full access has no limits to describe; the other profiles say Windows has no sandbox.
+      const windowsNotice = cursorWindowsSandboxNotice("cursor");
+      if (windowsNotice && profile.id !== "full_access") {
+        return profile.id === "read_only"
+          ? `Cursor can inspect the selected workspace but cannot edit it. ${windowsNotice}`
+          : `Cursor edits a separate copy of your project. LetAgents checks for conflicts before copying changes back. ${windowsNotice}`;
+      }
       if (profile.id === "full_access") {
         return "Cursor edits a separate copy of your project with its own command restrictions off. LetAgents checks for conflicts before copying changes back; files ignored by Git and changes to Git history are not copied back. Only LetAgents room tools are available.";
       }
