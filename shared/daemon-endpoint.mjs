@@ -1,12 +1,12 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { open, readFile, rename, unlink } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { Socket, createConnection } from "node:net";
 import { userInfo } from "node:os";
 import { posix, win32 } from "node:path";
 
 import { letagentsHome } from "./letagents-home.mjs";
+import { isOwnerPrivate, writePrivateFileAtomically } from "./owner-private-fs.mjs";
 
 // Where the desktop, the supervisor daemon and MCP workers meet.
 //
@@ -39,26 +39,9 @@ const PIPE_PATTERN = /^\\\\[.?]\\pipe\\/i;
 
 /** Proof paths of endpoints this process computed, by connect path. */
 const knownProofPaths = new Map();
-let cachedUserSid = null;
 
 export function isWindowsPipePath(path) {
   return typeof path === "string" && PIPE_PATTERN.test(path);
-}
-
-/**
- * The current user's SID on Windows, from whoami in System32 (not PATH).
- * Only the owner-only DACL needs it; a failure throws, so that fails closed.
- */
-export function currentWindowsUserSid({ env = process.env, run } = {}) {
-  if (cachedUserSid && !run) return cachedUserSid;
-  const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
-  const output = String((run ?? execFileSync)(win32.join(systemRoot, "System32", "whoami.exe"), ["/user", "/fo", "csv", "/nh"], {
-    encoding: "utf8", windowsHide: true, timeout: 10_000,
-  }));
-  const sid = /"(S-1-[0-9]+(?:-[0-9]+)+)"\s*$/i.exec(output.trim())?.[1]?.toUpperCase();
-  if (!sid) throw new Error("The current Windows account's SID could not be read.");
-  if (!run) cachedUserSid = sid;
-  return sid;
 }
 
 /** The account name the pipe name binds: GetUserNameW through os.userInfo(), no subprocess, no environment. */
@@ -113,53 +96,26 @@ function parseProof(raw) {
 }
 
 /**
- * Give a Windows file an owner-only DACL: the current user owns it, and only
- * that user and SYSTEM have access, with inheritance removed. Mirrors the
- * shared owner-private helper (PR #1794), which replaces this once it lands.
- * A missing SID or a failed icacls throws: the caller fails closed.
+ * Read the proof, or create it. A valid proof survives restarts and handoffs,
+ * so a client never races a rotation. It is reused only while it is a regular
+ * file private to this account (mode 0600 on POSIX; on Windows the account as
+ * owner and a protected DACL for only the account and SYSTEM). Anything else
+ * is replaced: a proof that others could read is no longer a secret. A new
+ * proof is written in a private staging folder before it is renamed into
+ * place, so no other account can hold a handle to it.
  */
-export function protectWindowsPrivateFile(path, { env = process.env, run, userSid } = {}) {
-  const sid = userSid ?? currentWindowsUserSid({ env, ...(run ? { run } : {}) });
-  if (!/^S-1-[0-9]+(?:-[0-9]+)+$/i.test(sid)) throw new Error("The current Windows account's SID is unknown; refusing to protect the daemon proof.");
-  const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
-  const icacls = win32.join(systemRoot, "System32", "icacls.exe");
-  const options = { encoding: "utf8", windowsHide: true, timeout: 10_000 };
-  (run ?? execFileSync)(icacls, [path, "/setowner", `*${sid}`, "/q"], options);
-  (run ?? execFileSync)(icacls, [path, "/inheritance:r", "/grant:r", `*${sid}:F`, "*S-1-5-18:F", "/q"], options);
-}
-
-/**
- * Read the proof, or create it once. A valid proof survives restarts and
- * handoffs, so a client never races a rotation. `protect` makes a file
- * owner-private; it runs on Windows (where mode 0600 means nothing) before the
- * secret is written, and again on every start for a proof that exists.
- */
-export async function ensureDaemonProof(proofPath, { protect = process.platform === "win32" ? protectWindowsPrivateFile : null } = {}) {
+export async function ensureDaemonProof(proofPath, options = {}) {
   try {
-    const existing = parseProof(await readFile(proofPath, "utf8"));
-    if (existing) {
-      protect?.(proofPath);
-      return existing;
+    const info = await lstat(proofPath);
+    if (info.isFile() && await isOwnerPrivate(proofPath, info, options)) {
+      const existing = parseProof(await readFile(proofPath, "utf8"));
+      if (existing) return existing;
     }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   const proof = randomBytes(32).toString("hex");
-  const temporary = `${proofPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  const handle = await open(temporary, "wx", 0o600);
-  try {
-    // The DACL is in place before the secret exists; a rename keeps it.
-    protect?.(temporary);
-    await handle.writeFile(`${proof}\n`, "utf8");
-    await handle.sync();
-  } catch (error) {
-    await handle.close();
-    await unlink(temporary).catch(() => undefined);
-    throw error;
-  }
-  await handle.close();
-  try { await rename(temporary, proofPath); }
-  catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
+  await writePrivateFileAtomically(proofPath, `${proof}\n`, options);
   return proof;
 }
 

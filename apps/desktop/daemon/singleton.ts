@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
-import { chmod, mkdir, open, readFile, rename, writeFile, type FileHandle } from "node:fs/promises";
+import { open, readFile, rename, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { daemonEndpoint } from "../../../shared/daemon-endpoint.mjs";
 import { letagentsHome } from "../../../shared/letagents-home.mjs";
+import { createPrivateDir, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 import { assertSupervisorDaemonPlatform } from "./platform.js";
 
 export class DaemonFenceLostError extends Error {}
@@ -60,8 +61,10 @@ export class DaemonSingleton {
 
   async acquire(): Promise<number> {
     assertSupervisorDaemonPlatform(this.platform);
-    await mkdir(dirname(this.lockPath), { recursive: true, mode: 0o700 });
-    await chmod(dirname(this.lockPath), 0o700);
+    // POSIX: mkdir 0700 and chmod 0700, as before. Windows: the account as owner
+    // and a protected DACL for only the account and SYSTEM.
+    await createPrivateDir(dirname(this.lockPath), { recursive: true });
+    await protectOwnerPrivate(dirname(this.lockPath), "directory");
     // A Windows host always takes the real lock, whatever platform a test
     // injects: it can, and the cross-process exclusion is the point.
     const usesWindowsLock = this.hostPlatform === "win32";

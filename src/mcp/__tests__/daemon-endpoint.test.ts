@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
@@ -11,17 +11,15 @@ import {
   acceptDaemonPeer,
   connectDaemon,
   currentWindowsAccount,
-  currentWindowsUserSid,
   daemonEndpoint,
   ensureDaemonProof,
   isWindowsPipePath,
-  protectWindowsPrivateFile,
   resolveDaemonProofPath,
   windowsPipeName,
 } from "../../../shared/daemon-endpoint.mjs";
 import { isRetryableSupervisorBridgeError } from "../server/runtime/supervisor-bridge.js";
+import { assertOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 
-const SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 const ACCOUNT = "owner";
 
 test("POSIX endpoint is the unchanged socket file and needs no proof", () => {
@@ -62,32 +60,6 @@ test("Windows endpoint is a per-user, per-state-root named pipe with a proof fil
     windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), currentWindowsAccount()));
 });
 
-test("the Windows user SID comes from System32 whoami and a failure throws", () => {
-  const calls: Array<{ file: string; args: string[]; windowsHide: boolean }> = [];
-  const sid = currentWindowsUserSid({
-    env: { SystemRoot: "C:\\Windows" },
-    run: (file, args, options) => { calls.push({ file, args, windowsHide: options.windowsHide }); return `"host\\owner","${SID.toLowerCase()}"\r\n`; },
-  });
-  assert.equal(sid, SID);
-  assert.deepEqual(calls, [{ file: "C:\\Windows\\System32\\whoami.exe", args: ["/user", "/fo", "csv", "/nh"], windowsHide: true }]);
-  assert.throws(() => currentWindowsUserSid({ env: {}, run: () => { throw new Error("no whoami"); } }), /no whoami/);
-  assert.throws(() => currentWindowsUserSid({ env: {}, run: () => "garbage" }), /SID could not be read/);
-});
-
-test("the Windows proof gets an owner-only DACL through System32 icacls, failing closed", () => {
-  const calls: Array<{ file: string; args: string[] }> = [];
-  protectWindowsPrivateFile("C:\\state\\daemon-endpoint.proof", {
-    env: { SystemRoot: "C:\\Windows" }, userSid: SID,
-    run: (file, args) => { calls.push({ file, args }); return ""; },
-  });
-  assert.deepEqual(calls, [
-    { file: "C:\\Windows\\System32\\icacls.exe", args: ["C:\\state\\daemon-endpoint.proof", "/setowner", `*${SID}`, "/q"] },
-    { file: "C:\\Windows\\System32\\icacls.exe", args: ["C:\\state\\daemon-endpoint.proof", "/inheritance:r", "/grant:r", `*${SID}:F`, "*S-1-5-18:F", "/q"] },
-  ]);
-  assert.throws(() => protectWindowsPrivateFile("C:\\p", { userSid: "user:owner", run: () => "" }), /SID is unknown/);
-  assert.throws(() => protectWindowsPrivateFile("C:\\p", { userSid: SID, run: () => { throw new Error("icacls exited 5"); } }), /icacls exited 5/);
-});
-
 test("a worker that knows only the pipe name finds the proof through its state directories", () => {
   const stateDir = join(tmpdir(), "letagents-endpoint-worker-state");
   const pipe = windowsPipeName("letagents-daemon", win32.resolve(stateDir).toLowerCase(), currentWindowsAccount());
@@ -101,21 +73,31 @@ test("the proof is created once, private, and survives restarts", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
   try {
     const proofPath = join(root, DAEMON_PROOF_FILE);
-    const protectedPaths: string[] = [];
-    const first = await ensureDaemonProof(proofPath, { protect: (path) => { protectedPaths.push(path); } });
-    assert.equal(protectedPaths.length, 1);
-    assert.match(protectedPaths[0]!, /daemon-endpoint\.proof\.\d+\.[0-9a-f]+\.tmp$/, "the DACL is set on the empty temporary file before the secret is written");
+    const first = await ensureDaemonProof(proofPath);
     assert.match(first, /^[a-f0-9]{64}$/);
-    if (process.platform !== "win32") assert.equal((await stat(proofPath)).mode & 0o777, 0o600);
-    assert.equal(await ensureDaemonProof(proofPath, { protect: (path) => { protectedPaths.push(path); } }), first, "a handoff keeps the proof clients already read");
-    assert.equal(protectedPaths.at(-1), proofPath, "an existing proof is protected again on every start");
-    await assert.rejects(ensureDaemonProof(join(root, "refused.proof"), { protect: () => { throw new Error("no DACL"); } }), /no DACL/);
-    assert.deepEqual((await readdir(root)).filter((name) => name.startsWith("refused")), [], "a proof that could not be protected leaves nothing behind");
+    // POSIX: mode 0600. Windows: the account owns it, protected DACL for the account and SYSTEM only.
+    await assertOwnerPrivate(proofPath, { kind: "file" });
+    assert.deepEqual((await readdir(root)).sort(), [DAEMON_PROOF_FILE], "no staging file is left behind");
+    assert.equal(await ensureDaemonProof(proofPath), first, "a handoff keeps the proof clients already read");
     await writeFile(proofPath, "not-a-proof\n");
     const replaced = await ensureDaemonProof(proofPath);
     assert.match(replaced, /^[a-f0-9]{64}$/);
     assert.notEqual(replaced, first);
     assert.equal((await readFile(proofPath, "utf8")).trim(), replaced);
+    await assertOwnerPrivate(proofPath, { kind: "file" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a proof others could read is replaced, not reused", { skip: process.platform === "win32" && "POSIX mode bits; the Windows DACL case is covered by the owner-private helper's tests" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
+  try {
+    const proofPath = join(root, DAEMON_PROOF_FILE);
+    const leaked = "a".repeat(64);
+    await writeFile(proofPath, `${leaked}\n`, { mode: 0o644 });
+    await chmod(proofPath, 0o644);
+    const proof = await ensureDaemonProof(proofPath);
+    assert.notEqual(proof, leaked);
+    assert.equal((await stat(proofPath)).mode & 0o777, 0o600);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

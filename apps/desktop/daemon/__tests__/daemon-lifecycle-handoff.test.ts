@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 import { connectDaemon, daemonEndpoint, isWindowsPipePath } from "../../../../shared/daemon-endpoint.mjs";
 import { join } from "node:path";
 import test from "node:test";
@@ -125,11 +126,13 @@ test("daemon lifecycle diagnostics are private, redacted, and strictly bounded",
     });
     second.close();
 
-    // Windows keeps no POSIX mode bits; the owner-private ACL check belongs to
-    // the shared owner-private helper's own tests.
     if (process.platform !== "win32") {
       assert.equal((await stat(env.root)).mode & 0o777, 0o700);
       assert.equal((await stat(path)).mode & 0o777, 0o600);
+    } else {
+      // Windows keeps no POSIX mode bits: the account owns both, with a protected DACL.
+      assert.ok(await isOwnerPrivate(env.root, await lstat(env.root)), "the log folder is private");
+      assert.ok(await isOwnerPrivate(path, await lstat(path)), "the log is private");
     }
     assert.equal((await readdir(env.root)).filter((name) => name.startsWith("daemon-lifecycle.jsonl")).length, 2);
     const current = await readFile(path, "utf8");
@@ -149,7 +152,11 @@ test("daemon lifecycle diagnostics rotate repeated samples within one process", 
     assert.deepEqual(files, ["daemon-lifecycle.jsonl", "daemon-lifecycle.jsonl.previous"]);
     assert.equal(JSON.parse((await readFile(path, "utf8")).trim()).detail, "sample 19");
     assert.equal(JSON.parse((await readFile(`${path}.previous`, "utf8")).trim()).detail, "sample 18");
-    if (process.platform !== "win32") for (const name of files) assert.equal((await stat(join(env.root, name))).mode & 0o777, 0o600);
+    for (const name of files) {
+      const file = join(env.root, name);
+      if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o777, 0o600);
+      else assert.ok(await isOwnerPrivate(file, await lstat(file)), `${name} is private`);
+    }
   } finally { log.close(); await env.cleanup(); }
 });
 
