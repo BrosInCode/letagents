@@ -1,11 +1,16 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { PROCESS_TREE_HELPER_NAME, sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
+
 const execFileAsync = promisify(execFile);
+const processTreeSource = fileURLToPath(new URL("../../native/win-process-tree/", import.meta.url));
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** Sizes Windows picks from for the taskbar, Start menu, Explorer and Alt+Tab. */
@@ -198,6 +203,48 @@ export function assertWindowsExecutableBytes(bytes, label) {
   if (bytes.length < 2 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
     throw new Error(`${label} is not a Windows executable.`);
   }
+}
+
+/** Where shared/process-tree.mjs looks for the helper in the packaged app, under resources/app. */
+export const PROCESS_TREE_HELPER_APP_PATH = `runtime/${PROCESS_TREE_HELPER_NAME}`;
+
+/**
+ * The process-tree helper to ship: LETAGENTS_PROCESS_TREE_HELPER_BUILD when
+ * set (a helper another job built with build.mjs on the sealed compiler),
+ * else a build here with `build.mjs --arch <arch> --check --strict`, which
+ * fails unless this machine built the sealed bytes.
+ */
+export function buildProcessTreeHelper({ arch, env = process.env, run = spawnSync } = {}) {
+  const prebuilt = env.LETAGENTS_PROCESS_TREE_HELPER_BUILD?.trim();
+  if (prebuilt) return prebuilt;
+  const built = run(process.execPath, [join(processTreeSource, "build.mjs"), "--arch", arch, "--check", "--strict"], { stdio: "inherit" });
+  if (built.status !== 0) {
+    throw new Error(`build.mjs --arch ${arch} --check --strict failed (exit ${built.status ?? built.signal ?? built.error?.message}).`);
+  }
+  return join(processTreeSource, "build", arch, PROCESS_TREE_HELPER_NAME);
+}
+
+/**
+ * Write the helper into the app only when its bytes are the sealed build for
+ * `arch` (shared/letagents-process-tree.seal.json, read by the same function
+ * the app uses at run time). Any other bytes fail the build: the app would
+ * refuse them. The checked bytes are the ones written.
+ */
+export async function stageProcessTreeHelper({ helper, destination, arch, seal }) {
+  const bytes = await readFile(helper);
+  assertWindowsExecutableBytes(bytes, helper);
+  const expected = seal === undefined ? sealedProcessTreeHelperSha256(arch) : sealedProcessTreeHelperSha256(arch, seal);
+  if (!expected) throw new Error(`No ${arch} build of ${PROCESS_TREE_HELPER_NAME} is sealed in shared/letagents-process-tree.seal.json.`);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== expected) {
+    throw new Error(
+      `${helper} (sha256 ${sha256}) is not the sealed ${PROCESS_TREE_HELPER_NAME} (${expected}), so the app would refuse it. `
+        + "Build it with the MSVC and SDK the seal names, or reseal shared/letagents-process-tree.seal.json.",
+    );
+  }
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, bytes);
+  return { sha256, bytes: bytes.length };
 }
 
 /**

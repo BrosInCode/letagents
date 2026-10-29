@@ -616,8 +616,12 @@ async function reapNativeGroup() {
 // for the helper's pid and creation time. Ending the job goes through the
 // helper with that recorded birth; it waits until the job is empty. The
 // helper's own exit is not the proof, because a process in Cursor's tree can
-// end the helper itself: the job must be gone, or hold no process.
-const WINDOWS_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(signal) {
+// end the helper itself: the job must be gone, or hold no process. An
+// unkillable answer (kill status 4, or the helper's exit code 0xE04C5401:
+// a process had not exited when the helper's bounded wait ran out) is never
+// reaped: a later query cannot undo it, since the job loses its name with the
+// helper.
+export const WINDOWS_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(signal) {
   if (!native) return;
   // Ending the helper closes its job, and Windows ends every process in it.
   try { native.kill(signal); } catch {}
@@ -628,7 +632,8 @@ function endNativeJob() {
     const ended = spawnSync(windowsTurn.helper, ["kill", String(native.pid), nativeHelperBirth], {
       stdio: "ignore", windowsHide: true, timeout: 15000,
     });
-    // 0: the job was ended and is empty; 2: no helper with that birth is running.
+    // 0: the job was ended and is empty; 2: no helper with that birth is running;
+    // 4: unkillable.
     return ended.error ? null : ended.status;
   } catch { return null; }
 }
@@ -648,12 +653,16 @@ async function reapNativeGroup() {
   if (!native) return true;
   // A helper that could not start (ENOENT, EACCES) started nothing.
   if (!Number.isSafeInteger(native.pid)) return true;
+  let unkillable = false;
   if (native.exitCode === null && native.signalCode === null) {
     const exited = new Promise((resolve) => { native.once("exit", resolve); native.once("error", resolve); });
     const status = endNativeJob();
-    if (status !== 0 && status !== 2) signalNativeGroup("SIGKILL");
+    // Unkillable: ending the helper as well would not end what is left.
+    if (status === 4) unkillable = true;
+    else if (status !== 0 && status !== 2) signalNativeGroup("SIGKILL");
     await exited;
   }
+  if (unkillable || native.exitCode === 0xE04C5401) return false;
   // A closed job's processes end shortly after the close; wait a bounded moment.
   const deadline = Date.now() + 2000;
   for (;;) {
