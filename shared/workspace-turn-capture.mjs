@@ -1,10 +1,11 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, readlink, realpath, rm } from 'node:fs/promises';
 import { devNull, tmpdir } from 'node:os';
 import nodePath, { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
+import { signalTree, spawnTree } from './process-tree.mjs';
 const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 // Hooks off: os.devNull is /dev/null on POSIX and \\.\nul on Windows. A bare
 // "/dev/null" there is \dev\null on the current drive, a folder any local user
@@ -30,17 +31,16 @@ function git(cwd, args, signal, index, input, extra) {
  */
 function remoteGit(cwd, args, signal, extra) {
     return new Promise((resolve, reject) => {
-        const child = spawn('git', ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = spawnTree('git', ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
             cwd, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'ignore'],
             env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...extra },
         });
         let output = '';
         const stop = () => {
-            // Windows has no process groups: only Git itself is killed there, and a stalled
-            // ssh it started is orphaned until it gives up on its own (ConnectTimeout). Good
-            // enough for tier 1; the Windows agent work (tier 3) should kill the job tree.
-            try { process.kill(-child.pid, 'SIGKILL'); }
-            catch { child.kill('SIGKILL'); } // No process group on this platform, or it is gone.
+            // The whole process group; on Windows the process-tree helper's job, so a stalled
+            // ssh dies with Git. Without the helper only Git itself is killed there.
+            if (!signalTree(child.pid, 'SIGKILL', { child, groupOnly: true }))
+                child.kill('SIGKILL'); // No process group (or job), or it is gone.
             child.stdout.destroy();
             reject(new Error('The remote did not answer in time.'));
         };

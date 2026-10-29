@@ -21,11 +21,13 @@ export function cursorWrapperMcpSource(): string {
     runtime.once("error", () => { runtimeClosed = true; });
     if (process.platform === "win32") {
       runtimeGroupClosed = runtimeClosed;
+      // No signals on Windows: any kill ends the runtime at once. Closing its
+      // stdin (below) is the stop request; only the escalation kills it.
       signalRuntimeGroup = (signal) => {
+        if (signal !== "SIGKILL") return false;
         try { runtime.kill(signal); } catch {}
         return true;
       };
-      if (!runtimeClosed) termSignaled = signalRuntimeGroup("SIGTERM");
     } else if (Number.isSafeInteger(runtimeGroupId) && runtimeGroupId > 1) {
       groupMembers = () => processGroupMembers(runtimeGroupId);
       signalRuntimeGroup = (signal) => {

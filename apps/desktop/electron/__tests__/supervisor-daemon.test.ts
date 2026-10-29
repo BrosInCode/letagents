@@ -3812,7 +3812,7 @@ test("every daemon termination signal is identity-guarded and positive-PID only"
   const clientFiles = (await readdir(daemonClientDirectory)).filter((name) => name.endsWith(".ts")).sort();
   const allSource = (await Promise.all(clientFiles.map((name) => readFile(join(daemonClientDirectory, name), "utf8")))).join("\n");
   const signalCalls = [...allSource.matchAll(/this\.signalDaemon\(([^;]+)\);/g)].map((match) => match[1]);
-  assert.deepEqual(signalCalls, ["retired.pid, signal"], "all injected daemon signalling is centralized in the guarded helper");
+  assert.deepEqual(signalCalls, ["retired.pid, signal, retired.kernelStartTime"], "all injected daemon signalling is centralized in the guarded helper");
   const source = await readFile(daemonClientPath, "utf8");
   const helper = source.slice(
     source.indexOf("private guardedSignalRetiredDaemon"),

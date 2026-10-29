@@ -91,6 +91,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
     "integration-db-tests": checks,
     "mcp-tests-windows": checks,
     "desktop-tests-windows": checks,
+    "process-tree-windows": checks,
     "integration-tests": gate,
     "npm-publish": staging,
     docker: staging,
@@ -102,7 +103,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   }
   // The Windows test jobs are checks like the ubuntu ones: they are off on
   // the manual evaluation, read the repository only and are given no secret.
-  for (const name of ["mcp-tests-windows", "desktop-tests-windows"]) {
+  for (const name of ["mcp-tests-windows", "desktop-tests-windows", "process-tree-windows"]) {
     const windows = workflow.jobs[name];
     assert.equal(windows["runs-on"], "windows-latest", name);
     assert.deepEqual(windows.permissions, { contents: "read" }, name);

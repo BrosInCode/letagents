@@ -9,6 +9,7 @@ import { classifyLinkNavigation } from "./link-routing.js";
 import { openExternalWebUrl } from "./external-url.js";
 import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
 import { supervisedAgentsSupported } from "./platform-capabilities.js";
+import { windowsSmokeNotificationSettled } from "./windows-app-identity.js";
 
 const { app, BrowserWindow } = electron as typeof import("electron");
 
@@ -512,6 +513,7 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         app.exit(result.boardScreenshotLayoutValid ? 0 : 1);
         return;
       }
+      await windowsSmokeNotificationSettled();
       console.log(`LETAGENTS_DESKTOP_SMOKE ${JSON.stringify(result)}`);
       app.exit(Object.values(result).every(Boolean) ? 0 : 1);
     }).catch((error: unknown) => {

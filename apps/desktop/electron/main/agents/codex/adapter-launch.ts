@@ -390,7 +390,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         codexAgentHomeNoticeSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
       }
       client.close();
-      if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
+      if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM", processIdentity);
       throw error;
     }
   }

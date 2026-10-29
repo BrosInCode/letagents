@@ -330,7 +330,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
   protected async fenceRecordedChild(
     connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
     providerContinuationId: string,
-    stop?: { force: boolean; graceMs: number; birthEvidence: RegExp },
+    stop?: { force: boolean; graceMs: number; birthEvidence: (identity: string) => boolean },
   ): Promise<ProviderAttachTerminal> {
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
@@ -339,7 +339,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
     }
     const readIdentity = () => {
       const identity = this.deps.getProcessIdentity(connection.pid!);
-      if (stop && typeof identity === "string" && !stop.birthEvidence.test(identity.trim())) {
+      if (stop && typeof identity === "string" && !stop.birthEvidence(identity)) {
         throw new Error("Claude exact-reference stop is ambiguous because process birth cannot be verified.");
       }
       return identity;
@@ -379,7 +379,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
     // with the previous supervisor). It may still be writing the workspace, so
     // it must be terminal before any replacement generation exists.
     const signal = stop?.force ? "SIGKILL" : "SIGTERM";
-    this.deps.signalProcess(connection.pid, signal);
+    this.deps.signalProcess(connection.pid, signal, connection.processIdentity);
     await delay(stop?.graceMs ?? this.stopGraceMs);
     const identityBeforeKill = readIdentity();
     if (identityBeforeKill === undefined) {
@@ -389,7 +389,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
     }
     if (identityBeforeKill !== null && sameProcessBirthIdentity(identityBeforeKill, connection.processIdentity)) {
       if (stop?.force) throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
-      this.deps.signalProcess(connection.pid, "SIGKILL");
+      this.deps.signalProcess(connection.pid, "SIGKILL", connection.processIdentity);
       if (stop) {
         await delay(stop.graceMs);
         const finalIdentity = readIdentity();

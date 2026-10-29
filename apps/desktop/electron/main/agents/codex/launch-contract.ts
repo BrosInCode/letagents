@@ -38,7 +38,6 @@ export const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
 export const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input", "sandbox"]);
 /** What an access level decides for a Codex thread. With the owner's setup a thread is given these alone. */
 export const CODEX_ACCESS_LEVEL_OPTIONS = ["approvalPolicy", "sandboxPolicy", "approvalsReviewer"] as const;
-export const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
 
 export function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

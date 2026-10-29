@@ -286,12 +286,12 @@ export class OpenModelProviderAdapter extends OpenModelAdapterLaunch implements 
     handle.setState("stopping");
     const identity = this.deps.getProcessIdentity(handle.pid);
     if (identity && sameProcessBirthIdentity(identity, handle.providerConnection.processIdentity!)) {
-      this.deps.signalProcess(handle.pid, options.force ? "SIGKILL" : "SIGTERM");
+      this.deps.signalProcess(handle.pid, options.force ? "SIGKILL" : "SIGTERM", handle.providerConnection.processIdentity!);
       if (!options.force) {
         await delay(options.graceMs ?? this.stopGraceMs);
         const next = this.deps.getProcessIdentity(handle.pid);
         if (next && sameProcessBirthIdentity(next, handle.providerConnection.processIdentity!)) {
-          this.deps.signalProcess(handle.pid, "SIGKILL");
+          this.deps.signalProcess(handle.pid, "SIGKILL", handle.providerConnection.processIdentity!);
         }
       }
     }

@@ -57,6 +57,15 @@ process.on("SIGINT", exit);
 process.on("SIGTERM", exit);
 process.stdin.on("end", exit);
 process.stdin.on("close", exit);
+if (process.platform === "win32") {
+  // Windows delivers no SIGTERM: a kill there ends this process at once. The
+  // stop requests that do arrive are the host closing stdin (above), a
+  // { type: "stop" } message on an IPC channel, and Ctrl+Break.
+  process.on("SIGBREAK", exit);
+  process.on("message", (message: unknown) => {
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "stop") exit();
+  });
+}
 
 main().catch((err) => {
   console.error("Fatal error:", err);
