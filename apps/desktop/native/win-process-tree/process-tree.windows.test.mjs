@@ -3,8 +3,9 @@
 //   node --test apps/desktop/native/win-process-tree/process-tree.windows.test.mjs
 // Elsewhere, or without a build, every test is skipped.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
@@ -12,10 +13,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   isWindowsBirth,
+  PROCESS_TREE_UNKILLABLE_EXIT_CODE,
   processBirth,
+  processTreeHelperPath,
+  processTreeHelperRefusal,
+  sealedProcessTreeHelperSha256,
   signalTree,
+  signalTreeOutcome,
   spawnTree,
   terminateTree,
+  terminateTreeOutcome,
   windowsProcessInfo,
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
@@ -41,14 +48,16 @@ function setup() {
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   // The middle: starts the grandchild, records its own pid, then waits, or
-  // with "leave" exits at once and leaves a detached grandchild behind.
+  // with "leave" exits at once and leaves a detached grandchild behind, or
+  // with "leave-on-go" does so once a `<child pid file>.go` file exists.
   const child = fixture("child.cjs", [
     'const { spawn } = require("node:child_process");',
     'const fs = require("node:fs");',
     "const [childFile, grandchildFile, mode] = process.argv.slice(2);",
-    `const grandchild = spawn(process.execPath, [${JSON.stringify(grandchild)}, grandchildFile], { stdio: "ignore", detached: mode === "leave" });`,
+    `const grandchild = spawn(process.execPath, [${JSON.stringify(grandchild)}, grandchildFile], { stdio: "ignore", detached: mode !== "wait" });`,
     "fs.writeFileSync(childFile, String(process.pid));",
     'if (mode === "leave") { grandchild.unref(); const done = () => fs.existsSync(grandchildFile) ? process.exit(0) : setTimeout(done, 20); done(); }',
+    'else if (mode === "leave-on-go") { grandchild.unref(); const done = () => fs.existsSync(grandchildFile) && fs.existsSync(childFile + ".go") ? process.exit(0) : setTimeout(done, 20); done(); }',
     "else setInterval(() => {}, 1000);",
   ].join("\n"));
   // The top: a batch file (not an npm shim), so it runs under cmd.exe.
@@ -238,4 +247,183 @@ test("info names an absent pid as absent and reads this process", { skip }, () =
   assert.equal(self.pid, process.pid);
   assert.equal(self.exited, false);
   assert.equal(processBirth(process.pid, helper), `win32-ft:${self.creationTime}`);
+});
+
+// The helper's wait for an ended job is bounded. A process whose exit is
+// held cannot leave the job: a debugger attached to it receives the
+// EXIT_PROCESS debug event before the process leaves its job, and the
+// process waits there until the debugger continues. The holder below
+// (Windows PowerShell compiling a few lines of C#, both on every Windows
+// runner) holds that event for `holdMs`, so the job stays non-empty past the
+// helper's bound, deterministically, and empties once it lets go.
+const HOLDER = String.raw`
+param([int]$TargetPid, [int]$HoldMs)
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class ExitHolder {
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool DebugActiveProcess(int pid);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool WaitForDebugEvent(byte[] debugEvent, int milliseconds);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool ContinueDebugEvent(int pid, int tid, uint status);
+  const uint Continue = 0x00010002, NotHandled = 0x80010001;
+  public static void Run(int pid, int holdMs) {
+    if (!DebugActiveProcess(pid)) throw new Exception("DebugActiveProcess failed: " + Marshal.GetLastWin32Error());
+    Console.WriteLine("attached");
+    byte[] debugEvent = new byte[1024];
+    DateTime deadline = DateTime.UtcNow.AddMinutes(2);
+    while (DateTime.UtcNow < deadline) {
+      if (!WaitForDebugEvent(debugEvent, 1000)) continue;
+      int code = BitConverter.ToInt32(debugEvent, 0), processId = BitConverter.ToInt32(debugEvent, 4), threadId = BitConverter.ToInt32(debugEvent, 8);
+      if (code == 5) {
+        Console.WriteLine("held");
+        Thread.Sleep(holdMs);
+        ContinueDebugEvent(processId, threadId, Continue);
+        return;
+      }
+      // An exception other than the attach breakpoint (0x80000003) stays the process's own.
+      uint exception = code == 1 ? BitConverter.ToUInt32(debugEvent, 16) : 0;
+      ContinueDebugEvent(processId, threadId, code == 1 && exception != 0x80000003 ? NotHandled : Continue);
+    }
+  }
+}
+'@
+[ExitHolder]::Run($TargetPid, $HoldMs)
+`;
+
+/** Attaches the holder to `pid`; resolves once it is attached. `held` resolves when it holds the exit, `done` when it let go. */
+async function holdExit(pid, holdMs) {
+  const script = fixture("hold-exit.ps1", HOLDER);
+  const holder = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, String(pid), String(holdMs)], { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
+  let output = "";
+  holder.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+  const done = exited(holder);
+  await waitFor(() => output.includes("attached") || holder.exitCode !== null, "the exit holder to attach", 60_000);
+  assert.match(output, /attached/, "the exit holder could not attach");
+  return { held: waitFor(() => output.includes("held"), "the held exit", 30_000), done };
+}
+
+const HOLD_MS = 10_000;
+
+test("a kill whose bounded wait runs out reports the tree unkillable; the held process ends once let go", { skip }, async () => {
+  const started = await startTree();
+  const holder = await holdExit(started.grandchildPid, HOLD_MS);
+  const before = Date.now();
+  // The job is ended; the held grandchild has not exited when the kill's 1 s bound runs out.
+  assert.equal(signalTreeOutcome(started.tree.pid, "SIGKILL", { ...noHeldTrees, identity: started.births.helper, unkillableAfterMs: 1_000 }), "unkillable");
+  await holder.held;
+  assert.ok(Date.now() - before < HOLD_MS, "the kill waited for the held process instead of its bound");
+  assert.equal(processBirth(started.grandchildPid, helper), started.births.grandchild, "the held process ended early");
+  await exited(started.tree);
+  await holder.done;
+  await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+  assert.ok(gone(started.childPid, started.births.child));
+});
+
+test("a helper whose own bounded wait runs out exits with the unkillable code", { skip }, async () => {
+  // The program exits by itself and leaves a grandchild whose exit is held: the helper ends it and waits 1 s.
+  const { shim } = setup();
+  const id = Math.random().toString(36).slice(2);
+  const childFile = join(folder, `child-${id}.pid`);
+  const grandchildFile = join(folder, `grandchild-${id}.pid`);
+  const tree = spawnTree(shim, [childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 1_000 });
+  const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
+  const grandchildBirth = processBirth(grandchildPid, helper);
+  const holder = await holdExit(grandchildPid, HOLD_MS);
+  const before = Date.now();
+  writeFileSync(`${childFile}.go`, "");
+  const { code } = await exited(tree);
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.ok(Date.now() - before < HOLD_MS, "the helper waited for the held process instead of its bound");
+  assert.equal(processBirth(grandchildPid, helper), grandchildBirth, "the held process ended early");
+  await holder.done;
+  await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
+});
+
+test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
+  // The program exits by itself, so the helper ends its job and waits (5 s) on the held grandchild;
+  // a kill then finds the job listing nothing, and must not call that a clean stop.
+  const { shim } = setup();
+  const id = Math.random().toString(36).slice(2);
+  const childFile = join(folder, `child-${id}.pid`);
+  const grandchildFile = join(folder, `grandchild-${id}.pid`);
+  const tree = spawnTree(shim, [childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, helper);
+  const treeBirth = processBirth(tree.pid, helper);
+  const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
+  const grandchildBirth = processBirth(grandchildPid, helper);
+  const holder = await holdExit(grandchildPid, HOLD_MS);
+  writeFileSync(`${childFile}.go`, "");
+  await holder.held;
+  assert.equal(signalTreeOutcome(tree.pid, "SIGKILL", { ...noHeldTrees, identity: treeBirth, unkillableAfterMs: 1_000 }), "unkillable");
+  const { code } = await exited(tree);
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  await holder.done;
+  await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
+});
+
+test("a second kill while the first still waits on a held process reports it unkillable too", { skip }, async () => {
+  const started = await startTree();
+  const holder = await holdExit(started.grandchildPid, HOLD_MS);
+  // Kill A ends the job and waits (8 s) on the held grandchild; kill B then finds the job listing nothing.
+  const first = spawn(helperPath, ["kill", String(started.tree.pid), started.births.helper.slice("win32-ft:".length), "8000"], { stdio: "ignore", windowsHide: true });
+  const firstDone = exited(first);
+  await holder.held;
+  assert.equal(signalTreeOutcome(started.tree.pid, "SIGKILL", { ...noHeldTrees, identity: started.births.helper, unkillableAfterMs: 2_000 }), "unkillable");
+  assert.equal((await firstDone).code, 4);
+  assert.equal((await exited(started.tree)).code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  await holder.done;
+  await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+});
+
+test("terminateTreeOutcome reports a held tree unkillable, and terminateTree resolves false for one", { skip }, async () => {
+  const first = await startTree();
+  const firstHolder = await holdExit(first.grandchildPid, HOLD_MS);
+  assert.equal(await terminateTreeOutcome(first.tree, { ...helper, unkillableAfterMs: 1_000 }), "unkillable");
+  // Asked again after its helper exited, whatever code the helper exited with: still unkillable.
+  await exited(first.tree);
+  assert.equal(await terminateTreeOutcome(first.tree, helper), "unkillable");
+  const second = await startTree();
+  const secondHolder = await holdExit(second.grandchildPid, HOLD_MS);
+  assert.equal(await terminateTree(second.tree, { ...helper, unkillableAfterMs: 1_000 }), false);
+  for (const [started, holder] of [[first, firstHolder], [second, secondHolder]]) {
+    await holder.done;
+    await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+  }
+});
+
+test("with the default bound a tree ends whole and terminateTreeOutcome reports it exited", { skip }, async () => {
+  const started = await startTree();
+  assert.equal(await terminateTreeOutcome(started.tree, helper), "exited");
+  assertAllGone(started);
+});
+
+test("the helper refuses a wait bound out of range", { skip }, () => {
+  const birth = processBirth(process.pid, helper).slice("win32-ft:".length);
+  const run = (args) => spawnSync(helperPath, args, { stdio: "ignore", windowsHide: true }).status;
+  assert.equal(run(["kill", String(process.pid), birth, "600001"]), 120);
+  assert.equal(run(["kill", String(process.pid), birth, "-1"]), 120);
+  assert.equal(run(["kill", String(process.pid), birth, "5", "6"]), 120);
+  assert.equal(run(["query", String(process.pid), birth, "5"]), 120);
+  assert.equal(run(["spawn", process.execPath, "node -e 0", "x"]), 120);
+});
+
+test("the app uses a found helper only when its bytes are the sealed build", { skip }, () => {
+  const resources = join(folder, `resources-${Math.random().toString(36).slice(2)}`);
+  const runtime = join(resources, "app", "runtime");
+  mkdirSync(runtime, { recursive: true });
+  const packaged = join(runtime, "letagents-process-tree.exe");
+  copyFileSync(helperPath, packaged);
+  const built = createHash("sha256").update(readFileSync(helperPath)).digest("hex");
+  const found = (seal) => processTreeHelperPath({ env: {}, resourcesPath: resources, includeLocalBuild: false, ...(seal === undefined ? {} : { seal }) });
+  // This build, sealed: used.
+  assert.equal(found({ builds: { x64: { sha256: built } } }), packaged);
+  // The committed seal: used exactly when this runner built the sealed bytes.
+  assert.equal(found(), built === sealedProcessTreeHelperSha256("x64") ? packaged : null);
+  // One byte more: refused, with the reason.
+  writeFileSync(packaged, Buffer.concat([readFileSync(helperPath), Buffer.from([0])]));
+  assert.equal(found({ builds: { x64: { sha256: built } } }), null);
+  assert.match(String(processTreeHelperRefusal()), /is not the sealed/);
+  // A configured helper that is not sealed is refused, with no fallback.
+  assert.equal(processTreeHelperPath({ env: { LETAGENTS_PROCESS_TREE_HELPER: packaged }, resourcesPath: resources, seal: { builds: { x64: { sha256: built } } } }), null);
 });

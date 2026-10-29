@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { parseWindowsCommandLine, signalTree, windowsProcessInfo, WINDOWS_BIRTH_PREFIX } from "../../../../../shared/process-tree.mjs";
+import { parseWindowsCommandLine, signalTreeOutcome, windowsProcessInfo, WINDOWS_BIRTH_PREFIX } from "../../../../../shared/process-tree.mjs";
 import type { DaemonIdentityInspection } from "./types.js";
 
 const PS_DAEMON_IDENTITY = /^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+)$/;
@@ -55,20 +55,26 @@ function inspectWindowsDaemonProcess(
  * before. Windows: only through the process-tree helper, which ends the pid
  * after checking its creation time against `identity` (the recorded
  * kernelStartTime) while it holds the process, so a reused pid is never
- * ended; no match, or no helper, is reported as ESRCH.
+ * ended; no match, or no helper, is reported as ESRCH. A daemon the helper
+ * ended but that was still there when its bounded wait ran out is reported
+ * as EUNKILLABLE: it is not gone, and waiting longer may not end it.
  */
 export function signalDaemonProcess(
   pid: number,
   signal: "SIGTERM" | "SIGKILL",
   identity?: string,
   platform: NodeJS.Platform = process.platform,
-  signalWindowsProcess: typeof signalTree = signalTree,
+  signalWindowsProcess: typeof signalTreeOutcome = signalTreeOutcome,
 ): void {
   if (platform !== "win32") {
     process.kill(pid, signal);
     return;
   }
-  if (!signalWindowsProcess(pid, signal, { platform, identity, liveTrees: new Map() })) {
+  const outcome = signalWindowsProcess(pid, signal, { platform, identity, liveTrees: new Map() });
+  if (outcome === "unkillable") {
+    throw Object.assign(new Error(`The daemon ${pid} was ended but did not exit within the helper's wait.`), { code: "EUNKILLABLE" });
+  }
+  if (outcome !== "ended") {
     throw Object.assign(new Error(`No process ${pid} with the recorded daemon birth was ended.`), { code: "ESRCH" });
   }
 }

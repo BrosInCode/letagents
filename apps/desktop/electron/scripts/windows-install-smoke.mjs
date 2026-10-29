@@ -6,10 +6,12 @@ import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
 import { desktopAssetNames } from "./release-metadata.mjs";
+import { sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
+import { sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
 import {
   DAEMON_PIPE_ADDON_APP_PATH,
+  PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_APP_USER_MODEL_ID,
   WINDOWS_EXECUTABLE_NAME,
   WINDOWS_UNINSTALLER_NAME,
@@ -18,9 +20,9 @@ import {
 // Installs the built Windows installer silently for the current user, runs
 // the installed app's smoke check (LETAGENTS_DESKTOP_SMOKE_CHECK=1 loads the
 // real window against seeded local state and exits 0 when it renders), then
-// checks that the installed app loads its sealed daemon pipe addon and
-// reaches a daemon through it, updates the running app the way
-// electron-updater does, and uninstalls it
+// checks that the installed app finds and uses the sealed process-tree
+// helper, and loads its sealed daemon pipe addon to reach a daemon through
+// it, updates the running app the way electron-updater does, and uninstalls it
 // and checks that the install folder and registration are gone.
 // For CI runners: it installs into the runner user's own profile.
 
@@ -103,6 +105,38 @@ assert(existsSync(executable), `The installer did not write ${executable}.`);
 assert(existsSync(join(installDirectory, WINDOWS_UNINSTALLER_NAME)), "The installer did not write its uninstaller.");
 assert(existsSync(join(installDirectory, "resources", "app", "runtime", "opencode.exe")), "The install has no bundled opencode.exe.");
 assert(existsSync(join(installDirectory, "shared", "message-contracts.mjs")), "The install has no shared contracts.");
+
+// The process-tree helper: the sealed bytes, at the path the app looks in,
+// accepted by the installed shared/process-tree.mjs, and able to end a tree
+// (the installed app as node, then a child of it) through its job.
+const installedHelper = join(installDirectory, "resources", "app", ...PROCESS_TREE_HELPER_APP_PATH.split("/"));
+assert(existsSync(installedHelper), `The install has no ${PROCESS_TREE_HELPER_APP_PATH}.`);
+const installedHelperSha256 = createHash("sha256").update(readFileSync(installedHelper)).digest("hex");
+assert(
+  installedHelperSha256 === sealedProcessTreeHelperSha256("x64"),
+  `The installed helper is ${installedHelperSha256}; the seal names ${sealedProcessTreeHelperSha256("x64")}.`,
+);
+const helperProbe = run(executable, ["-e", [
+  "(async () => {",
+  "  const path = require('node:path');",
+  "  const install = process.argv[process.argv.length - 1];",
+  "  const tree = await import(require('node:url').pathToFileURL(path.join(install, 'shared', 'process-tree.mjs')).href);",
+  "  const helperPath = tree.processTreeHelperPath({ env: {}, resourcesPath: path.join(install, 'resources'), includeLocalBuild: false });",
+  "  const program = \"require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); setInterval(() => {}, 1000);\";",
+  "  const child = tree.spawnTree(process.execPath, ['-e', program], { stdio: 'ignore' }, { helperPath });",
+  "  await new Promise((resolve) => setTimeout(resolve, 3000));",
+  "  const birth = tree.processBirth(child.pid, { helperPath });",
+  "  const before = tree.windowsTreeSize(child.pid, birth, { helperPath });",
+  "  const outcome = await tree.terminateTreeOutcome(child, { helperPath });",
+  "  const after = tree.windowsTreeSize(child.pid, birth, { helperPath });",
+  "  console.log('LETAGENTS_PROCESS_TREE_PROBE ' + JSON.stringify({ helperPath, refusal: tree.processTreeHelperRefusal(), before, outcome, after }));",
+  "})().catch((error) => { console.error(error); process.exit(1); });",
+].join("\n"), installDirectory], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 2 * 60_000 });
+assert(helperProbe.status === 0, `The installed process-tree probe exited with ${helperProbe.status}.`);
+const probe = JSON.parse(/LETAGENTS_PROCESS_TREE_PROBE (.+)/.exec(helperProbe.stdout)?.[1] ?? "null");
+assert(probe?.helperPath === installedHelper, `The installed app did not accept its helper: ${JSON.stringify(probe)}.`);
+// The job held the app as node and its child (the helper is outside its own job), and ended both.
+assert(probe.before >= 2 && probe.outcome === "exited" && probe.after === 0, `The installed helper did not end its tree: ${JSON.stringify(probe)}.`);
 
 // The daemon pipe addon: the sealed bytes, at the path the app looks in, and
 // loaded by the installed app (as node) to reach a daemon over a real pipe.

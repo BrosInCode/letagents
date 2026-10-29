@@ -197,13 +197,15 @@ jobs:
             security delete-keychain "${MACOS_RELEASE_KEYCHAIN}"
           fi
 
-  # The Windows daemon pipe addon (apps/desktop/native/win-daemon-pipe) is
-  # built where its seal was made: windows-latest's MSVC and SDK, which
-  # windows-2022 does not have. --strict fails on any bytes but the sealed
-  # ones. It installs no npm package. build-windows checks the bytes against
-  # the seal again before it ships them.
-  build-daemon-pipe-windows:
-    name: Windows daemon pipe addon
+  # The sealed Windows native pieces, the process-tree helper
+  # (apps/desktop/native/win-process-tree) and the daemon pipe addon
+  # (apps/desktop/native/win-daemon-pipe), are built where their seals were
+  # made: windows-latest's MSVC and SDK, which windows-2022 does not have.
+  # --strict fails on any bytes but the sealed ones. It installs no npm
+  # package. build-windows checks the bytes against the seals again before it
+  # ships them.
+  build-native-windows:
+    name: Windows sealed native pieces
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:
@@ -219,6 +221,18 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+
+      - name: Build the process-tree helper and require its seal
+        shell: bash
+        run: node apps/desktop/native/win-process-tree/build.mjs --arch x64 --check --strict
+
+      - name: Keep the sealed helper for the Windows build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: letagents-process-tree-x64-release
+          path: apps/desktop/native/win-process-tree/build/x64/letagents-process-tree.exe
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Build the daemon pipe addon and require its seal
         shell: bash
@@ -238,7 +252,7 @@ jobs:
     # audit for the shared lockfiles; this job verifies the signatures of the
     # trees it installs itself, because Windows installs Windows-only optional
     # packages the macOS runners never see.
-    needs: [build-macos, build-daemon-pipe-windows]
+    needs: [build-macos, build-native-windows]
     # windows-2022 rather than windows-latest: the windows-2025 image has no
     # NSIS, and windows-2022 has NSIS 3.10 preinstalled, so the installer is
     # built without downloading a compiler.
@@ -315,6 +329,12 @@ jobs:
           echo "LETAGENTS_OPENCODE_BIN=${RUNNER_TEMP}/opencode/node_modules/opencode-ai/bin/opencode.exe" >> "${GITHUB_ENV}"
 
       # The packager checks these bytes against the seal and refuses others.
+      - name: Download the sealed process-tree helper
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: letagents-process-tree-x64-release
+          path: ${{ runner.temp }}/process-tree
+
       - name: Download the sealed daemon pipe addon
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -333,6 +353,7 @@ jobs:
           fi
           export LETAGENTS_DESKTOP_RELEASE_BASE_URL="${R2_PUBLIC_BASE_URL}/desktop/v${DESKTOP_VERSION}/"
           export LETAGENTS_DESKTOP_RELEASE_NOTES="LetAgents desktop ${DESKTOP_VERSION}"
+          export LETAGENTS_PROCESS_TREE_HELPER_BUILD="${RUNNER_TEMP}/process-tree/letagents-process-tree.exe"
           export LETAGENTS_DAEMON_PIPE_ADDON_BUILD="${RUNNER_TEMP}/daemon-pipe/letagents-daemon-pipe.node"
           npm --prefix apps/desktop run package:win
 

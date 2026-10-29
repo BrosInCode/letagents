@@ -10,15 +10,18 @@ import { deflateSync } from "node:zlib";
 
 import {
   DAEMON_PIPE_ADDON_APP_PATH,
+  PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_EXECUTABLE_NAME,
   assertWindowsExecutableBytes,
   buildDaemonPipeAddon,
+  buildProcessTreeHelper,
   createIcoFile,
   createNsisPayloadInclude,
   findMakensis,
   readPngDimensions,
   resolveWindowsOpenCodeExecutable,
   stageDaemonPipeAddon,
+  stageProcessTreeHelper,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
 
@@ -175,6 +178,60 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   for (const removal of ['DeleteRegKey HKCU "${UNINSTALL_KEY}"', 'DeleteRegKey HKCU "${URL_KEY}"', 'RMDir /r "$LOCALAPPDATA\\${UPDATER_CACHE}"', 'Delete "$SMPROGRAMS\\${PRODUCT_NAME}.lnk"']) {
     assert.ok(registeredOnly.includes(removal), removal);
   }
+});
+
+test("the process-tree helper ships at the path the app looks for it, built strictly unless one is given", () => {
+  assert.equal(PROCESS_TREE_HELPER_APP_PATH, "runtime/letagents-process-tree.exe");
+  const runs = [];
+  const run = (file, args) => { runs.push([file, args]); return { status: 0 }; };
+  const built = buildProcessTreeHelper({ arch: "x64", env: {}, run });
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0][0], process.execPath);
+  assert.match(runs[0][1][0], /native[\\/]win-process-tree[\\/]build\.mjs$/);
+  assert.deepEqual(runs[0][1].slice(1), ["--arch", "x64", "--check", "--strict"]);
+  assert.match(built, /native[\\/]win-process-tree[\\/]build[\\/]x64[\\/]letagents-process-tree\.exe$/);
+  // A helper another job built on the sealed compiler is used as given (and still checked when staged).
+  assert.equal(buildProcessTreeHelper({ arch: "x64", env: { LETAGENTS_PROCESS_TREE_HELPER_BUILD: " C:\\built\\helper.exe " }, run }), "C:\\built\\helper.exe");
+  assert.equal(runs.length, 1);
+  // A failed or not-sealed build is a build error.
+  assert.throws(() => buildProcessTreeHelper({ arch: "x64", env: {}, run: () => ({ status: 1 }) }), /--strict failed \(exit 1\)/);
+});
+
+test("only the sealed helper bytes are staged; any other bytes fail the build", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "letagents-helper-stage-"));
+  try {
+    const helper = join(folder, "letagents-process-tree.exe");
+    const bytes = Buffer.from("MZ a helper build");
+    await writeFile(helper, bytes);
+    const seal = { builds: { x64: { sha256: createHash("sha256").update(bytes).digest("hex") } } };
+    const destination = join(folder, "app", "runtime", "letagents-process-tree.exe");
+    assert.deepEqual(await stageProcessTreeHelper({ helper, destination, arch: "x64", seal }), { sha256: seal.builds.x64.sha256, bytes: bytes.length });
+    assert.deepEqual(await readFile(destination), bytes);
+
+    const elsewhere = join(folder, "refused", "letagents-process-tree.exe");
+    await assert.rejects(
+      stageProcessTreeHelper({ helper, destination: elsewhere, arch: "x64", seal: { builds: { x64: { sha256: "0".repeat(64) } } } }),
+      /is not the sealed letagents-process-tree\.exe .*so the app would refuse it/,
+    );
+    await assert.rejects(stageProcessTreeHelper({ helper, destination: elsewhere, arch: "arm64", seal }), /No arm64 build/);
+    await writeFile(helper, "not an executable");
+    await assert.rejects(stageProcessTreeHelper({ helper, destination: elsewhere, arch: "x64", seal }), /is not a Windows executable/);
+    await assert.rejects(readFile(elsewhere), { code: "ENOENT" });
+    // Without a seal given, the committed one decides: these bytes are not its build.
+    await writeFile(helper, bytes);
+    await assert.rejects(stageProcessTreeHelper({ helper, destination: elsewhere, arch: "x64" }), /is not the sealed/);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
+test("the packaged app gets the helper and the daemon pipe addon, and their runtime sides and seals are required files", async () => {
+  const packager = await readFile(join(scriptsDirectory, "package-artifact.mjs"), "utf8");
+  assert.match(packager, /stageProcessTreeHelper\(\{\s*helper: buildProcessTreeHelper\(\{ arch: desktopArch \}\),\s*destination: join\(app, PROCESS_TREE_HELPER_APP_PATH\)/);
+  assert.match(packager, /stageDaemonPipeAddon\(\{\s*addon: buildDaemonPipeAddon\(\{ arch: desktopArch \}\),\s*destination: join\(app, DAEMON_PIPE_ADDON_APP_PATH\)/);
+  assert.match(packager, /windows \? \[PROCESS_TREE_HELPER_APP_PATH, DAEMON_PIPE_ADDON_APP_PATH\] : \[\]/);
+  assert.match(packager, /"shared\/letagents-process-tree\.seal\.json"/);
+  assert.match(packager, /"shared\/daemon-endpoint\.mjs", "shared\/daemon-pipe-native\.mjs", "shared\/letagents-daemon-pipe\.seal\.json"/);
 });
 
 test("the installer ships only the sealed daemon pipe addon, where the app looks for it", async () => {

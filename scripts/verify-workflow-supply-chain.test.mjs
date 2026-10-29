@@ -458,9 +458,9 @@ test("the Windows release build verifies each tree it installs before anything r
   const jobs = workflowJobs(".github/workflows/desktop-release.yml");
   const windows = jobs.find((candidate) => candidate.name === "build-windows");
   assert.ok(windows, "desktop-release.yml must build Windows");
-  // The macOS builds run the lockfile gates (cooldown, advisories) first; the
-  // sealed daemon pipe addon is built in a job that installs no package.
-  assert.deepEqual(windows.needs, ["build-macos", "build-daemon-pipe-windows"]);
+  // The macOS builds run the lockfile gates (cooldown, advisories) first;
+  // the sealed native pieces are built on the toolchain their seals name.
+  assert.deepEqual(windows.needs, ["build-macos", "build-native-windows"]);
   const steps = windows.steps;
   const lifecycle = steps.findIndex((step) => step.name === "Run verified dependency lifecycle scripts");
   assert.ok(lifecycle > 0, "build-windows must run lifecycle scripts only after verification");

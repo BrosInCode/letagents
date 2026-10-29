@@ -19,7 +19,7 @@ import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "../main/agents
 import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.js";
 import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-types.js";
 import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
-import { cursorMcpConnectorRootPattern } from "../main/agents/cursor/turn-wrapper-setup.js";
+import { cursorMcpConnectorRootPattern, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
 import {
   assertCursorWindowsCommandLines,
   cursorMcpConnectorListenPath,
@@ -354,3 +354,39 @@ stranger().then(attestFixtureMcp).then((connector) => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("Windows reaping never calls an unkillable Cursor job reaped, whatever a later query says", async () => {
+  // The wrapper's reaper, run against a fake helper: the job query always answers "gone", as it does once
+  // the helper has exited (its job loses its name), so only the unkillable answer can keep it false.
+  type FakeNative = { pid: number; exitCode: number | null; signalCode: null; kills: string[]; listeners: Array<() => void>;
+    once(event: string, listener: () => void): void; kill(signal: string): void; exit(code: number): void };
+  const reaper = (status: number | null, exitCodeAfterKill: number) => {
+    const native: FakeNative = {
+      pid: 4321, exitCode: null, signalCode: null, kills: [], listeners: [],
+      once(event, listener) { if (event === "exit") this.listeners.push(listener); },
+      kill(signal) { this.kills.push(signal); },
+      exit(code) { this.exitCode = code; for (const listener of this.listeners.splice(0)) listener(); },
+    };
+    const spawnSync = (_file: string, args: string[]) => {
+      if (args[0] === "kill") { setImmediate(() => native.exit(exitCodeAfterKill)); return { status, error: undefined }; }
+      return { status: 2, stdout: "", error: undefined };
+    };
+    const reap = new Function("native", "nativeHelperBirth", "windowsTurn", "spawnSync", "wait",
+      `${WINDOWS_NATIVE_REAP_SOURCE}\nreturn reapNativeGroup;`)(native, "133752345678901234", { helper: "C:\\h.exe" }, spawnSync,
+      (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))) as () => Promise<boolean>;
+    return { native, reap };
+  };
+  // Kill status 4: unkillable. The helper is not killed as well, and nothing later makes it reaped.
+  const four = reaper(4, 1);
+  assert.equal(await four.reap(), false);
+  assert.deepEqual(four.native.kills, []);
+  // The helper's own unkillable exit code.
+  assert.equal(await reaper(0, 0xE04C5401).reap(), false);
+  // A clean end is still reaped.
+  assert.equal(await reaper(0, 1).reap(), true);
+  // A helper that could not be asked is still ended by killing it.
+  const unknown = reaper(null, 1);
+  assert.equal(await unknown.reap(), true);
+  assert.deepEqual(unknown.native.kills, ["SIGKILL"]);
+});
+

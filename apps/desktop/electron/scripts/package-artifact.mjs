@@ -19,15 +19,18 @@ import {
 } from "./release-metadata.mjs";
 import {
   DAEMON_PIPE_ADDON_APP_PATH,
+  PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_EXECUTABLE_NAME,
   assertWindowsExecutableBytes,
   brandWindowsExecutable,
   buildDaemonPipeAddon,
+  buildProcessTreeHelper,
   createIcoFile,
   readWindowsExecutableVersion,
   renderWindowsIconPngs,
   resolveWindowsOpenCodeExecutable,
   stageDaemonPipeAddon,
+  stageProcessTreeHelper,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
 
@@ -241,10 +244,16 @@ const bundledOpenCode = windows ? "opencode.exe" : "opencode";
 await mkdir(join(app, "runtime"), { recursive: true });
 await cp(openCodePath, join(app, "runtime", bundledOpenCode));
 await chmod(join(app, "runtime", bundledOpenCode), 0o755);
-// Every Windows client of the supervisor daemon opens its pipe through the
-// sealed addon; a build that is not the sealed one fails here, as the app
+// Windows holds each agent's process tree in a Job Object through the sealed
+// helper, and every client of the supervisor daemon opens its pipe through
+// the sealed addon; a build that is not the sealed one fails here, as the app
 // would refuse it at run time.
 if (windows) {
+  await stageProcessTreeHelper({
+    helper: buildProcessTreeHelper({ arch: desktopArch }),
+    destination: join(app, PROCESS_TREE_HELPER_APP_PATH),
+    arch: desktopArch,
+  });
   await stageDaemonPipeAddon({
     addon: buildDaemonPipeAddon({ arch: desktopArch }),
     destination: join(app, DAEMON_PIPE_ADDON_APP_PATH),
@@ -351,7 +360,7 @@ const requiredAppFiles = [
 // Contents/... in LetAgents.app, resources/... and shared/... on Windows.
 const bundlePath = (absolutePath) => relative(bundle, absolutePath).split(sep).join("/");
 const required = [
-  ...requiredAppFiles.map((relative) => ({
+  ...[...requiredAppFiles, ...(windows ? [PROCESS_TREE_HELPER_APP_PATH, DAEMON_PIPE_ADDON_APP_PATH] : [])].map((relative) => ({
     absolutePath: join(app, relative),
     manifestPath: relative,
   })),
@@ -362,12 +371,6 @@ const required = [
   ...(windows ? [WINDOWS_EXECUTABLE_NAME, "resources/letagents.ico"] : []).map((relative) => ({
     absolutePath: join(bundle, relative),
     manifestPath: relative,
-  })),
-  // The daemon pipe addon, and the modules and seal that check and load it.
-  ...(windows ? [{ absolutePath: join(app, DAEMON_PIPE_ADDON_APP_PATH), manifestPath: DAEMON_PIPE_ADDON_APP_PATH }] : []),
-  ...(windows ? ["shared/daemon-endpoint.mjs", "shared/daemon-pipe-native.mjs", "shared/letagents-daemon-pipe.seal.json"] : []).map((relative) => ({
-    absolutePath: join(contents, relative),
-    manifestPath: bundlePath(join(contents, relative)),
   })),
   ...[
     "shared/agent-branch.mjs",
@@ -395,6 +398,10 @@ const required = [
     "shared/workspace-attachment-files.mjs",
     "shared/workspace-turn-capture.mjs",
     "shared/workspace-turn-capture-worker.mjs",
+    // The helper's runtime side and the seal it checks the helper against.
+    ...(windows ? ["shared/codex-executable.mjs", "shared/letagents-process-tree.seal.json", "shared/process-tree.mjs", "shared/provider-executable.mjs"] : []),
+    // The daemon pipe addon's runtime side and the seal it checks the addon against.
+    ...(windows ? ["shared/daemon-endpoint.mjs", "shared/daemon-pipe-native.mjs", "shared/letagents-daemon-pipe.seal.json"] : []),
   ].map((relative) => ({
     absolutePath: join(contents, relative),
     manifestPath: bundlePath(join(contents, relative)),
