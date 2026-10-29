@@ -64,7 +64,7 @@
     "typescript": "5.9.3"
   },
   "overrides": {
-    "@hono/node-server": "2.0.10",
+    "@hono/node-server": "2.1.5",
     "@esbuild-kit/core-utils": {
       "esbuild": "^0.25.12"
     },
