@@ -402,6 +402,38 @@ test('a picked GIF goes into the draft with its preview, still under reduced mot
   assert.equal(vm.selectedGifPreview.value, null);
 });
 
+test('Enter while a file uploads sends once it finishes, with the file; a failed upload sends nothing', async t => {
+  const props = reactive({ attaching: false, attachmentDrafts: [] as any[], attachmentError: null, eventPreviews: [], messageNamespace: `upload-${++sequence}`,
+    participants: [], pendingAttachmentDrafts: [{ localId: 'p1', fileName: 'shot.png', mimeType: 'image/png', sizeBytes: 3, previewDataUrl: null }] as any[],
+    replyTo: null, roomIdentifier: 'room-a', roomLoading: false, sendError: null, sending: false });
+  const { vm, events } = setup(Composer, props, t);
+  vm.draft.value = 'see this';
+  assert.equal(vm.canSend.value, true, 'a file still uploading counts as something to send');
+  await vm.submitMessage();
+  assert.equal(events.filter((event: any) => event[0] === 'send-message').length, 0, 'it waits for the upload');
+  assert.equal(vm.sendLabel.value, 'Sends when the files finish uploading');
+  props.attachmentDrafts = [{ uploadId: 'up1', fileName: 'shot.png', mimeType: 'image/png', sizeBytes: 3, previewDataUrl: null }];
+  props.pendingAttachmentDrafts = [];
+  await nextTick();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const sent = events.find((event: any) => event[0] === 'send-message');
+  assert.ok(sent, 'it sends when the upload finishes');
+  assert.equal(sent[1], 'see this');
+  assert.deepEqual(sent[3], [{ upload_id: 'up1' }]);
+
+  // A failed upload: the chip goes away without becoming an attachment, so nothing is sent.
+  const failing = reactive({ ...props, attachmentDrafts: [] as any[], messageNamespace: `upload-${++sequence}`,
+    pendingAttachmentDrafts: [{ localId: 'p2', fileName: 'b.txt', mimeType: 'text/plain', sizeBytes: 3, previewDataUrl: null }] as any[] });
+  const second = setup(Composer, failing, t);
+  second.vm.draft.value = 'with file';
+  await second.vm.submitMessage();
+  failing.pendingAttachmentDrafts = [];
+  await nextTick();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(second.events.filter((event: any) => event[0] === 'send-message').length, 0);
+  assert.equal(second.vm.draft.value, 'with file', 'the draft stays');
+});
+
 const suggestionFor = (recordId: string) => ({ recordId, from: 'Ada', text: 'Ship the small fixes now.' });
 
 test('Tab fills the suggested reply once, only into an empty input with no menu or list open', async t => {
@@ -471,16 +503,16 @@ test('an Escape that closed the "+" menu leaves an open command list alone', t =
   assert.equal(vm.slash.open.value, false);
 });
 
-test('a paste or drop while another file is uploading says so instead of vanishing', async t => {
+test('a paste or drop while the picker is open still shows its chip at once', async t => {
   const { useRoomAttachments } = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/useRoomAttachments.ts');
   let attachments: any;
   const app = renderer.createApp({ setup() { attachments = useRoomAttachments({ roomIdentifier: { value: 'room-a' }, discardAttachment() {} }); return () => h('div'); } });
   app.mount({});
   t.after(() => app.unmount());
   attachments.attaching.value = true;
-  await attachments.stageDroppedAttachments([{ name: 'shot.png', type: 'image/png', size: 10 }]);
-  assert.deepEqual(attachments.attachmentProblem.value, { kind: 'busy' }, 'the activity line says a file is still attaching');
-  assert.equal(attachments.pendingAttachmentDrafts.value.length, 0);
+  void attachments.stageDroppedAttachments([{ name: 'notes.txt', type: 'text/plain', size: 10 }]);
+  assert.equal(attachments.attachmentProblem.value, null);
+  assert.deepEqual(attachments.pendingAttachmentDrafts.value.map((draft: any) => draft.fileName), ['notes.txt']);
 });
 
 test('no Needs you provider means no suggestion', t => {

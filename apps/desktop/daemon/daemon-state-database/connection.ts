@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { SCHEMA_VERSION } from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
 import { DaemonStateSchema } from "./schema.js";
-import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { isOwnerPrivate, ownerPrivatePlatform, protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 
 function configureDaemonStateConnection(database: DatabaseSync): void {
   database.exec("PRAGMA foreign_keys = ON");
@@ -55,11 +55,24 @@ export function openDaemonStateObservationDatabase(path: string): DatabaseSync {
 
 /** Opens a daemon state connection with the non-negotiable durability settings. */
 export async function openDaemonStateDatabase(path: string, initializeSchema: (database: DatabaseSync) => void | Promise<void>): Promise<DatabaseSync> {
-  const { mkdir } = await import("node:fs/promises");
+  const { lstat, mkdir } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await protectOwnerPrivate(directory, "directory");
+  // Windows: an existing database, -wal or -shm file is checked now, before
+  // this process opens it, and protected only when it is not private (one
+  // that another account made fails, as chmod would). Another process may
+  // have it open, so a private one is only read, never changed; no tool runs
+  // on it while this process has it open. A new one inherits the folder.
+  if (ownerPrivatePlatform() === "win32") {
+    for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
+      const info = await lstat(candidate).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+      if (!info || await isOwnerPrivate(candidate, info)) continue;
+      try { await protectOwnerPrivate(candidate, "file", { force: true }); }
+      catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  }
   // Fresh sibling daemons can race at the one-time WAL conversion or schema
   // DDL before busy_timeout is fully effective. Close each failed handle and
   // back off outside SQLite; never turn an unrelated initialization error into
@@ -77,7 +90,10 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
       configureDaemonStateConnection(database);
-      for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await protectOwnerPrivate(candidate, "file"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+      // Windows did this before the open (above): no tool may change the DACL of an open SQLite file.
+      if (ownerPrivatePlatform() !== "win32") {
+        for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await protectOwnerPrivate(candidate, "file"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+      }
       await initializeSchema(database);
       return database;
     } catch (error) {

@@ -6,8 +6,9 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { symlinkSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -16,9 +17,10 @@ import {
   readDaemonMaintenance,
   withDaemonMaintenanceOperation,
 } from "../../../../shared/daemon-maintenance.mjs";
-import { isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { forgetOwnerPrivateCache, isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 import { openDaemonStateDatabase } from "../daemon-state-database.js";
 import { isDaemonEntryPoint } from "../entry-point.js";
+import { DaemonLifecycleLog } from "../lifecycle-log.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { RoomTurnAttachmentStager } from "../room-turn-attachments.js";
 import { decryptStateRecoveryBackup, prepareStateRecoveryBackup } from "../state-recovery-backup.js";
@@ -51,7 +53,7 @@ const getKey = async () => ({ key: Buffer.from(backupKey), sealedKey: "sealed" }
 
 // ---------------------------------------------------------------- state recovery backup
 
-test("Windows: the recovery snapshot needs a private folder, and its file gets the DACL before any ciphertext", async (t) => {
+test("Windows: the recovery snapshot needs a private folder, and its file inherits that folder's DACL", async (t) => {
   const root = await scratch(t);
   const fake = fakeWindowsSecurity();
   const directory = join(root, "state");
@@ -61,12 +63,15 @@ test("Windows: the recovery snapshot needs a private folder, and its file gets t
     // mkdir alone gives an inherited DACL: refused, as a 0755 folder is on POSIX.
     await assert.rejects(prepareStateRecoveryBackup(database, 18, getKey), { code: "snapshot_refused" });
     await fake.security.protect(directory, "directory");
+    const before = fake.protects.length;
     const backup = await prepareStateRecoveryBackup(database, 18, getKey);
     assert.ok(backup);
-    assert.ok(fake.protects.some(call => call === `protect:file:${database}.recovery.enc.pending`));
+    // The verified folder passes its entries on; no tool runs for the snapshot file.
+    assert.equal(fake.protects.length, before);
     assert.equal(fake.isProtected(`${database}.recovery.enc`), true);
     (await decryptStateRecoveryBackup(`${database}.recovery.enc`, backupKey)).close();
-    fake.tamper(`${database}.recovery.enc`);
+    // A folder that lost its private DACL: the snapshot is refused.
+    fake.tamper(directory);
     await assert.rejects(decryptStateRecoveryBackup(`${database}.recovery.enc`, backupKey), { code: "verify_failed" });
   });
 });
@@ -93,18 +98,15 @@ test("Windows: a maintenance hold is written private and a tampered record is re
   await asWindows(fake, async () => {
     const hold = await createDaemonMaintenance(path);
     assert.deepEqual(await readDaemonMaintenance(path), hold);
-    // Every folder it made, the lock and the record's temporary file got the private DACL.
-    assert.ok(fake.protects.includes(`protect:directory:${join(root, "home")}`));
-    assert.ok(fake.protects.includes(`protect:directory:${join(root, "home", ".letagents")}`));
-    assert.ok(fake.protects.includes(`protect:file:${path}.lock`));
-    // The record was made in a private staging folder beside it, then given its own DACL.
-    const staged = fake.protects.findIndex(call => call.startsWith(`protect:directory:${dirname(path)}${sep}.daemon-maintenance.json.letagents-`));
-    assert.ok(staged >= 0);
-    assert.equal(fake.protects[staged + 1], `protect:file:${join(fake.protects[staged]!.slice("protect:directory:".length), "record")}`);
+    // The first folder it made got the private DACL; the state folder, the lock and the
+    // record inherit it, so no tool ran for them.
+    assert.deepEqual(fake.protects, [`protect:directory:${join(root, "home")}`]);
+    for (const made of [dirname(path), `${path}.lock`, path]) assert.equal(fake.isProtected(made), true, made);
     assert.deepEqual((await readdir(dirname(path))).sort(), ["daemon-maintenance.json", "daemon-maintenance.json.lock"]);
     fake.tamper(path);
     await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
-    // A lock this account owns but has not made private yet is repaired; another account's is refused.
+    // A lock this account owns but that is not private is repaired; another account's is refused,
+    // even inside the verified folder (it may have been there before the folder was private).
     fake.tamper(`${path}.lock`);
     await withDaemonMaintenanceOperation(async () => undefined, path);
     assert.equal(fake.isProtected(`${path}.lock`), true);
@@ -114,7 +116,8 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     // (A second folder: the fake remembers files by inode, which Linux reuses at once after a delete.)
     const second = join(root, "home2", ".letagents", "daemon-maintenance.json");
     const secondHold = await createDaemonMaintenance(second);
-    fake.tamper(dirname(second));
+    // home2 loses its private DACL: .letagents now has a fresh profile folder's access, not private.
+    fake.unprotect(join(root, "home2"));
     await assert.rejects(readDaemonMaintenance(second), /Unsafe service maintenance record/);
     assert.equal((await withDaemonMaintenanceOperation(owner => owner.read(), second))?.id, secondHold.id);
     assert.equal(fake.isProtected(dirname(second)), true);
@@ -151,16 +154,25 @@ test("POSIX: a group-readable maintenance record or lock is still refused", { sk
   await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
 });
 
-test("real Windows: a maintenance hold passes the real ACL check, and an extra entry is refused", { skip: windowsOnly }, async (t) => {
+test("real Windows: a maintenance hold passes the real ACL check, and an extra entry on its folder is refused", { skip: windowsOnly }, async (t) => {
   const root = await scratch(t);
-  const path = join(root, ".letagents", "daemon-maintenance.json");
+  const folder = join(root, ".letagents");
+  const path = join(folder, "daemon-maintenance.json");
   const hold = await createDaemonMaintenance(path);
   assert.deepEqual(await readDaemonMaintenance(path), hold);
-  assert.equal(await isOwnerPrivate(join(root, ".letagents"), await lstat(join(root, ".letagents"))), true);
+  assert.equal(await isOwnerPrivate(folder, await lstat(folder)), true);
   const { execFileSync } = await import("node:child_process");
-  const { windowsSystemTool } = await import("../../../../shared/owner-private-fs.mjs");
+  const { forgetOwnerPrivateCache, windowsSystemTool } = await import("../../../../shared/owner-private-fs.mjs");
+  // A cold reader (another process) refuses a record with an extra entry of its own.
   execFileSync(windowsSystemTool("icacls.exe"), [path, "/grant", "*S-1-1-0:R"], { stdio: "ignore", windowsHide: true });
+  forgetOwnerPrivateCache();
   await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+  // And a record in a folder that lost its private DACL.
+  execFileSync(windowsSystemTool("icacls.exe"), [path, "/remove:g", "*S-1-1-0"], { stdio: "ignore", windowsHide: true });
+  execFileSync(windowsSystemTool("icacls.exe"), [folder, "/grant", "*S-1-5-32-545:(OI)(CI)R"], { stdio: "ignore", windowsHide: true });
+  forgetOwnerPrivateCache();
+  await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+  forgetOwnerPrivateCache();
 });
 
 test("Windows: when the ACL tools fail, a missing maintenance record is not read as no hold", async (t) => {
@@ -230,11 +242,12 @@ test("Windows: a kept file is used only from private cache folders", async (t) =
     const stager = new RoomTurnAttachmentStager(root);
     for (let turn = 0; turn < 2; turn += 1) await (await stager.prepare(input())).release();
     assert.equal(downloads, 1);
-    // The cache folder lost its private DACL: the kept copy is not trusted.
-    const cache = (await readdir(root)).find(name => !name.startsWith("turn-"))!;
-    fake.tamper(join(root, cache));
+    // The attachment folder lost its private DACL: the kept copy is not trusted.
+    fake.tamper(root);
     await (await stager.prepare(input())).release();
     assert.equal(downloads, 2);
+    // Writing the new copy made the folder private again.
+    assert.equal(fake.isProtected(root), true);
   });
 });
 
@@ -252,6 +265,39 @@ test("Windows: the state database folder and files get the private DACL", async 
       // A -wal or -shm file SQLite makes later inherits the folder's private entries.
     } finally { database.close(); }
   });
+});
+
+test("Windows: a new lifecycle log inherits its folder; an existing one is protected", async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const path = join(root, "logs", "daemon-lifecycle.jsonl");
+  await asWindows(fake, async () => {
+    new DaemonLifecycleLog(path);
+    // The folder is protected; the log it made needs no tool of its own.
+    assert.deepEqual(fake.protects, [`protect:directory:${dirname(path)}`]);
+    assert.equal(fake.isProtected(path), true);
+    // A later process finds the log already there: it is protected in full.
+    forgetOwnerPrivateCache();
+    fake.protects.length = 0;
+    new DaemonLifecycleLog(path);
+    assert.deepEqual(fake.protects, [`protect:directory:${dirname(path)}`, `protect:file:${path}`]);
+  });
+});
+
+test("Windows: a link at the lifecycle log path is never followed", { skip: posixOnly }, async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const folder = join(root, "logs");
+  await mkdir(folder);
+  const elsewhere = join(root, "elsewhere.jsonl");
+  const path = join(folder, "daemon-lifecycle.jsonl");
+  symlinkSync(elsewhere, path);
+  await asWindows(fake, async () => {
+    const log = new DaemonLifecycleLog(path);
+    log.append({ event: "daemon_starting" } as Parameters<DaemonLifecycleLog["append"]>[0]);
+  });
+  // Neither the open nor the append created the link's target.
+  await assert.rejects(lstat(elsewhere), { code: "ENOENT" });
 });
 
 // ---------------------------------------------------------------- daemon entry point

@@ -4,6 +4,20 @@
     class="desktop-attachment-drafts"
     data-testid="desktop-attachment-drafts"
   >
+    <!-- Uploaded files first, then the ones still uploading, so a finished chip does not jump. -->
+    <div
+      v-for="attachment in attachments"
+      :key="attachment.uploadId"
+      class="desktop-attachment-draft"
+      data-testid="desktop-attachment-draft"
+    >
+      <span>
+        <img v-if="attachment.previewDataUrl" class="desktop-attachment-preview" :src="attachment.previewDataUrl" alt="">
+        <strong>{{ attachment.fileName }}</strong>
+        <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }}</small>
+      </span>
+      <button type="button" @click="$emit('remove', attachment.uploadId)">Remove</button>
+    </div>
     <div
       v-for="attachment in pendingAttachments"
       :key="attachment.localId"
@@ -19,21 +33,8 @@
         >
         <span v-else class="desktop-attachment-pending-icon" aria-hidden="true"></span>
         <strong>{{ attachment.fileName }}</strong>
-        <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }} · Uploading...</small>
+        <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }} · Uploading…</small>
       </span>
-    </div>
-    <div
-      v-for="attachment in attachments"
-      :key="attachment.uploadId"
-      class="desktop-attachment-draft"
-      data-testid="desktop-attachment-draft"
-    >
-      <span>
-        <img v-if="attachment.previewDataUrl" class="desktop-attachment-preview" :src="attachment.previewDataUrl" alt="">
-        <strong>{{ attachment.fileName }}</strong>
-        <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }}</small>
-      </span>
-      <button type="button" @click="$emit('remove', attachment.uploadId)">Remove</button>
     </div>
   </div>
 </template>
