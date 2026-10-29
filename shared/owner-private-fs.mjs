@@ -560,30 +560,9 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
 }
 
 /**
- * `path` and its missing ancestors, nearest the root first, read before the
- * mkdir. It stops at the first folder that exists, so an existing folder is
- * never changed. (mkdir's own answer cannot be compared as text: on Windows it
- * may spell the same folder another way, such as a short 8.3 name.)
+ * `path` and its missing ancestors, nearest the root first. It stops at the
+ * first folder that exists, so an existing folder is never changed.
  */
-function identity(path) {
-  try {
-    const info = lstatSync(path, { bigint: true });
-    return `${info.dev}:${info.ino}`;
-  } catch { return null; }
-}
-
-/**
- * Of the folders that were missing, the ones this mkdir made: from the folder
- * it reports as the first it made (matched by identity, not by spelling) down
- * to `path`. A folder another process made in the meantime, above that one,
- * is left alone. If no folder matches, only `path` itself is protected.
- */
-function foldersMade(missing, made, path) {
-  const first = identity(made);
-  const index = first ? missing.findIndex(folder => identity(folder) === first) : -1;
-  return index < 0 ? [resolve(path)] : missing.slice(index);
-}
-
 function missingFolders(path) {
   const missing = [];
   for (let current = resolve(path); ; current = dirname(current)) {
@@ -595,28 +574,52 @@ function missingFolders(path) {
   return missing;
 }
 
+function existingFolder(folder, error) {
+  if (error.code !== "EEXIST") throw error;
+  const info = lstatSync(folder);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw error;
+}
+
 /**
  * mkdir with mode 0700, exactly as on POSIX today (an existing folder is left
- * as it is). On Windows each folder it makes gets the private DACL.
+ * as it is). On Windows a recursive call makes the missing folders one at a
+ * time and gives the private DACL only to each folder this call made; a
+ * folder another process made in the meantime is left alone. (Node's
+ * recursive mkdir reports only the first folder it made, and on Windows may
+ * spell it another way, such as a short 8.3 name.)
  */
 export async function createPrivateDir(path, { recursive = false } = {}, options = {}) {
-  const missing = isWindows(options) && recursive ? missingFolders(path) : [];
-  const made = await mkdir(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
-  if (isWindows(options)) {
-    const folders = recursive ? (made === undefined ? [] : foldersMade(missing, made, path)) : [resolve(path)];
-    for (const folder of folders) await protectOwnerPrivate(folder, "directory", options);
+  if (!isWindows(options)) return mkdir(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
+  if (!recursive) {
+    await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });
+    await protectOwnerPrivate(resolve(path), "directory", options);
+    return undefined;
   }
-  return made;
+  let first;
+  for (const folder of missingFolders(path)) {
+    try { await mkdir(folder, { mode: PRIVATE_DIRECTORY_MODE }); }
+    catch (error) { existingFolder(folder, error); continue; }
+    first ??= folder;
+    await protectOwnerPrivate(folder, "directory", options);
+  }
+  return first;
 }
 
 export function createPrivateDirSync(path, { recursive = false } = {}, options = {}) {
-  const missing = isWindows(options) && recursive ? missingFolders(path) : [];
-  const made = mkdirSync(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
-  if (isWindows(options)) {
-    const folders = recursive ? (made === undefined ? [] : foldersMade(missing, made, path)) : [resolve(path)];
-    for (const folder of folders) protectOwnerPrivateSync(folder, "directory", options);
+  if (!isWindows(options)) return mkdirSync(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
+  if (!recursive) {
+    mkdirSync(path, { mode: PRIVATE_DIRECTORY_MODE });
+    protectOwnerPrivateSync(resolve(path), "directory", options);
+    return undefined;
   }
-  return made;
+  let first;
+  for (const folder of missingFolders(path)) {
+    try { mkdirSync(folder, { mode: PRIVATE_DIRECTORY_MODE }); }
+    catch (error) { existingFolder(folder, error); continue; }
+    first ??= folder;
+    protectOwnerPrivateSync(folder, "directory", options);
+  }
+  return first;
 }
 
 /** fsync a folder so a rename in it is durable. Windows cannot fsync a folder handle; NTFS journals the rename. */

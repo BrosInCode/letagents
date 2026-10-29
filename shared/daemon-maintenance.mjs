@@ -15,6 +15,26 @@ async function syncDirectory(path) {
   await syncFolder(dirname(path));
 }
 
+/**
+ * Windows reads a file's permissions by path, so a record is trusted only in
+ * a folder no other account can change (no swap during the read).
+ */
+async function privateParent(path) {
+  const folder = dirname(path);
+  const info = await lstat(folder);
+  return info.isDirectory() && !info.isSymbolicLink() && await isOwnerPrivate(folder, info);
+}
+
+/** Windows: make this account's own state folder private if it is not yet (the daemon does the same at start). */
+async function ensurePrivateParent(path) {
+  const folder = dirname(path);
+  const info = await lstat(folder);
+  if (!info.isDirectory() || info.isSymbolicLink() || !await isOwnedByCurrentUser(folder, info)) {
+    throw new Error("Unsafe service maintenance folder.");
+  }
+  if (!await isOwnerPrivate(folder, info)) await protectOwnerPrivate(folder, "directory");
+}
+
 /** Only ENOENT means normal operation. Corruption or an unsafe path must fail closed. */
 export async function readDaemonMaintenance(path = daemonMaintenancePath()) {
   let file;
@@ -22,7 +42,8 @@ export async function readDaemonMaintenance(path = daemonMaintenancePath()) {
   catch (error) { if (error.code === "ENOENT") return null; throw error; }
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > 4096 || !await isOwnerPrivate(path, stat)) throw new Error("Unsafe service maintenance record.");
+    if (!stat.isFile() || stat.size > 4096 || !await isOwnerPrivate(path, stat)
+      || (ownerPrivatePlatform() === "win32" && !await privateParent(path))) throw new Error("Unsafe service maintenance record.");
     const value = JSON.parse(await file.readFile("utf8"));
     if (value?.version !== 1 || typeof value.id !== "string" || !/^[a-f0-9-]{36}$/.test(value.id)
       || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))
@@ -56,7 +77,7 @@ async function publishHold(path) {
       return published;
     } finally { await file.close(); await unlink(temporary); }
   } finally {
-    if (staging) await rm(staging, { recursive: true, force: true });
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -79,6 +100,7 @@ const simulatedClaims = new Set();
 export async function withDaemonMaintenanceOperation(operation, path = daemonMaintenancePath()) {
   const lockPath = `${resolve(path)}.lock`;
   await createPrivateDir(dirname(lockPath), { recursive: true });
+  if (ownerPrivatePlatform() === "win32") await ensurePrivateParent(lockPath);
   const native = process.platform === "darwin";
   if (!native && simulatedClaims.has(lockPath)) throw new Error("Another service maintenance action is in progress.");
   if (!native) simulatedClaims.add(lockPath);

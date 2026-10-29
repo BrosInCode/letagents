@@ -110,6 +110,15 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     assert.equal(fake.isProtected(`${path}.lock`), true);
     fake.giveAway(`${path}.lock`);
     await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
+    // A record is trusted only in a private folder; an operation repairs this account's own folder.
+    await rm(`${path}.lock`);
+    await fake.security.protect(path, "file");
+    fake.tamper(dirname(path));
+    await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+    assert.equal((await withDaemonMaintenanceOperation(owner => owner.read(), path))?.id, hold.id);
+    assert.equal(fake.isProtected(dirname(path)), true);
+    fake.giveAway(dirname(path));
+    await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance folder/);
   });
 });
 
@@ -174,6 +183,31 @@ test("Windows: staged attachment folders and files get the private DACL", async 
       assert.equal(fake.isProtected(staged[0]!), true);
       assert.equal(fake.isProtected(join(staged[0]!, "..")), true);
     } finally { await prepared.release(); }
+  });
+});
+
+test("Windows: a kept file is used only from private cache folders", async (t) => {
+  const parent = await scratch(t);
+  const root = join(parent, "room-turn-attachments");
+  const fake = fakeWindowsSecurity();
+  let downloads = 0;
+  const input = () => ({
+    delivery: "file", fileAccess: { text: true, pdf: false }, localRoom: false, roomId: "room_1",
+    apiUrl: "https://api.example.test", bearer: "b", sourceMessageId: "msg_7",
+    sourceMessage: { id: "msg_7", text: "Log", attachments: [{ id: "att_1", filename: "log.txt", content_type: "text/plain",
+      byte_size: 5, download_url: "/rooms/room_1/messages/msg_7/attachments/att_1" }] },
+    http: { async downloadAttachment() { downloads += 1; return new TextEncoder().encode("hello"); } },
+    signal: new AbortController().signal,
+  } as unknown as Parameters<RoomTurnAttachmentStager["prepare"]>[0]);
+  await asWindows(fake, async () => {
+    const stager = new RoomTurnAttachmentStager(root);
+    for (let turn = 0; turn < 2; turn += 1) await (await stager.prepare(input())).release();
+    assert.equal(downloads, 1);
+    // The cache folder lost its private DACL: the kept copy is not trusted.
+    const cache = (await readdir(root)).find(name => !name.startsWith("turn-"))!;
+    fake.tamper(join(root, cache));
+    await (await stager.prepare(input())).release();
+    assert.equal(downloads, 2);
   });
 });
 

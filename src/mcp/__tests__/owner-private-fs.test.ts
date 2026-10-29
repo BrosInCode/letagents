@@ -332,6 +332,27 @@ test("Windows: each folder mkdir makes gets the private DACL; an existing one is
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Windows: a folder another process makes during a recursive mkdir is left alone", async () => {
+  const root = scratch();
+  try {
+    const { security, calls } = fakeSecurity();
+    // While `a` is being protected, "another process" makes `a/b`.
+    const racing: WindowsSecurity = {
+      ...security,
+      async protect(path, kind) {
+        await security.protect(path, kind);
+        if (path === join(root, "a")) mkdirSync(join(root, "a", "b"));
+      },
+    };
+    const made = await createPrivateDir(join(root, "a", "b", "c"), { recursive: true }, { platform: "win32", windowsSecurity: racing });
+    assert.equal(made, join(root, "a"));
+    assert.deepEqual(calls, [`protect:directory:${join(root, "a")}`, `protect:directory:${join(root, "a", "b", "c")}`]);
+    // A file where a folder should be is still an error, as with mkdir.
+    writeFileSync(join(root, "file"), "x");
+    await assert.rejects(createPrivateDir(join(root, "file", "x"), { recursive: true }, { platform: "win32", windowsSecurity: security }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Windows: an atomic private file is protected before its bytes are written", async () => {
   const root = scratch();
   try {
