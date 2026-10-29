@@ -26,6 +26,8 @@ const controlledEnvironmentKeys = [
   "LETAGENTS_SUPERVISOR_DAEMON_SOCKET",
   "LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID",
   "LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID",
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
+  "USERPROFILE",
 ] as const;
 const originalEnvironment = Object.fromEntries(
   controlledEnvironmentKeys.map((key) => [key, process.env[key]]),
@@ -35,6 +37,7 @@ for (const key of controlledEnvironmentKeys.slice(6)) {
   delete process.env[key];
 }
 process.env.HOME = home;
+process.env.USERPROFILE = home;
 process.env.LETAGENTS_API_URL = "https://letagents.test";
 process.env.LETAGENTS_TOKEN = "owner-token";
 process.env.LETAGENTS_AGENT_NAME = "registration-worker";

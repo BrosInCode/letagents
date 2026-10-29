@@ -143,7 +143,7 @@ export class DaemonSingleton {
     try { await handle.writeFile(`${generation}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
     await rename(temporary, this.generationPath);
     // Windows cannot flush a directory handle; NTFS journals the rename itself.
-    if (this.hostPlatform === "win32") return;
+    if (process.platform === "win32") return;
     const directory = await open(dirname(this.generationPath), "r");
     try { await directory.sync(); } finally { await directory.close(); }
   }

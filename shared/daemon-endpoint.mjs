@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir, userInfo } from "node:os";
-import { join, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 
 // Where the desktop, the supervisor daemon and MCP workers meet.
 //
@@ -83,7 +83,8 @@ export function windowsPipeName(prefix, key, userSid) {
 export function daemonEndpoint(stateDir, { platform = process.platform, userSid } = {}) {
   if (typeof stateDir !== "string" || !stateDir) throw new Error("The daemon state directory is required.");
   if (platform !== "win32") {
-    const socketPath = join(stateDir, DAEMON_SOCKET_FILE);
+    // A Unix socket path is POSIX; this equals join() on every POSIX host.
+    const socketPath = posix.join(stateDir, DAEMON_SOCKET_FILE);
     return { stateDir, transport: "unix", listenPath: socketPath, connectPath: socketPath, proofPath: null };
   }
   const normalized = win32.resolve(stateDir).toLowerCase();

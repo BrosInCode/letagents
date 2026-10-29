@@ -125,8 +125,12 @@ test("daemon lifecycle diagnostics are private, redacted, and strictly bounded",
     });
     second.close();
 
-    assert.equal((await stat(env.root)).mode & 0o777, 0o700);
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    // Windows keeps no POSIX mode bits; the owner-private ACL check belongs to
+    // the shared owner-private helper's own tests.
+    if (process.platform !== "win32") {
+      assert.equal((await stat(env.root)).mode & 0o777, 0o700);
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+    }
     assert.equal((await readdir(env.root)).filter((name) => name.startsWith("daemon-lifecycle.jsonl")).length, 2);
     const current = await readFile(path, "utf8");
     assert.match(current, /"event":"fatal_exception"/);
@@ -145,7 +149,7 @@ test("daemon lifecycle diagnostics rotate repeated samples within one process", 
     assert.deepEqual(files, ["daemon-lifecycle.jsonl", "daemon-lifecycle.jsonl.previous"]);
     assert.equal(JSON.parse((await readFile(path, "utf8")).trim()).detail, "sample 19");
     assert.equal(JSON.parse((await readFile(`${path}.previous`, "utf8")).trim()).detail, "sample 18");
-    for (const name of files) assert.equal((await stat(join(env.root, name))).mode & 0o777, 0o600);
+    if (process.platform !== "win32") for (const name of files) assert.equal((await stat(join(env.root, name))).mode & 0o777, 0o600);
   } finally { log.close(); await env.cleanup(); }
 });
 
@@ -1104,7 +1108,11 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
   }
 });
 
-test("SIGTERM after authority release uses default process-only termination and preserves detached providers", async () => {
+test("SIGTERM after authority release uses default process-only termination and preserves detached providers", {
+  // Windows has no handled SIGTERM: process.kill ends the process at once.
+  // Process termination on Windows belongs to the process-lifecycle work.
+  skip: process.platform === "win32" ? "needs POSIX signal semantics" : false,
+}, async () => {
   const env = await fixture();
   const mainPath = join(process.cwd(), "daemon/main.ts");
   const singletonPath = join(process.cwd(), "daemon/singleton.ts");
