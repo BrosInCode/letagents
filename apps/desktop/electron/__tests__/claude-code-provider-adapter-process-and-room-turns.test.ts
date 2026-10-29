@@ -2,7 +2,8 @@ import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
+import { supervisedAgentsOnly } from "./platform.js";
 import { ClaudeCodeProviderAdapter, claudeChildEnvironment, claudeTranscriptsRoot } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderRoomTurnRequest,
@@ -90,7 +91,34 @@ test("stop orders SIGTERM before the observed terminal and escalates to SIGKILL 
   assert.equal(killed.terminalCause, "killed");
 });
 
-test("exact-reference Claude stop fences both attached and unreachable processes and emits birth evidence", async () => {
+test("Windows, which has no SIGTERM: stop hands the CLI it spawned to terminateTree, gracefully or forced, and sends no signal", async () => {
+  for (const force of [false, true]) {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 25 });
+    const handle = await adapter.spawn(spawnRequest());
+    const child = harness.children.at(-1)!;
+    const terminations: Array<{ graceful: boolean; graceMs: number }> = [];
+    child.terminate = async (options) => {
+      terminations.push(options);
+      child.resolveExit({ type: "exit", code: 0, signal: null });
+      return true;
+    };
+    // Read while stop() runs up to its first wait; restored before anything else runs.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    let stopping: Promise<ProviderTerminalPayload>;
+    try {
+      stopping = adapter.stop(handle, force ? { force: true } : {});
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+    await stopping;
+    assert.deepEqual(terminations, [{ graceful: !force, graceMs: 25 }]);
+    assert.deepEqual(harness.signals, []);
+  }
+});
+
+test("exact-reference Claude stop fences both attached and unreachable processes and emits birth evidence", { skip: supervisedAgentsOnly }, async () => {
   for (const cached of [false, true]) for (const force of [false, true]) {
     const birth = "Mon Sep 21 17:55:18 2026";
     const h = createHarness({ identities: new Map([[4100, birth]]), dieOnSigterm: false });
@@ -107,7 +135,7 @@ test("exact-reference Claude stop fences both attached and unreachable processes
   }
 });
 
-test("exact-reference Claude stop ignores a cached protocol terminal while its process remains alive", async () => {
+test("exact-reference Claude stop ignores a cached protocol terminal while its process remains alive", { skip: supervisedAgentsOnly }, async () => {
   const birth = "Mon Sep 21 17:55:18 2026";
   const h = createHarness({ identities: new Map([[4100, birth]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
@@ -121,7 +149,7 @@ test("exact-reference Claude stop ignores a cached protocol terminal while its p
   assert.equal(terminal.nativeRuntimeDeath?.pid, 4100);
 });
 
-test("exact-reference Claude stop refuses invalid births and known foreign ownership", async () => {
+test("exact-reference Claude stop refuses invalid births and known foreign ownership", { skip: supervisedAgentsOnly }, async () => {
   const birth = "Mon Sep 21 17:55:18 2026";
   const h = createHarness({ identities: new Map([[4100, birth]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
@@ -140,7 +168,7 @@ test("exact-reference Claude stop refuses invalid births and known foreign owner
   assert.equal(h.signals.length, 0);
 });
 
-test("exact-reference Claude stop never signals a reused PID or accepts an unconfirmed kill", async () => {
+test("exact-reference Claude stop never signals a reused PID or accepts an unconfirmed kill", { skip: supervisedAgentsOnly }, async () => {
   const birth = "Mon Sep 21 17:55:18 2026";
   const h = createHarness({ identities: new Map([[4100, "Mon Sep 21 18:55:18 2026"]]) });
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: h.dependencies });
@@ -824,7 +852,7 @@ test("a Claude turn whose transcript is not found where its CLI keeps it is left
   }
 });
 
-test("Claude transcripts are read where the CLI writes them: its configured directory, or its home's", () => {
+test("Claude transcripts are read where the CLI writes them: its configured directory, or its home's", { skip: supervisedAgentsOnly }, () => {
   const base = { HOME: "/home/owner", PATH: "/usr/bin" };
   assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({}, base)), "/home/owner/.claude/projects");
   assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({}, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })), "/data/claude/projects",

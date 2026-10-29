@@ -133,11 +133,12 @@ test("Windows: a batch file runs through cmd.exe inside the job, never as a bare
   spawnTree("codex", ["exec", "50%"], { env: windowsEnv }, { platform: "win32", spawn, helperPath: HELPER, exists, launchOptions: { readFile: () => shimText } });
   assert.equal(calls[0]!.args[1], "C:\\Windows\\System32\\cmd.exe");
   assert.equal(calls[0]!.args[2], '"C:\\Windows\\System32\\cmd.exe" /d /e:on /v:off /s /c ""C:\\Tools\\codex.cmd" "exec" "50%%cd:~0,0%""');
-  // A relative PATH entry is not searched, and a missing program spawns as given so Node reports ENOENT.
+  // A relative PATH entry is not searched, and a missing program spawns at a path that cannot exist, so
+  // Node reports ENOENT and never runs a program of that name from the working directory (the repository).
   assert.equal(resolveWindowsCommand("tool", { env: { PATH: "relative\\bin" }, exists: () => true }), null);
   const missing = recordingSpawn();
   spawnTree("nothing-here", ["x"], { env: windowsEnv }, { platform: "win32", spawn: missing.spawn, helperPath: HELPER, exists });
-  assert.equal(missing.calls[0]!.command, "nothing-here");
+  assert.equal(missing.calls[0]!.command, "C:\\Windows\\letagents-not-on-path\\nothing-here");
   assert.equal(missing.calls[0]!.options.windowsHide, true);
 });
 

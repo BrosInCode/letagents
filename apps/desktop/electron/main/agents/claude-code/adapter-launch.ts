@@ -5,6 +5,7 @@ import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import type { ProviderAttachTerminal, ProviderConnectionRef, ProviderContinuationRef, ProviderSpawnRequest, ProviderTerminalPayload } from "../provider-adapter.js";
 import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "../provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "../rental-child-environment.js";
+import { daemonStateDirEnvironment } from "../windows-child-environment.js";
 import { delay, observeFencedExit, sameProcessBirthIdentity, terminateFreshLaunch } from "../provider-evidence.js";
 import { claudeApprovalProfileLabel, requireSupportedClaudeCodeVersion } from "../claude-code-version.js";
 import { ClaudeAdapterStream } from "./adapter-stream.js";
@@ -56,6 +57,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
       ? {
         LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
         LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
+        ...daemonStateDirEnvironment(req.supervisorSocketPath),
         LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
         LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
         ...(req.supervisorWorkerSession ? {

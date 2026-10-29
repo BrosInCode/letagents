@@ -10,7 +10,6 @@ import { lstatSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 
-import { codexLaunchCommand } from "../../../../../../shared/codex-executable.mjs";
 import {
   currentWindowsAccount,
   DAEMON_STATE_DIR_ENV,
@@ -24,6 +23,7 @@ import {
   resolveWindowsCommand,
   terminateTree,
 } from "../../../../../../shared/process-tree.mjs";
+import { ProviderBatchFileError, providerLaunchCommand, type ProviderLaunchOptions } from "../../../../../../shared/provider-executable.mjs";
 import { DEFAULT_STOP_GRACE_MS } from "../provider-evidence.js";
 
 /** What the Windows wrapper embeds to start Cursor inside its own process-tree job. */
@@ -64,26 +64,32 @@ export function cursorMcpConnectorListenPath(
 }
 
 /**
- * The program Cursor's command runs on Windows, without cmd.exe. A batch
- * launcher is replaced by the Node program it runs (shared/codex-executable.mjs).
- * One that only cmd.exe can run is refused: the room message holds line
- * breaks and quotes that cmd.exe cannot pass on. So is a Node launcher with
- * no node.exe of its own inside the packaged app, where this process is
- * Electron, not Node.
+ * The program Cursor's command runs on Windows, without cmd.exe, as the
+ * shared provider resolver finds it (shared/provider-executable.mjs): a
+ * native program as it is, an npm shim as the Node program it runs. One that
+ * only cmd.exe can run is refused: the room message holds line breaks and
+ * quotes that cmd.exe cannot pass on. So is a Node launcher with no node.exe
+ * of its own inside the packaged app, where this process is Electron, not
+ * Node: the wrapper starts Cursor with its own environment.
  */
 export function cursorWindowsProgram(
   cursorBin: string,
-  options: { env?: NodeJS.ProcessEnv; cwd?: string } = {},
+  options: { env?: NodeJS.ProcessEnv; cwd?: string } & Pick<ProviderLaunchOptions, "exists" | "launchOptions" | "electron"> = {},
 ): { file: string; args: string[] } {
   const env = options.env ?? process.env;
-  const resolved = resolveWindowsCommand(cursorBin, { env, cwd: options.cwd });
-  if (!resolved) throw new Error(`Cursor's command '${cursorBin}' was not found on this computer.`);
-  const launch = codexLaunchCommand(resolved, [], { platform: "win32", env });
-  if (launch.windowsVerbatimArguments) {
-    throw new Error(`Cursor's launcher ${resolved} is a batch file that only cmd.exe can run, and cmd.exe cannot pass a room message to it. Set LETAGENTS_CURSOR_AGENT_BIN to the program it starts.`);
+  let launch: ReturnType<typeof providerLaunchCommand>;
+  try {
+    launch = providerLaunchCommand(cursorBin, [], {
+      platform: "win32", env, cwd: options.cwd, exists: options.exists, launchOptions: options.launchOptions, electron: options.electron,
+    });
+  } catch (error) {
+    if (!(error instanceof ProviderBatchFileError)) throw error;
+    const resolved = resolveWindowsCommand(cursorBin, { env, cwd: options.cwd, exists: options.exists });
+    throw new Error(`Cursor's launcher ${resolved ?? cursorBin} is a batch file that only cmd.exe can run, and cmd.exe cannot pass a room message to it. Set LETAGENTS_CURSOR_AGENT_BIN to the program it starts.`);
   }
-  if (process.versions.electron && launch.file === process.execPath) {
-    throw new Error(`Cursor's launcher ${resolved} runs Node.js, and no node.exe is beside it. Install Node.js or set LETAGENTS_CURSOR_AGENT_BIN to Cursor's own program.`);
+  if (!launch.resolved) throw new Error(`Cursor's command '${cursorBin}' was not found on this computer.`);
+  if (launch.envAdditions) {
+    throw new Error(`Cursor's launcher ${launch.resolved} runs Node.js, and no node.exe is beside it. Install Node.js or set LETAGENTS_CURSOR_AGENT_BIN to Cursor's own program.`);
   }
   return { file: launch.file, args: launch.args };
 }

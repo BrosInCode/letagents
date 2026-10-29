@@ -789,7 +789,8 @@ export async function codexDaemonFixture(options: {
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
   const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
   const { SupervisedRoomAuthorizationError } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
-  const { createConnection } = await import("node:net");
+  // The daemon's own endpoint: a socket file on POSIX, a named pipe with its proof on Windows.
+  const { connectDaemon, daemonEndpoint } = await import(new URL("../../../../shared/daemon-endpoint.mjs", import.meta.url).href);
   const { DatabaseSync } = await import("node:sqlite");
   const { generateKeyPairSync, sign } = await import("node:crypto");
   /** The desktop app's key: only a request it signs can change an agent's use of its owner's setup. */
@@ -797,16 +798,16 @@ export async function codexDaemonFixture(options: {
   const root = await mkdtemp(join(tmpdir(), "codex-daemon-"));
   const id = "codex_agent";
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), socketPath: daemonEndpoint(root).listenPath, peerProofPath: daemonEndpoint(root).proofPath,
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
   const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
-    const socket = createConnection(paths.socketPath);
+    const socket = connectDaemon(paths.socketPath);
     let received = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: string) => {
       received += chunk;
       if (!received.includes("\n")) return;
       socket.end();

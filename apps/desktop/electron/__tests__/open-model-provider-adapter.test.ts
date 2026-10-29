@@ -2730,7 +2730,7 @@ test("Open Model instruction shield replaces a link without writing through it",
   assert.deepEqual(await readdir(join(configHome, "opencode")), ["AGENTS.md"]);
 });
 
-test("Open Model instruction shield survives concurrent launches of one runtime", { skip: supervisedAgentsOnly }, async (t) => {
+test("Open Model instruction shield survives concurrent launches of one runtime", async (t) => {
   const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-race-"));
   t.after(() => rm(configHome, { recursive: true, force: true }));
   const target = join(configHome, "opencode", "AGENTS.md");
@@ -4548,21 +4548,22 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
   const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
   const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
-  const { createConnection } = await import("node:net");
+  // The daemon's own endpoint: a socket file on POSIX, a named pipe with its proof on Windows.
+  const { connectDaemon, daemonEndpoint } = await import(new URL("../../../../shared/daemon-endpoint.mjs", import.meta.url).href);
   const { DatabaseSync } = await import("node:sqlite");
   const root = await mkdtemp(join(tmpdir(), "open-model-daemon-"));
   const id = "open_model_agent";
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), socketPath: daemonEndpoint(root).listenPath, peerProofPath: daemonEndpoint(root).proofPath,
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
   const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
-    const socket = createConnection(paths.socketPath);
+    const socket = connectDaemon(paths.socketPath);
     let received = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: string) => {
       received += chunk;
       if (!received.includes("\n")) return;
       socket.end();
@@ -4985,7 +4986,7 @@ async function ownerAllowsTheCommand(agent: OpenModelDaemonAgent, turn: Awaited<
   assert.equal(agent.read<{ state: string }>("SELECT state FROM execution_approval_requests WHERE agent_id=?").at(-1)?.state, "resolved");
 }
 
-test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", { skip: supervisedAgentsOnly }, async () => {
+test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     // The owner saves the new mode while a turn runs, so the process has not been replaced when it crashes.
@@ -5000,7 +5001,7 @@ test("an Open Model agent whose process crashed after its owner changed its perm
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent that was paused and resumed after its owner changed its permission mode still gets answerable approval cards", { skip: supervisedAgentsOnly }, async () => {
+test("an Open Model agent that was paused and resumed after its owner changed its permission mode still gets answerable approval cards", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5016,7 +5017,7 @@ test("an Open Model agent that was paused and resumed after its owner changed it
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent asks its owner about a command while the mode the owner saved waits for the turn to end, and the owner's answer is accepted", { skip: supervisedAgentsOnly }, async () => {
+test("an Open Model agent asks its owner about a command while the mode the owner saved waits for the turn to end, and the owner's answer is accepted", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5032,7 +5033,7 @@ test("an Open Model agent asks its owner about a command while the mode the owne
 const FULL_ACCESS = { "*": "allow" };
 const ASK_BEFORE_WRITE = { "*": "allow", edit: "ask", bash: "ask" };
 
-test("an idle Open Model agent is restarted at once with the permission mode its owner saved, and takes its next message under it", { skip: supervisedAgentsOnly }, async () => {
+test("an idle Open Model agent is restarted at once with the permission mode its owner saved, and takes its next message under it", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   const releaseConvergence = agent.holdConvergence();
   try {
@@ -5060,7 +5061,7 @@ test("an idle Open Model agent is restarted at once with the permission mode its
   } finally { releaseConvergence(); await agent.cleanup(); }
 });
 
-test("an Open Model agent in the middle of a turn finishes it under the old mode, and the queued message waits for the replacement", { skip: supervisedAgentsOnly }, async () => {
+test("an Open Model agent in the middle of a turn finishes it under the old mode, and the queued message waits for the replacement", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5088,7 +5089,7 @@ test("an Open Model agent in the middle of a turn finishes it under the old mode
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent whose background service restarted between its owner's save and the restart is still replaced with the saved mode", { skip: supervisedAgentsOnly }, async () => {
+test("an Open Model agent whose background service restarted between its owner's save and the restart is still replaced with the saved mode", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5110,7 +5111,7 @@ test("an Open Model agent whose background service restarted between its owner's
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent whose background service restarted in the middle of its turn is replaced with the saved mode when that turn ends", { skip: supervisedAgentsOnly }, async () => {
+test("an Open Model agent whose background service restarted in the middle of its turn is replaced with the saved mode when that turn ends", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);

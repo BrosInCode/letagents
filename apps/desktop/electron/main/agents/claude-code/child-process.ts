@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { spawnTree } from "../../../../../../shared/process-tree.mjs";
+import { spawnTree, terminateTree } from "../../../../../../shared/process-tree.mjs";
+import { execProviderFile } from "../../../../../../shared/provider-executable.mjs";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import { withoutRoomAuthority } from "../room-authority-environment.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
@@ -40,7 +40,7 @@ export function claudeCliEnv(base: NodeJS.ProcessEnv = desktopRuntimeEnvironment
 
 function defaultReadVersion(claudeBin: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile(
+    const child = execProviderFile(
       claudeBin,
       ["--version"],
       { timeout: VERSION_TIMEOUT_MS, env: claudeCliEnv() },
@@ -162,6 +162,9 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     },
     markIntentionalClose() {
       intentionalClose = true;
+    },
+    terminate({ graceful, graceMs }) {
+      return terminateTree(child, { graceful, graceMs, requestStop: () => child.stdin?.end() });
     },
   };
 }

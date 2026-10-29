@@ -133,12 +133,17 @@ const CURSOR_CHILD_ENV_ALLOWLIST = new Set([
   "XDG_DATA_HOME",
 ]);
 
+/** Windows reads names without case, and a copy of process.env keeps its own spelling (`ComSpec`, `windir`). */
+const CURSOR_CHILD_ENV_ALLOWLIST_WITHOUT_CASE = new Set([...CURSOR_CHILD_ENV_ALLOWLIST].map((key) => key.toLowerCase()));
+
 function copyAllowedCursorEnv(
   destination: NodeJS.ProcessEnv,
   source: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
 ): void {
   for (const [key, value] of Object.entries(source)) {
-    if (value !== undefined && CURSOR_CHILD_ENV_ALLOWLIST.has(key)) {
+    if (value !== undefined && (CURSOR_CHILD_ENV_ALLOWLIST.has(key)
+      || (platform === "win32" && CURSOR_CHILD_ENV_ALLOWLIST_WITHOUT_CASE.has(key.toLowerCase())))) {
       destination[key] = value;
     }
   }
