@@ -362,8 +362,8 @@ function openAgentSetup(id: DesktopMcpInstallTargetId) {
 }
 
 function refresh(): void {
-  if (activePane.value === "system:diagnostics") {
-    void diagnosticsPane.value?.refresh();
+  if (activePane.value === "system:diagnostics" && diagnosticsPane.value) {
+    void diagnosticsPane.value.refresh();
     return;
   }
   if (isConnectorsPane.value) {

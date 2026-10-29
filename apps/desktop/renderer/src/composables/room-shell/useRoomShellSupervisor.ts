@@ -1,4 +1,4 @@
-import { provide, readonly, shallowReadonly } from "vue";
+import { provide, readonly, shallowReadonly, watch } from "vue";
 import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorRetirementEvent,
@@ -396,7 +396,7 @@ export function useRoomShellSupervisorActions(context: unknown) {
 export function useRoomShellSupervisorSync(context: unknown) {
   const {
     acceptSupervisorStateSnapshot, props, refreshSupervisorEntries, supervisorEntries,
-    supervisorEntriesError, supervisorEntriesState,
+    supervisorEntriesError, supervisorEntriesHaveLoaded, supervisorEntriesState,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState" | "useRoomShellSupervisorActions">;
   const app = context as object;
   provide(supervisorEntriesKey, {
@@ -407,6 +407,13 @@ export function useRoomShellSupervisorSync(context: unknown) {
   });
   const supervisorStateSubscription = useSupervisorStateSubscription({ roomIdentifier: () => props.room.identifier, accept: acceptSupervisorStateSnapshot });
   Object.assign(app, { supervisorStateSubscription });
+  // The flag can turn on after the room mounted (app info arrives later): read the
+  // daemon then, as a first load, instead of keeping the settled empty list.
+  watch(supervisedAgentsSupported, (supported) => {
+    if (!supported) return;
+    supervisorEntriesHaveLoaded.value = false;
+    void refreshSupervisorEntries();
+  });
   return {
     supervisorStateSubscription,
   };

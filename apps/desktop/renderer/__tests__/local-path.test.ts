@@ -18,6 +18,9 @@ describe("local-path: basename", () => {
     assert.equal(localPathBasename("~/Projects"), "Projects");
     assert.equal(localPathBasename("src/app.ts"), "app.ts");
     assert.equal(localPathBasename("app.ts"), "app.ts");
+    // "//" starts a POSIX path, not a UNC root; names keep their spaces.
+    assert.equal(localPathBasename("//usr/local"), "local");
+    assert.equal(localPathBasename("dir/ name "), " name ");
   });
 
   it("reads the last segment of Windows drive, mixed and UNC paths", () => {
@@ -30,7 +33,7 @@ describe("local-path: basename", () => {
   });
 
   it("returns an empty string for roots and empty input, so callers fall back", () => {
-    for (const root of ["", "   ", "/", "C:\\", "C:", "c:/", "\\\\server\\share", "\\\\server\\share\\", null, undefined]) {
+    for (const root of ["", "/", "C:\\", "C:", "c:/", "\\\\server\\share", "\\\\server\\share\\", null, undefined]) {
       assert.equal(localPathBasename(root), "", `root ${String(root)}`);
     }
   });

@@ -20,7 +20,6 @@ import { FileCode, ArrowUpRight } from '@lucide/vue';
 import type { DesktopRoomAgentWork } from '../../../../../../electron/ipc-types';
 import { readableContributionText } from '../../../../../../../../shared/contribution-text.mjs';
 import { contributionChanges } from '../../../../domain/room-contributions';
-import { localPathBasename } from '../../../../domain/local-path';
 import { renderDesktopMarkdown } from '../formatting/markdown';
 const props = defineProps<{ work: DesktopRoomAgentWork }>();
 const changes = computed(() => contributionChanges(props.work));
@@ -62,7 +61,7 @@ const links = ref<Record<string, 'local' | 'github'>>({});
 const opening = ref<string | null>(null);
 const error = ref('');
 const fileError = ref<HTMLElement | null>(null);
-const filename = (path: string) => localPathBasename(path) || path;
+const filename = (path: string) => path.split('/').at(-1) || path;
 const action = (status: string) => (({ added: 'Added', untracked: 'Added', deleted: 'Deleted', renamed: 'Renamed' } as Record<string, string>)[status] ?? 'Updated');
 const request = () => ({ roomId: props.work.roomId, agentKey: props.work.agentKey, sourceMessageId: props.work.sourceMessageId, paths: files.value.map(file => file.path) });
 watch(() => JSON.stringify([props.work.roomId, props.work.agentKey, props.work.sourceMessageId, changes.value?.captured_at]), async (_work, _old, cleanup) => {

@@ -1,13 +1,14 @@
 /**
  * Display helpers for paths on this computer. They accept POSIX paths and the
  * Windows forms (`\` or `/` separators, `C:\` drive roots and `\\server\share`
- * UNC roots), whatever platform the renderer runs on. Room identifiers and
- * URLs are not local paths and must not go through these helpers.
+ * UNC roots), whatever platform the renderer runs on. Room identifiers, URLs
+ * and repo-relative Git paths (always `/`) must not go through these helpers.
  */
 
 /** The root a path starts with: "/", "C:\", "C:", "\\server\share\" or "". */
 function localPathRoot(path: string): string {
-  const unc = /^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.exec(path);
+  // "//" also starts a POSIX path, so only a leading "\\" marks a UNC root.
+  const unc = /^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.exec(path);
   if (unc) return unc[0];
   const drive = /^[A-Za-z]:(?:[\\/]|$)/.exec(path);
   if (drive) return drive[0];
@@ -16,7 +17,7 @@ function localPathRoot(path: string): string {
 
 /** The last segment of a local path, or "" for a root or an empty path. */
 export function localPathBasename(path: string | null | undefined): string {
-  const value = path?.trim() ?? "";
+  const value = path ?? "";
   const rest = value.slice(localPathRoot(value).length);
   return rest.split(/[\\/]/).filter(Boolean).at(-1) ?? "";
 }
@@ -26,7 +27,7 @@ export function localPathBasename(path: string | null | undefined): string {
  * when the path has no parent (a root or a bare name).
  */
 export function localPathDirname(path: string | null | undefined): string {
-  const value = path?.trim() ?? "";
+  const value = path ?? "";
   const root = localPathRoot(value);
   const rest = value.slice(root.length).replace(/[\\/]+$/, "");
   const cut = Math.max(rest.lastIndexOf("/"), rest.lastIndexOf("\\"));

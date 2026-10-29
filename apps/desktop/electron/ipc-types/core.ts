@@ -12,8 +12,8 @@ export interface DesktopAppInfo {
   homePath?: string;
   apiUrl: string | null;
   /**
-   * Whether this app may run supervised agents on this computer (macOS only for
-   * now). Absent from an older main process: the renderer then assumes darwin only.
+   * Whether this app may run supervised agents on this computer: false on Windows
+   * for now. Absent from an older main process: the renderer then assumes not win32.
    */
   supervisedAgentsSupported?: boolean;
 }

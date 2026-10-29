@@ -5,11 +5,12 @@ import { isMacPlatform } from "./room-switcher-shortcut";
 
 /**
  * Whether this app may run supervised agents on this computer. The main
- * process reports it in app info; until that arrives a renderer page guesses
- * from the browser platform, so no daemon read starts on a platform without
- * agents. Outside a page (unit tests under Node) it starts supported.
+ * process reports it in app info (false on Windows; macOS and Linux run agents).
+ * Until that arrives a renderer page guesses from the browser platform, so no
+ * daemon read starts on Windows. Outside a page (unit tests under Node) it
+ * starts supported.
  */
-const supported = ref(typeof document === "undefined" || isMacPlatform());
+const supported = ref(typeof document === "undefined" || !isWindowsPlatform());
 
 /** Development only: `localStorage["letagents.dev.supervisedAgentsSupported"] = "false"` previews the gated state. */
 const DEV_OVERRIDE_KEY = "letagents.dev.supervisedAgentsSupported";
@@ -24,11 +25,11 @@ function devOverride(): boolean | null {
   }
 }
 
-/** App info without the field (an older main process) means agents run only on macOS. */
+/** App info without the field comes from an older main process, which ran agents everywhere but Windows. */
 export function supervisedAgentsSupportedFromAppInfo(
   info: Pick<DesktopAppInfo, "platform" | "supervisedAgentsSupported">,
 ): boolean {
-  return info.supervisedAgentsSupported ?? info.platform === "darwin";
+  return info.supervisedAgentsSupported ?? !isWindowsPlatform(info.platform);
 }
 
 export function applySupervisedAgentsSupport(info: Pick<DesktopAppInfo, "platform" | "supervisedAgentsSupported">): void {

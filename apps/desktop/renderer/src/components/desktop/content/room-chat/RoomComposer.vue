@@ -172,7 +172,7 @@
         />
         <span v-if="suggestionVisible" :id="suggestionDescriptionId" class="sr-only">{{ suggestionDescription }}</span>
       </div>
-      <div v-if="agentHost && roomIdentifier" class="desktop-composer-under">
+      <div v-if="agentHost && roomIdentifier && supervisedAgentsSupported" class="desktop-composer-under">
         <RoomComposerAccessDefault
           :model-value="agentPersonalAccess"
           :room-handle="roomHandle"

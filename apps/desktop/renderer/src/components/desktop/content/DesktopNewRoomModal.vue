@@ -154,7 +154,7 @@ const showTabs = computed(() => !['working', 'success', 'error'].includes(props.
 const showProjectPath = ref(false);
 const showParentPath = ref(false);
 const projectMode = ref<'project' | 'new_project'>(props.step === 'project' ? 'project' : 'new_project');
-const parentLabel = computed(() => localPathBasename(projectParent.value) || 'Choose a location');
+const parentLabel = computed(() => localPathBasename(projectParent.value.trim()) || 'Choose a location');
 const pathExamples = localPathExamples();
 const thisComputer = thisComputerLabel();
 const dialogElement = ref<HTMLElement | null>(null);

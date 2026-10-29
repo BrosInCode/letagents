@@ -44,7 +44,7 @@ function lastAmount(): number | null {
 }
 
 watch(selected, () => { if (giveFailed.value) error.value = null; giveFailed.value = false; });
-watch(() => props.token, () => { void load(); }, { immediate: true });
+watch([() => props.token, supervisedAgentsSupported], () => { void load(); }, { immediate: true });
 
 async function load() {
   const version = ++generation, token = props.token;

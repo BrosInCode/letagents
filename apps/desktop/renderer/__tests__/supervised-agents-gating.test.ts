@@ -21,11 +21,42 @@ import { useRoomShellSupervisorActions } from "../src/composables/room-shell/use
 
 const source = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
 let daemonReads: string[] = [];
+let timers = 0;
+
+/** The parts of the room shell's context that the agent-list refresh reads. */
+function roomShellContext() {
+  const context = {
+    props: { room: { identifier: "room-a" } },
+    supervisorEntries: ref<unknown[]>([{ id: "stale" }]),
+    supervisorEntriesError: ref<string | null>("old error"),
+    supervisorEntriesHaveLoaded: ref(false),
+    supervisorEntriesState: ref("loading"),
+    supervisorEntriesUpdatedAt: ref<string | null>(null),
+    supervisorStatus: ref(null),
+    deliveryRetryNegotiated: ref(false),
+    agentInspectorConfigurationResource: ref({ configuration: null }),
+    agentInspectorRoomMoveResource: ref({ move: null }),
+    agentInspectorRequestState: {
+      agentInspectorSettingsRequestToken: 0, agentInspectorRoomMoveRequestToken: 0, agentInspectorRoomMoveRecoveryTimer: null,
+    },
+    supervisorStateSubscription: { state: () => ({ active: false, lastSnapshotAtMs: null }) },
+    supervisorSyncState: {
+      supervisorEntriesRefreshOwnerActive: true,
+      supervisorEntriesRefreshQueued: false,
+      supervisorEntriesRefreshRequestId: 0,
+      supervisorEntriesMutationVersion: 0,
+      supervisorStatusRequestToken: 0,
+      supervisorStateLastRepairAtMs: 0,
+    },
+  };
+  return context;
+}
 
 beforeEach(() => {
   daemonReads = [];
+  timers = 0;
   resetHostApprovals();
-  Object.assign(globalThis, { window: { letagentsDesktop: { supervisor: {
+  Object.assign(globalThis, { document: { hidden: false }, window: { setTimeout: () => ++timers, clearTimeout: () => undefined, letagentsDesktop: { supervisor: {
     listAgents: async () => { daemonReads.push("listAgents"); return []; },
     getStatus: async () => { daemonReads.push("getStatus"); throw new Error("unsupported"); },
     listHostApprovals: async () => { daemonReads.push("listHostApprovals"); return { available: false, approvals: [], error: "unsupported" }; },
@@ -35,13 +66,14 @@ beforeEach(() => {
 afterEach(() => overrideSupervisedAgentsSupported(true));
 
 describe("supervised agents support flag", () => {
-  it("reads the main-process field, and assumes macOS only when an older main process omits it", () => {
+  it("reads the main-process field, and assumes everything but Windows when an older main process omits it", () => {
     assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "win32", supervisedAgentsSupported: false }), false);
     assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "darwin", supervisedAgentsSupported: true }), true);
     assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "darwin", supervisedAgentsSupported: false }), false);
     assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "darwin" }), true);
     assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "win32" }), false);
-    assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "linux" }), false);
+    assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "linux" }), true);
+    assert.equal(supervisedAgentsSupportedFromAppInfo({ platform: "linux", supervisedAgentsSupported: true }), true);
   });
 
   it("updates the shared reactive flag from app info", () => {
@@ -73,23 +105,7 @@ describe("no daemon reads where agents cannot run", () => {
 
   it("the room's agent list settles empty and ready, with no error and no daemon read", async () => {
     overrideSupervisedAgentsSupported(false);
-    const context = {
-      props: { room: { identifier: "room-a" } },
-      supervisorEntries: ref([{ id: "stale" }]),
-      supervisorEntriesError: ref<string | null>("old error"),
-      supervisorEntriesHaveLoaded: ref(false),
-      supervisorEntriesState: ref("loading"),
-      supervisorEntriesUpdatedAt: ref<string | null>(null),
-      supervisorStatus: ref(null),
-      supervisorSyncState: {
-        supervisorEntriesRefreshOwnerActive: true,
-        supervisorEntriesRefreshQueued: false,
-        supervisorEntriesRefreshRequestId: 0,
-        supervisorEntriesMutationVersion: 0,
-        supervisorStatusRequestToken: 0,
-        supervisorStateLastRepairAtMs: 0,
-      },
-    };
+    const context = roomShellContext();
     const actions = useRoomShellSupervisorActions(context);
     await actions.refreshSupervisorEntries();
     assert.equal(await actions.refreshSupervisorStatus(), null);
@@ -98,6 +114,15 @@ describe("no daemon reads where agents cannot run", () => {
     assert.equal(context.supervisorEntriesState.value, "ready");
     assert.equal(context.supervisorEntriesError.value, null);
     assert.equal(context.supervisorEntriesHaveLoaded.value, true);
+    assert.equal(timers, 0, "no repair timer is scheduled");
+  });
+
+  it("the room's agent list reads the daemon where agents run", async () => {
+    overrideSupervisedAgentsSupported(true);
+    const context = roomShellContext();
+    await useRoomShellSupervisorActions(context).refreshSupervisorEntries();
+    assert.deepEqual(daemonReads.sort(), ["getStatus", "listAgents"]);
+    assert.equal(timers, 1, "the repair timer is scheduled");
   });
 
   it("still reads the daemon where agents run", async () => {
@@ -121,6 +146,10 @@ describe("agent entry points show the one notice where agents cannot run", () =>
       source("components/desktop/content/room-chat/RoomComposer.vue"),
       /:agent-rows="agentHost && supervisedAgentsSupported \? agentRows : null"/,
     );
+    assert.match(
+      source("components/desktop/content/room-chat/RoomComposer.vue"),
+      /<div v-if="agentHost && roomIdentifier && supervisedAgentsSupported" class="desktop-composer-under">/,
+    );
   });
 
   it("Give an agent, renting out and agent settings show the notice", () => {
@@ -130,6 +159,9 @@ describe("agent entry points show the one notice where agents cannot run", () =>
     const settings = source("components/desktop/content/SettingsView.vue");
     assert.match(settings, /v-else-if="!supervisedAgentsSupported && agentOnlySettingsPanes\.has\(activePane\)"/);
     assert.match(settings, /\["account:renting", "system:supervisor", "system:diagnostics"\]/);
+    const agentsPane = source("components/desktop/settings/panes/SettingsAgentsPane.vue");
+    assert.match(agentsPane, /<SupervisedAgentsUnavailableNotice v-if="!supervisedAgentsSupported" \/>\s*<div v-else class="settings-control-list">/);
+    assert.match(agentsPane, /if \(supervisedAgentsSupported\.value\) void loadCommitIdentity\(\);/);
     assert.match(source("components/desktop/content/RentMarketplaceView.vue"), /<RentProviderDashboard v-if="supervisedAgentsSupported" \/>\s*<SupervisedAgentsUnavailableNotice v-else \/>/);
   });
 });
