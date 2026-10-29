@@ -1,0 +1,105 @@
+# TEMPORARY (iteration only; removed before review): measures the Windows
+# owner-private cost before (staging) and after (this branch), each with the
+# desktop Windows CI fixes from #1791 merged in, and runs the daemon suite.
+name: Win3 owner-private perf (temporary)
+
+on:
+  pull_request:
+    branches:
+      - staging
+
+permissions:
+  contents: read
+
+jobs:
+  windows-perf:
+    name: windows-perf (${{ matrix.side }})
+    runs-on: windows-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [before, after, after-daemon-suite]
+    env:
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      - name: Use a scratch home and keep committed line endings
+        shell: bash
+        run: |
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          git config --global core.autocrlf false
+          git config --global user.email ci@example.invalid
+          git config --global user.name ci
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the side and merge the desktop Windows CI fixes (#1791)
+        shell: bash
+        run: |
+          if [ "${{ matrix.side }}" = "before" ]; then git checkout -q origin/staging; fi
+          git log --oneline -1
+          git fetch -q origin claude/win2-desktop-ci-a8fb64
+          git merge -q --no-edit FETCH_HEAD
+          git log --oneline -3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+          npm rebuild
+          node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      - name: Time the slow files
+        if: ${{ matrix.side != 'after-daemon-suite' }}
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          status=0
+          for file in execution-storage-migration supervised-agent-inbox-store room-turn-files room-turn-attachments \
+            supervised-agent-delivery-admission-stop supervised-agent-delivery-intake-polling supervised-agent-delivery-scheduled-follow-ups \
+            owner-private-sites; do
+            [ -f "daemon/__tests__/${file}.test.ts" ] || continue
+            start=$(date +%s)
+            node --import tsx --test --test-timeout=600000 "daemon/__tests__/${file}.test.ts" > "${RUNNER_TEMP}/${file}.log" 2>&1; code=$?
+            end=$(date +%s)
+            echo "TIMING ${{ matrix.side }} daemon/${file}: $((end - start)) s, exit ${code}, $(grep -E '^# (pass|fail) ' "${RUNNER_TEMP}/${file}.log" | tr '\n' ' ')"
+            [ "${code}" = 0 ] || { status=1; grep -E "^not ok" "${RUNNER_TEMP}/${file}.log" | head -20; }
+          done
+          for file in open-model-provider-adapter owner-private-sites; do
+            [ -f "electron/__tests__/${file}.test.ts" ] || continue
+            start=$(date +%s)
+            node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks "electron/__tests__/${file}.test.ts" > "${RUNNER_TEMP}/e-${file}.log" 2>&1; code=$?
+            end=$(date +%s)
+            echo "TIMING ${{ matrix.side }} electron/${file}: $((end - start)) s, exit ${code}, $(grep -E '^# (pass|fail) ' "${RUNNER_TEMP}/e-${file}.log" | tr '\n' ' ')"
+            [ "${code}" = 0 ] || { status=1; grep -E "^not ok" "${RUNNER_TEMP}/e-${file}.log" | head -20; }
+          done
+          cd ../..
+          start=$(date +%s)
+          node --import tsx --test src/mcp/__tests__/owner-private-fs.test.ts > "${RUNNER_TEMP}/helper.log" 2>&1; code=$?
+          end=$(date +%s)
+          echo "TIMING ${{ matrix.side }} helper: $((end - start)) s, exit ${code}, $(grep -E '^# (pass|fail) |costs:' "${RUNNER_TEMP}/helper.log" | tr '\n' ' ')"
+          [ "${code}" = 0 ] || grep -E "^not ok" "${RUNNER_TEMP}/helper.log" | head -20
+          exit 0
+
+      - name: Daemon suite
+        if: ${{ matrix.side == 'after-daemon-suite' }}
+        shell: bash
+        run: |
+          start=$(date +%s)
+          npm --prefix apps/desktop run test:daemon > "${RUNNER_TEMP}/daemon.log" 2>&1; code=$?
+          end=$(date +%s)
+          echo "TIMING daemon suite: $((end - start)) s, exit ${code}"
+          grep -E "^# (tests|pass|fail|skipped|duration_ms) " "${RUNNER_TEMP}/daemon.log" | tail -6
+          grep -E "^not ok" "${RUNNER_TEMP}/daemon.log" | head -40
+          exit "${code}"
