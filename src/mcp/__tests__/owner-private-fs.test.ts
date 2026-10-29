@@ -42,6 +42,7 @@ import {
   sddlExtraGrantSids,
   sddlHasOnlyAdministratorAccess,
   sddlHasProfileDefaultAccess,
+  sddlOwnerAliases,
   sddlPassesPrivateEntriesOn,
   sddlHasPrivateEntries,
   sddlIsOwnerPrivate,
@@ -195,7 +196,8 @@ test("Windows: a protect reads the owner, sets owner + DACL, reads back; nothing
       if (tool === "powershell.exe") return options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.split("\n").map(() => `ok:${PRIVATE_FOLDER}`).join("\r\n");
       return "";
     };
-    const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, run: async (...args) => runner(...args), runSync: runner });
+    // COMPUTERNAME set, as in a normal process: the aliases come from whoami (no PowerShell call for them).
+    const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", COMPUTERNAME: "host" }, run: async (...args) => runner(...args), runSync: runner });
     const options = { platform: "win32" as const, windowsSecurity: security };
     await protectOwnerPrivate(folder, "directory", options);
     // The owner is read first (an existing entry may be another account's), then owner, DACL, read-back.
@@ -836,6 +838,29 @@ test("Windows: a batch privacy check reads every path in one call", () => {
     assert.equal(everyOwnerPrivateSync([{ path: join(root, "a"), info: stat }, { path: join(root, "c"), info: stat }], options), false);
     assert.equal(reads.length, 2);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: without COMPUTERNAME, the user's SDDL aliases come from how Windows writes the SID as an owner", () => {
+  const asked: string[] = [];
+  const runSync = (file: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+    if (file.endsWith("whoami.exe")) return '"fv-az1-2\\Administrator","S-1-5-21-1-2-3-500"\r\n';
+    const paths = options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.split("\n");
+    asked.push(...paths);
+    return paths.map(path => (path.startsWith("owner-alias:") ? "ok:O:LA" : "error:")).join("\r\n");
+  };
+  // A process started with a reduced environment (no COMPUTERNAME): the reader answers.
+  const reduced = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, runSync });
+  assert.deepEqual(reduced.currentUserAliasesSync!(), ["LA"]);
+  assert.deepEqual(asked, ["owner-alias:S-1-5-21-1-2-3-500"]);
+  assert.deepEqual(reduced.currentUserAliasesSync!(), ["LA"], "asked once");
+  assert.equal(asked.length, 1);
+  // With COMPUTERNAME, as before: whoami's domain and the computer name decide, and nothing is asked.
+  const full = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", COMPUTERNAME: "fv-az1-2" }, runSync });
+  assert.deepEqual(full.currentUserAliasesSync!(), ["LA"]);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(sddlOwnerAliases("O:S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001"), []);
+  assert.deepEqual(sddlOwnerAliases(null, "S-1-5-21-1-2-3-1001"), [], "no answer: no alias (a file it owns reads as not private)");
+  assert.deepEqual(sddlOwnerAliases("O:LA;x", "S-1-5-21-1-2-3-500"), []);
 });
 
 test("Windows: the built-in Administrator alias is resolved from whoami and the computer name", () => {
@@ -1533,4 +1558,15 @@ test("real Windows: an older version's Administrators-only state is made private
     assert.throws(() => readOwnerPrivateFileSync(shared, "utf8", { upgradeAdministratorsOnly: true }), { code: "EOWNERPRIVATE" });
     assert.equal(security.readSddlSync([shared])[0], widened);
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("real Windows: a process without COMPUTERNAME sees the same SDDL aliases for this account", { skip: windowsOnly }, () => {
+  const withName = createWindowsSecurity();
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) if (name.toUpperCase() === "COMPUTERNAME") delete env[name];
+  const reduced = createWindowsSecurity({ env });
+  const expected = withName.currentUserAliasesSync!();
+  console.log(`this account's SDDL aliases: ${JSON.stringify(expected)}`);
+  assert.deepEqual(reduced.currentUserAliasesSync!(), expected);
+  assert.equal(reduced.currentUserSidSync(), withName.currentUserSidSync());
 });

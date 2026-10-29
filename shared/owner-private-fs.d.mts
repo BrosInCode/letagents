@@ -37,6 +37,8 @@ export interface WindowsSecurity {
   upgradeObjectSync?(path: string): string | null;
 }
 export interface SecretObject { sddl: string; data: Buffer }
+/** An "owner-alias:<SID>" answer (`O:LA`, or `O:<SID>`): the SDDL aliases that name that SID. */
+export declare function sddlOwnerAliases(answer: string | null | undefined, sid: string): string[];
 /** An "object:" answer, `<SDDL>|<base64 bytes>`, or null. */
 export declare function parseObjectAnswer(answer: string | null | undefined): SecretObject | null;
 export type ToolRunner = (file: string, args: readonly string[], options: { env: NodeJS.ProcessEnv }) => Promise<string>;

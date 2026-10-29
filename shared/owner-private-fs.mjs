@@ -58,6 +58,8 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // the file renamed meanwhile cannot make the answer describe another file:
 //   "object:<path>"  the owner and DACL of the handle, and the file's bytes
 //                    read through it: "ok:<SDDL>|<base64>";
+//   "owner-alias:<SID>" how Windows writes that SID as an SDDL owner
+//                    ("O:LA", or "O:<SID>" when it has no alias);
 //   "upgrade:<path>" if the handle's owner is this account or Administrators
 //                    and only this account, SYSTEM and Administrators are
 //                    allowed in (plain allow and deny entries only), make it
@@ -82,6 +84,7 @@ const ANSWER_FUNCTION = [
   "        return 'ok:' + $sddl + '|' + [Convert]::ToBase64String($bytes)",
   "      } finally { $fs.Dispose() }",
   "    }",
+  "    if ($p.StartsWith('owner-alias:')) { return 'ok:' + [System.Security.AccessControl.RawSecurityDescriptor]::new('O:' + $p.Substring(12)).GetSddlForm([System.Security.AccessControl.AccessControlSections]::Owner) }",
   "    if ($p.StartsWith('upgrade:')) {",
   "      $rights = [System.Security.AccessControl.FileSystemRights]'ReadData, ReadPermissions, ChangePermissions, TakeOwnership'",
   "      $fs = [System.IO.FileStream]::new($p.Substring(8), [System.IO.FileMode]::Open, $rights, [System.IO.FileShare]'ReadWrite, Delete', 4096, [System.IO.FileOptions]::None)",
@@ -326,6 +329,17 @@ function startSddlServer(powershell, env) {
 
 const SERVER_PATH = /^[\x20-\x7e]+$/;
 
+/**
+ * An "owner-alias:<SID>" answer, `O:<owner>` as Windows writes that SID in
+ * SDDL: the alias it uses for it ("LA" for this machine's built-in
+ * Administrator), or none. Anything else is none (an alias not known stays a
+ * SID, so a file it owns reads as not private).
+ */
+export function sddlOwnerAliases(answer, sid) {
+  const match = /^O:([A-Z]{2})$/.exec(String(answer ?? ""));
+  return match && match[1] !== sid ? [match[1]] : [];
+}
+
 /** An "object:" answer: `<SDDL>|<base64 bytes>`, or null. */
 export function parseObjectAnswer(answer) {
   if (typeof answer !== "string") return null;
@@ -557,9 +571,11 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
   };
   let sid = null;
   let aliases = null;
+  // Without COMPUTERNAME (a process started with a reduced environment) the
+  // aliases come from Windows' own SDDL writer, through the reader.
   const remember = (output) => {
     const user = parseWhoamiUser(output);
-    aliases = userSidAliases(user, env.COMPUTERNAME);
+    aliases = env.COMPUTERNAME ? userSidAliases(user, env.COMPUTERNAME) : null;
     return user.sid;
   };
   const environment = paths => ({ ...env, [PATHS_VARIABLE]: encodeSddlPaths(paths) });
@@ -572,8 +588,20 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
       sid ??= remember(runSync(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));
       return sid;
     },
-    async currentUserAliases() { await this.currentUserSid(); return aliases; },
-    currentUserAliasesSync() { this.currentUserSidSync(); return aliases; },
+    async currentUserAliases() {
+      const user = await this.currentUserSid();
+      if (aliases === null) {
+        try { aliases = sddlOwnerAliases((await this.readSddl([`owner-alias:${user}`]))[0], user); } catch { aliases = []; }
+      }
+      return aliases;
+    },
+    currentUserAliasesSync() {
+      const user = this.currentUserSidSync();
+      if (aliases === null) {
+        try { aliases = sddlOwnerAliases(this.readSddlSync([`owner-alias:${user}`])[0], user); } catch { aliases = []; }
+      }
+      return aliases;
+    },
     async readSddl(paths) {
       if (server?.usable && paths.length) {
         try { return await server.read(paths); } catch { /* the one-shot read below answers instead */ }

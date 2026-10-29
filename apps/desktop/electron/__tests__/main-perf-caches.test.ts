@@ -38,7 +38,7 @@ fs.readFileSync = ((...args: Parameters<typeof originalReadFileSync>) => {
 }) as typeof originalReadFileSync;
 // Windows reads the state file after it lstats it (through a handle of its own, or of the permissions reader).
 const originalLstatSync = fs.lstatSync;
-fs.lstatSync = ((...args: Parameters<typeof originalLstatSync>) => {
+(fs as { lstatSync: typeof originalLstatSync }).lstatSync = ((...args: Parameters<typeof originalLstatSync>) => {
   if (process.platform === "win32" && String(args[0]) === env.statePath) counts.stateReads += 1;
   return originalLstatSync(...args);
 }) as typeof originalLstatSync;
