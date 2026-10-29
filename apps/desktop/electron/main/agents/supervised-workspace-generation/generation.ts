@@ -334,13 +334,13 @@ async function prepareWindowsGeneration(
   const providerGit = await prepareWindowsWorktree(support, generationRoot, liveSourceRoot, limits);
   await createPrivateDir(join(generationRoot, BASELINE_FILES_NAME));
   const { tracked } = await sourceVisiblePaths(support, limits);
-  await recordWindowsBaselineModes(support, join(generationRoot, BASELINE_FILES_NAME), tracked, limits);
+  const baselineModes = await recordWindowsBaselineModes(support, join(generationRoot, BASELINE_FILES_NAME), tracked, limits);
   const dependencyRoots = await linkIgnoredDependencyRoots(support, liveSourceRoot, limits);
   await installDependencyExcludes(providerGit, dependencyRoots, liveSourceRoot, generationId);
   await installDependencyExcludes(authorityRoot, dependencyRoots, liveSourceRoot, generationId);
   await assertSafeBareAlternateRoot(providerGit, support.gitObjectDirectory, limits);
   await assertSafeBareAlternateRoot(authorityRoot, support.gitObjectDirectory, limits);
-  const sourceTree = await carryDirtyTrackedFiles(support, authorityRoot, providerGit, liveSourceRoot, tracked, limits);
+  const sourceTree = await carryDirtyTrackedFiles(support, authorityRoot, providerGit, liveSourceRoot, tracked, baselineModes, limits);
   const baselineTreeOid = await snapshotWorktree(
     authorityRoot,
     liveSourceRoot,

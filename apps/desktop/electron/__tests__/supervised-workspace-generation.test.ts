@@ -1164,6 +1164,90 @@ windowsTest("objects pruned from the repository fail resume and export closed, a
   });
 });
 
+generationTest("staged and unstaged deletions, renames, and file/folder replacements are carried into the generation", async () => {
+  await withRepository(async (repo) => {
+    for (const name of ["deleted-staged.txt", "deleted-unstaged.txt", "rename-old.txt", "becomes-folder"]) {
+      writeFileSync(join(repo, name), `${name}\n`);
+    }
+    mkdirSync(join(repo, "becomes-file"));
+    writeFileSync(join(repo, "becomes-file", "child.txt"), "child\n");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "topology fixtures"]);
+    git(repo, ["rm", "-q", "deleted-staged.txt"]);
+    rmSync(join(repo, "deleted-unstaged.txt"));
+    git(repo, ["mv", "rename-old.txt", "rename-new.txt"]);
+    git(repo, ["rm", "-q", "becomes-folder"]);
+    mkdirSync(join(repo, "becomes-folder"));
+    writeFileSync(join(repo, "becomes-folder", "inside.txt"), "inside\n");
+    git(repo, ["rm", "-rq", "becomes-file"]);
+    writeFileSync(join(repo, "becomes-file"), "now a file\n");
+    git(repo, ["add", "becomes-folder/inside.txt", "becomes-file"]);
+    const expectedStatus = carriedStatus(git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]));
+
+    const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "carried-topology" });
+    assert.equal(git(handle.liveSourceRoot, ["status", "--porcelain=v1", "--untracked-files=all"]), expectedStatus);
+    for (const name of ["deleted-staged.txt", "deleted-unstaged.txt", "rename-old.txt"]) {
+      assert.equal(existsSync(join(handle.liveWorkspace, name)), false, name);
+    }
+    assert.equal(readFileSync(join(handle.liveWorkspace, "rename-new.txt"), "utf8"), "rename-old.txt\n");
+    assert.equal(readFileSync(join(handle.liveWorkspace, "becomes-folder", "inside.txt"), "utf8"), "inside\n");
+    assert.equal(readFileSync(join(handle.liveWorkspace, "becomes-file"), "utf8"), "now a file\n");
+    writeFileSync(join(handle.liveWorkspace, "rename-new.txt"), "agent\n");
+    const receipt = await handle.retireAndReconcile();
+    assert.deepEqual(receipt.appliedPaths, ["rename-new.txt"]);
+    assert.equal(readFileSync(join(repo, "rename-new.txt"), "utf8"), "agent\n");
+    assert.equal(existsSync(join(repo, "deleted-staged.txt")), false);
+  });
+});
+
+windowsTest("read-only tracked files start read-only in the worktree and keep their attribute, whatever their name", async () => {
+  await withRepository(async (repo) => {
+    for (const name of ["read-only.txt", "__proto__"]) writeFileSync(join(repo, name), `${name}\n`);
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "read-only fixtures"]);
+    for (const name of ["read-only.txt", "__proto__"]) chmodSync(join(repo, name), 0o444);
+    try {
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "read-only-start" });
+      for (const name of ["read-only.txt", "__proto__"]) {
+        assert.equal(lstatSync(join(handle.liveWorkspace, name)).mode & 0o7777, 0o444, name);
+      }
+      // The agent clears the attribute to edit one file; nothing else changes it.
+      chmodSync(join(handle.liveWorkspace, "__proto__"), 0o666);
+      writeFileSync(join(handle.liveWorkspace, "__proto__"), "agent\n");
+      writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
+      const receipt = await handle.retireAndReconcile();
+      assert.deepEqual(receipt.appliedPaths.sort(), ["__proto__", "tracked.txt"]);
+      assert.equal(readFileSync(join(repo, "__proto__"), "utf8"), "agent\n");
+      assert.equal(readFileSync(join(repo, "read-only.txt"), "utf8"), "read-only.txt\n");
+      assert.equal(lstatSync(join(repo, "read-only.txt")).mode & 0o7777, 0o444);
+    } finally {
+      for (const name of ["read-only.txt", "__proto__"]) chmodSync(join(repo, name), 0o666);
+    }
+  });
+});
+
+windowsTest("the agent's own Git handles a path that is long only inside the generation", async () => {
+  await withRepository(async (repo) => {
+    // About 240 characters in the workspace; the generation folder adds about 60 (MAX_PATH is 260).
+    const segments: string[] = [];
+    while (join(repo, ...segments, "file.txt").length < 230) segments.push("long-folder-name");
+    const relativePath = join(...segments, "file.txt");
+    mkdirSync(join(repo, ...segments), { recursive: true });
+    writeFileSync(join(repo, relativePath), "deep\n");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "deep file"]);
+
+    const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "long-path" });
+    assert.ok(join(handle.liveWorkspace, relativePath).length > 260);
+    assert.equal(git(handle.liveSourceRoot, ["config", "--get", "core.longpaths"]), "true");
+    writeFileSync(join(handle.liveWorkspace, relativePath), "agent\n");
+    git(handle.liveSourceRoot, ["add", "-A"]);
+    assert.match(git(handle.liveSourceRoot, ["status", "--porcelain=v1"]), /^M  /);
+    await handle.retireAndReconcile();
+    assert.equal(readFileSync(join(repo, relativePath), "utf8"), "agent\n");
+  });
+});
+
 test("git.exe is found on absolute PATH folders with a .exe or .com PATHEXT name only", () => {
   const present = new Set([
     "relative\\bin\\git.exe",

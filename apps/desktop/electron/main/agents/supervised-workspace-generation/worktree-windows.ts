@@ -11,14 +11,14 @@
  */
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, readdir, statfs, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { chmod, lstat, mkdir, readdir, statfs, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 import { isOwnerPrivate, openNoFollow, privateEntryCreated, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
 import { BASELINE_FILES_NAME, type GenerationManifest, PROVIDER_GIT_NAME, type RegularFileInfo, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport } from "./types.js";
 import { GIT_ENV, ProcessExitError, canonicalGitControlTarget, cloneRegularFile, gitArgs, gitAuthorityText, gitControlPath, gitExecutable, gitHooksPath, readStableGitControlFile, runGit, runGitWithAuthority, runProcess, sourceAuthorityBuffer, sourceAuthorityText, sourceGitEnvironment } from "./git.js";
 import { assertSafeAncestors } from "./manifest.js";
 import { assertSafeRelativePath, generationError, gitRelativePath, isErrno, limitError, splitNulBuffer } from "./helpers.js";
-import { diffTreeEntries, snapshotWorktree } from "./worktree.js";
+import { diffTreeEntries, removeEmptyAncestors, snapshotWorktree } from "./worktree.js";
 
 /** Shown to the agent on a turn that runs in a Windows generation. */
 export const WINDOWS_FRESH_WORKTREE_NOTE = "fresh git worktree: untracked files not present";
@@ -95,6 +95,8 @@ export async function prepareWindowsWorktree(
     ["core.fsmonitor", "false"],
     ["gc.auto", "0"],
     ["extensions.worktreeConfig", "true"],
+    // The agent's own Git: the generation folder lengthens every path.
+    ["core.longpaths", "true"],
     ...lineEndings,
   ] as const) {
     await runGit(providerGit, ["config", "--local", key, value], 1024 * 1024);
@@ -179,12 +181,15 @@ async function sourceLineEndings(support: SupervisedWorkspaceGenerationSupport):
 }
 
 /**
- * Make the worktree's tracked files the workspace's own bytes: every tracked
- * path whose raw bytes differ from the checkout (an edit, a staged file, a
- * deletion, or a file the user's Git converted differently) is copied or
- * removed, then the workspace's index is reproduced so the agent sees its
- * staged state. Returns the raw tree of the workspace's tracked files; the
- * caller's baseline snapshot of the worktree must equal it.
+ * Make the worktree's tracked files the workspace's own: every tracked path
+ * whose raw bytes differ from the checkout (an edit, a staged or unstaged
+ * deletion, a rename, a file replaced by a folder or back, or a file the
+ * user's Git converted differently) is removed or copied, deletions first.
+ * The source side is built from an EMPTY index holding only the tracked
+ * paths that are regular files now, so a deleted path cannot survive from
+ * HEAD. Then the read-only attributes are reproduced, and the workspace's
+ * index, so the agent sees its staged state. Returns the raw tree of the
+ * workspace's tracked files; the caller's baseline snapshot must equal it.
  */
 export async function carryDirtyTrackedFiles(
   support: SupervisedWorkspaceGenerationSupport,
@@ -192,36 +197,60 @@ export async function carryDirtyTrackedFiles(
   providerGit: string,
   liveSourceRoot: string,
   trackedPaths: readonly string[],
+  baselineModes: ReadonlyMap<string, number>,
   limits: SupervisedWorkspaceGenerationLimits,
 ): Promise<string> {
-  const checkoutTree = await snapshotWorktree(authorityRoot, liveSourceRoot, join(authorityRoot, "letagents-checkout.index"), support.headOid, limits);
+  const checkoutIndex = join(authorityRoot, "letagents-checkout.index");
+  const checkoutTree = await snapshotWorktree(authorityRoot, liveSourceRoot, checkoutIndex, support.headOid, limits);
+  await unlink(checkoutIndex);
+  const presentPaths: string[] = [];
+  for (const relativePath of trackedPaths) {
+    assertSafeRelativePath(relativePath, limits);
+    await assertSafeAncestors(support.sourceRoot, relativePath, false);
+    const info = await lstat(join(support.sourceRoot, relativePath)).catch((error) => {
+      if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) return null;
+      throw error;
+    });
+    if (info?.isFile()) presentPaths.push(relativePath);
+  }
   const sourceIndex = join(authorityRoot, "letagents-source.index");
   await unlink(sourceIndex).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
   const env = { ...GIT_ENV, GIT_INDEX_FILE: sourceIndex };
-  await runGitWithAuthority(authorityRoot, support.sourceRoot, ["read-tree", support.headOid], limits.maxPatchBytes, env);
-  const pathList = Buffer.concat(trackedPaths.map((path) => Buffer.from(`${gitRelativePath(path)}\0`)));
-  await runProcessInAuthority(authorityRoot, support.sourceRoot, ["update-index", "--add", "--remove", "-z", "--stdin"], pathList, limits.maxPatchBytes, env);
+  const pathList = Buffer.concat(presentPaths.map((path) => Buffer.from(`${gitRelativePath(path)}\0`)));
+  await runProcessInAuthority(authorityRoot, support.sourceRoot, ["update-index", "--add", "-z", "--stdin"], pathList, limits.maxPatchBytes, env);
   const sourceTree = await gitAuthorityText(authorityRoot, support.sourceRoot, ["write-tree"], limits.maxPatchBytes, env);
   if (!/^[a-f0-9]{40,64}$/.test(sourceTree)) throw generationError("Git returned an invalid snapshot tree id.", "INVALID_GIT_TREE");
   await unlink(sourceIndex);
-  await unlink(join(authorityRoot, "letagents-checkout.index"));
 
-  let copiedBytes = 0;
-  for (const { sourceRelativePath, after } of await diffTreeEntries(authorityRoot, checkoutTree, sourceTree, limits)) {
+  const changes = await diffTreeEntries(authorityRoot, checkoutTree, sourceTree, limits);
+  const deletions = changes.filter((change) => change.after === null)
+    .sort((a, b) => b.sourceRelativePath.split(sep).length - a.sourceRelativePath.split(sep).length);
+  for (const { sourceRelativePath } of deletions) {
     assertSafeRelativePath(sourceRelativePath, limits);
+    await assertSafeAncestors(liveSourceRoot, sourceRelativePath, false);
     const destination = join(liveSourceRoot, sourceRelativePath);
-    await assertSafeAncestors(liveSourceRoot, sourceRelativePath, after !== null);
     await unlink(destination).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
-    if (!after) continue;
+    await removeEmptyAncestors(dirname(destination), liveSourceRoot);
+  }
+  let copiedBytes = 0;
+  for (const { sourceRelativePath } of changes.filter((change) => change.after !== null)) {
+    assertSafeRelativePath(sourceRelativePath, limits);
     await assertSafeAncestors(support.sourceRoot, sourceRelativePath, false);
+    await assertSafeAncestors(liveSourceRoot, sourceRelativePath, true);
     const source = join(support.sourceRoot, sourceRelativePath);
+    const destination = join(liveSourceRoot, sourceRelativePath);
     const info = await lstat(source);
     copiedBytes += info.size;
     if (info.size > limits.maxFileBytes || copiedBytes > limits.maxTotalUntrackedBytes) {
       throw limitError("dirty tracked bytes", limits.maxTotalUntrackedBytes);
     }
-    await mkdir(dirname(destination), { recursive: true });
+    await unlink(destination).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
     await cloneRegularFile(source, destination, limits.maxFileBytes);
+  }
+  // A clean read-only file is not copied, so the checkout made it writable.
+  for (const [relativePath, mode] of baselineModes) {
+    const destination = join(liveSourceRoot, relativePath);
+    if ((await lstat(destination).catch(() => null))?.isFile()) await chmod(destination, mode);
   }
   const administration = await worktreeAdministration(providerGit, liveSourceRoot);
   await unlink(join(administration, "index"));
@@ -256,19 +285,21 @@ export async function recordWindowsBaselineModes(
   baselineFilesRoot: string,
   trackedPaths: readonly string[],
   limits: SupervisedWorkspaceGenerationLimits,
-): Promise<void> {
-  const modes: Record<string, number> = {};
+): Promise<Map<string, number>> {
+  const modes = new Map<string, number>();
   for (const relativePath of trackedPaths) {
     assertSafeRelativePath(relativePath, limits);
     const info = await lstat(join(support.sourceRoot, relativePath)).catch((error) => {
       if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) return null;
       throw error;
     });
-    if (info?.isFile() && (info.mode & 0o7777) !== WINDOWS_DEFAULT_FILE_MODE) modes[relativePath] = info.mode & 0o7777;
+    if (info?.isFile() && (info.mode & 0o7777) !== WINDOWS_DEFAULT_FILE_MODE) modes.set(relativePath, info.mode & 0o7777);
   }
+  // An array of pairs: a path such as "__proto__" is never an object key here.
   const path = join(baselineFilesRoot, BASELINE_MODES_NAME);
-  await writeFile(path, `${JSON.stringify(modes)}\n`, { flag: "wx" });
+  await writeFile(path, `${JSON.stringify([...modes])}\n`, { flag: "wx" });
   await privateEntryCreated(path, "file");
+  return modes;
 }
 
 export async function readWindowsBaselineModes(manifest: GenerationManifest): Promise<Map<string, number>> {
@@ -286,15 +317,14 @@ export async function readWindowsBaselineModes(manifest: GenerationManifest): Pr
   } finally {
     await descriptor.close();
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw generationError("Windows baseline metadata is malformed.", "INVALID_BASELINE_METADATA");
-  }
+  if (!Array.isArray(parsed)) throw generationError("Windows baseline metadata is malformed.", "INVALID_BASELINE_METADATA");
   const result = new Map<string, number>();
-  for (const [relativePath, mode] of Object.entries(parsed)) {
-    if (!Number.isInteger(mode) || (mode as number) < 0 || (mode as number) > 0o7777) {
+  for (const entry of parsed) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string"
+      || !Number.isInteger(entry[1]) || entry[1] < 0 || entry[1] > 0o7777) {
       throw generationError("Windows baseline metadata is malformed.", "INVALID_BASELINE_METADATA");
     }
-    result.set(relativePath, mode as number);
+    result.set(entry[0], entry[1]);
   }
   return result;
 }
