@@ -5,7 +5,7 @@ import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import {
   cleanupStateRecoveryBackup, decryptStateRecoveryBackup, markStateRecoveryBackupValidated,
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,

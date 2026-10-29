@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies } from "../main/agents/cursor-provider-adapter.js";
 import type {
   ProviderSpawnRequest,

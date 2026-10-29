@@ -20,6 +20,7 @@ import type {
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt-native-resolution",
@@ -903,7 +904,7 @@ test("devMcpServerEntryFromEnv returns path only when both env gates are set", (
   );
 });
 
-test("daemon spawn gates the local MCP entry to supported providers and explicit development", async () => {
+test("daemon spawn gates the local MCP entry to supported providers and explicit development", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-dev-spawn-gate-"));
   const source = join(root, "source");
   await mkdir(source);
@@ -1148,7 +1149,7 @@ test("provider router public handle reads the native observed state live", async
   assert.equal(handle.observedState, "failed", "the same daemon handle sees native terminal failure");
 });
 
-test("daemon convergence drives Claude through the router across stop and same-attempt resume", async () => {
+test("daemon convergence drives Claude through the router across stop and same-attempt resume", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-router-daemon-"));
   const source = join(root, "source");
   await mkdir(source);
@@ -1307,7 +1308,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   }
 });
 
-test("an mcp-polling provider cannot receive Inspector control without an exact daemon-owned turn", async () => {
+test("an mcp-polling provider cannot receive Inspector control without an exact daemon-owned turn", { skip: supervisedAgentsOnly }, async () => {
   // Regression guard for the Cursor routing bug: Cursor advertises only
   // mcp_polling but applies a correction natively (its controlTurn stops the
   // child and beginTurns the same session with the correction). Such a provider
@@ -1416,7 +1417,7 @@ test("an mcp-polling provider cannot receive Inspector control without an exact 
   }
 });
 
-test("daemon restart quarantines pre-target turn controls for explicit resolution", async () => {
+test("daemon restart quarantines pre-target turn controls for explicit resolution", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-control-restart-"));
   const calls: string[] = [];
   const adapter = fakeAdapter("claude-code", calls);
@@ -1593,7 +1594,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
   }
 });
 
-test("operator-applied legacy native correction settles its interrupted FIFO row instead of retrying it", async () => {
+test("operator-applied legacy native correction settles its interrupted FIFO row instead of retrying it", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-ncr-"));
   const paths = {
     lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
@@ -1665,7 +1666,7 @@ test("operator-applied legacy native correction settles its interrupted FIFO row
   }
 });
 
-test("operator resolution remains available after the controlled runtime is detached or replaced", async () => {
+test("operator resolution remains available after the controlled runtime is detached or replaced", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-historical-control-"));
   const paths = {
     lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),

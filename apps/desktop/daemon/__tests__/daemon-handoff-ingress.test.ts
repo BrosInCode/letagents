@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError } from "../singleton.js";
 import { type DaemonActivityEvent, type DaemonManifestEntry } from "../types.js";

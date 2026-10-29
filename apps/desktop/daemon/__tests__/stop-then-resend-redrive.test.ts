@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";

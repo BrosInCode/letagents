@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { DatabaseSync } from "node:sqlite";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
