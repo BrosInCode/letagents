@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { join } from 'node:path';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, commit, count, fixture, git, lines, listed, turn } from './fixtures/workspace-turns.js';
-import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
 
 // The card may show too much, but it must never hide a change the agent made.
 // The agent commits two files in the turn. Whatever happens to the remote and to
@@ -86,7 +85,7 @@ const afterTheCommit: Record<string, (f: ReturnType<typeof fixture>, workspace: 
   },
 };
 for (const [name, afterCommit] of Object.entries(afterTheCommit)) for (const baseUpdate of [false, true]) {
-  test(`the agent's commit stays on the card${baseUpdate ? ' next to a base update' : ''} - ${name}`, { skip: baseUpdate && supervisedAgentsOnly }, async t => {
+  test(`the agent's commit stays on the card${baseUpdate ? ' next to a base update' : ''} - ${name}`, async t => {
     const f = fixture(t);
     const workspace = f.clone();
     git(f.root, 'clone', '-q', '--bare', f.remote, join(f.root, 'fork.git'));

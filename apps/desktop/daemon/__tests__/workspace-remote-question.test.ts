@@ -104,7 +104,7 @@ test('when the owner\'s own Git configuration sends the recorded address elsewhe
 // Git can be told to read one object in the place of another (`git replace`), and to
 // give a commit other parents (a grafts file, a shallow file). All of it is local, and
 // none of it may take the agent's commit off the card.
-test('a replace ref on the base that the turn merged does not hide the agent\'s commit', { skip: supervisedAgentsOnly }, async t => {
+test('a replace ref on the base that the turn merged does not hide the agent\'s commit', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -121,7 +121,7 @@ test('a replace ref on the base that the turn merged does not hide the agent\'s 
   assert.deepEqual(listed(result.after), OWN_ROWS);
 });
 
-test('a replace ref on a teammate\'s branch that was merged without its content does not hide the agent\'s commit', { skip: supervisedAgentsOnly }, async t => {
+test('a replace ref on a teammate\'s branch that was merged without its content does not hide the agent\'s commit', async t => {
   const f = fixture(t);
   const feature = f.pushFeatureBranch();
   const workspace = f.clone();

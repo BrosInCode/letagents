@@ -18,7 +18,7 @@ import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
 // supervisor daemon asks the remote it recorded itself when it made the workspace,
 // because an agent can point the repository's own remotes at a repository of its own.
 
-test('case A: a workspace that starts on an old commit is not credited with the history it fetches', { skip: supervisedAgentsOnly }, async t => {
+test('case A: a workspace that starts on an old commit is not credited with the history it fetches', async t => {
   const f = fixture(t);
   const workspace = f.detachedWorktree(f.first);
   const landed = f.landOnStaging();
@@ -36,7 +36,7 @@ test('case A: a workspace that starts on an old commit is not credited with the 
   assert.match(result.after.patch, /\+app 3 fixed/);
 });
 
-test('case B: merging the base branch into the feature branch is not the agent\'s change', { skip: supervisedAgentsOnly }, async t => {
+test('case B: merging the base branch into the feature branch is not the agent\'s change', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -62,7 +62,7 @@ test('case B: merging the base branch into the feature branch is not the agent\'
   assertPlain(next);
 });
 
-test('a merge and an own commit in the same turn show the own commit only', { skip: supervisedAgentsOnly }, async t => {
+test('a merge and an own commit in the same turn show the own commit only', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -79,7 +79,7 @@ test('a merge and an own commit in the same turn show the own commit only', { sk
   assert.deepEqual(listed(result.after), ['modified src/own.ts +1 -0']);
 });
 
-test('rebasing onto a newer base shows only what the turn added', { skip: supervisedAgentsOnly }, async t => {
+test('rebasing onto a newer base shows only what the turn added', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -97,7 +97,7 @@ test('rebasing onto a newer base shows only what the turn added', { skip: superv
   assert.deepEqual(listed(result.after), ['added src/second.ts +3 -0']);
 });
 
-test('a fast-forward pull keeps uncommitted and untracked edits and drops what was pulled', { skip: supervisedAgentsOnly }, async t => {
+test('a fast-forward pull keeps uncommitted and untracked edits and drops what was pulled', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   const second = f.clone('second');
@@ -116,7 +116,7 @@ test('a fast-forward pull keeps uncommitted and untracked edits and drops what w
   assert.deepEqual(listed(result.after), ['added notes.txt +1 -0', 'modified src/app.ts +1 -1']);
 });
 
-test('an own edit to a file the base update also changed is measured against the new base', { skip: supervisedAgentsOnly }, async t => {
+test('an own edit to a file the base update also changed is measured against the new base', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   f.landOnStaging();
@@ -131,7 +131,7 @@ test('an own edit to a file the base update also changed is measured against the
   assert.doesNotMatch(result.after.patch, /^[+-]shared 1/m, 'the line staging changed is context, not a change');
 });
 
-test('an upstream change that the turn drops is the agent\'s change, although the file is as it was', { skip: supervisedAgentsOnly }, async t => {
+test('an upstream change that the turn drops is the agent\'s change, although the file is as it was', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -149,7 +149,7 @@ test('an upstream change that the turn drops is the agent\'s change, although th
   assert.match(result.after.patch, /-shared 1 from staging\n\+shared 1\n/);
 });
 
-test('a file the agent changed before the base moved stays as before, conflict resolution included', { skip: supervisedAgentsOnly }, async t => {
+test('a file the agent changed before the base moved stays as before, conflict resolution included', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -168,7 +168,7 @@ test('a file the agent changed before the base moved stays as before, conflict r
   assert.match(result.after.patch, /-shared 1 from the agent\n\+shared 1 resolved/);
 });
 
-test('an earlier change stays on the card when upstream turns its directory into a file', { skip: supervisedAgentsOnly }, async t => {
+test('an earlier change stays on the card when upstream turns its directory into a file', async t => {
   const f = fixture(t);
   f.land('a package', { 'pkg/a.ts': lines(3, 'a'), 'pkg/b.ts': lines(3, 'b') });
   const workspace = f.clone();
@@ -187,7 +187,7 @@ test('an earlier change stays on the card when upstream turns its directory into
   assert.deepEqual(listed(result.after), ['added pkg +2 -0', 'deleted pkg/a.ts +0 -4'], 'the untouched pkg/b.ts went with the base; the given-up change did not');
 });
 
-test('renames, deletions and binary files of the agent survive a base update', { skip: supervisedAgentsOnly }, async t => {
+test('renames, deletions and binary files of the agent survive a base update', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   f.landOnStaging();
@@ -202,7 +202,7 @@ test('renames, deletions and binary files of the agent survive a base update', {
   assert.equal(result.after.files.find(file => file.path === 'assets/logo.bin')?.binary, true);
 });
 
-test('a turn without a base update produces exactly the card it produced before', { skip: supervisedAgentsOnly }, async t => {
+test('a turn without a base update produces exactly the card it produced before', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -223,7 +223,7 @@ test('a turn without a base update produces exactly the card it produced before'
   assertPlain(unfetched);
 });
 
-test('a base update is recognized on a branch that is stacked on another remote branch', { skip: supervisedAgentsOnly }, async t => {
+test('a base update is recognized on a branch that is stacked on another remote branch', async t => {
   const f = fixture(t);
   const feature = f.pushFeatureBranch();
   const workspace = f.clone();
@@ -239,7 +239,7 @@ test('a base update is recognized on a branch that is stacked on another remote 
   assert.deepEqual(listed(result.after), []);
 });
 
-test('a base that moves during the turn is counted: only what the remote held before the turn is a base', { skip: supervisedAgentsOnly }, async t => {
+test('a base that moves during the turn is counted: only what the remote held before the turn is a base', async t => {
   const f = fixture(t);
   const behind = f.clone('behind');
   f.landOnStaging();
@@ -329,7 +329,7 @@ test('two unrelated upstream lines in one turn give the plain comparison', async
   assertPlain(result);
 });
 
-test('under core.autocrlf the rule holds; a sparse checkout keeps the plain comparison', { skip: supervisedAgentsOnly }, async t => {
+test('under core.autocrlf the rule holds; a sparse checkout keeps the plain comparison', async t => {
   // The files on disk are not the committed bytes under core.autocrlf (CRLF on disk, LF in
   // HEAD), the default of Git for Windows. The captured trees hold text files as Git stores
   // them, so the pulled base is told from the agent's own CRLF edit all the same.
@@ -361,7 +361,7 @@ test('under core.autocrlf the rule holds; a sparse checkout keeps the plain comp
   assertPlain(partial);
 });
 
-test('more gained remote branches than the capture will sort out give the plain comparison', { skip: supervisedAgentsOnly }, async t => {
+test('more gained remote branches than the capture will sort out give the plain comparison', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   let tip = f.landOnStaging();
