@@ -232,12 +232,12 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
         await delay(Math.min(25, deadline - Date.now()));
       }
     };
-    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM");
+    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM", birth);
     if (await awaitAbsence()) return terminal();
     if (!force) {
       // Never escalate into a reused PID, nor accept a cached protocol error.
       if (isGone()) return terminal();
-      this.deps.signalProcess(pid, "SIGKILL");
+      this.deps.signalProcess(pid, "SIGKILL", birth);
       if (await awaitAbsence()) return terminal();
     }
     throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
@@ -285,11 +285,11 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
     handle.invalidatePermissions();
     const exitPromise = this.requireExitPromise(handle);
     if (options.force) {
-      this.deps.signalProcess(pid, "SIGKILL");
+      this.deps.signalProcess(pid, "SIGKILL", processIdentity);
       return exitPromise;
     }
 
-    this.deps.signalProcess(pid, "SIGTERM");
+    this.deps.signalProcess(pid, "SIGTERM", processIdentity);
     const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
     const graceful = await Promise.race([
       exitPromise.then((payload) => ({ payload })),
@@ -299,7 +299,7 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
 
     // A PID observed before the grace period may now belong to another child.
     assertProcessIdentity();
-    this.deps.signalProcess(pid, "SIGKILL");
+    this.deps.signalProcess(pid, "SIGKILL", processIdentity);
     return exitPromise;
   }
 

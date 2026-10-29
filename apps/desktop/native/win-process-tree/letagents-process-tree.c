@@ -14,23 +14,23 @@
  *       The child inherits this helper's standard handles and C runtime
  *       descriptors (so a Node IPC channel passes through) and its current
  *       directory and environment. When the child exits, the rest of the job
- *       is ended and this helper exits with the child's exit code once the
- *       job is empty. If this helper is killed, its job handle closes and
+ *       is ended and this helper exits with the child's exit code only once
+ *       the job is empty. If this helper is killed, its job handle closes and
  *       Windows ends the job. Exit 120: usage; 121: job setup failed;
  *       122: the child could not be started (the reason is on stderr).
  *
  *   kill <pid> <creation-time>
- *       End the job of the helper with that pid and creation time. When no
- *       such job exists, end the process <pid> only if its creation time is
- *       <creation-time>; the creation time is checked while a handle is held,
- *       so the pid cannot be reused in between. Exit 0: job ended and empty;
+ *       Only if process <pid> has that creation time (checked while a handle
+ *       to it is held, so the pid cannot be reused in between): end its job
+ *       when it is a running helper, else end that one process. Exit 0: job ended and empty;
  *       5: the single process was ended (it had no job); 2: nothing with that
  *       identity exists, nothing was ended; 3: access denied; 4: the job was
  *       ended but processes remained after 5 seconds; 120: usage; 121: error.
  *
  *   query <pid> <creation-time>
- *       Print the number of live processes in that helper's job. Exit 0, or
- *       2 when the job no longer exists (every process in it has ended).
+ *       Print the number of live processes in the job named for that helper.
+ *       Exit 0, or 2 when the job no longer exists (every process in it has
+ *       ended). Informational: it ends nothing.
  *
  *   info <pid>
  *       Print one JSON line:
@@ -146,6 +146,7 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line) {
   PROCESS_INFORMATION child;
   DWORD flags = CREATE_SUSPENDED;
   DWORD exit_code = 1;
+  int reported = 0;
   size_t length;
   wchar_t *mutable_line;
 
@@ -232,9 +233,16 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line) {
   CloseHandle(child.hThread);
   WaitForSingleObject(child.hProcess, INFINITE);
   if (!GetExitCodeProcess(child.hProcess, &exit_code)) exit_code = 1;
-  /* What the child left behind ends with it: the helper's exit means the tree is gone. */
-  TerminateJobObject(job, 1);
-  drain_job(job, port, DRAIN_MS);
+  /* What the child left behind ends with it, and the helper exits only once
+     the job is empty: its exit means the whole tree is gone. Termination is
+     asynchronous (a process can wait on pending I/O), so it is repeated. */
+  for (;;) {
+    if (!TerminateJobObject(job, 1) && !reported) {
+      fail_message("cannot end what the program left running; waiting for it", GetLastError());
+      reported = 1;
+    }
+    if (drain_job(job, port, 1000)) break;
+  }
   return (int)exit_code;
 }
 
@@ -266,28 +274,44 @@ static int open_identified_process(DWORD pid, u64 creation, DWORD access, HANDLE
 static int run_kill(DWORD pid, u64 creation) {
   wchar_t name[96];
   HANDLE job, process = NULL;
-  int opened;
-  job_name(name, sizeof name / sizeof name[0], pid, creation);
-  job = OpenJobObjectW(JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY, FALSE, name);
-  if (job) {
-    if (!TerminateJobObject(job, 1)) {
-      DWORD error = GetLastError();
-      CloseHandle(job);
-      fail_message("cannot end the job", error);
-      return error == ERROR_ACCESS_DENIED ? EXIT_DENIED : EXIT_FAILED;
-    }
-    opened = drain_job(job, NULL, DRAIN_MS) ? 0 : EXIT_SURVIVORS;
-    CloseHandle(job);
-    return opened;
-  }
-  if (GetLastError() == ERROR_ACCESS_DENIED) return EXIT_DENIED;
-  /* No job: the pid was not started by this helper. End only that exact process. */
-  opened = open_identified_process(pid, creation, PROCESS_TERMINATE | SYNCHRONIZE, &process);
-  if (opened != 0) return opened;
+  int result;
+  /* Hold the exact process first: nothing is ended unless <pid> still has that
+     creation time, and while the handle is held the pid cannot be reused. */
+  result = open_identified_process(pid, creation, PROCESS_TERMINATE | SYNCHRONIZE, &process);
+  if (result != 0) return result;
   if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) {
     CloseHandle(process);
     return EXIT_ABSENT;
   }
+  job_name(name, sizeof name / sizeof name[0], pid, creation);
+  job = OpenJobObjectW(JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY, FALSE, name);
+  /* A running helper holds the job it created under this name (spawn refuses
+     a name that already exists), so while it runs the name is its job. It is
+     checked again after the open: had the helper exited in between, its job
+     could be gone and the name someone else's. */
+  if (job && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+    if (!TerminateJobObject(job, 1)) {
+      DWORD error = GetLastError();
+      CloseHandle(job);
+      CloseHandle(process);
+      fail_message("cannot end the job", error);
+      return error == ERROR_ACCESS_DENIED ? EXIT_DENIED : EXIT_FAILED;
+    }
+    result = drain_job(job, NULL, DRAIN_MS) ? 0 : EXIT_SURVIVORS;
+    CloseHandle(job);
+    /* The helper exits once its program has. */
+    WaitForSingleObject(process, DRAIN_MS);
+    CloseHandle(process);
+    return result;
+  }
+  if (job) {
+    /* The helper exited between the checks: its tree ended with its job. */
+    CloseHandle(job);
+    CloseHandle(process);
+    return EXIT_ABSENT;
+  }
+  /* No job: the pid was not started by this helper. End only that exact
+     process, through the handle that proved its creation time. */
   if (!TerminateProcess(process, 1)) {
     DWORD error = GetLastError();
     CloseHandle(process);

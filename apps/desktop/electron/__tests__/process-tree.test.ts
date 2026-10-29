@@ -20,7 +20,7 @@ import {
   windowsProcessInfo,
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
-import { defaultInspectDaemonProcess } from "../main/supervisor-daemon/process-identity.js";
+import { defaultInspectDaemonProcess, signalDaemonProcess } from "../main/supervisor-daemon/process-identity.js";
 
 const HELPER = "C:\\Program Files\\LetAgents\\resources\\app\\runtime\\letagents-process-tree.exe";
 const LSTART = "Tue Oct 29 01:02:03 2026";
@@ -263,6 +263,9 @@ test("a recorded birth is evidence only in its own platform's format", () => {
   assert.equal(isBirthEvidence("win32-ft:133752345678901234", "win32"), true);
   assert.equal(isBirthEvidence(LSTART, "win32"), false);
   assert.equal(isBirthEvidence("win32-ft:0123", "win32"), false);
+  // A FILETIME is an unsigned 64-bit value.
+  assert.equal(isBirthEvidence("win32-ft:18446744073709551615", "win32"), true);
+  assert.equal(isBirthEvidence("win32-ft:18446744073709551616", "win32"), false);
   assert.equal(isBirthEvidence(null, "win32"), false);
 });
 
@@ -287,4 +290,48 @@ test("Windows command lines round-trip through Node's quoting and the C runtime'
   assert.equal(quoteWindowsArgument('say "hi"'), '"say \\"hi\\""');
   assert.throws(() => quoteWindowsArgument("nul\0"));
   assert.deepEqual(parseWindowsCommandLine('"C:\\a.exe" "x""y" z'), ["C:\\a.exe", 'x"y', "z"]);
+  // The program name toggles quotes anywhere and reads backslashes literally, as the MSVC runtime does.
+  assert.deepEqual(parseWindowsCommandLine('"C:\\Program Files"\\node.exe C:\\daemon.js'), ["C:\\Program Files\\node.exe", "C:\\daemon.js"]);
+  assert.deepEqual(parseWindowsCommandLine('C:\\a\\"b c"\\x.exe y'), ["C:\\a\\b c\\x.exe", "y"]);
+});
+
+test("a failed stop message is not an exit: the tree is still ended after the grace period", async () => {
+  const child = new FakeChild(1200);
+  const helper = recordingHelper({ "info 1200": info(1200, "8"), "kill 1200 8": { status: 0 } });
+  const liveTrees = new Map([[1200, { child: child as unknown as ChildProcess, helper: HELPER }]]);
+  const result = await terminateTree(child as unknown as ChildProcess, {
+    platform: "win32", graceful: true, graceMs: 20, killWaitMs: 20, liveTrees,
+    runHelper: (file, args) => { const answer = helper.runHelper(file, args); if (args[0] === "kill") child.exit(1); return answer; },
+    // The IPC channel is gone: Node reports it as an 'error' on the live child.
+    requestStop: () => { child.emit("error", Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" })); },
+  });
+  assert.equal(result, true);
+  assert.deepEqual(helper.calls.map(([, args]) => args), [["info", "1200"], ["kill", "1200", "8"]]);
+});
+
+test("Windows: a retired daemon is signalled only through its recorded birth; a refusal reads as ESRCH", () => {
+  const calls: Array<[number, string, unknown]> = [];
+  const ended = (pid: number, signal: NodeJS.Signals, options?: { identity?: string | null }) => { calls.push([pid, signal, options?.identity]); return true; };
+  signalDaemonProcess(50, "SIGTERM", "win32-ft:123", "win32", ended);
+  assert.deepEqual(calls, [[50, "SIGTERM", "win32-ft:123"]]);
+  const refused = () => false;
+  assert.throws(() => signalDaemonProcess(50, "SIGKILL", "win32-ft:124", "win32", refused), (error: NodeJS.ErrnoException) => error.code === "ESRCH");
+});
+
+test("Windows: a pid reused by another tree of ours is not ended for a caller whose own child exited, or whose birth differs", () => {
+  // Tree B now holds pid 1300; the caller's child A (same pid number) has exited.
+  const treeB = new FakeChild(1300);
+  const childA = new FakeChild(1300);
+  childA.exit(0);
+  const helper = recordingHelper({ "info 1300": info(1300, "99"), "kill 1300 99": { status: 0 }, "kill 1300 11": { status: 2 } });
+  const liveTrees = new Map([[1300, { child: treeB as unknown as ChildProcess, helper: HELPER }]]);
+  const options = { platform: "win32" as const, runHelper: helper.runHelper, liveTrees, helperPath: HELPER };
+  assert.equal(signalTree(1300, "SIGKILL", { ...options, child: childA as unknown as ChildProcess }), false);
+  assert.equal(signalTree(1300, "SIGKILL", { ...options, child: childA as unknown as ChildProcess, identity: "win32-ft:11" }), false);
+  // A pid-only caller with A's recorded birth: B's birth differs, so B is not ended.
+  assert.equal(signalTree(1300, "SIGKILL", { ...options, identity: "win32-ft:11" }), false);
+  assert.deepEqual(treeB.kills, []);
+  assert.equal(helper.calls.some(([, args]) => args.join(" ") === "kill 1300 99"), false);
+  // B's own birth still ends B.
+  assert.equal(signalTree(1300, "SIGKILL", { ...options, identity: "win32-ft:99" }), true);
 });

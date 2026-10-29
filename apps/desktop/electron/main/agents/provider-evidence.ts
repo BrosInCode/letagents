@@ -43,7 +43,7 @@ export interface ProviderProcessEvidenceDeps {
    * Signal the process tree led by pid. `identity` is its recorded birth: on
    * Windows a pid this process does not hold is ended only with it.
    */
-  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string): void;
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
 }
@@ -118,7 +118,7 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function defaultSignalProcess(pid: number, signal: NodeJS.Signals, identity?: string): void {
+export function defaultSignalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void {
   // POSIX: the process group, then the pid alone. Windows: the helper's job
   // of a tree this process holds, or of a pid whose recorded birth matches.
   signalTree(pid, signal, { identity });

@@ -409,12 +409,13 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     handle.state = "stopping";
     handle.child.markIntentionalClose();
     const exitPromise = this.requireExitPromise(handle);
+    const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity : undefined;
     if (options.force) {
-      this.deps.signalProcess(handle.pid, "SIGKILL");
+      this.deps.signalProcess(handle.pid, "SIGKILL", identity);
       return exitPromise;
     }
 
-    this.deps.signalProcess(handle.pid, "SIGTERM");
+    this.deps.signalProcess(handle.pid, "SIGTERM", identity);
     const graceMs = options.graceMs ?? this.stopGraceMs;
     const graceful = await Promise.race([
       exitPromise.then((payload) => ({ payload })),
@@ -422,7 +423,7 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     ]);
     if (graceful) return graceful.payload;
 
-    this.deps.signalProcess(handle.pid, "SIGKILL");
+    this.deps.signalProcess(handle.pid, "SIGKILL", identity);
     return exitPromise;
   }
 

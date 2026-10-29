@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { parseWindowsCommandLine, windowsProcessInfo, WINDOWS_BIRTH_PREFIX } from "../../../../../shared/process-tree.mjs";
+import { parseWindowsCommandLine, signalTree, windowsProcessInfo, WINDOWS_BIRTH_PREFIX } from "../../../../../shared/process-tree.mjs";
 import type { DaemonIdentityInspection } from "./types.js";
 
 const PS_DAEMON_IDENTITY = /^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+)$/;
@@ -48,6 +48,29 @@ function inspectWindowsDaemonProcess(
     state: info.exited ? "zombie" : "live",
     command: parseWindowsCommandLine(info.commandLine).join(" "),
   };
+}
+
+/**
+ * Signal the exact daemon pid (never a group). POSIX: process.kill, as
+ * before. Windows: only through the process-tree helper, which ends the pid
+ * after checking its creation time against `identity` (the recorded
+ * kernelStartTime) while it holds the process, so a reused pid is never
+ * ended; no match, or no helper, is reported as ESRCH.
+ */
+export function signalDaemonProcess(
+  pid: number,
+  signal: "SIGTERM" | "SIGKILL",
+  identity?: string,
+  platform: NodeJS.Platform = process.platform,
+  signalWindowsProcess: typeof signalTree = signalTree,
+): void {
+  if (platform !== "win32") {
+    process.kill(pid, signal);
+    return;
+  }
+  if (!signalWindowsProcess(pid, signal, { platform, identity, liveTrees: new Map() })) {
+    throw Object.assign(new Error(`No process ${pid} with the recorded daemon birth was ended.`), { code: "ESRCH" });
+  }
 }
 
 function probeAbsence(pid: number): null | undefined {

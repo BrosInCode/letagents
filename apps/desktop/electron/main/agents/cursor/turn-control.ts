@@ -34,7 +34,7 @@ export async function stopRef(
     if (identity !== null && sameProcessBirthIdentity(identity, connection.processIdentity)) {
     // The wrapper owns its native process group and performs TERM→KILL
     // escalation internally. Killing the wrapper itself could orphan Cursor.
-      adapter.deps.signalProcess(connection.pid, "SIGTERM");
+      adapter.deps.signalProcess(connection.pid, "SIGTERM", connection.processIdentity);
       const deadline = Date.now() + (options.graceMs ?? adapter.stopGraceMs);
       for (;;) {
         const current = adapter.deps.getProcessIdentity(connection.pid);

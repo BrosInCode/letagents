@@ -134,6 +134,20 @@ test("a stored pid with its recorded birth ends the tree, as after a daemon rest
   assertAllGone(started);
 });
 
+test("a live tree is not ended for a recorded birth that is not its helper's", { skip }, async () => {
+  const started = await startTree();
+  try {
+    const wrong = `win32-ft:${BigInt(started.births.helper.slice("win32-ft:".length)) + 1n}`;
+    assert.equal(signalTree(started.tree.pid, "SIGKILL", { ...noHeldTrees, identity: wrong }), false);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(started.tree.exitCode, null);
+    assert.equal(processBirth(started.grandchildPid, helper), started.births.grandchild);
+  } finally {
+    signalTree(started.tree.pid, "SIGKILL", helper);
+    await exited(started.tree);
+  }
+});
+
 test("killing only the helper process still ends the tree (the job closes with it)", { skip }, async () => {
   const started = await startTree();
   started.tree.kill();

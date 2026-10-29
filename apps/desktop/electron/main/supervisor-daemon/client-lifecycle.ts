@@ -557,7 +557,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     // Deliberately signal the exact positive daemon PID. Provider-stop code may
     // signal provider process groups; daemon replacement must never do so.
     try {
-      this.signalDaemon(retired.pid, signal);
+      this.signalDaemon(retired.pid, signal, retired.kernelStartTime);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ESRCH") {
         return this.observeRetiredDaemon(retired);

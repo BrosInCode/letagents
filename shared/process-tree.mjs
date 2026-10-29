@@ -30,8 +30,17 @@ const HELPER_TIMEOUT_MS = 10_000;
 /** Children this process started through the helper and that have not exited. */
 const liveTrees = new Map();
 
+const MAX_FILETIME = 2n ** 64n - 1n;
+
+/** A FILETIME in decimal: 1 to 2^64 - 1, no leading zero. */
+function isCreationTime(text) {
+  return /^[1-9]\d{0,19}$/.test(text) && BigInt(text) <= MAX_FILETIME;
+}
+
 export function isWindowsBirth(identity) {
-  return typeof identity === "string" && WINDOWS_BIRTH.test(identity.trim());
+  if (typeof identity !== "string") return false;
+  const match = WINDOWS_BIRTH.exec(identity.trim());
+  return Boolean(match && isCreationTime(match[1]));
 }
 
 /** The start of a `ps -o lstart=` birth: "Tue Oct 29 01:02:03 2026". */
@@ -101,20 +110,19 @@ export function windowsCommandLine(file, args) {
 
 /**
  * The argv a Windows program's C runtime reads from its command line: the
- * program name up to the next quote or blank, then arguments with the
- * backslash-quote rules (and `""` inside quotes as one quote).
+ * program name up to the first blank outside quotes (quotes toggle, no
+ * escapes), then arguments with the backslash-quote rules (and `""` inside
+ * quotes as one quote).
  */
 export function parseWindowsCommandLine(line) {
   const args = [];
   const blank = (character) => character === " " || character === "\t";
   let index = 0;
   let program = "";
-  if (line[index] === '"') {
-    index += 1;
-    while (index < line.length && line[index] !== '"') program += line[index++];
-    if (index < line.length) index += 1;
-  } else {
-    while (index < line.length && !blank(line[index])) program += line[index++];
+  // The program name: quotes toggle anywhere in it, backslashes are literal.
+  for (let quoted = false; index < line.length && (quoted || !blank(line[index])); index += 1) {
+    if (line[index] === '"') quoted = !quoted;
+    else program += line[index];
   }
   args.push(program);
   for (;;) {
@@ -271,7 +279,7 @@ export function windowsProcessInfo(pid, options = {}) {
   if (result.status !== 0) return undefined;
   try {
     const info = JSON.parse(String(result.stdout).trim());
-    if (info?.pid !== pid || typeof info.creationTime !== "string" || !/^[1-9]\d{0,19}$/.test(info.creationTime)) return undefined;
+    if (info?.pid !== pid || typeof info.creationTime !== "string" || !isCreationTime(info.creationTime)) return undefined;
     return {
       pid,
       parentPid: Number.isSafeInteger(info.parentPid) ? info.parentPid : null,
@@ -327,21 +335,26 @@ export function signalTree(pid, signal, options = {}) {
 
 function endWindowsTree(pid, options) {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
-  const live = (options.liveTrees ?? liveTrees).get(pid);
-  const child = live?.child ?? options.child;
+  const identity = options.identity?.trim() || null;
+  // The caller's own child decides: a held tree under the same pid is another
+  // process once the caller's child has exited.
+  const registered = (options.liveTrees ?? liveTrees).get(pid);
+  const live = registered && (!options.child || registered.child === options.child) ? registered : undefined;
+  const child = options.child ?? live?.child;
   const held = child && child.pid === pid && child.exitCode === null && child.signalCode === null;
   const helper = live?.helper
     ?? (options.helperPath === undefined ? processTreeHelperPath({ platform: "win32", env: options.helperEnv }) : options.helperPath);
   if (held) {
     // Node holds this child's handle, so its pid cannot belong to anyone else.
-    // A helper's own exit closes its job, so child.kill() ends the tree too.
     if (live?.helper) {
       const birth = processBirth(pid, { ...options, platform: "win32", helperPath: helper });
+      // A recorded birth that is not this child's names a process that is gone.
+      if (identity && isWindowsBirth(birth) && birth !== identity) return false;
       if (isWindowsBirth(birth) && killByBirth(helper, pid, birth, options) === "ended") return true;
     }
+    // A helper's own exit closes its job, so child.kill() ends the tree too.
     try { return child.kill() !== false; } catch { return false; }
   }
-  const identity = options.identity?.trim();
   if (!helper || !isWindowsBirth(identity)) return false;
   return killByBirth(helper, pid, identity, options) === "ended";
 }
@@ -372,12 +385,10 @@ export function windowsTreeSize(pid, identity, options = {}) {
   return Number.isSafeInteger(count) && count >= 0 ? count : undefined;
 }
 
+/** Settles on the process's exit only: an 'error' (an IPC send failing, a kill failing) is not one. */
 function exitedPromise(child) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    child.once("exit", () => resolve());
-    child.once("error", () => resolve());
-  });
+  return new Promise((resolve) => { child.once("exit", () => resolve()); });
 }
 
 /** Resolves true when `promise` settles first, false after `ms`; the timer never outlives the race. */

@@ -1,12 +1,6 @@
 {
   "file": "letagents-process-tree.exe",
   "source": "letagents-process-tree.c",
-  "sourceSha256": "44b61a2c8202e3353f57356af2064cb36b2414422c51421f65da470097b227c4",
-  "builds": {
-    "x64": {
-      "sha256": "372040375abb61e8c76bc285498cfc375ad8261966e14369b26e86065253e66a",
-      "vcToolsVersion": "14.51.36231",
-      "windowsSdkVersion": "10.0.26100.0"
-    }
-  }
+  "sourceSha256": "59a1add8c49679eef213d9f51e8955565cf65d28690477b08470ad0b9306b69d",
+  "builds": {}
 }
