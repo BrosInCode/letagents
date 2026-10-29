@@ -255,18 +255,21 @@ test("Cursor on Windows takes its program from the shared resolver: no cmd.exe, 
 
 test("Cursor's environment keeps ComSpec and windir as Windows spells them, and still nothing outside its allowlist", () => {
   const overrides = { ComSpec: "C:\\Windows\\System32\\cmd.exe", windir: "C:\\Windows", LETAGENTS_TOKEN: "secret" };
-  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
-  let windows: NodeJS.ProcessEnv;
-  try {
-    windows = buildCursorChildEnv(overrides);
-  } finally {
-    Object.defineProperty(process, "platform", platform);
-  }
+  // Each half names its platform, so the test means the same on every host.
+  const as = (value: NodeJS.Platform) => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value });
+    try {
+      return buildCursorChildEnv(overrides);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  };
+  const windows = as("win32");
   assert.equal(windows.ComSpec, "C:\\Windows\\System32\\cmd.exe");
   assert.equal(windows.windir, "C:\\Windows");
   assert.equal(windows.LETAGENTS_TOKEN, undefined);
-  const posix = buildCursorChildEnv(overrides);
+  const posix = as("darwin");
   assert.equal(posix.ComSpec, undefined, "POSIX matches names exactly, as before");
   assert.equal(posix.windir, undefined);
 });
