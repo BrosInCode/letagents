@@ -3,7 +3,7 @@ import { SupervisedAgentsUnsupportedError, supervisedAgentsSupported } from "../
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../../shared/daemon-maintenance.mjs";
-import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
+import { connectDaemon, daemonEndpoint, prepareDaemonConnection } from "../../../../../shared/daemon-endpoint.mjs";
 import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
 import { desktopRoot } from "../paths.js";
@@ -115,6 +115,8 @@ export abstract class SupervisorDaemonClientBase {
     const endpoint = daemonEndpoint(this.stateDir);
     this.socketPath = options.socketPath ?? endpoint.connectPath;
     this.peerProofPath = options.socketPath === undefined ? endpoint.proofPath : null;
+    // Windows pipe only: check the proof's privacy before the first request needs it.
+    if (supervisedAgentsSupported()) prepareDaemonConnection(this.socketPath, { proofPath: this.peerProofPath });
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? this.stateDir;
     this.lifecycleLogPath = options.lifecycleLogPath ?? join(this.stateDir, "daemon-lifecycle.jsonl");

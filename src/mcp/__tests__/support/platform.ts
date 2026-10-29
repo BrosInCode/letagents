@@ -7,7 +7,7 @@ import { isAbsolute, join, relative } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { acceptDaemonPeer, daemonEndpoint, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
+import { acceptDaemonPeer, daemonEndpoint, rememberPrivateDaemonProof, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
 import { isOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../shared/owner-private-fs.mjs";
 
 // Platform facts the MCP test suites share. The suites run on Windows in CI;
@@ -43,6 +43,8 @@ export function listenTestDaemon(server: Server, socketPath: string, callback?: 
       proof = randomBytes(32).toString("hex");
       writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
     }
+    // As the daemon does for its own proof: this process knows it is private.
+    rememberPrivateDaemonProof(proofPath);
     for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
       server.off("connection", listener);
       server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));

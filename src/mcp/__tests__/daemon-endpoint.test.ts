@@ -330,6 +330,33 @@ test("a caller that paused the stream before connect gets it back paused", async
   } finally { await env.cleanup(); }
 });
 
+test("a proof this process made private is used without reading its DACL again", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    // A Windows privacy backend that never answers: a check would hit the deadline.
+    const neverAnswers = {
+      platform: "win32" as const,
+      windowsSecurity: {
+        currentUserSid: () => new Promise<string>(() => undefined),
+        currentUserSidSync: () => { throw new Error("not used"); },
+        readSddl: () => new Promise<(string | null)[]>(() => undefined),
+        readSddlSync: () => { throw new Error("not used"); },
+        protect: async () => undefined,
+        protectSync: () => undefined,
+      },
+    };
+    const startedAt = Date.now();
+    const client = connectDaemon(env.path, { proofPath: env.proofPath, handshake: true, handshakeTimeoutMs: 1_000, ...neverAnswers });
+    const result = await exchange(client, "ping\n");
+    assert.equal(result.data, "pong:ping\n", "ensureDaemonProof recorded the proof as private in this process");
+    assert.ok(Date.now() - startedAt < 500, "no DACL read on the request path");
+  } finally { await env.cleanup(); }
+});
+
 test("a client whose proof file is missing fails like an absent daemon", async () => {
   const env = await harness();
   try {

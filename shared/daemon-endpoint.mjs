@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { lstatSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { Socket, createConnection } from "node:net";
 import { userInfo } from "node:os";
@@ -113,13 +114,17 @@ export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, ...op
       || (await new Promise((resolve) => setTimeout(resolve, recheckDelayMs)), await isOwnerPrivate(proofPath, info, options));
     if (info.isFile() && await isPrivate()) {
       const existing = parseProof(await readFile(proofPath, "utf8"));
-      if (existing) return existing;
+      if (existing) {
+        rememberPrivateDaemonProof(proofPath);
+        return existing;
+      }
     }
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   const proof = randomBytes(32).toString("hex");
   await writePrivateFileAtomically(proofPath, `${proof}\n`, options);
+  rememberPrivateDaemonProof(proofPath);
   return proof;
 }
 
@@ -177,31 +182,76 @@ function untrusted(message) {
   return Object.assign(new Error(message), { code: "ERR_LETAGENTS_DAEMON_UNTRUSTED" });
 }
 
-const PRIVATE_PROOF_CACHE_MS = 5 * 60_000;
-/** Proof files found private, by path and file identity, until a deadline. */
-const privateProofs = new Map();
+const PRIVATE_PROOF_REFRESH_MS = 5 * 60_000;
+/**
+ * What this process knows about each proof file, by path: the file identity
+ * the verdict is for (path, inode, mtime, ctime, size; ctime moves with the
+ * mode or the DACL), whether it was private, and when to check it again.
+ */
+const proofVerdicts = new Map();
+
+function proofIdentity(path, info) {
+  return `${path}\0${info.ino}\0${info.mtimeMs}\0${info.ctimeMs}\0${info.size}`;
+}
+
+async function checkProofPrivacy(path, info, identity, options) {
+  const isPrivate = info.isFile() && await isOwnerPrivate(path, info, options);
+  proofVerdicts.set(path, { identity, isPrivate, refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
+  return isPrivate;
+}
+
+/**
+ * Record a proof this process has just made or found private (the daemon's
+ * own ensureDaemonProof, a test fake that wrote it privately), so clients in
+ * the same process need not read its DACL again.
+ */
+export function rememberPrivateDaemonProof(path) {
+  const info = lstatSync(path);
+  proofVerdicts.set(path, { identity: proofIdentity(path, info), isPrivate: true, refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
+}
 
 /**
  * The proof a client may use: a regular file private to this account (POSIX
  * mode 0600 and owner; on Windows the account as owner and a protected DACL
  * for only the account and SYSTEM). An exposed proof could let another
  * account squat the pipe and answer the handshake, so it is refused, never
- * used. A Windows check reads the DACL through PowerShell, so a positive
- * answer is kept for five minutes per file identity (a replaced proof, or one
- * whose permissions changed, is checked again).
+ * used.
+ *
+ * A Windows check reads the DACL through PowerShell (about a second), which
+ * request budgets as short as 250 ms cannot absorb. So a client waits for the
+ * check only when this process has no verdict for the file as it is now (first
+ * contact, a rotated proof, or a mode or DACL change, which moves ctime). A
+ * verdict older than five minutes is still used while a background check
+ * renews it; a "not private" answer refuses every later connection.
  */
 async function readClientProof(path, options) {
   if (!path) throw untrusted("no LetAgents state directory of this user owns this pipe");
   const info = await lstat(path);
-  // ctime changes with the mode or the DACL, so a loosened proof is checked again.
-  const identity = `${path}\0${info.ino}\0${info.mtimeMs}\0${info.ctimeMs}\0${info.size}`;
-  if (!((privateProofs.get(identity) ?? 0) > Date.now())) {
-    if (!info.isFile() || !await isOwnerPrivate(path, info, options)) throw untrusted("the proof file is not private to this account");
-    privateProofs.set(identity, Date.now() + PRIVATE_PROOF_CACHE_MS);
+  const identity = proofIdentity(path, info);
+  const known = proofVerdicts.get(path);
+  let isPrivate;
+  if (known?.identity === identity) {
+    isPrivate = known.isPrivate;
+    if (isPrivate && known.refreshAt <= Date.now()) {
+      known.refreshAt = Date.now() + PRIVATE_PROOF_REFRESH_MS;
+      void checkProofPrivacy(path, info, identity, options).catch(() => { proofVerdicts.delete(path); });
+    }
+  } else {
+    isPrivate = await checkProofPrivacy(path, info, identity, options);
   }
+  if (!isPrivate) throw untrusted("the proof file is not private to this account");
   const proof = parseProof(await readFile(path, "utf8"));
   if (!proof) throw untrusted("the proof file is malformed");
   return proof;
+}
+
+/**
+ * Start the client's proof check ahead of the first request, so a short first
+ * budget does not pay for it. Errors surface on the request itself.
+ */
+export function prepareDaemonConnection(connectPath, { proofPath, ...options } = {}) {
+  if (!isWindowsPipePath(connectPath)) return;
+  void Promise.resolve().then(() => readClientProof(proofPath ?? resolveDaemonProofPath(connectPath), options)).catch(() => undefined);
 }
 
 /**
