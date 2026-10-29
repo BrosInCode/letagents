@@ -17,8 +17,6 @@ import {
   forgetOwnerPrivateCache,
   icaclsProtectArguments,
   icaclsRemoveArguments,
-  icaclsSaveArguments,
-  parseIcaclsSave,
   INHERITED_GROUP_SIDS,
   isOwnedByCurrentUser,
   isOwnerPrivate,
@@ -154,33 +152,23 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   ]);
 });
 
-test("icacls /save is parsed from UTF-16LE, skipping a name line that starts with a drive", () => {
-  const text = "D:\\a\\letagents\\state\r\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)\r\n";
-  assert.equal(parseIcaclsSave(Buffer.from(text, "utf16le")), "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)");
-  assert.equal(parseIcaclsSave(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")])), "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)");
-  assert.equal(parseIcaclsSave(Buffer.from(text, "utf8")), "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)");
-  assert.throws(() => parseIcaclsSave(Buffer.from("D:\\only-a-name\r\n", "utf16le")), { code: "EOWNERPRIVATE" });
-  assert.deepEqual(icaclsSaveArguments("C:\\a", "C:\\t\\acl.txt"), ["C:\\a", "/save", "C:\\t\\acl.txt", "/q"]);
-});
-
-test("Windows: a protect is icacls only (owner, DACL, /save read-back); nothing runs again below it", async () => {
+test("Windows: a protect is icacls owner + DACL and one Get-Acl read-back; nothing runs again for what it made", async () => {
   const root = scratch();
   try {
     const folder = join(root, "state");
     mkdirSync(folder);
     const calls: string[][] = [];
-    const runner = (file: string, args: readonly string[]) => {
-      calls.push([file.split("\\").pop()!, ...args.slice(1, 2)]);
-      if (file.endsWith("whoami.exe")) return `"host\\me","${USER}"`;
-      if (args[1] === "/save") writeFileSync(String(args[2]), Buffer.from(`state\r\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;${USER})\r\n`, "utf16le"));
+    const runner = (file: string, args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+      const tool = file.split("\\").pop()!;
+      calls.push([tool, ...args.slice(1, 2)]);
+      if (tool === "whoami.exe") return `"host\\me","${USER}"`;
+      if (tool === "powershell.exe") return options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.split("\n").map(() => `ok:${PRIVATE_FOLDER}`).join("\r\n");
       return "";
     };
-    const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", TEMP: root }, run: async (...args) => runner(...args), runSync: runner });
+    const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, run: async (...args) => runner(...args), runSync: runner });
     const options = { platform: "win32" as const, windowsSecurity: security };
     await protectOwnerPrivate(folder, "directory", options);
-    assert.deepEqual(calls, [["whoami.exe", "/fo"], ["icacls.exe", "/setowner"], ["icacls.exe", "/inheritance:r"], ["icacls.exe", "/save"]]);
-    // The saved file is removed.
-    assert.deepEqual(readdirSync(root), ["state"]);
+    assert.deepEqual(calls, [["whoami.exe", "/fo"], ["icacls.exe", "/setowner"], ["icacls.exe", "/inheritance:r"], ["powershell.exe", "-NoProfile"]]);
     calls.length = 0;
     // Made by the helper inside the verified folder: known, so nothing runs again.
     await writePrivateFileAtomically(join(folder, "token"), "t", options);
@@ -192,7 +180,22 @@ test("Windows: a protect is icacls only (owner, DACL, /save read-back); nothing 
     // A file that was not made through the helper is protected in full (it may be another account's).
     writeFileSync(join(folder, "plain"), "p");
     await protectOwnerPrivate(join(folder, "plain"), "file", options);
-    assert.deepEqual(calls.map(call => call[1]), ["/setowner", "/inheritance:r", "/save"]);
+    assert.deepEqual(calls.map(call => call[0]), ["icacls.exe", "icacls.exe", "powershell.exe"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: a protect refuses an entry that was replaced during it", async () => {
+  const root = scratch();
+  try {
+    const file = join(root, "token");
+    writeFileSync(file, "ours");
+    const { security } = fakeSecurity();
+    const swapping: WindowsSecurity = {
+      ...security,
+      // Made before the old one goes, so it is a different file on every file system.
+      async protect(path, kind) { await security.protect(path, kind); writeFileSync(`${path}.new`, "theirs"); renameSync(`${path}.new`, path); },
+    };
+    await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: swapping }), /was replaced/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

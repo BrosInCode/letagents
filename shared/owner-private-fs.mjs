@@ -27,13 +27,12 @@
  * path's security descriptor as SDDL (owner and DACL, written with SIDs, so
  * the answer does not depend on the display language); icacls.exe sets the
  * owner (the current user, also for an elevated administrator) and the
- * protected DACL, and its /save form reads the DACL back right after. Every
+ * protected DACL, and Get-Acl reads the result back (owner included). Every
  * answer that cannot be read or parsed counts as "not private".
  */
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync, writeSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, open, rm, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { renameSyncWithRetry, renameWithRetryAsync } from "./rename-retry.mjs";
@@ -291,46 +290,7 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     removeGrantsSync(path, sids) {
       runSync(tools.icacls, icaclsRemoveArguments(path, sids), { env });
     },
-    // The DACL alone, as SDDL, from `icacls /save` (fast; no owner). Used only
-    // to read back a protect, right after /setowner made this account the owner.
-    async readDacl(path) {
-      const file = aclSaveFile(env);
-      try {
-        await run(tools.icacls, icaclsSaveArguments(path, file), { env });
-        return parseIcaclsSave(await readFile(file));
-      } finally { await rm(file, { force: true }).catch(() => undefined); }
-    },
-    readDaclSync(path) {
-      const file = aclSaveFile(env);
-      try {
-        runSync(tools.icacls, icaclsSaveArguments(path, file), { env });
-        return parseIcaclsSave(readFileSync(file));
-      } finally { try { rmSync(file, { force: true }); } catch { /* best effort */ } }
-    },
   };
-}
-
-function aclSaveFile(env) {
-  return join(env.TEMP || env.TMP || tmpdir(), `letagents-acl-${randomUUID()}.txt`);
-}
-
-export function icaclsSaveArguments(path, file) {
-  if (!isAbsolute(path) && !win32.isAbsolute(path)) throw privateError("A private path must be absolute.");
-  return [path, "/save", file, "/q"];
-}
-
-/**
- * `icacls <path> /save <file>` writes the object's name on one line and its
- * DACL as SDDL ("D:...") on the next, in UTF-16LE. The name line may itself
- * start with a drive ("D:\a\..."), so only a later line is read.
- */
-export function parseIcaclsSave(bytes) {
-  const buffer = Buffer.from(bytes);
-  const text = buffer[0] === 0xff && buffer[1] === 0xfe ? buffer.subarray(2).toString("utf16le")
-    : buffer.length > 1 && buffer[1] === 0 ? buffer.toString("utf16le") : buffer.toString("utf8");
-  const dacl = text.split(/\r?\n/).slice(1).map(line => line.trim()).find(line => /^D:[A-Z_]*(?:\(.*\))*$/.test(line));
-  if (!dacl) throw privateError("The saved Windows permissions could not be read.");
-  return dacl;
 }
 
 let defaultWindowsSecurity = null;
@@ -809,26 +769,28 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
   else addTo(knownEntries, security, path);
 }
 
-/** The DACL after a protect; owner is this account (icacls /setowner just succeeded). */
-async function readBack(security, path, user) {
-  if (security.readDacl) return `O:${user.sid}${await security.readDacl(path)}`;
-  return (await security.readSddl([path]))[0];
+function replaced(path) {
+  return privateError(`${path} was replaced while it was being made private.`);
 }
 
-function readBackSync(security, path, user) {
-  if (security.readDaclSync) return `O:${user.sid}${security.readDaclSync(path)}`;
-  return security.readSddlSync([path])[0];
-}
-
+/**
+ * The owner and DACL are read back from the object itself (owner included:
+ * the result of /setowner is not assumed), and the path must still name the
+ * same object as before the protect, so a swap in a writable folder fails.
+ */
 async function protectWindowsPath(security, path, kind) {
+  const before = identityOf(path);
+  if (!before) throw privateError(`Refusing to protect a link at ${path}.`);
   await security.protect(path, kind);
   const user = await currentUser(security);
-  let sddl = await readBack(security, path, user);
+  let [sddl] = await security.readSddl([path]);
+  if (identityOf(path) !== before) throw replaced(path);
   if (sddlIsOwnerPrivate(sddl, user)) return;
   const extra = sddlExtraGrantSids(sddl, user);
   if (!extra?.length || !security.removeGrants) throw notProtected(path);
   await security.removeGrants(path, extra);
-  sddl = await readBack(security, path, user);
+  [sddl] = await security.readSddl([path]);
+  if (identityOf(path) !== before) throw replaced(path);
   if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
 }
 
@@ -844,14 +806,18 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
 }
 
 function protectWindowsPathSync(security, path, kind) {
+  const before = identityOf(path);
+  if (!before) throw privateError(`Refusing to protect a link at ${path}.`);
   security.protectSync(path, kind);
   const user = currentUserSync(security);
-  let sddl = readBackSync(security, path, user);
+  let [sddl] = security.readSddlSync([path]);
+  if (identityOf(path) !== before) throw replaced(path);
   if (sddlIsOwnerPrivate(sddl, user)) return;
   const extra = sddlExtraGrantSids(sddl, user);
   if (!extra?.length || !security.removeGrantsSync) throw notProtected(path);
   security.removeGrantsSync(path, extra);
-  sddl = readBackSync(security, path, user);
+  [sddl] = security.readSddlSync([path]);
+  if (identityOf(path) !== before) throw replaced(path);
   if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
 }
 

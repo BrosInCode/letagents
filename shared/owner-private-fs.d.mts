@@ -20,9 +20,6 @@ export interface WindowsSecurity {
   currentUserAliasesSync?(): string[];
   protect(path: string, kind: PrivateKind): Promise<void>;
   protectSync(path: string, kind: PrivateKind): void;
-  /** The DACL alone as SDDL ("D:..."), read right after a protect (the default backend uses icacls /save). */
-  readDacl?(path: string): Promise<string>;
-  readDaclSync?(path: string): string;
   /** Remove every allow entry for these SIDs (the default backend has it; a fake may leave it out). */
   removeGrants?(path: string, sids: readonly string[]): Promise<void>;
   removeGrantsSync?(path: string, sids: readonly string[]): void;
@@ -55,9 +52,6 @@ export type UserIdentity = string | { sid: string; aliases?: readonly string[] }
 export declare function encodeSddlPaths(paths: readonly string[]): string;
 export declare function parseSddlLines(output: string, count: number): (string | null)[];
 export declare function icaclsRemoveArguments(path: string, sids: readonly string[]): string[];
-export declare function icaclsSaveArguments(path: string, file: string): string[];
-/** The DACL line of an `icacls /save` file (UTF-16LE or UTF-8). */
-export declare function parseIcaclsSave(bytes: Uint8Array): string;
 /**
  * After this process made `path` exclusively (open "wx", mkdir): POSIX no-op;
  * Windows marks it known when its folder is verified, else protects it.
