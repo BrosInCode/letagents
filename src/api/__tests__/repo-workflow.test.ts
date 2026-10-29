@@ -578,6 +578,28 @@ test("formatRepoCheckRunEventMessage surfaces actionable check conclusions only"
     null
   );
 
+  for (const conclusion of ["cancelled", "stale"]) {
+    assert.equal(
+      formatRepoCheckRunEventMessage({
+        provider: "github",
+        action: "completed",
+        repositoryFullName: "brosincode/letagents",
+        checkRun: { name: "tests", status: "completed", conclusion, url: "https://example.com" },
+      }),
+      null,
+      conclusion
+    );
+  }
+
+  assert.ok(
+    formatRepoCheckRunEventMessage({
+      provider: "github",
+      action: "completed",
+      repositoryFullName: "brosincode/letagents",
+      checkRun: { name: "tests", status: "completed", conclusion: "timed_out", url: "https://example.com" },
+    })?.includes('Check "tests" timed_out')
+  );
+
   const failMsg = formatRepoCheckRunEventMessage({
     provider: "github",
     action: "completed",
