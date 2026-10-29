@@ -552,6 +552,11 @@ test("the dependency gates run once, in dependency-audit, before every check job
         // failed or skipped check leaves nothing to run the unverified tree.
         const gate = checkJob.steps.findIndex((candidate) => candidate.name === windowsGate.name);
         assert.ok(gate > index, `${checkJob.name}:${step.name} must run before the gate "${windowsGate.name}"`);
+        // Nothing runs between the last check and the gate.
+        const lastCheck = checkJob.steps.findLastIndex((candidate) => containsDirectNpmAudit(candidate.run ?? ""));
+        assert.equal(gate, lastCheck + 1, `${checkJob.name} must reach its gate right after its last signature check`);
+        // Its tests write below a scratch home, never the runner's profile.
+        assert.match(checkJob.steps[0].run ?? "", /printf 'HOME=%s\\nUSERPROFILE=%s\\n' .* >> "\$\{GITHUB_ENV\}"/, `${checkJob.name} must point HOME and USERPROFILE at a scratch folder first`);
         assert.ok(checkJob.steps.length > gate + 1, `${checkJob.name} must run its suites after the gate`);
         for (const later of checkJob.steps.slice(gate + 1)) {
           assert.equal(later.condition, `\${{ !cancelled() && steps.${windowsGate.id}.outcome == 'success' }}`, `${checkJob.name}:${later.name} must wait for the gate "${windowsGate.name}"`);
@@ -725,8 +730,11 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
     const testStep = desktopJob.steps.find((step) => step.name === "Test desktop (${{ matrix.suite }})");
     assert.ok(testStep, `${jobName} must define its test step`);
     for (const name of suiteScripts) {
-      const command = name === "test:electron" ? "npm run test:electron:files -- " : `npm --prefix apps/desktop run ${name}`;
-      assert.ok(testStep.run.includes(command), `${jobName} must run ${name}`);
+      const run = `${testStep.run}\n`;
+      const ran = name === "test:electron"
+        ? run.includes("npm run test:electron:files -- ")
+        : [`npm --prefix apps/desktop run ${name}\n`, `npm --prefix apps/desktop run ${name} ||`].some((command) => run.includes(command));
+      assert.ok(ran, `${jobName} must run ${name}`);
     }
     assert.ok(
       testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/electron-test-weights.json ${electronFiles} > `),

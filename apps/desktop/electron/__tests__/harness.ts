@@ -39,7 +39,8 @@ function trackSqliteDatabases(): void {
   syncBuiltinESMExports();
 }
 
-trackSqliteDatabases();
+// Only Windows refuses to delete an open file; elsewhere nothing is tracked.
+if (process.platform === "win32") trackSqliteDatabases();
 
 function isInside(path: string, folder: string): boolean {
   const inside = relative(resolve(folder), path);

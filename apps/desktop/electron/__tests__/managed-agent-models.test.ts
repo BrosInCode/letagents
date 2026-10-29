@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-managed-agent-models-",
@@ -123,7 +124,7 @@ function fakeClaude(version: string): void {
   process.env.LETAGENTS_CLAUDE_CODE_BIN = claudeBin;
 }
 
-test("Claude models are full ids with real names, and newer ones only from the CLI that knows them", async () => {
+test("Claude models are full ids with real names, and newer ones only from the CLI that knows them", { skip: supervisedAgentsOnly }, async () => {
   fakeClaude("2.1.278");
   const older = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
   assert.equal(older.status, "ready");
@@ -152,7 +153,7 @@ test("Claude models are full ids with real names, and newer ones only from the C
   delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
 });
 
-test("known and custom model validation use the selected source intentionally", async () => {
+test("known and custom model validation use the selected source intentionally", { skip: supervisedAgentsOnly }, async () => {
   fakeClaude("2.1.278");
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
@@ -189,7 +190,7 @@ test("known and custom model validation use the selected source intentionally", 
   delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
 });
 
-test("Codex model discovery reads debug model catalog output", async () => {
+test("Codex model discovery reads debug model catalog output", { skip: supervisedAgentsOnly }, async () => {
   const codexBin = join(tempDir, "codex-debug-models");
   writeFileSync(
     codexBin,
@@ -219,7 +220,7 @@ test("Codex model discovery reads debug model catalog output", async () => {
   }), { model: "gpt-5.4-mini", error: null });
 });
 
-test("Codex stale ready model cache is extended after failed rediscovery", async (t) => {
+test("Codex stale ready model cache is extended after failed rediscovery", { skip: supervisedAgentsOnly }, async (t) => {
   let now = 1_000_000;
   t.mock.method(Date, "now", () => now);
 
@@ -264,7 +265,7 @@ test("Codex stale ready model cache is extended after failed rediscovery", async
   assert.equal(readFileSync(counterPath, "utf8"), "3");
 });
 
-test("Cursor discovered model validation blocks stale provider ids", async () => {
+test("Cursor discovered model validation blocks stale provider ids", { skip: supervisedAgentsOnly }, async () => {
   const cursorBin = join(tempDir, "cursor-agent-models");
   writeFileSync(
     cursorBin,
@@ -299,7 +300,7 @@ test("Cursor discovered model validation blocks stale provider ids", async () =>
   assert.match(stale.error ?? "", /no longer available/);
 });
 
-test("Cursor model discovery uses the managed profile environment", async () => {
+test("Cursor model discovery uses the managed profile environment", { skip: supervisedAgentsOnly }, async () => {
   const cursorBin = join(tempDir, "cursor-agent-models-managed-env");
   const managedHome = join(tempDir, "managed-cursor-home");
   writeFileSync(
@@ -329,7 +330,7 @@ test("Cursor model discovery uses the managed profile environment", async () => 
   assert.deepEqual(result.models.map((model) => model.id), ["managed"]);
 });
 
-test("Cursor model discovery caches failures briefly and refreshModels bypasses the cache", async () => {
+test("Cursor model discovery caches failures briefly and refreshModels bypasses the cache", { skip: supervisedAgentsOnly }, async () => {
   const cursorBin = join(tempDir, "cursor-agent-models-cache-failure");
   const counterPath = join(tempDir, "cursor-agent-models-cache-count");
   writeFileSync(
@@ -365,7 +366,7 @@ test("Cursor model discovery caches failures briefly and refreshModels bypasses 
   assert.equal(readFileSync(counterPath, "utf8"), "2");
 });
 
-test("a fresh Cursor model list is returned before the managed profile is prepared", async () => {
+test("a fresh Cursor model list is returned before the managed profile is prepared", { skip: supervisedAgentsOnly }, async () => {
   const cursorBin = join(tempDir, "cursor-agent-models-profile-skip");
   const managedHome = join(tempDir, "profile-skip", "home");
   writeFileSync(cursorBin, "#!/usr/bin/env node\nconsole.log('fast - Fast Model (default)');\n", { mode: 0o755 });
