@@ -1,6 +1,7 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   renameSync,
@@ -153,8 +154,19 @@ function isRefusedStateFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === "EOWNERPRIVATE";
 }
 
+/**
+ * Whether there is anything at the state path. Windows: a link counts (the
+ * reader then refuses it), where existsSync would follow it and call a
+ * dangling link absent. POSIX: existsSync, as before.
+ */
+function stateFileExists(statePath: string): boolean {
+  if (ownerPrivatePlatform() !== "win32") return existsSync(statePath);
+  try { lstatSync(statePath); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+}
+
 function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
-  if (!existsSync(statePath)) return {};
+  if (!stateFileExists(statePath)) return {};
   try {
     return parseLocalState(readStateFile(statePath));
   } catch (error) {
@@ -168,7 +180,7 @@ export function readAgentLocalStateSnapshot(): {
   complete: boolean;
 } {
   const statePath = getLetAgentsLocalStatePath();
-  if (!existsSync(statePath)) {
+  if (!stateFileExists(statePath)) {
     return { state: {}, complete: true };
   }
 

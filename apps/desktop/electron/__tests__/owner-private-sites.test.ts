@@ -2,7 +2,7 @@
 // POSIX keeps its mode/uid rules; on Windows (an injected platform with a fake
 // ACL backend) the private DACL decides, and POSIX-only literals are replaced.
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -222,6 +222,15 @@ test("Windows: the desktop reads the shared state file (worker tokens) only whil
     assert.equal(fake.protects.length, 2);
   });
   assert.match(await readFile(file, "utf8"), /worker-token-3/);
+  // A dangling link at the state path is refused, not read as "no state", and left in place.
+  await rm(file);
+  await symlink(join(folder, "gone.json"), file);
+  await asWindows(fakeWindowsSecurity(), () => {
+    assert.throws(() => readAgentLocalState(), { code: "EOWNERPRIVATE" });
+    assert.throws(() => readAgentLocalStateSnapshot(), { code: "EOWNERPRIVATE" });
+    assert.throws(() => saveAgentSession(session), { code: "EOWNERPRIVATE" });
+  });
+  assert.equal((await lstat(file)).isSymbolicLink(), true);
 });
 
 test("Windows: the local supervisor key is private from birth, read again unchanged, and refused when exposed or another account's", async (t) => {

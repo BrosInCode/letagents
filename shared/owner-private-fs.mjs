@@ -328,9 +328,9 @@ const SYNC_READER_SOURCE = `"use strict";
 process.on("uncaughtException", () => stop());
 const { workerData } = require("node:worker_threads");
 const { spawn } = require("node:child_process");
-const { port, signal, command, args, env, timeoutMs } = workerData;
+const { port, signal, command, args, env, timeoutMs, startTimeoutMs } = workerData;
 const flag = new Int32Array(signal);
-let child = null; let buffer = ""; let lines = []; let busy = false; let dead = false; let timer = null;
+let child = null; let buffer = ""; let lines = []; let busy = false; let dead = false; let timer = null; let started = false;
 function answer(message) { clearTimeout(timer); busy = false; lines = []; port.postMessage(message); Atomics.store(flag, 0, 1); Atomics.notify(flag, 0); }
 function stop() { if (dead) return; dead = true; try { if (child) child.kill(); } catch {} if (busy) answer({ error: true }); }
 function reader() {
@@ -356,7 +356,8 @@ port.on("message", (paths) => {
   busy = true;
   if (dead) { answer({ error: true }); return; }
   // A reader that does not answer is killed here, so no PowerShell outlives the wait.
-  timer = setTimeout(stop, timeoutMs);
+  timer = setTimeout(stop, started ? timeoutMs : startTimeoutMs);
+  started = true;
   // An empty request (prepare) only starts PowerShell: its answer is the empty line's "done:".
   try { reader().stdin.write(paths.length ? paths.join("\\n") + "\\n\\n" : "\\n"); } catch { stop(); }
 });
@@ -368,17 +369,21 @@ port.on("message", (paths) => {
  * one-shot tool; the first answer includes the PowerShell start.
  */
 const SYNC_READER_TIMEOUT_MS = 10_000;
+/** The first answer includes starting PowerShell, which a slow or busy machine can take long for. */
+const SYNC_READER_START_TIMEOUT_MS = TOOL_TIMEOUT_MS;
 
 /** Starts the worker that owns a synchronous reader: `command args` speaks the reader protocol above. */
 export function syncSddlReaderWorker(command, args, env = process.env) {
-  return ({ port, signal, timeoutMs }) => new Worker(SYNC_READER_SOURCE, {
-    eval: true, workerData: { port, signal, command, args, env: { ...env }, timeoutMs }, transferList: [port],
+  return ({ port, signal, timeoutMs, startTimeoutMs }) => new Worker(SYNC_READER_SOURCE, {
+    eval: true, workerData: { port, signal, command, args, env: { ...env }, timeoutMs, startTimeoutMs }, transferList: [port],
   });
 }
 
 /** One long-lived reader for synchronous reads; `start` returns its worker (injectable for tests). */
-export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS } = {}) {
+export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS, startTimeoutMs = SYNC_READER_START_TIMEOUT_MS } = {}) {
   let worker = null; let port = null; let flag = null; let broken = false;
+  /** The worker's first answer (the PowerShell start) has a longer budget. */
+  let answered = false;
   /** A prepare() request whose answer has not been taken yet. */
   let warming = false;
   const stop = () => {
@@ -391,7 +396,7 @@ export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS
     if (!worker) {
       const channel = new MessageChannel();
       flag = new Int32Array(new SharedArrayBuffer(4));
-      worker = start({ port: channel.port2, signal: flag.buffer, timeoutMs });
+      worker = start({ port: channel.port2, signal: flag.buffer, timeoutMs, startTimeoutMs });
       // Neither the worker nor its port may keep the process alive on its own.
       worker.unref?.();
       // Seen between reads only: a worker that dies during a read answers through `flag` first.
@@ -405,8 +410,10 @@ export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS
   }
   /** The worker's answer to the request just posted, or a throw (and the reader is stopped). */
   function answer() {
-    // The worker gives up after timeoutMs and answers; this wait is the backstop.
-    if (Atomics.wait(flag, 0, 0, timeoutMs + 1_000) === "timed-out") { stop(); throw privateError("The permissions reader did not answer in time."); }
+    // The worker gives up after its budget and answers; this wait is the backstop.
+    const budget = answered ? timeoutMs : startTimeoutMs;
+    answered = true;
+    if (Atomics.wait(flag, 0, 0, budget + 1_000) === "timed-out") { stop(); throw privateError("The permissions reader did not answer in time."); }
     const message = receiveMessageOnPort(port)?.message;
     if (!Array.isArray(message?.lines)) { stop(); throw privateError("The permissions reader stopped."); }
     return message.lines;
@@ -795,6 +802,14 @@ export function privateEntryCreatedSync(path, kind, options = {}) {
 
 /** Internal: this process just made the entry, so its owner is this account and need not be read first. */
 const JUST_CREATED = Symbol("owner-private just created");
+/**
+ * Internal: an upgrade of an Administrators-only secret (see
+ * upgradeAdministratorsOnly). The value is the volume and file ID that were
+ * checked; the protect refuses unless the path is still that file and the
+ * DACL it reads before any change still lets only this account, SYSTEM and
+ * Administrators in.
+ */
+const UPGRADE_OF = Symbol("owner-private upgrade of");
 
 /** `path` and every folder above it, nearest first. */
 function chainOf(path) {
@@ -1011,8 +1026,8 @@ export function assertOwnerPrivateSync(path, options = {}) {
 // volume, file ID, change time, write time and size. NTFS moves the change
 // time when a DACL changes, so a grant added later is a new identity and is
 // checked again before the next read; an unchanged file costs no tool. A
-// file this process wrote privately is remembered as written (see
-// rememberWrittenSecret). Only "private" is kept, and for
+// file this process wrote privately is remembered when it is unchanged since
+// the write (see rememberWrittenSecret). Only "private" is kept, and for
 // five minutes at most: a program with this account's rights (or an
 // administrator's) can set the change time back after it widens a DACL, and
 // it could read the file anyway, but such a change is still seen soon.
@@ -1096,24 +1111,19 @@ function openedIsChecked(opened, info) {
  * Administrators have access too (state an older version left) is made
  * private, by itself (its folder is not changed), and read. Only this
  * account, SYSTEM and Administrators could ever open it; any other grant or
- * owner is still refused. The new DACL is checked again before the read.
+ * owner is still refused. The protect itself refuses unless the path is
+ * still the file that was checked (`info`) and the DACL it reads before any
+ * change is still Administrators-only; the new DACL is checked again before
+ * the read.
  */
-function upgradeSecretSync(security, path, options) {
-  try {
-    const [sddl] = security.readSddlSync([path]);
-    if (!sddlHasOnlyAdministratorAccess(sddl, currentUserSync(security))) return false;
-    protectOwnerPrivateSync(path, "file", { ...options, force: true });
-    return true;
-  } catch { return false; }
+function upgradeSecretSync(path, info, options) {
+  try { protectOwnerPrivateSync(path, "file", { ...options, force: true, [UPGRADE_OF]: `${info.dev}:${info.ino}` }); return true; }
+  catch { return false; }
 }
 
-async function upgradeSecret(security, path, options) {
-  try {
-    const [sddl] = await security.readSddl([path]);
-    if (!sddlHasOnlyAdministratorAccess(sddl, await currentUser(security))) return false;
-    await protectOwnerPrivate(path, "file", { ...options, force: true });
-    return true;
-  } catch { return false; }
+async function upgradeSecret(path, info, options) {
+  try { await protectOwnerPrivate(path, "file", { ...options, force: true, [UPGRADE_OF]: `${info.dev}:${info.ino}` }); return true; }
+  catch { return false; }
 }
 
 /**
@@ -1132,9 +1142,9 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
   const security = windowsSecurity(options);
   let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {
-    let verdict;
+    let verdict; let info;
     try {
-      const info = secretInfo(path, lstatSync(path, { bigint: true }));
+      info = secretInfo(path, lstatSync(path, { bigint: true }));
       verdict = secretIsRemembered(security, path, info) ? "private"
         : judgeSecret(security, path, info, isOwnerPrivateSync(path, info, { ...options, checkObject: true }));
       if (verdict === "private") {
@@ -1152,7 +1162,7 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
     }
     if (verdict === "exposed" && options.upgradeAdministratorsOnly && !upgraded) {
       upgraded = true;
-      if (upgradeSecretSync(security, path, options)) continue;
+      if (upgradeSecretSync(path, info, options)) continue;
     }
     if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
@@ -1164,9 +1174,9 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
   const security = windowsSecurity(options);
   let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {
-    let verdict;
+    let verdict; let info;
     try {
-      const info = secretInfo(path, await lstat(path, { bigint: true }));
+      info = secretInfo(path, await lstat(path, { bigint: true }));
       verdict = secretIsRemembered(security, path, info) ? "private"
         : judgeSecret(security, path, info, await isOwnerPrivate(path, info, { ...options, checkObject: true }));
       if (verdict === "private") {
@@ -1184,7 +1194,7 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
     }
     if (verdict === "exposed" && options.upgradeAdministratorsOnly && !upgraded) {
       upgraded = true;
-      if (await upgradeSecret(security, path, options)) continue;
+      if (await upgradeSecret(path, info, options)) continue;
     }
     if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
@@ -1205,10 +1215,9 @@ export function prepareOwnerPrivateReads(options = {}) {
 function rememberWrittenSecret(security, path, written) {
   try {
     const current = lstatSync(path, { bigint: true });
-    // The change time is not compared: a rename may move it (Windows Server
-    // does). The file is the one this process made private moments ago.
-    const same = (info) => `${info.dev}:${info.ino}:${info.mtimeNs}:${info.size}`;
-    if (!current.isSymbolicLink() && same(current) === same(written)) rememberSecret(security, path, current);
+    // Any change since the write (the change time included, which a rename
+    // may also move) leaves it unremembered: the next read checks its DACL.
+    if (!current.isSymbolicLink() && secretIdentity(current) === secretIdentity(written)) rememberSecret(security, path, current);
   } catch { /* not remembered: the next read checks it */ }
 }
 
@@ -1227,14 +1236,15 @@ function rememberWrittenSecret(security, path, written) {
 export function ensurePrivateStateFolderSync(folder, options = {}) {
   if (!isWindows(options)) return false;
   let info;
-  try { info = lstatSync(folder); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  try { info = lstatSync(folder, { bigint: true }); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
   if (!info.isDirectory() || info.isSymbolicLink()) return false;
   if (isOwnerPrivateSync(folder, info, options)) return true;
-  const security = windowsSecurity(options);
-  const [sddl] = security.readSddlSync([folder]);
-  if (!pathIsInfo(folder, info) || !sddlHasOnlyAdministratorAccess(sddl, currentUserSync(security))) return false;
-  protectOwnerPrivateSync(folder, "directory", { ...options, force: true });
-  return true;
+  // The protect refuses unless the folder is still the one checked here and Administrators-only.
+  // Any failure leaves the folder as it is: the writer then gives each file a protected DACL of its own.
+  try {
+    protectOwnerPrivateSync(folder, "directory", { ...options, force: true, [UPGRADE_OF]: `${info.dev}:${info.ino}` });
+    return true;
+  } catch { return false; }
 }
 
 // ---------------------------------------------------------------- making private paths
@@ -1274,7 +1284,7 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
   let proved;
-  try { proved = await protectWindowsPath(security, path, kind, options[JUST_CREATED] === true); }
+  try { proved = await protectWindowsPath(security, path, kind, options[JUST_CREATED] === true, options[UPGRADE_OF]); }
   catch (error) { throw protectFailure(path, error); }
   rememberId(security, proved.id, proved.passesOn);
 }
@@ -1302,12 +1312,21 @@ function assertProtectableOwner(path, sddl, user) {
   }
 }
 
-async function protectWindowsPath(security, path, kind, justCreated) {
+/** An upgrade (UPGRADE_OF) changes only the entry that was checked, and only while it is Administrators-only. */
+function assertUpgradable(path, before, upgradeOf, sddl, user) {
+  if (upgradeOf === undefined) return;
+  if (before !== upgradeOf || !sddlHasOnlyAdministratorAccess(sddl, user)) {
+    throw privateError(`${path} changed, or other accounts can open it; it is not made private.`);
+  }
+}
+
+async function protectWindowsPath(security, path, kind, justCreated, upgradeOf) {
   const before = identityOf(path);
   if (!before) throw privateError(`Refusing to protect a link at ${path}.`);
   if (!justCreated) {
     const [current] = await security.readSddl([path]);
     assertProtectableOwner(path, current, await currentUser(security));
+    assertUpgradable(path, before, upgradeOf, current, await currentUser(security));
     if (identityOf(path) !== before) throw replaced(path);
   }
   await security.protect(path, kind);
@@ -1331,17 +1350,18 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
   let proved;
-  try { proved = protectWindowsPathSync(security, path, kind, options[JUST_CREATED] === true); }
+  try { proved = protectWindowsPathSync(security, path, kind, options[JUST_CREATED] === true, options[UPGRADE_OF]); }
   catch (error) { throw protectFailure(path, error); }
   rememberId(security, proved.id, proved.passesOn);
 }
 
-function protectWindowsPathSync(security, path, kind, justCreated) {
+function protectWindowsPathSync(security, path, kind, justCreated, upgradeOf) {
   const before = identityOf(path);
   if (!before) throw privateError(`Refusing to protect a link at ${path}.`);
   if (!justCreated) {
     const [current] = security.readSddlSync([path]);
     assertProtectableOwner(path, current, currentUserSync(security));
+    assertUpgradable(path, before, upgradeOf, current, currentUserSync(security));
     if (identityOf(path) !== before) throw replaced(path);
   }
   security.protectSync(path, kind);

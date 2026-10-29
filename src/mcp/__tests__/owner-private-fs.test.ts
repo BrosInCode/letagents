@@ -871,7 +871,9 @@ test("Windows: a secret this process wrote is read with no tool; a cold read che
     let before = reads.length;
     assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "{\"token\":\"t2\"}");
     assert.equal(await readOwnerPrivateFile(file, "utf8", options), "{\"token\":\"t2\"}");
-    assert.equal(reads.length, before, "the writer's own file needs no read");
+    // Unchanged since the write, it needs no read. A rename may move the change time (POSIX does, and
+    // Windows Server can): then the next read checks the file once, through the reader (no protect).
+    assert.ok(reads.length - before <= 1, "the writer's own file needs at most one read");
     // A cold process (another MCP worker): the file's own DACL and the folders up to a protected one, in one read.
     forgetOwnerPrivateCache();
     before = reads.length;
@@ -1036,6 +1038,44 @@ test("Windows: an Administrators-only secret (an older version's state) is made 
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Windows: an upgrade changes only the file that was checked: one swapped in before the protect is refused, untouched", () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const legacy = join(folder, "legacy.json");
+    writeFileSync(legacy, "legacy");
+    const adminOnly = `O:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;${USER})`;
+    const exposed = `O:${USER}D:AI(A;;FR;;;WD)(A;ID;FA;;;SY)(A;ID;FA;;;${USER})`;
+    const { security, calls, sddl } = fakeSecurity({ [folder]: `O:${USER}D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;${USER})`, [legacy]: adminOnly });
+    let reads = 0;
+    const swapping: WindowsSecurity = {
+      ...security,
+      readSddlSync(paths) {
+        reads += 1;
+        // After the check, before the protect's own read: an exposed file (this account's) takes the path.
+        if (reads === 2) { writeFileSync(`${legacy}.new`, "planted"); renameSync(`${legacy}.new`, legacy); sddl[legacy] = exposed; }
+        return security.readSddlSync(paths);
+      },
+    };
+    const options = { platform: "win32" as const, windowsSecurity: swapping, upgradeAdministratorsOnly: true };
+    assert.throws(() => readOwnerPrivateFileSync(legacy, "utf8", options), { code: "EOWNERPRIVATE" });
+    assert.deepEqual(calls, [], "nothing was protected");
+    assert.equal(sddl[legacy], exposed);
+    // The same file, still Administrators-only but widened just before the protect: refused too.
+    forgetOwnerPrivateCache();
+    writeFileSync(legacy, "legacy 2");
+    sddl[legacy] = adminOnly;
+    reads = 0;
+    const widening: WindowsSecurity = {
+      ...security,
+      readSddlSync(paths) { reads += 1; if (reads === 2) sddl[legacy] = exposed; return security.readSddlSync(paths); },
+    };
+    assert.throws(() => readOwnerPrivateFileSync(legacy, "utf8", { ...options, windowsSecurity: widening }), { code: "EOWNERPRIVATE" });
+    assert.deepEqual(calls, []);
+  } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Windows: a secret's verdict lasts five minutes at most, even when nothing about the file changed", (t) => {
   const root = scratch();
   try {
@@ -1076,7 +1116,7 @@ test("synchronous reads wait for one long-lived reader in a worker thread; a rea
   const stopped = createSyncSddlServer(syncSddlReaderWorker(process.execPath, ["-e", "process.exit(3)"]));
   assert.throws(() => stopped.read(["C:\\a"]), { code: "EOWNERPRIVATE" });
   assert.equal(stopped.usable, false);
-  const hung = createSyncSddlServer(syncSddlReaderWorker(process.execPath, ["-e", "process.stdin.resume()"]), { timeoutMs: 300 });
+  const hung = createSyncSddlServer(syncSddlReaderWorker(process.execPath, ["-e", "process.stdin.resume()"]), { timeoutMs: 300, startTimeoutMs: 300 });
   assert.throws(() => hung.read(["C:\\a"]), { code: "EOWNERPRIVATE" });
   assert.equal(hung.usable, false);
   const short = createSyncSddlServer(syncSddlReaderWorker(process.execPath, ["-e", "require('readline').createInterface({ input: process.stdin }).on('line', (l) => { if (l === '') console.log('done:'); });"]));
@@ -1337,10 +1377,12 @@ test("real Windows: a fresh token passes; an Everyone grant and another owner ar
     console.log(`rename keeps: ino ${probeBefore.ino === probeAfter.ino}, ctime ${probeBefore.ctimeNs === probeAfter.ctimeNs}, mtime ${probeBefore.mtimeNs === probeAfter.mtimeNs}`);
     writePrivateFileAtomicallySync(token, "{\"token\":\"fresh\"}", writerOptions);
 
-    // The writer reads its own fresh token back without any tool (no icacls, no Get-Acl).
-    const before = writer.total();
+    // The writer reads its own fresh token back with no icacls, and at most one warm DACL read (none when the
+    // rename kept the change time).
+    const before = { ...writer.counts };
     assert.equal(readOwnerPrivateFileSync(token, "utf8", writerOptions), "{\"token\":\"fresh\"}");
-    assert.equal(writer.total(), before, `the writer's read started a tool: ${JSON.stringify(writer.counts)}`);
+    assert.equal(writer.counts.protectSync ?? 0, before.protectSync ?? 0, `the writer's read ran icacls: ${JSON.stringify(writer.counts)}`);
+    assert.ok((writer.counts.readSddlSync ?? 0) - (before.readSddlSync ?? 0) <= 1, JSON.stringify(writer.counts));
 
     // Another process (a cold WindowsSecurity): one DACL read on the first read, none after; never a protect.
     const reader = countingSecurity();

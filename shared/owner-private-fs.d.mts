@@ -70,12 +70,12 @@ export declare function icaclsProtectArguments(path: string, kind: PrivateKind, 
 export interface SddlServer { readonly usable: boolean; read(paths: readonly string[]): Promise<(string | null)[]>; stop(): void }
 /** One long-lived PowerShell reader for asynchronous reads; `start` returns its child process. */
 export declare function createSddlServer(start: () => import("node:child_process").ChildProcess): SddlServer;
-export type SyncSddlReaderStart = (channel: { port: import("node:worker_threads").MessagePort; signal: SharedArrayBuffer; timeoutMs: number }) => import("node:worker_threads").Worker;
+export type SyncSddlReaderStart = (channel: { port: import("node:worker_threads").MessagePort; signal: SharedArrayBuffer; timeoutMs: number; startTimeoutMs: number }) => import("node:worker_threads").Worker;
 /** The worker that owns a synchronous reader: `command args` speaks the long-lived reader's line protocol. */
 export declare function syncSddlReaderWorker(command: string, args: readonly string[], env?: NodeJS.ProcessEnv): SyncSddlReaderStart;
 export interface SyncSddlServer { readonly usable: boolean; prepare(): void; read(paths: readonly string[]): (string | null)[]; stop(): void }
 /** One long-lived reader for synchronous reads: the caller waits (Atomics.wait) for its worker's answer. */
-export declare function createSyncSddlServer(start: SyncSddlReaderStart, options?: { timeoutMs?: number }): SyncSddlServer;
+export declare function createSyncSddlServer(start: SyncSddlReaderStart, options?: { timeoutMs?: number; startTimeoutMs?: number }): SyncSddlServer;
 export declare function createWindowsSecurity(options?: {
   run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv;
   /** The long-lived reader's child process; null for none. Default: PowerShell, only with the real runners. */
