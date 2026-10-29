@@ -582,6 +582,9 @@ async function terminateChildTree(child, options) {
   }
   const signalled = signalTreeOutcome(pid, platform === "win32" ? "SIGTERM" : "SIGKILL", { ...options, child });
   await settlesWithin(exited, options.killWaitMs ?? 5_000);
+  // The kill's answer wins over the helper's exit code: once a kill has ended
+  // the job, the job no longer lists the processes the kill waited on, so the
+  // helper cannot see one that is still there.
   if (signalled === "unkillable") return "unkillable";
   return hasExited() ? exitOutcome() : "running";
 }

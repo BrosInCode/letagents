@@ -56,6 +56,7 @@
 #endif
 #include <windows.h>
 #include <tlhelp32.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,39 +131,77 @@ static DWORD job_active_processes(HANDLE job) {
   return accounting.ActiveProcesses;
 }
 
-/* Wait until the job is empty. The port, when given, wakes the wait early. */
-static int drain_job(HANDLE job, HANDLE port, DWORD timeout_ms) {
-  ULONGLONG deadline = GetTickCount64() + timeout_ms;
-  for (;;) {
-    DWORD active = job_active_processes(job);
-    ULONGLONG now = GetTickCount64();
-    DWORD slice;
-    if (active == 0) return 1;
-    if (now >= deadline) return 0;
-    slice = (DWORD)(deadline - now);
-    if (slice > 50) slice = 50;
-    if (port) {
-      DWORD message = 0;
-      ULONG_PTR key = 0;
-      LPOVERLAPPED overlapped = NULL;
-      GetQueuedCompletionStatus(port, &message, &key, &overlapped, slice);
-    } else {
-      Sleep(slice);
+/* Handles to a job's processes, taken while the job still lists them. An
+   ended job cannot be waited on through its own counts: TerminateJobObject
+   stops counting each process (ActiveProcesses, the process list) at once,
+   before it has exited. Only a process handle shows when it is gone. */
+typedef struct {
+  HANDLE *handles;
+  DWORD count;
+} held_processes;
+
+static void hold_job_processes(HANDLE job, held_processes *held) {
+  DWORD capacity = 64, attempt, index;
+  held->handles = NULL;
+  held->count = 0;
+  for (attempt = 0; attempt < 4; attempt++) {
+    size_t size = offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) + (size_t)capacity * sizeof(ULONG_PTR);
+    JOBOBJECT_BASIC_PROCESS_ID_LIST *list = (JOBOBJECT_BASIC_PROCESS_ID_LIST *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+    if (!list) return;
+    if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, list, (DWORD)size, NULL) && GetLastError() != ERROR_MORE_DATA) {
+      HeapFree(GetProcessHeap(), 0, list);
+      return;
     }
+    /* More processes than room: read again with room for them (a few times at most). */
+    if (list->NumberOfAssignedProcesses > list->NumberOfProcessIdsInList && attempt < 3) {
+      capacity = list->NumberOfAssignedProcesses + 16;
+      HeapFree(GetProcessHeap(), 0, list);
+      continue;
+    }
+    held->handles = (HANDLE *)HeapAlloc(GetProcessHeap(), 0, ((size_t)list->NumberOfProcessIdsInList + 1) * sizeof(HANDLE));
+    for (index = 0; held->handles && index < list->NumberOfProcessIdsInList; index++) {
+      BOOL in_job = FALSE;
+      HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)list->ProcessIdList[index]);
+      if (!process) continue;
+      /* The pid may name another process by now: only a process in this job counts. */
+      if (IsProcessInJob(process, job, &in_job) && in_job) held->handles[held->count++] = process;
+      else CloseHandle(process);
+    }
+    HeapFree(GetProcessHeap(), 0, list);
+    return;
   }
+}
+
+static DWORD remaining_ms(ULONGLONG deadline) {
+  ULONGLONG now = GetTickCount64();
+  return now >= deadline ? 0 : (DWORD)(deadline - now);
+}
+
+/* Wait for each held process until the deadline, then let them go: 1 when every one exited. */
+static int wait_held_processes(held_processes *held, ULONGLONG deadline) {
+  int all = 1;
+  DWORD index;
+  for (index = 0; index < held->count; index++) {
+    if (WaitForSingleObject(held->handles[index], remaining_ms(deadline)) != WAIT_OBJECT_0) all = 0;
+    CloseHandle(held->handles[index]);
+  }
+  if (held->handles) HeapFree(GetProcessHeap(), 0, held->handles);
+  held->handles = NULL;
+  held->count = 0;
+  return all;
 }
 
 static int run_spawn(const wchar_t *application, const wchar_t *command_line, DWORD wait_ms) {
   FILETIME creation, exit_time, kernel, user;
   wchar_t name[96], event_name[112];
-  HANDLE job, port, ended, waits[2];
+  HANDLE job, ended, waits[2];
+  held_processes held;
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
-  JOBOBJECT_ASSOCIATE_COMPLETION_PORT association;
   STARTUPINFOW own, startup;
   PROCESS_INFORMATION child;
   DWORD flags = CREATE_SUSPENDED;
   DWORD exit_code = 1;
-  int reported = 0;
+  int emptied;
   ULONGLONG deadline;
   size_t length;
   wchar_t *mutable_line;
@@ -197,15 +236,6 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
   if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits)) {
     fail_message("cannot set the job's limits", GetLastError());
     return EXIT_FAILED;
-  }
-  port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
-  if (port) {
-    association.CompletionKey = (PVOID)job;
-    association.CompletionPort = port;
-    if (!SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &association, sizeof association)) {
-      CloseHandle(port);
-      port = NULL;
-    }
   }
 
   ZeroMemory(&own, sizeof own);
@@ -262,27 +292,22 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
   waits[1] = ended;
   WaitForMultipleObjects(2, waits, FALSE, INFINITE);
   /* What the child left behind ends with it, and the helper exits with the
-     child's code only once the job is empty: that exit means the whole tree
-     is gone. Termination is asynchronous (a process can wait on pending
-     I/O), so it is repeated, for at most wait_ms: a process still there
-     then is unkillable, and the helper says so instead of waiting forever. */
+     child's code only once every process of the job has exited: that exit
+     means the whole tree is gone. Termination is asynchronous (a process
+     can wait on pending I/O), so the helper waits on the processes the job
+     listed before it was ended, and on the child, for at most wait_ms: a
+     process still there then is unkillable, and the helper says so instead
+     of waiting forever. After a kill the job lists only what started since,
+     and the kill itself waits for the rest. */
   deadline = GetTickCount64() + wait_ms;
-  for (;;) {
-    ULONGLONG now;
-    DWORD slice;
-    if (!TerminateJobObject(job, 1) && !reported) {
-      fail_message("cannot end what the program left running; waiting for it", GetLastError());
-      reported = 1;
-    }
-    now = GetTickCount64();
-    slice = now >= deadline ? 0 : (deadline - now > 1000 ? 1000 : (DWORD)(deadline - now));
-    if (drain_job(job, port, slice)) break;
-    if (GetTickCount64() >= deadline) {
-      fail_message("the program's job still holds processes after it was ended (unkillable)", ERROR_TIMEOUT);
-      return (int)EXIT_SPAWN_UNKILLABLE;
-    }
+  hold_job_processes(job, &held);
+  if (!TerminateJobObject(job, 1)) fail_message("cannot end what the program left running", GetLastError());
+  emptied = wait_held_processes(&held, deadline);
+  if (WaitForSingleObject(child.hProcess, remaining_ms(deadline)) != WAIT_OBJECT_0 || !emptied) {
+    fail_message("the program's job still holds processes after it was ended (unkillable)", ERROR_TIMEOUT);
+    return (int)EXIT_SPAWN_UNKILLABLE;
   }
-  /* The job is empty, so the child (in it) has exited and its code is final. */
+  /* The child has exited, so its code is final. */
   if (!GetExitCodeProcess(child.hProcess, &exit_code)) exit_code = 1;
   return (int)exit_code;
 }
@@ -331,8 +356,12 @@ static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
      checked again after the open: had the helper exited in between, its job
      could be gone and the name someone else's. */
   if (job && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+    held_processes held;
+    /* Before the job is ended: afterwards it no longer lists its processes. */
+    hold_job_processes(job, &held);
     if (!TerminateJobObject(job, 1)) {
       DWORD error = GetLastError();
+      wait_held_processes(&held, 0);
       CloseHandle(job);
       CloseHandle(process);
       fail_message("cannot end the job", error);
@@ -345,8 +374,8 @@ static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
       SetEvent(ended);
       CloseHandle(ended);
     }
-    /* Bounded: processes still in the job after wait_ms are unkillable. */
-    result = drain_job(job, NULL, wait_ms) ? 0 : EXIT_UNKILLABLE;
+    /* Bounded: a process of the job still there after wait_ms is unkillable. */
+    result = wait_held_processes(&held, GetTickCount64() + wait_ms) ? 0 : EXIT_UNKILLABLE;
     CloseHandle(job);
     /* The helper exits once its program has: a short wait, so this command
        stays well inside its caller's timeout. */

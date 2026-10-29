@@ -561,7 +561,11 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
     try {
       this.signalDaemon(retired.pid, signal, retired.kernelStartTime);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      // ESRCH: nothing with that birth was ended. EUNKILLABLE (Windows): it
+      // was ended but had not exited when the helper's wait ran out; the
+      // bounded observation below decides, as after any delivered signal.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH" || code === "EUNKILLABLE") {
         return this.observeRetiredDaemon(retired);
       }
       throw error;

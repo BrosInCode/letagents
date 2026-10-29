@@ -48,14 +48,16 @@ function setup() {
     "setInterval(() => {}, 1000);",
   ].join("\n"));
   // The middle: starts the grandchild, records its own pid, then waits, or
-  // with "leave" exits at once and leaves a detached grandchild behind.
+  // with "leave" exits at once and leaves a detached grandchild behind, or
+  // with "leave-on-go" does so once a `<child pid file>.go` file exists.
   const child = fixture("child.cjs", [
     'const { spawn } = require("node:child_process");',
     'const fs = require("node:fs");',
     "const [childFile, grandchildFile, mode] = process.argv.slice(2);",
-    `const grandchild = spawn(process.execPath, [${JSON.stringify(grandchild)}, grandchildFile], { stdio: "ignore", detached: mode === "leave" });`,
+    `const grandchild = spawn(process.execPath, [${JSON.stringify(grandchild)}, grandchildFile], { stdio: "ignore", detached: mode !== "wait" });`,
     "fs.writeFileSync(childFile, String(process.pid));",
     'if (mode === "leave") { grandchild.unref(); const done = () => fs.existsSync(grandchildFile) ? process.exit(0) : setTimeout(done, 20); done(); }',
+    'else if (mode === "leave-on-go") { grandchild.unref(); const done = () => fs.existsSync(grandchildFile) && fs.existsSync(childFile + ".go") ? process.exit(0) : setTimeout(done, 20); done(); }',
     "else setInterval(() => {}, 1000);",
   ].join("\n"));
   // The top: a batch file (not an npm shim), so it runs under cmd.exe.
@@ -304,34 +306,52 @@ async function holdExit(pid, holdMs) {
 
 const HOLD_MS = 10_000;
 
-test("a kill whose bounded wait runs out reports the tree unkillable; the helper's own bound ends with the unkillable code", { skip }, async () => {
+test("a kill whose bounded wait runs out reports the tree unkillable; the held process ends once let go", { skip }, async () => {
   const started = await startTree();
   const holder = await holdExit(started.grandchildPid, HOLD_MS);
   const before = Date.now();
-  // The job is ended; the held grandchild stays in it past the kill's 1 s bound.
+  // The job is ended; the held grandchild has not exited when the kill's 1 s bound runs out.
   assert.equal(signalTreeOutcome(started.tree.pid, "SIGKILL", { ...noHeldTrees, identity: started.births.helper, unkillableAfterMs: 1_000 }), "unkillable");
   await holder.held;
-  // The kill told the helper its job was ended: the helper's default 5 s bound runs out while the exit is still held.
-  const { code } = await exited(started.tree);
-  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
-  assert.ok(Date.now() - before < HOLD_MS, "the helper waited for the held process instead of its bound");
-  // The held process is still there (its job lost its name with the helper's handle, so it is asked by pid).
+  assert.ok(Date.now() - before < HOLD_MS, "the kill waited for the held process instead of its bound");
   assert.equal(processBirth(started.grandchildPid, helper), started.births.grandchild, "the held process ended early");
-  // Once let go, it ends.
+  await exited(started.tree);
   await holder.done;
   await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
   assert.ok(gone(started.childPid, started.births.child));
 });
 
-test("terminateTreeOutcome reports a held tree unkillable, and terminateTree resolves false for it", { skip }, async () => {
-  const started = await startTree();
-  const holder = await holdExit(started.grandchildPid, HOLD_MS);
-  assert.equal(await terminateTreeOutcome(started.tree, { ...helper, unkillableAfterMs: 1_000, killWaitMs: 7_000 }), "unkillable");
-  await exited(started.tree);
-  assert.equal(started.tree.exitCode, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
-  assert.equal(await terminateTree(started.tree, helper), false);
+test("a helper whose own bounded wait runs out exits with the unkillable code", { skip }, async () => {
+  // The program exits by itself and leaves a grandchild whose exit is held: the helper ends it and waits 1 s.
+  const { shim } = setup();
+  const id = Math.random().toString(36).slice(2);
+  const childFile = join(folder, `child-${id}.pid`);
+  const grandchildFile = join(folder, `grandchild-${id}.pid`);
+  const tree = spawnTree(shim, [childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 1_000 });
+  const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
+  const grandchildBirth = processBirth(grandchildPid, helper);
+  const holder = await holdExit(grandchildPid, HOLD_MS);
+  const before = Date.now();
+  writeFileSync(`${childFile}.go`, "");
+  const { code } = await exited(tree);
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.ok(Date.now() - before < HOLD_MS, "the helper waited for the held process instead of its bound");
+  assert.equal(processBirth(grandchildPid, helper), grandchildBirth, "the held process ended early");
   await holder.done;
-  await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+  await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
+});
+
+test("terminateTreeOutcome reports a held tree unkillable, and terminateTree resolves false for one", { skip }, async () => {
+  const first = await startTree();
+  const firstHolder = await holdExit(first.grandchildPid, HOLD_MS);
+  assert.equal(await terminateTreeOutcome(first.tree, { ...helper, unkillableAfterMs: 1_000 }), "unkillable");
+  const second = await startTree();
+  const secondHolder = await holdExit(second.grandchildPid, HOLD_MS);
+  assert.equal(await terminateTree(second.tree, { ...helper, unkillableAfterMs: 1_000 }), false);
+  for (const [started, holder] of [[first, firstHolder], [second, secondHolder]]) {
+    await holder.done;
+    await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+  }
 });
 
 test("with the default bound a tree ends whole and terminateTreeOutcome reports it exited", { skip }, async () => {
