@@ -1,11 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
+import { homedir } from 'node:os';
 import { extname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { readdir, realpath, stat } from 'node:fs/promises';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
-import { letagentsHomePath } from '../../../../shared/letagents-home.mjs';
+import { letagentsHome } from '../../../../shared/letagents-home.mjs';
 import { apiUrl } from './paths.js';
 import { pollDesktopRoomAgentWork } from './rooms/agent-work.js';
 
@@ -40,7 +41,7 @@ async function context(input: WorkspaceFileRequest, options: { cachedPoll?: bool
   validate(input);
   let database: DatabaseSync | undefined;
   try {
-    database = new DatabaseSync(letagentsHomePath('daemon-state.sqlite'), { readOnly: true });
+    database = new DatabaseSync(join(letagentsHome({ homedir }), 'daemon-state.sqlite'), { readOnly: true });
     const row = database.prepare(`SELECT c.settled_json, a.workspace_path FROM room_workspace_captures c
       JOIN room_work_publications p USING(agent_id,room_id,source_message_id)
       JOIN work_attempts a USING(work_attempt_id)
@@ -249,7 +250,9 @@ export function windowsSourceEditor(options: { env?: NodeJS.ProcessEnv; exists?:
   }
   return null;
 }
-function openWithWindowsEditor(editorPath: string, path: string): Promise<string> {
+async function openWithWindowsEditor(editorPath: string, path: string): Promise<string> {
+  // Loaded here so macOS-only callers and tests never need spawn.
+  const { spawn } = await import('node:child_process');
   return new Promise(resolveOpen => {
     try {
       // Detached: a first VS Code window keeps running after LetAgents is done.
