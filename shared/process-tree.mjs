@@ -350,8 +350,12 @@ function endWindowsTree(pid, options) {
       ? processBirth(pid, { ...options, platform: "win32", helperPath: helper })
       : undefined;
     // A child found only by its pid is the one the caller recorded only if its
-    // birth is proved to be that record; unreadable is not proof.
-    if (identity && !options.child && birth !== identity) return false;
+    // birth is proved to be that record; unreadable is not proof, so then the
+    // helper's own handle-held check of the recorded birth decides.
+    if (identity && !options.child && birth !== identity) {
+      if (isWindowsBirth(birth) || !live?.helper || !isWindowsBirth(identity)) return false;
+      return killByBirth(helper, pid, identity, options) === "ended";
+    }
     if (live?.helper && isWindowsBirth(birth)) {
       const ended = killByBirth(helper, pid, birth, options);
       if (ended === "ended") return true;
@@ -435,6 +439,12 @@ async function terminateChildTree(child, options) {
   const exited = exitedPromise(child);
   const pid = child.pid;
   if (!Number.isSafeInteger(pid) || pid < 1) return child.exitCode !== null || child.signalCode !== null;
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // Already exited: no stop request (it could only fail), only what is
+    // left of its POSIX group; a Windows helper's exit already emptied its job.
+    if (platform !== "win32") signalTree(pid, "SIGKILL", { ...options, groupOnly: true });
+    return true;
+  }
   if (options.graceful) {
     if (platform === "win32") {
       try { options.requestStop?.(); } catch { /* the stop message is best effort; the kill below is not */ }

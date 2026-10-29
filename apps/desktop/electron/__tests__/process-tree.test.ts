@@ -339,9 +339,13 @@ test("Windows: a pid reused by another tree of ours is not ended for a caller wh
 test("Windows: a recorded birth that cannot be proved never ends a tree found only by its pid", () => {
   // B (a helper tree) holds the pid, but its birth cannot be read now.
   const treeB = new FakeChild(1400);
-  const unreadable = recordingHelper({ "info 1400": { status: 3 } });
+  const unreadable = recordingHelper({ "info 1400": { status: 3 }, "kill 1400 11": { status: 2 }, "kill 1400 99": { status: 0 } });
   const helperTrees = new Map([[1400, { child: treeB as unknown as ChildProcess, helper: HELPER }]]);
+  // The helper's own check of the recorded birth decides, and refuses A's.
   assert.equal(signalTree(1400, "SIGKILL", { platform: "win32", runHelper: unreadable.runHelper, liveTrees: helperTrees, identity: "win32-ft:11", probe: () => {} }), false);
+  // B's own recorded birth still ends B through that check.
+  assert.equal(signalTree(1400, "SIGKILL", { platform: "win32", runHelper: unreadable.runHelper, liveTrees: helperTrees, identity: "win32-ft:99", probe: () => {} }), true);
+  assert.deepEqual(unreadable.calls.filter(([, args]) => args[0] === "kill").map(([, args]) => args), [["kill", "1400", "11"], ["kill", "1400", "99"]]);
   // C was spawned without the helper, so nothing can read its birth.
   const treeC = new FakeChild(1401);
   const directTrees = new Map([[1401, { child: treeC as unknown as ChildProcess, helper: null as unknown as string }]]);
@@ -361,4 +365,15 @@ test("Windows: a kill that is still waiting for the job to empty is not replaced
     : { status: null as unknown as number, stdout: "", error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
   assert.equal(signalTree(1500, "SIGKILL", { platform: "win32", runHelper, liveTrees }), true);
   assert.deepEqual(child.kills, []);
+});
+
+test("an exited child gets no stop request (its failure could only arrive after the call)", async () => {
+  const child = new FakeChild(1600);
+  child.exit(0);
+  let asked = false;
+  assert.equal(await terminateTree(child as unknown as ChildProcess, { platform: "win32", graceful: true, requestStop: () => { asked = true; } }), true);
+  assert.equal(asked, false);
+  const sent: Array<[number, NodeJS.Signals | 0]> = [];
+  assert.equal(await terminateTree(child as unknown as ChildProcess, { platform: "darwin", graceful: true, kill: (pid, signal) => { sent.push([pid, signal]); } }), true);
+  assert.deepEqual(sent, [[-1600, "SIGKILL"]]);
 });
