@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
-import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
@@ -1324,7 +1324,8 @@ test("local board follows cross-process commits with no idle, message, or other-
   const mcpUrl = new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href;
   const runMcp = (code: string) => exec(process.execPath,
     ["--import", "tsx", "--input-type=module", "-e", `const m = await import(${JSON.stringify(mcpUrl)}); ${code}`],
-    { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env } });
+    // On Windows the child finds the board pipe's proof through the state directory.
+    { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env, [DAEMON_STATE_DIR_ENV]: env.tempDir } });
   const updates = () => emitted.filter((event): event is Extract<DesktopRoomStreamEvent, { type: "task_update" }> =>
     event.type === "task_update" && event.roomIdentifier === room);
   try {
