@@ -71,7 +71,7 @@ jobs:
             if ! out=$(node --import tsx --test --experimental-test-module-mocks --test-name-pattern='^letagents-load-only-no-test-has-this-name$' "${file}" 2>&1); then
               failed=$((failed + 1))
               echo "LOAD FAILED: ${file}"
-              printf '%s\n' "${out}" | tail -25
+              printf '%s\n' "${out}" | grep -vE '^#?\s+at ' | head -40
             fi
           done
           echo "Loaded $((total - failed)) of ${total} electron test files."
