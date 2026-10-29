@@ -210,9 +210,7 @@ async function readClientProof(path, options) {
  * "ready") fire only after both sides proved themselves, and the daemon's
  * handshake line never reaches the caller's "data" listeners. A missing proof
  * file reads as ENOENT (no daemon has run here); an exposed proof or a daemon
- * that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED. As with every
- * caller today, attach a "data" listener before "connect": the handshake reads
- * the daemon's line in flowing mode, and without one it ends at the deadline. `handshake: true` runs it over a Unix
+ * that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED. `handshake: true` runs it over a Unix
  * socket too, for tests on hosts without pipes.
  */
 export function connectDaemon(connectPath, { proofPath, handshake = false, handshakeTimeoutMs = 10_000, ...privacy } = {}) {
@@ -243,6 +241,7 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
   const write = socket.write;
   const held = [];
   let open = false;
+  let forcedFlow = false;
   // An absolute bound on connect + handshake. A caller's own timeout may be
   // unlimited (handoff, configuration apply) or reset by trickled bytes; this
   // one is not. It ends once the daemon proved itself or the socket closed.
@@ -260,6 +259,12 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
     write.call(socket, `${JSON.stringify({ letagents_daemon_client: answer(proof, "client", frame.letagents_daemon_challenge) })}\n`);
     open = true;
     clearTimeout(deadline);
+    // Hand the stream back as the caller left it: with no consumer yet, a
+    // later "data" listener starts the flow as on any fresh socket.
+    if (forcedFlow && socket.listenerCount("data") === 0) {
+      socket.pause();
+      socket.readableFlowing = null;
+    }
     for (const [event, args] of held) emit.call(socket, event, ...args);
     return false;
   }, () => socket.destroy(untrusted("The supervisor daemon handshake is too large.")));
@@ -280,6 +285,9 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
       // only when the held event is replayed. Start reading now; the deferred
       // call is a no-op once the handle reads.
       socket._read(socket.readableHighWaterMark);
+      // The daemon's line arrives as "data" only in flowing mode; flow even if
+      // the caller attaches its listener later (it is restored afterwards).
+      if (socket.readableFlowing !== true) { forcedFlow = true; socket.resume(); }
       return true;
     }
     if (event === "ready") { held.push([event, args]); return true; }

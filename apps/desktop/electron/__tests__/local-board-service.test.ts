@@ -133,7 +133,7 @@ test("a caller disconnect does not cancel or retry an admitted mutation", async 
   beforeMutation = async () => { admitted(); await blocked; };
   const before = mutations;
   const client = connectDaemon(socketPath);
-  await new Promise<void>(resolve => client.once("connect", resolve));
+  await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
   client.write(`${JSON.stringify({ version: 3, id: randomUUID(), method: "local_board.mutate", params: {
     domain: "desktop", operation: "addLocalTask", args: [room, { title: "Only once" }], databasePath: env.localChatDbPath,
   } })}\n`);

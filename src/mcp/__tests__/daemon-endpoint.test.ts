@@ -287,12 +287,33 @@ test("unref() on a daemon connection still applies after the deferred connect", 
   try {
     await env.listen((socket) => acceptDaemonPeer(socket, env.proof, () => undefined));
     const client = env.connect();
-    client.on("data", () => undefined);
     client.unref();
     await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
     const handle = (client as unknown as { _handle: { hasRef?: () => boolean } | null })._handle;
     assert.equal(handle?.hasRef?.(), false, "the pipe handle does not keep the process alive");
     client.destroy();
+  } finally { await env.cleanup(); }
+});
+
+test("a caller may attach its data listener only after connect", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    const client = env.connect();
+    await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
+    assert.equal(client.readableFlowing, null, "the stream is handed back with no consumer");
+    const reply = await new Promise<string>((resolve, reject) => {
+      let data = "";
+      client.setEncoding("utf8");
+      client.on("data", (chunk: string) => { data += chunk; });
+      client.once("error", reject);
+      client.once("close", () => resolve(data));
+      client.write("late\n");
+    });
+    assert.equal(reply, "pong:late\n");
   } finally { await env.cleanup(); }
 });
 
