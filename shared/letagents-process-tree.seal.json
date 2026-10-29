@@ -1,7 +1,7 @@
 {
   "file": "letagents-process-tree.exe",
   "source": "apps/desktop/native/win-process-tree/letagents-process-tree.c",
-  "sourceSha256": "9834bfe0c6cdcef00867c16bfa275386dbff04a81bce7b1cb667c92cf27f106c",
+  "sourceSha256": "a09c3d9577630e9ab881b4bc0be0a4c1e57d25392210575d6036410a56dfee66",
   "builds": {
     "x64": {
       "sha256": "c2f980e824055d09ff27a90e2dfedf8a5e37ed926fc8c009bf97dd179330acd6",

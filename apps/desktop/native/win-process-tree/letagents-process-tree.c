@@ -299,7 +299,7 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
   STARTUPINFOW own, startup;
   PROCESS_INFORMATION child;
   DWORD flags = CREATE_SUSPENDED;
-  DWORD exit_code = 1, error = 0;
+  DWORD exit_code = 1, stop_error = 0;
   ULONGLONG deadline;
   size_t length;
   wchar_t *mutable_line;
@@ -412,8 +412,8 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
      kill, it first waits for that kill to finish its own wait (stop_job),
      and reports what the kill found. */
   deadline = GetTickCount64() + wait_ms;
-  if (!stop_job(job, stopping, unkillable, NULL, child.hProcess, deadline, &error)) {
-    if (error) fail_message("cannot end what the program left running", error);
+  if (!stop_job(job, stopping, unkillable, NULL, child.hProcess, deadline, &stop_error)) {
+    if (stop_error) fail_message("cannot end what the program left running", stop_error);
     fail_message("the program's job still holds processes after it was ended (unkillable)", ERROR_TIMEOUT);
     return (int)EXIT_SPAWN_UNKILLABLE;
   }
