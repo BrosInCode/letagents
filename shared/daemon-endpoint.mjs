@@ -301,6 +301,8 @@ async function openDaemonPipe(connectPath, cancelled) {
       await new Promise((resolve) => setTimeout(resolve, PIPE_BUSY_RETRY_MS));
       continue;
     }
+    // A failed N-API call returns nothing; never wrap a socket without the pipe.
+    if (!Number.isInteger(opened?.fd) || opened.fd < 0) throw Object.assign(new Error("The daemon pipe addon returned no descriptor."), { code: "EIO" });
     try {
       return new Socket({ fd: opened.fd, readable: true, writable: true });
     } catch (error) {

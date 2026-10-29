@@ -2,5 +2,11 @@
   "file": "letagents-daemon-pipe.node",
   "source": "apps/desktop/native/win-daemon-pipe/letagents-daemon-pipe.c",
   "sourceSha256": "f736cb4f1f00afed80e2639cbc4211479a9850098fb0bfc7a70b6034221df307",
-  "builds": {}
+  "builds": {
+    "x64": {
+      "sha256": "99b6a036ad49def139b90eefd59abfa3818706106fcea468d38d9c8f697e06c2",
+      "vcToolsVersion": "14.51.36231",
+      "windowsSdkVersion": "10.0.26100.0"
+    }
+  }
 }
