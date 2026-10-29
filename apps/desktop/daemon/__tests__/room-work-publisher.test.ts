@@ -18,6 +18,7 @@ import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHos
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
+import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
@@ -857,7 +858,9 @@ test('unavailable capture retains uncertainty without publishing an empty worksp
 });
 
 for (const change of ['binary', 'rename', 'mode', 'empty deletion'] as const) {
-  test(`${change} with zero textual line totals still publishes a review`, async t => {
+  // Windows has no executable bit: chmod cannot change what Git sees (core.fileMode=false keeps HEAD's mode).
+  // The other three changes cover a zero-line review there.
+  test(`${change} with zero textual line totals still publishes a review`, { skip: change === 'mode' && process.platform === 'win32' && 'Windows has no executable bit' }, async t => {
     const f = await fixture(t);
     f.options.workspaceLocation = async () => f.location;
     if (change === 'empty deletion') await writeFile(join(f.location.path, 'empty.txt'), '');
@@ -897,7 +900,7 @@ async function remoteFixture(t: TestContext) {
   return { root, git, remote, team, land, revision, clone };
 }
 
-test('a base branch update during a turn is not published as the agent\'s contribution', async t => {
+test('a base branch update during a turn is not published as the agent\'s contribution', { skip: supervisedAgentsOnly }, async t => {
   const f = await fixture(t);
   const { git, remote, team, land, revision, clone } = await remoteFixture(t);
   const workspace = clone('agent');
@@ -970,7 +973,7 @@ test('a base branch update during a turn is not published as the agent\'s contri
   assert.deepEqual(paths(settled(4).contribution.changes), ['theirs-5.ts']);
 });
 
-test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', async t => {
+test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', { skip: supervisedAgentsOnly }, async t => {
   const f = await fixture(t);
   const { root, git, remote, land, revision, clone } = await remoteFixture(t);
   await land('theirs.ts');
@@ -1001,7 +1004,7 @@ test('the daemon asks the remote it recorded, not a repository that the workspac
   }
 });
 
-test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', async t => {
+test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', { skip: supervisedAgentsOnly }, async t => {
   const f = await fixture(t);
   const { git, remote, land, revision, clone } = await remoteFixture(t);
   let clock = Date.parse('2026-08-31T12:00:00Z');
@@ -1054,7 +1057,7 @@ test('an answer serves the turns of the next minute only: a base that landed aft
   assert.equal(asked.length, 3);
 });
 
-test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', async t => {
+test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', { skip: supervisedAgentsOnly }, async t => {
   const f = await fixture(t);
   const { git, remote, revision, clone } = await remoteFixture(t);
   let clock = Date.parse('2026-08-31T12:00:00Z');

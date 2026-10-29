@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes } f
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import { attachmentStorageUrl, downloadRoomAttachment, isThisMachineAddress, readRoomThread, storageResolvesToThisMachine } from "../cloud-http.js";
@@ -25,6 +25,16 @@ const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 
 const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46]);
 const GIF = new TextEncoder().encode("GIF89a\u0001\u0000\u0001\u0000");
 const WEBP = Uint8Array.from([0x52, 0x49, 0x46, 0x46, 4, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38]);
+
+/**
+ * The staged copies are private: 0600 files in 0700 folders. Windows has no permission bits (stat reports
+ * 0o666 or 0o777, and chmod changes nothing), so there the check is that the path is a plain file or folder.
+ */
+async function assertPrivate(path: string, mode: 0o600 | 0o700): Promise<void> {
+  const info = await stat(path);
+  if (process.platform === "win32") assert.ok(mode === 0o700 ? info.isDirectory() : info.isFile(), path);
+  else assert.equal(info.mode & 0o777, mode, path);
+}
 
 type Download = { messageId: string; attachmentId: string; bearer: string; maxBytes: number };
 
@@ -175,7 +185,7 @@ test("a local room stages a file for a provider that reads one", async () => {
     const [file] = prepared.attachments;
     assert.equal(file?.status, "image");
     assert.equal(file?.image?.mimeType, "image/jpeg");
-    assert.match(file?.image?.path ?? "", /\/1\.jpg$/);
+    assert.match(file?.image?.path ?? "", /[\\/]1\.jpg$/);
     assert.deepEqual(new Uint8Array(await readFile(file!.image!.path!)), JPEG);
     await prepared.release();
     await assert.rejects(lstat(file!.image!.path!), { code: "ENOENT" });
@@ -226,12 +236,12 @@ test("a provider that reads a file gets a private daemon-owned copy, removed on 
     assert.equal(first?.fileName, "../../etc/passwd", "the sender's name is shown, never used as a path");
     const path = first!.image!.path!;
     assert.equal(first!.image!.data, undefined);
-    assert.match(path, /\/room-turn-attachments\/turn-[^/]+\/1\.jpg$/);
-    assert.match(second!.image!.path!, /\/2\.webp$/);
+    assert.match(path, /[\\/]room-turn-attachments[\\/]turn-[^\\/]+[\\/]1\.jpg$/);
+    assert.match(second!.image!.path!, /[\\/]2\.webp$/);
     assert.deepEqual(await readFile(path), Buffer.from(JPEG));
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
-    assert.equal((await stat(join(path, ".."))).mode & 0o777, 0o700);
-    assert.equal((await stat(root)).mode & 0o777, 0o700);
+    await assertPrivate(path, 0o600);
+    await assertPrivate(join(path, ".."), 0o700);
+    await assertPrivate(root, 0o700);
     await prepared.release();
     await prepared.release();
     assert.deepEqual(await readdir(root), []);
@@ -280,7 +290,7 @@ test("a sweep removes only old staged folders that no turn still holds", async (
     await utimes(unrelated, past, past);
     await utimes(heldFolder, past, past);
     await stager.sweep();
-    assert.deepEqual((await readdir(root)).sort(), [heldFolder.split("/").at(-1), "not-a-turn-folder", "turn-recent"].sort());
+    assert.deepEqual((await readdir(root)).sort(), [basename(heldFolder), "not-a-turn-folder", "turn-recent"].sort());
     await held.release();
     now += STAGED_FOLDER_MAX_AGE_MS * 2;
     await stager.sweep();
@@ -566,7 +576,7 @@ test("a recent message's images follow the activating message's, each named by i
     ], "a text file of a recent message is described too; this agent opens no files");
     assert.deepEqual(prepared.attachments[1]?.origin, { messageId: "msg_6", sender: "Sender msg_6", inThread: true });
     assert.deepEqual(downloads.map(item => [item.messageId, item.attachmentId]), [["msg_7", "att_70"], ["msg_6", "att_60"], ["msg_5", "att_50"]]);
-    assert.deepEqual(prepared.attachments.map(file => file.image?.path?.split("/").at(-1)), ["1.png", "2.png", undefined, "3.png"],
+    assert.deepEqual(prepared.attachments.map(file => (file.image?.path && basename(file.image.path))), ["1.png", "2.png", undefined, "3.png"],
       "files of two messages with the same index never collide");
     assert.deepEqual(prepared.outcomes, [
       { messageId: "msg_7", attachmentId: "att_70", outcome: "image" }, { messageId: "msg_6", attachmentId: "att_60", outcome: "image" },

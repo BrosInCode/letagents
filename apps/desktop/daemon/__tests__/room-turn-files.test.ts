@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -18,6 +18,16 @@ const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const PDF = utf8("%PDF-1.7\n1 0 obj << >> endobj\n%%EOF\n");
 const LOG = utf8("\u001b[32mok\u001b[0m build started\r\nstep 1\r\nstep 2 failed: é\n");
+
+/**
+ * The staged copies are private: 0600 files in 0700 folders. Windows has no permission bits (stat reports
+ * 0o666 or 0o777, and chmod changes nothing), so there the check is that the path is a plain file or folder.
+ */
+async function assertPrivate(path: string, mode: 0o600 | 0o700): Promise<void> {
+  const info = await stat(path);
+  if (process.platform === "win32") assert.ok(mode === 0o700 ? info.isDirectory() : info.isFile(), path);
+  else assert.equal(info.mode & 0o777, mode, path);
+}
 
 type Download = { messageId: string; attachmentId: string; maxBytes: number };
 
@@ -85,10 +95,10 @@ test("a text file and a PDF are saved for the agent to read; their bytes never r
       [1, "file", "file", "text"], [2, "file", "file", "pdf"], [3, "file", "file", "text"], [4, "file", "file", "text"],
     ]);
     const paths = prepared.attachments.map(item => item.file!.path);
-    assert.deepEqual(paths.map(path => path.split("/").at(-1)), ["1.log", "2.pdf", "3.txt", "4.log"], "names come from the turn and the kind, never the sender");
+    assert.deepEqual(paths.map(path => basename(path)), ["1.log", "2.pdf", "3.txt", "4.log"], "names come from the turn and the kind, never the sender");
     assert.deepEqual(await readFile(paths[0]!), Buffer.from(LOG));
-    assert.equal((await stat(paths[0]!)).mode & 0o777, 0o600);
-    assert.equal((await stat(join(paths[0]!, ".."))).mode & 0o777, 0o700);
+    await assertPrivate(paths[0]!, 0o600);
+    await assertPrivate(join(paths[0]!, ".."), 0o700);
     assert.deepEqual(prepared.attachments[0]!.file, { path: paths[0], kind: "text", encoding: "utf-8", lines: 3, longestLine: 26 },
       "the longest line is counted in bytes, its carriage return and colour codes included");
     assert.equal(prepared.attachments[1]!.mimeType, "application/pdf");
@@ -178,7 +188,7 @@ test("a recent file is downloaded once and kept for later turns, each with its o
     await second.release();
     const cache = join(root, "file-cache");
     assert.equal((await readdir(cache)).length, 1);
-    assert.equal((await stat(cache)).mode & 0o777, 0o700);
+    await assertPrivate(cache, 0o700);
     now += FILE_CACHE_MAX_AGE_MS + 1_000;
     await stager.sweep();
     assert.deepEqual(await readdir(cache), [], "a kept file no turn used for six hours is removed");
