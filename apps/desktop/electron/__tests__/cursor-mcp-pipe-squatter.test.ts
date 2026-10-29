@@ -242,7 +242,16 @@ test("a SYSTEM squatter (SeImpersonatePrivilege) gets not one byte, and no token
 test("the wrapper's seal limits the pipe to this user, for the instances libuv adds later too", { skip }, async () => {
   const state = scene();
   const connections: Socket[] = [];
-  const server = await listen(state.pipe, (socket) => { connections.push(socket); socket.on("error", () => undefined); });
+  let proven: Socket | null = null;
+  const server = await listen(state.pipe, (socket) => {
+    connections.push(socket);
+    socket.on("error", () => undefined);
+    let received = "";
+    socket.setEncoding("utf8").on("data", (chunk: string) => {
+      received += chunk;
+      if (received === `${state.proof}\n`) proven = socket;
+    });
+  });
   const opened: number[] = [];
   try {
     await sealConnectorPipe!(state.pipe);
@@ -262,12 +271,15 @@ test("the wrapper's seal limits the pipe to this user, for the instances libuv a
       opened.push(pipe.fd);
       assert.equal(pipe.serverPid, process.pid);
     }
-    // Cursor's connector (this user) still reaches it.
+    // Cursor's connector (this user) still reaches it, on an instance made after the seal.
     const { result } = runConnector(state);
-    await waitFor(() => connections.length >= 8, "the connector's connection");
-    for (const socket of connections) socket.destroy();
-    assert.equal((await result).code, 0);
+    const connector = await waitFor(() => proven, "the connector's proof");
+    connector.end();
+    const outcome = await result;
+    assert.equal(outcome.code, 0, outcome.stderr);
+    assert.ok(connections.length >= 8, `${connections.length} connections`);
   } finally {
+    for (const socket of connections) socket.destroy();
     for (const fd of opened) { try { closeSync(fd); } catch { /* closed */ } }
     await new Promise((resolve) => server.close(resolve));
   }
