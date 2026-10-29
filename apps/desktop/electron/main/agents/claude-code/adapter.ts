@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
 import { NO_REPLY_FAILURE } from "../../../../../../shared/room-turn-no-reply.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../../shared/provider-permissions.js";
 import { sameProviderConnectionIdentity, PROCESS_ENDED_DURING_TURN, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type RoomTurnFileAccess, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderTurnControlResult, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderStreamEvent, type ProviderTerminalPayload, type NativeExecutionObservation, type NativeExecutionSubscription, type ControlProbeResult } from "../provider-adapter.js";
@@ -368,10 +369,9 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
     const connection = ref.providerConnection;
     const graceMs = options.graceMs ?? this.stopGraceMs;
-    const birthEvidence = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
     if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
       || connection?.kind !== "claude_cli" || !Number.isSafeInteger(connection.pid) || connection.pid! <= 0
-      || typeof connection.processIdentity !== "string" || !birthEvidence.test(connection.processIdentity.trim())
+      || !isBirthEvidence(connection.processIdentity)
       || !Number.isFinite(graceMs) || graceMs < 0) {
       throw new Error("Claude exact-reference stop requires an exact continuation and process birth.");
     }
@@ -390,7 +390,7 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     }
     // A cached protocol terminal is not evidence that the process stopped.
     const result = await this.fenceRecordedChild(connection, ref.providerContinuationId,
-      { force: options.force === true, graceMs, birthEvidence });
+      { force: options.force === true, graceMs, birthEvidence: isBirthEvidence });
     return result.terminal;
   }
 

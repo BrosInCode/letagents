@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnTree } from "../../../../../../shared/process-tree.mjs";
 
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import {
@@ -224,7 +224,7 @@ export function defaultLaunchTurn(input: {
   // The program text lives in the cursor/turn-wrapper-*.ts slices, joined in order.
 const wrapperSource = String.raw`
 ${cursorWrapperSetupSource({ agentUpstreamEndpoint, controlPlaneUpstreamEndpoint, deniedDelegatingExecutablePaths })}${cursorWrapperMcpSource()}${cursorWrapperProxySource()}${cursorWrapperStartSource()}`;
-  const child = spawn(process.execPath, [
+  const child = spawnTree(process.execPath, [
     "-e",
     wrapperSource,
     input.cursorBin,
@@ -256,7 +256,7 @@ ${cursorWrapperSetupSource({ agentUpstreamEndpoint, controlPlaneUpstreamEndpoint
     cwd: input.cwd,
     // The prompt travels as a positional argument; cursor-agent has no stdin
     // channel (matrix row). Its own process group so group signalling reaps
-    // any descendants.
+    // any descendants (on Windows the process-tree helper's job).
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     detached: process.platform !== "win32",
     env: {

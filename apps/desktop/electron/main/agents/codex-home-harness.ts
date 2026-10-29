@@ -15,6 +15,7 @@ import {
   type CodexMcpListRunner,
   type CodexMcpServerEntry,
 } from "../../../../../shared/codex-owner-isolation.mjs";
+import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
 
 // A launch that keeps the owner's own Codex setup leaves the owner's
 // extensions on: plugins, app connectors, computer and browser use, hooks,
@@ -189,7 +190,7 @@ export function askCodexAppServer<T>(
   timeoutMs = INSPECTION_TIMEOUT_MS,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    const child = spawn(codexBin, [
+    const child = spawnTree(codexBin, [
       "app-server",
       ...options.configOverrides.flatMap((override) => ["-c", override]),
       "--listen", "stdio://",
@@ -199,11 +200,8 @@ export function askCodexAppServer<T>(
     let nextId = 1;
     const pending = new Map<number, (result: unknown, error: unknown) => void>();
     const stop = () => {
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
+      // Its whole process group (on Windows its job).
+      if (child.pid) signalTree(child.pid, "SIGKILL", { child, groupOnly: true });
     };
     const finish = (error: Error | null, value?: T) => {
       if (settled) return;

@@ -1,9 +1,10 @@
 /** OpenCode runtime launch ownership, process launch, port and connection discovery, deadlines, runtime control files and default dependencies. */
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
+import { spawnTree } from "../../../../../../shared/process-tree.mjs";
 import { probeScratchWorkspaceGit } from "../../../../../../shared/scratch-workspace-repository.mjs";
 import { synthesizeTerminalPayload, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, type ProviderProcessExit } from "../provider-evidence.js";
@@ -54,7 +55,7 @@ export type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
 export function defaultLaunch(input: {
   binary: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
 }): { child: ChildProcess; exited: Promise<ProviderProcessExit> } {
-  const child = spawn(input.binary, input.args, {
+  const child = spawnTree(input.binary, input.args, {
     cwd: input.cwd,
     env: input.env,
     detached: true,
@@ -92,7 +93,12 @@ export function execFileText(file: string, args: string[]): Promise<string> {
 
 export async function defaultDiscoverRuntimeConnection(
   runtimeRoot: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<{ pid: number; url: string } | null> {
+  // Windows has no lsof, and the pid that holds the database there is the
+  // native server inside the helper's job, not a pid whose job could end it:
+  // recovery uses only the connection recorded in the runtime control file.
+  if (platform === "win32") return null;
   let owners: string;
   try {
     owners = await execFileText(

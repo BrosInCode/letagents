@@ -1,4 +1,5 @@
-import type { ChildProcess, SpawnOptions, SpawnSyncReturns } from "node:child_process";
+import type { ChildProcess, ChildProcessByStdio, SpawnOptions, SpawnOptionsWithStdioTuple, SpawnSyncReturns, StdioPipe } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
 import type { CodexLaunchCommandOptions } from "./codex-executable.mjs";
 
 export const PROCESS_TREE_HELPER_NAME: "letagents-process-tree.exe";
@@ -16,6 +17,9 @@ export interface ProcessTreeHelperOptions {
 }
 
 export function isWindowsBirth(identity: unknown): identity is string;
+export const PS_BIRTH_EVIDENCE: RegExp;
+/** POSIX: a `ps lstart` birth; Windows: a `win32-ft:` birth. */
+export function isBirthEvidence(identity: unknown, platform?: NodeJS.Platform): identity is string;
 export function processTreeHelperPath(options?: {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
@@ -26,6 +30,7 @@ export function processTreeHelperPath(options?: {
 }): string | null;
 export function quoteWindowsArgument(argument: string): string;
 export function windowsCommandLine(file: string, args: readonly string[]): string;
+export function parseWindowsCommandLine(line: string): string[];
 export function resolveWindowsCommand(command: string, options?: {
   env?: NodeJS.ProcessEnv;
   cwd?: string | URL;
@@ -40,6 +45,12 @@ export interface SpawnTreeOptions extends ProcessTreeHelperOptions {
   launchOptions?: Omit<CodexLaunchCommandOptions, "platform" | "env">;
   spawn?: (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 }
+export function spawnTree(
+  command: string,
+  args: readonly string[],
+  spawnOptions: SpawnOptionsWithStdioTuple<StdioPipe, StdioPipe, StdioPipe>,
+  treeOptions?: SpawnTreeOptions,
+): ChildProcessByStdio<Writable, Readable, Readable>;
 export function spawnTree(command: string, args: readonly string[], spawnOptions?: SpawnOptions, treeOptions?: SpawnTreeOptions): ChildProcess;
 
 export interface ProcessBirthOptions extends ProcessTreeHelperOptions {
@@ -57,6 +68,7 @@ export interface WindowsProcessInfo {
   creationTime: string;
   exited: boolean;
   image: string | null;
+  commandLine: string | null;
 }
 export function windowsProcessInfo(pid: number, options?: ProcessTreeHelperOptions): WindowsProcessInfo | null | undefined;
 
@@ -66,9 +78,12 @@ export interface SignalTreeOptions extends ProcessTreeHelperOptions {
   identity?: string | null;
   /** The child when the caller holds it. */
   child?: ChildProcess;
+  /** POSIX: signal only the group, never the pid alone. */
+  groupOnly?: boolean;
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   liveTrees?: Map<number, { child: ChildProcess; helper: string }>;
 }
+export function isProcessTree(child: ChildProcess | null | undefined): boolean;
 export function signalTree(pid: number, signal: NodeJS.Signals, options?: SignalTreeOptions): boolean;
 export function windowsTreeSize(pid: number, identity: string, options?: ProcessTreeHelperOptions): number | undefined;
 export function terminateTree(child: ChildProcess, options?: SignalTreeOptions & {

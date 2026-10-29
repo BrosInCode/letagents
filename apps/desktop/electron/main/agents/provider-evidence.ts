@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { processBirth, signalTree } from "../../../../../shared/process-tree.mjs";
 
 // Shared process-evidence primitives for provider adapters (plan v10 §4.8).
 // Extracted verbatim from the Codex adapter (#765) so the liveness invariants
@@ -39,7 +39,11 @@ export interface ProviderControlChannel {
 }
 
 export interface ProviderProcessEvidenceDeps {
-  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  /**
+   * Signal the process tree led by pid. `identity` is its recorded birth: on
+   * Windows a pid this process does not hold is ended only with it.
+   */
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
 }
@@ -114,43 +118,14 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, signal);
-      return;
-    }
-  } catch {
-    // Fall through to the direct child pid. The process group may already be
-    // gone while the child exit event is still in flight.
-  }
-  try {
-    process.kill(pid, signal);
-  } catch {
-    // Already terminal. The observed exit promise remains authoritative.
-  }
+export function defaultSignalProcess(pid: number, signal: NodeJS.Signals, identity?: string): void {
+  // POSIX: the process group, then the pid alone. Windows: the helper's job
+  // of a tree this process holds, or of a pid whose recorded birth matches.
+  signalTree(pid, signal, { identity });
 }
 
 export function defaultGetProcessIdentity(pid: number): string | null | undefined {
-  try {
-    // argv/command is mutable (`claude` rewrites its process title after init),
-    // so it cannot be part of a durable birth identity. PID is carried beside
-    // this value; the kernel-recorded start time distinguishes PID reuse while
-    // remaining stable for the process lifetime.
-    const identity = execFileSync(
-      "/bin/ps",
-      ["-p", String(pid), "-o", "lstart="],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    return identity || undefined;
-  } catch {
-    try {
-      process.kill(pid, 0);
-      return undefined;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
-    }
-  }
+  return processBirth(pid);
 }
 
 const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
@@ -291,7 +266,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
           return;
         }
         if (identityBeforeTerm === undefined) return;
-        deps.signalProcess(pid, "SIGTERM");
+        deps.signalProcess(pid, "SIGTERM", processIdentity);
         await delay(DEFAULT_STOP_GRACE_MS);
         if (settled) return;
         // Re-check the birth identity before escalation. A recycled PID must
@@ -305,7 +280,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
           return;
         }
         if (identityBeforeKill === undefined) return;
-        deps.signalProcess(pid, "SIGKILL");
+        deps.signalProcess(pid, "SIGKILL", processIdentity);
         // Only actual process-identity disappearance can make the generation
         // terminal. A control-channel close by itself remains ambiguous and
         // restart-blocking.
@@ -343,7 +318,7 @@ export async function terminateFreshLaunch(
     ) return;
   }
 
-  deps.signalProcess(launch.pid, "SIGTERM");
+  deps.signalProcess(launch.pid, "SIGTERM", launch.processIdentity);
   const graceful = await Promise.race([
     launch.exited.then(() => true),
     delay(graceMs).then(() => false),
@@ -361,6 +336,6 @@ export async function terminateFreshLaunch(
     ) return;
   }
 
-  deps.signalProcess(launch.pid, "SIGKILL");
+  deps.signalProcess(launch.pid, "SIGKILL", launch.processIdentity);
   await launch.exited;
 }

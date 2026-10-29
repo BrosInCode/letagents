@@ -330,7 +330,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
   protected async fenceRecordedChild(
     connection: Extract<ProviderConnectionRef, { kind: "claude_cli" }>,
     providerContinuationId: string,
-    stop?: { force: boolean; graceMs: number; birthEvidence: RegExp },
+    stop?: { force: boolean; graceMs: number; birthEvidence: (identity: string) => boolean },
   ): Promise<ProviderAttachTerminal> {
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
@@ -339,7 +339,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
     }
     const readIdentity = () => {
       const identity = this.deps.getProcessIdentity(connection.pid!);
-      if (stop && typeof identity === "string" && !stop.birthEvidence.test(identity.trim())) {
+      if (stop && typeof identity === "string" && !stop.birthEvidence(identity)) {
         throw new Error("Claude exact-reference stop is ambiguous because process birth cannot be verified.");
       }
       return identity;

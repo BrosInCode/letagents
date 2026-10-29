@@ -33,7 +33,8 @@
  *       2 when the job no longer exists (every process in it has ended).
  *
  *   info <pid>
- *       Print one JSON line: {"pid","parentPid","creationTime","exited","image"}.
+ *       Print one JSON line:
+ *       {"pid","parentPid","creationTime","exited","image","commandLine"}.
  *       creationTime is the FILETIME (100 ns since 1601, UTC) as a decimal
  *       string; it is the process's birth identity. Exit 0; 2: no such
  *       process; 3: the process exists but cannot be opened; 121: error.
@@ -358,13 +359,50 @@ static int parent_pid(DWORD pid, DWORD *parent) {
   return found;
 }
 
+typedef struct {
+  USHORT Length;
+  USHORT MaximumLength;
+  PWSTR Buffer;
+} counted_text;
+typedef LONG (WINAPI *query_process_fn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+#define PROCESS_COMMAND_LINE_INFORMATION 60
+
+/* The process's command line (Windows 8.1 and later), or NULL. Free with HeapFree. */
+static wchar_t *command_line_of(HANDLE process) {
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  query_process_fn query;
+  ULONG size = 0;
+  BYTE *buffer;
+  wchar_t *text;
+  counted_text *line;
+  if (!ntdll) return NULL;
+  query = (query_process_fn)(void *)GetProcAddress(ntdll, "NtQueryInformationProcess");
+  if (!query) return NULL;
+  query(process, PROCESS_COMMAND_LINE_INFORMATION, NULL, 0, &size);
+  if (size < sizeof(counted_text) || size > (1u << 20)) return NULL;
+  buffer = (BYTE *)HeapAlloc(GetProcessHeap(), 0, size);
+  if (!buffer) return NULL;
+  if (query(process, PROCESS_COMMAND_LINE_INFORMATION, buffer, size, &size) < 0) {
+    HeapFree(GetProcessHeap(), 0, buffer);
+    return NULL;
+  }
+  line = (counted_text *)buffer;
+  text = (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)line->Length + sizeof(wchar_t));
+  if (text) {
+    memcpy(text, line->Buffer, line->Length);
+    text[line->Length / sizeof(wchar_t)] = 0;
+  }
+  HeapFree(GetProcessHeap(), 0, buffer);
+  return text;
+}
+
 static int run_info(DWORD pid) {
   FILETIME created, exit_time, kernel, user;
   HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
   int can_wait = 1, exited = 0, has_parent;
   DWORD parent = 0, status = 0, image_length = 32768;
-  wchar_t *image;
-  static char out[3 * 32768 * 2 + 256];
+  wchar_t *image, *command_line;
+  static char out[2 * 6 * 32768 + 512];
   if (!process) {
     DWORD error = GetLastError();
     if (error == ERROR_INVALID_PARAMETER) return EXIT_ABSENT;
@@ -401,6 +439,16 @@ static int run_info(DWORD pid) {
     strcat_s(out, sizeof out, "null");
   }
   if (image) HeapFree(GetProcessHeap(), 0, image);
+  strcat_s(out, sizeof out, ",\"commandLine\":");
+  command_line = command_line_of(process);
+  if (command_line) {
+    strcat_s(out, sizeof out, "\"");
+    append_json_text(out, sizeof out - 4, command_line);
+    strcat_s(out, sizeof out, "\"");
+    HeapFree(GetProcessHeap(), 0, command_line);
+  } else {
+    strcat_s(out, sizeof out, "null");
+  }
   strcat_s(out, sizeof out, "}\n");
   CloseHandle(process);
   write_text(GetStdHandle(STD_OUTPUT_HANDLE), out);

@@ -34,6 +34,19 @@ export function isWindowsBirth(identity) {
   return typeof identity === "string" && WINDOWS_BIRTH.test(identity.trim());
 }
 
+/** The start of a `ps -o lstart=` birth: "Tue Oct 29 01:02:03 2026". */
+export const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
+
+/**
+ * Whether a recorded or read birth is hard evidence on this platform: a
+ * `ps lstart` string on POSIX, a `win32-ft:` creation time on Windows. A
+ * record in the other platform's format is never evidence.
+ */
+export function isBirthEvidence(identity, platform = process.platform) {
+  if (typeof identity !== "string") return false;
+  return platform === "win32" ? isWindowsBirth(identity) : PS_BIRTH_EVIDENCE.test(identity.trim());
+}
+
 /**
  * Where letagents-process-tree.exe is, or null when it is not there: the
  * LETAGENTS_PROCESS_TREE_HELPER path, then `<resources>/app/runtime/`, where
@@ -87,6 +100,50 @@ export function windowsCommandLine(file, args) {
 }
 
 /**
+ * The argv a Windows program's C runtime reads from its command line: the
+ * program name up to the next quote or blank, then arguments with the
+ * backslash-quote rules (and `""` inside quotes as one quote).
+ */
+export function parseWindowsCommandLine(line) {
+  const args = [];
+  const blank = (character) => character === " " || character === "\t";
+  let index = 0;
+  let program = "";
+  if (line[index] === '"') {
+    index += 1;
+    while (index < line.length && line[index] !== '"') program += line[index++];
+    if (index < line.length) index += 1;
+  } else {
+    while (index < line.length && !blank(line[index])) program += line[index++];
+  }
+  args.push(program);
+  for (;;) {
+    while (index < line.length && blank(line[index])) index += 1;
+    if (index >= line.length) return args;
+    let argument = "";
+    let quoted = false;
+    while (index < line.length && (quoted || !blank(line[index]))) {
+      if (line[index] === "\\") {
+        let count = 0;
+        while (line[index] === "\\") { count += 1; index += 1; }
+        if (line[index] === '"') {
+          argument += "\\".repeat(count >> 1);
+          if (count % 2) { argument += '"'; index += 1; }
+        } else {
+          argument += "\\".repeat(count);
+        }
+      } else if (line[index] === '"') {
+        if (quoted && line[index + 1] === '"') { argument += '"'; index += 2; }
+        else { quoted = !quoted; index += 1; }
+      } else {
+        argument += line[index++];
+      }
+    }
+    args.push(argument);
+  }
+}
+
+/**
  * The absolute program a Windows spawn of `command` runs, or null. A bare
  * name is looked up on PATH only, never in the working directory (the
  * user's repository); a name without an extension gets .com, .exe, .cmd,
@@ -130,18 +187,28 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   };
   // Not found: spawn it as given, so the caller sees Node's own ENOENT.
-  if (!helper || !resolved) return spawnProcess(launch.file, launch.args, direct);
+  if (!helper || !resolved) return remember(spawnProcess(launch.file, launch.args, direct), null);
   const commandLine = launch.windowsVerbatimArguments
     ? [launch.argv0 ?? quoteWindowsArgument(launch.file), ...launch.args].join(" ")
     : windowsCommandLine(launch.file, launch.args);
   const { argv0: _argv0, windowsVerbatimArguments: _verbatim, ...helperOptions } = spawnOptions;
-  const child = spawnProcess(helper, ["spawn", launch.file, commandLine], { ...helperOptions, windowsHide: true });
+  return remember(spawnProcess(helper, ["spawn", launch.file, commandLine], { ...helperOptions, windowsHide: true }), helper);
+}
+
+/** Windows: keep a spawned child findable by pid until it exits; `helper` null for a direct child. */
+function remember(child, helper) {
   if (Number.isSafeInteger(child.pid) && child.pid > 0) {
     const pid = child.pid;
     liveTrees.set(pid, { child, helper });
     child.once("exit", () => { if (liveTrees.get(pid)?.child === child) liveTrees.delete(pid); });
   }
   return child;
+}
+
+/** True when `child` is a live tree in the helper's job (Windows), so ending it ends what it started. */
+export function isProcessTree(child) {
+  const live = child && liveTrees.get(child.pid);
+  return Boolean(live && live.child === child && live.helper);
 }
 
 function runHelper(helper, args, options) {
@@ -191,7 +258,7 @@ function probeAbsence(pid, options) {
 
 /**
  * What Windows knows of a process: `{ pid, parentPid, creationTime, exited,
- * image }`, null when no process has that pid, undefined when it cannot be
+ * image, commandLine }`, null when no process has that pid, undefined when it cannot be
  * read (no helper, access denied, helper failure). Windows only.
  */
 export function windowsProcessInfo(pid, options = {}) {
@@ -211,6 +278,7 @@ export function windowsProcessInfo(pid, options = {}) {
       creationTime: info.creationTime,
       exited: info.exited === true,
       image: typeof info.image === "string" ? info.image : null,
+      commandLine: typeof info.commandLine === "string" ? info.commandLine : null,
     };
   } catch {
     return undefined;
@@ -221,15 +289,18 @@ export function windowsProcessInfo(pid, options = {}) {
  * Send `signal` to the process tree led by `pid`.
  *
  * POSIX: exactly the daemon's former `defaultSignalProcess`: the process
- * group first, then the pid alone when the group is already gone.
+ * group first, then the pid alone when the group is already gone (with
+ * `groupOnly`, only the group, as the probes that stop an npm wrapper's
+ * group did).
  *
  * Windows: there are no signals; every signal ends the tree. A tree this
  * process started and still holds is ended through its job. Any other pid is
  * ended only with `identity`, its recorded birth: through its job when the
  * helper started it, else that one process after the helper checked its
  * creation time while holding it. Without a recorded birth nothing is
- * ended. Returns true when something was ended (Windows), or always
- * (POSIX, where the old function returned nothing).
+ * ended. A child spawned without the helper is ended alone, as before.
+ * Returns false when nothing was ended on Windows, or when `groupOnly` found
+ * no group on POSIX; otherwise true.
  */
 export function signalTree(pid, signal, options = {}) {
   const platform = options.platform ?? process.platform;
@@ -239,6 +310,8 @@ export function signalTree(pid, signal, options = {}) {
       kill(-pid, signal);
       return true;
     } catch {
+      // groupOnly: the group is gone, and the pid alone may be someone else's.
+      if (options.groupOnly) return false;
       // Fall through to the direct child pid. The process group may already be
       // gone while the child exit event is still in flight.
     }
@@ -261,7 +334,8 @@ function endWindowsTree(pid, options) {
     ?? (options.helperPath === undefined ? processTreeHelperPath({ platform: "win32", env: options.helperEnv }) : options.helperPath);
   if (held) {
     // Node holds this child's handle, so its pid cannot belong to anyone else.
-    if (live && helper) {
+    // A helper's own exit closes its job, so child.kill() ends the tree too.
+    if (live?.helper) {
       const birth = processBirth(pid, { ...options, platform: "win32", helperPath: helper });
       if (isWindowsBirth(birth) && killByBirth(helper, pid, birth, options) === "ended") return true;
     }
@@ -334,7 +408,7 @@ export async function terminateTree(child, options = {}) {
       // The leader exited; on POSIX its group may still hold children. Only
       // the group: the leader's own pid may already be someone else's.
       if (platform !== "win32") {
-        try { (options.kill ?? ((target, sent) => process.kill(target, sent)))(-pid, "SIGKILL"); } catch { /* group already gone */ }
+        signalTree(pid, "SIGKILL", { ...options, groupOnly: true });
       }
       return true;
     }
