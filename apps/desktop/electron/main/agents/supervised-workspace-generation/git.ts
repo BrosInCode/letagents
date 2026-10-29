@@ -1,10 +1,11 @@
 /** Running git and other processes for the source authority and the private clone, git control files and file clones. */
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, mkdtempSync, readdirSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createPrivateDirSync, nullDevice, openNoFollow, ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
+import { assertOwnerPrivateSync, createPrivateDirSync, nullDevice, openNoFollow, ownerPrivatePlatform, protectOwnerPrivateSync } from "../../../../../../shared/owner-private-fs.mjs";
+import { letagentsHomePath } from "../../../../../../shared/letagents-home.mjs";
 import type { SourceGitAuthority } from "./types.js";
 import { fileVersionKey, generationError, limitError } from "./helpers.js";
 
@@ -16,14 +17,27 @@ export function gitTemporaryRoot(): string {
 /**
  * POSIX keeps /var/empty. Windows has no such folder (a bare "/var/empty" is
  * a folder at the root of the current drive, which any local user may make),
- * so an empty folder private to this account stands in.
+ * so an empty folder private to this account stands in: ~/.letagents/git-empty-home
+ * when it is private and empty, else a new private folder in the temp folder.
+ * A folder another account made first is never used.
  */
 export function gitEmptyHome(): string {
   if (ownerPrivatePlatform() !== "win32") return "/var/empty";
-  const home = join(tmpdir(), "letagents-git-empty-home");
-  try { createPrivateDirSync(home); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-  return home;
+  const home = letagentsHomePath("git-empty-home");
+  try {
+    createPrivateDirSync(home, { recursive: true });
+    assertOwnerPrivateSync(home, { kind: "directory" });
+    if (readdirSync(home).length === 0) return home;
+  } catch { /* use a new folder below */ }
+  const fresh = mkdtempSync(join(tmpdir(), "letagents-git-home-"));
+  protectOwnerPrivateSync(fresh, "directory");
+  return fresh;
+}
+
+/** POSIX keeps $HOME or /var/empty. Windows rarely sets HOME: the user's own profile keeps their global Git config. */
+function sourceGitHome(): string {
+  if (process.env.HOME) return process.env.HOME;
+  return ownerPrivatePlatform() === "win32" ? homedir() : "/var/empty";
 }
 
 // Git honors a large ambient control surface (GIT_DIR, GIT_WORK_TREE,
@@ -51,7 +65,7 @@ export function sourceGitEnvironment(): NodeJS.ProcessEnv {
   return {
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
     TMPDIR: gitTemporaryRoot(),
-    HOME: process.env.HOME || gitEmptyHome(),
+    HOME: sourceGitHome(),
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     GIT_ASKPASS: "/usr/bin/false",

@@ -1,9 +1,12 @@
 import { constants } from "node:fs";
-import { link, lstat, open, unlink } from "node:fs/promises";
+import { link, lstat, open, rm, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { letagentsHome } from "./letagents-home.mjs";
-import { createPrivateDir, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate, syncDirectory as syncFolder } from "./owner-private-fs.mjs";
+import {
+  createPrivateDir, createPrivateStagingFolder, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform,
+  protectOwnerPrivate, syncDirectory as syncFolder,
+} from "./owner-private-fs.mjs";
 
 export const daemonMaintenancePath = (root = letagentsHome()) => join(root, "daemon-maintenance.json");
 export const DAEMON_MAINTENANCE_MESSAGE = "Agent supervision is paused for service maintenance. Resume it in Settings → Updates.";
@@ -34,20 +37,27 @@ async function publishHold(path) {
   if (existing) { await syncDirectory(path); return existing; }
   await createPrivateDir(dirname(path), { recursive: true });
   const value = { version: 1, id: randomUUID(), createdAt: new Date().toISOString() };
-  const temporary = `${path}.${value.id}.tmp`;
-  const file = await open(temporary, "wx", 0o600);
+  // Windows has no mode bits: the record is made inside a private staging
+  // folder, so it is private from birth, and gets its own DACL before it is
+  // written. The hard link shares that DACL.
+  const staging = ownerPrivatePlatform() === "win32" ? await createPrivateStagingFolder(path) : null;
+  const temporary = staging ? join(staging, "record") : `${path}.${value.id}.tmp`;
   try {
-    // Windows has no mode bits: the empty file gets its private DACL first. The hard link shares it.
-    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(temporary, "file");
-    await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
-    await file.sync();
-    try { await link(temporary, path); }
-    catch (error) { if (error.code !== "EEXIST") throw error; }
-    await syncDirectory(path);
-    const published = await readDaemonMaintenance(path);
-    if (!published) throw new Error("Service maintenance record disappeared before commit.");
-    return published;
-  } finally { await file.close(); await unlink(temporary); }
+    const file = await open(temporary, "wx", 0o600);
+    try {
+      if (staging) await protectOwnerPrivate(temporary, "file");
+      await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+      await file.sync();
+      try { await link(temporary, path); }
+      catch (error) { if (error.code !== "EEXIST") throw error; }
+      await syncDirectory(path);
+      const published = await readDaemonMaintenance(path);
+      if (!published) throw new Error("Service maintenance record disappeared before commit.");
+      return published;
+    } finally { await file.close(); await unlink(temporary); }
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true });
+  }
 }
 
 /** Explicit resume owns removal, after the held daemon has exited. */
@@ -79,7 +89,15 @@ export async function withDaemonMaintenanceOperation(operation, path = daemonMai
     if (ownerPrivatePlatform() === "win32") await createWindowsLock(lockPath);
     lock = await openNoFollow(lockPath, constants.O_CREAT | constants.O_RDWR
       | constants.O_NONBLOCK | (native ? 0x20 /* Darwin O_EXLOCK */ : 0), 0o600);
-    const stat = await lock.stat();
+    let stat = await lock.stat();
+    // Windows: another of this account's processes may have made the lock and
+    // not yet set its DACL. A lock this account owns is made private here
+    // (it holds no data); one another account owns is refused.
+    if (ownerPrivatePlatform() === "win32" && stat.isFile() && !await isOwnerPrivate(lockPath, stat)
+      && await isOwnedByCurrentUser(lockPath, stat)) {
+      await protectOwnerPrivate(lockPath, "file");
+      stat = await lock.stat();
+    }
     if (!stat.isFile() || !await isOwnerPrivate(lockPath, stat)) {
       throw new Error("Unsafe service maintenance lock.");
     }

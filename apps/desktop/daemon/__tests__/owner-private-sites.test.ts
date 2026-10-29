@@ -4,9 +4,9 @@
 // it refuses what lacks the private DACL and accepts what the code itself made.
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -17,6 +17,7 @@ import {
   withDaemonMaintenanceOperation,
 } from "../../../../shared/daemon-maintenance.mjs";
 import { isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { openDaemonStateDatabase } from "../daemon-state-database.js";
 import { isDaemonEntryPoint } from "../entry-point.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { RoomTurnAttachmentStager } from "../room-turn-attachments.js";
@@ -96,10 +97,18 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     assert.ok(fake.protects.includes(`protect:directory:${join(root, "home")}`));
     assert.ok(fake.protects.includes(`protect:directory:${join(root, "home", ".letagents")}`));
     assert.ok(fake.protects.includes(`protect:file:${path}.lock`));
-    assert.ok(fake.protects.some(call => call.startsWith(`protect:file:${path}.`) && call.endsWith(".tmp")));
+    // The record was made in a private staging folder beside it, then given its own DACL.
+    const staged = fake.protects.findIndex(call => call.startsWith(`protect:directory:${dirname(path)}${sep}.daemon-maintenance.json.letagents-`));
+    assert.ok(staged >= 0);
+    assert.equal(fake.protects[staged + 1], `protect:file:${join(fake.protects[staged]!.slice("protect:directory:".length), "record")}`);
+    assert.deepEqual((await readdir(dirname(path))).sort(), ["daemon-maintenance.json", "daemon-maintenance.json.lock"]);
     fake.tamper(path);
     await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+    // A lock this account owns but has not made private yet is repaired; another account's is refused.
     fake.tamper(`${path}.lock`);
+    await withDaemonMaintenanceOperation(async () => undefined, path);
+    assert.equal(fake.isProtected(`${path}.lock`), true);
+    fake.giveAway(`${path}.lock`);
     await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
   });
 });
@@ -165,6 +174,22 @@ test("Windows: staged attachment folders and files get the private DACL", async 
       assert.equal(fake.isProtected(staged[0]!), true);
       assert.equal(fake.isProtected(join(staged[0]!, "..")), true);
     } finally { await prepared.release(); }
+  });
+});
+
+// ---------------------------------------------------------------- state database
+
+test("Windows: the state database folder and files get the private DACL", async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const path = join(root, "daemon", "daemon-state.sqlite");
+  await asWindows(fake, async () => {
+    const database = await openDaemonStateDatabase(path, () => undefined);
+    try {
+      assert.equal(fake.isProtected(join(root, "daemon")), true);
+      assert.equal(fake.isProtected(path), true);
+      // A -wal or -shm file SQLite makes later inherits the folder's private entries.
+    } finally { database.close(); }
   });
 });
 

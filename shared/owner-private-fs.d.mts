@@ -6,7 +6,7 @@ export declare const PRIVATE_FILE_MODE: 0o600;
 export declare const SYSTEM_SID: "S-1-5-18";
 
 export type PrivateKind = "file" | "directory";
-type StatLike = Pick<Stats, "mode" | "uid"> | Pick<BigIntStats, "mode" | "uid">;
+type StatLike = (Pick<Stats, "mode" | "uid"> & Partial<Pick<Stats, "dev" | "ino">>) | Pick<BigIntStats, "mode" | "uid" | "dev" | "ino">;
 
 /** The Windows facts behind every check; a native helper may replace the default one. */
 export interface WindowsSecurity {
@@ -15,8 +15,14 @@ export interface WindowsSecurity {
   /** One SDDL string per path, in order; null where it could not be read. */
   readSddl(paths: readonly string[]): Promise<(string | null)[]>;
   readSddlSync(paths: readonly string[]): (string | null)[];
+  /** SDDL aliases that also name the current user ("LA" for this machine's built-in Administrator). */
+  currentUserAliases?(): Promise<string[]>;
+  currentUserAliasesSync?(): string[];
   protect(path: string, kind: PrivateKind): Promise<void>;
   protectSync(path: string, kind: PrivateKind): void;
+  /** Remove every allow entry for these SIDs (the default backend has it; a fake may leave it out). */
+  removeGrants?(path: string, sids: readonly string[]): Promise<void>;
+  removeGrantsSync?(path: string, sids: readonly string[]): void;
 }
 export type ToolRunner = (file: string, args: readonly string[], options: { env: NodeJS.ProcessEnv }) => Promise<string>;
 export type ToolRunnerSync = (file: string, args: readonly string[], options: { env: NodeJS.ProcessEnv }) => string;
@@ -38,7 +44,12 @@ export declare function ownerPrivatePlatform(options?: OwnerPrivateOptions): Nod
 export declare function windowsSystemTool(name: string, env?: NodeJS.ProcessEnv): string;
 export declare function windowsToolPaths(env?: NodeJS.ProcessEnv): { whoami: string; icacls: string; powershell: string };
 export declare function parseWhoamiUserSid(output: string): string;
+export declare function parseWhoamiUser(output: string): { sid: string; domain: string | null };
+export declare function userSidAliases(user: { sid: string; domain: string | null }, computerName: string | undefined): string[];
+/** A SID string, or the SID with the SDDL aliases that also name it. */
+export type UserIdentity = string | { sid: string; aliases?: readonly string[] };
 export declare function parseSddlLines(output: string, count: number): (string | null)[];
+export declare function icaclsRemoveArguments(path: string, sids: readonly string[]): string[];
 export declare function icaclsSetOwnerArguments(path: string, sid: string): string[];
 export declare const INHERITED_GROUP_SIDS: readonly string[];
 export declare function icaclsProtectArguments(path: string, kind: PrivateKind, sid: string): string[];
@@ -49,12 +60,14 @@ export interface ParsedSddl {
   dacl: { flags: string; aces: { type: string; flags: string; rights: string; sid: string }[] } | null;
 }
 export declare function parseSddl(sddl: string | null | undefined): ParsedSddl | null;
-export declare function sddlIsOwnedBy(sddl: string | null | undefined, sid: string): boolean;
-export declare function sddlIsOwnerPrivate(sddl: string | null | undefined, sid: string): boolean;
+export declare function sddlIsOwnedBy(sddl: string | null | undefined, sid: UserIdentity): boolean;
+export declare function sddlExtraGrantSids(sddl: string | null | undefined, sid: UserIdentity): string[] | null;
+export declare function sddlIsOwnerPrivate(sddl: string | null | undefined, sid: UserIdentity): boolean;
 
 export declare function isOwnedByCurrentUser(path: string, info: StatLike, options?: OwnerPrivateOptions): Promise<boolean>;
 export declare function isOwnedByCurrentUserSync(path: string, info: StatLike, options?: OwnerPrivateOptions): boolean;
 export declare function everyOwnedByCurrentUserSync(entries: readonly { path: string; info: StatLike }[], options?: OwnerPrivateOptions): boolean;
+export declare function everyOwnerPrivateSync(entries: readonly { path: string; info: StatLike }[], options?: OwnerPrivateCheckOptions): boolean;
 export declare function isOwnerPrivate(path: string, info: StatLike, options?: OwnerPrivateCheckOptions): Promise<boolean>;
 export declare function isOwnerPrivateSync(path: string, info: StatLike, options?: OwnerPrivateCheckOptions): boolean;
 export declare function assertOwnerPrivate(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Promise<Stats>;
@@ -68,6 +81,8 @@ export declare function syncDirectory(path: string, options?: OwnerPrivateOption
 export declare function syncDirectorySync(path: string, options?: OwnerPrivateOptions): void;
 export declare function openNoFollow(path: string, flags: number, mode?: number, options?: OwnerPrivateOptions): Promise<FileHandle>;
 export declare function openNoFollowSync(path: string, flags: number, mode?: number, options?: OwnerPrivateOptions): number;
+/** Windows: a new folder beside `path`, private before anything is put in it (the caller removes it). */
+export declare function createPrivateStagingFolder(path: string, options?: OwnerPrivateOptions): Promise<string>;
 export declare function writePrivateFileAtomically(path: string, data: string | Uint8Array, options?: OwnerPrivateOptions & { syncDirectory?: boolean }): Promise<void>;
 export declare function writePrivateFileAtomicallySync(path: string, data: string | Uint8Array, options?: OwnerPrivateOptions & { syncDirectory?: boolean }): void;
 /** `/dev/null`, or `\\.\nul` on Windows (as os.devNull there). */

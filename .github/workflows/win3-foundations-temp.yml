@@ -1,0 +1,54 @@
+# TEMPORARY (PR #1794 iteration only; removed before review): runs the
+# owner-private helper and the migrated daemon suites on real Windows while
+# the CI dependency gate is red on staging.
+name: Win3 foundations (temporary)
+
+on:
+  pull_request:
+    branches:
+      - staging
+
+permissions:
+  contents: read
+
+jobs:
+  windows-foundations:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      - name: Use a scratch home and keep committed line endings
+        shell: bash
+        run: |
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          git config --global core.autocrlf false
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+          npm rebuild
+          node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Owner-private helper on real Windows
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: node --import tsx --test src/mcp/__tests__/owner-private-fs.test.ts src/mcp/__tests__/local-state-rename-retry.test.ts
+
+      - name: Migrated daemon suites on real Windows
+        if: ${{ !cancelled() }}
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          node --import tsx --test --test-timeout=180000 daemon/__tests__/owner-private-sites.test.ts
+          node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks electron/__tests__/owner-private-sites.test.ts

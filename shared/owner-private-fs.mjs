@@ -28,8 +28,8 @@
  * owner. Every answer that cannot be read or parsed counts as "not private".
  */
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, unlinkSync, writeSync } from "node:fs";
-import { chmod, lstat, mkdir, open, unlink } from "node:fs/promises";
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync, writeSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, open, rm, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { renameSyncWithRetry, renameWithRetryAsync } from "./rename-retry.mjs";
@@ -116,9 +116,26 @@ function runToolSync(file, args, options = {}) {
 
 /** `whoami /user /fo csv /nh` prints `"machine\name","S-1-5-21-…"`; only the SID is read. */
 export function parseWhoamiUserSid(output) {
-  const match = /"(S-1-[0-9]+(?:-[0-9]+)+)"\s*$/i.exec(String(output).trim());
+  return parseWhoamiUser(output).sid;
+}
+
+/** The SID, and the account's domain (the machine name for a local account). */
+export function parseWhoamiUser(output) {
+  const match = /^"([^"\\]*)\\[^"]*","(S-1-[0-9]+(?:-[0-9]+)+)"\s*$/i.exec(String(output).trim())
+    ?? /"(S-1-[0-9]+(?:-[0-9]+)+)"\s*$/i.exec(String(output).trim());
   if (!match) throw privateError("The current Windows account's SID could not be read.");
-  return match[1].toUpperCase();
+  return match.length === 3 ? { sid: match[2].toUpperCase(), domain: match[1] } : { sid: match[1].toUpperCase(), domain: null };
+}
+
+/**
+ * SDDL writes this machine's built-in Administrator (RID 500) as "LA". It
+ * names the current user only when that user is that account: a local account
+ * (its domain is this computer's name) whose SID ends in -500. A domain
+ * account with RID 500 is a different account.
+ */
+export function userSidAliases(user, computerName) {
+  return user.domain && computerName && user.domain.toUpperCase() === String(computerName).toUpperCase()
+    && /-500$/.test(user.sid) ? ["LA"] : [];
 }
 
 function chunkPaths(paths) {
@@ -158,8 +175,8 @@ export function icaclsSetOwnerArguments(path, sid) {
  * The well-known groups a user profile, the temporary folder or a drive root
  * gives by inheritance. On Windows Server 2022, `/inheritance:r` keeps an
  * object's inherited entries as explicit ones, so they are removed by name.
- * Any other entry left behind still fails the check: the result is never
- * trusted without reading it back.
+ * protectOwnerPrivate reads the result back and removes any other entry by
+ * its SID, or throws.
  */
 export const INHERITED_GROUP_SIDS = Object.freeze([
   "S-1-5-32-544", // Administrators
@@ -177,6 +194,13 @@ export const INHERITED_GROUP_SIDS = Object.freeze([
   "S-1-15-2-1", // All application packages
   "S-1-15-2-2", // All restricted application packages
 ]);
+
+/** The arguments that remove every allow entry for these SIDs. */
+export function icaclsRemoveArguments(path, sids) {
+  if (!isAbsolute(path) && !win32.isAbsolute(path)) throw privateError("A private path must be absolute.");
+  if (!sids.length || !sids.every(sid => SID_PATTERN.test(sid))) throw privateError("Only SIDs can be removed.");
+  return [path, "/remove:g", ...sids.map(sid => `*${sid}`), "/q"];
+}
 
 /**
  * The arguments that give a path a protected DACL for only `sid` and SYSTEM:
@@ -200,16 +224,24 @@ function powershellArguments() {
 export function createWindowsSecurity({ run = runTool, runSync = runToolSync, env = process.env } = {}) {
   const tools = windowsToolPaths(env);
   let sid = null;
+  let aliases = null;
+  const remember = (output) => {
+    const user = parseWhoamiUser(output);
+    aliases = userSidAliases(user, env.COMPUTERNAME);
+    return user.sid;
+  };
   const environment = paths => ({ ...env, [PATHS_VARIABLE]: JSON.stringify(paths) });
   return {
     async currentUserSid() {
-      sid ??= parseWhoamiUserSid(await run(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));
+      sid ??= remember(await run(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));
       return sid;
     },
     currentUserSidSync() {
-      sid ??= parseWhoamiUserSid(runSync(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));
+      sid ??= remember(runSync(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));
       return sid;
     },
+    async currentUserAliases() { await this.currentUserSid(); return aliases; },
+    currentUserAliasesSync() { this.currentUserSidSync(); return aliases; },
     async readSddl(paths) {
       const result = [];
       for (const chunk of chunkPaths(paths)) {
@@ -233,6 +265,12 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
       const user = this.currentUserSidSync();
       runSync(tools.icacls, icaclsSetOwnerArguments(path, user), { env });
       runSync(tools.icacls, icaclsProtectArguments(path, kind, user), { env });
+    },
+    async removeGrants(path, sids) {
+      await run(tools.icacls, icaclsRemoveArguments(path, sids), { env });
+    },
+    removeGrantsSync(path, sids) {
+      runSync(tools.icacls, icaclsRemoveArguments(path, sids), { env });
     },
   };
 }
@@ -288,29 +326,38 @@ export function parseSddl(sddl) {
   return owner ? { owner, dacl } : null;
 }
 
+/** SDDL aliases of fixed, machine-independent SIDs (domain-relative ones are left out). */
+const FIXED_SID_ALIASES = Object.freeze({
+  AN: "S-1-5-7", AU: "S-1-5-11", BA: "S-1-5-32-544", BG: "S-1-5-32-546", BO: "S-1-5-32-551", BU: "S-1-5-32-545",
+  CG: "S-1-3-1", CO: "S-1-3-0", IU: "S-1-5-4", LS: "S-1-5-19", NS: "S-1-5-20", NU: "S-1-5-2", OW: "S-1-3-4",
+  PO: "S-1-5-32-550", PS: "S-1-5-10", PU: "S-1-5-32-547", RC: "S-1-5-12", RD: "S-1-5-32-555", RE: "S-1-5-32-552",
+  RU: "S-1-5-32-554", SO: "S-1-5-32-549", SU: "S-1-5-6", WD: "S-1-1-0", WR: "S-1-5-33", AC: "S-1-15-2-1",
+  AO: "S-1-5-32-548", NO: "S-1-5-32-556", MU: "S-1-5-32-558", LU: "S-1-5-32-559", ER: "S-1-5-32-573",
+  RA: "S-1-5-32-575", HA: "S-1-5-32-578",
+});
+
 const DENY_TYPES = new Set(["D", "OD"]);
 const ALLOW_TYPES = new Set(["A", "OA"]);
 
-/**
- * SDDL writes a few well-known accounts as two-letter aliases. "LA" is this
- * machine's built-in Administrator (RID 500): it names the current user when
- * that user's SID ends in -500. On a domain machine a domain account with RID
- * 500 could be read as the local one; both are administrators, who can take
- * ownership of any file anyway, so no other user gains anything.
- */
+/** `user` is a SID string, or `{ sid, aliases }` where aliases are SDDL aliases that name it ("LA"). */
+function who(user) {
+  return typeof user === "string" ? { sid: user.toUpperCase(), aliases: [] }
+    : { sid: String(user.sid).toUpperCase(), aliases: user.aliases ?? [] };
+}
+
 function sidIsUser(sid, user) {
-  return sid === user || (sid === "LA" && /-500$/.test(user));
+  return sid === user.sid || user.aliases.includes(sid);
 }
 
 export function sddlIsOwnedBy(sddl, sid) {
   const owner = parseSddl(sddl)?.owner;
-  return Boolean(owner && sidIsUser(owner, String(sid).toUpperCase()));
+  return Boolean(owner && sidIsUser(owner, who(sid)));
 }
 
 /** Owner is `sid`; the DACL is protected; every allow entry is for `sid` or SYSTEM. */
 export function sddlIsOwnerPrivate(sddl, sid) {
   const parsed = parseSddl(sddl);
-  const user = String(sid).toUpperCase();
+  const user = who(sid);
   if (!parsed || !sidIsUser(parsed.owner, user) || !parsed.dacl) return false;
   const { flags, aces } = parsed.dacl;
   if (flags.includes("NO_ACCESS_CONTROL") || !flags.includes("P")) return false;
@@ -318,7 +365,50 @@ export function sddlIsOwnerPrivate(sddl, sid) {
     || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ace.sid === "SY" || ace.sid === SYSTEM_SID)));
 }
 
+/**
+ * The SIDs whose allow entries keep a descriptor from being private, when
+ * removing them is all it needs; null when something else is wrong (owner,
+ * inheritance, an alias that names no fixed SID, an unknown entry type).
+ */
+export function sddlExtraGrantSids(sddl, sid) {
+  const parsed = parseSddl(sddl);
+  const user = who(sid);
+  if (!parsed?.dacl || !sidIsUser(parsed.owner, user)) return null;
+  const { flags, aces } = parsed.dacl;
+  if (flags.includes("NO_ACCESS_CONTROL") || !flags.includes("P")) return null;
+  const extra = new Set();
+  for (const ace of aces) {
+    if (DENY_TYPES.has(ace.type) || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ace.sid === "SY" || ace.sid === SYSTEM_SID))) continue;
+    if (!ALLOW_TYPES.has(ace.type)) return null;
+    const full = SID_PATTERN.test(ace.sid) ? ace.sid : FIXED_SID_ALIASES[ace.sid];
+    if (!full) return null;
+    extra.add(full);
+  }
+  return [...extra];
+}
+
 // ---------------------------------------------------------------- checks
+
+async function currentUser(security) {
+  return { sid: await security.currentUserSid(), aliases: (await security.currentUserAliases?.()) ?? [] };
+}
+
+function currentUserSync(security) {
+  return { sid: security.currentUserSidSync(), aliases: security.currentUserAliasesSync?.() ?? [] };
+}
+
+/**
+ * Windows reads permissions by path, not from the caller's open file. So the
+ * path must still be the file the caller's stat describes (volume and file
+ * index), before and after the read: a file swapped in for the read is refused.
+ */
+function pathIsInfo(path, info) {
+  if (info?.ino === undefined || info?.dev === undefined) return true;
+  try {
+    const current = lstatSync(path, { bigint: typeof info.ino === "bigint" });
+    return current.dev === info.dev && current.ino === info.ino;
+  } catch { return false; }
+}
 
 function posixOwned(info) {
   return info.uid === process.getuid?.();
@@ -336,8 +426,9 @@ export async function isOwnedByCurrentUser(path, info, options = {}) {
   if (!isWindows(options)) return posixOwned(info);
   const security = windowsSecurity(options);
   try {
+    if (!pathIsInfo(path, info)) return false;
     const [sddl] = await security.readSddl([path]);
-    return sddlIsOwnedBy(sddl, await security.currentUserSid());
+    return pathIsInfo(path, info) && sddlIsOwnedBy(sddl, await currentUser(security));
   } catch { return false; }
 }
 
@@ -345,8 +436,9 @@ export function isOwnedByCurrentUserSync(path, info, options = {}) {
   if (!isWindows(options)) return posixOwned(info);
   const security = windowsSecurity(options);
   try {
+    if (!pathIsInfo(path, info)) return false;
     const [sddl] = security.readSddlSync([path]);
-    return sddlIsOwnedBy(sddl, security.currentUserSidSync());
+    return pathIsInfo(path, info) && sddlIsOwnedBy(sddl, currentUserSync(security));
   } catch { return false; }
 }
 
@@ -356,8 +448,23 @@ export function everyOwnedByCurrentUserSync(entries, options = {}) {
   if (!entries.length) return true;
   const security = windowsSecurity(options);
   try {
-    const sid = security.currentUserSidSync();
-    return security.readSddlSync(entries.map(entry => entry.path)).every(sddl => sddlIsOwnedBy(sddl, sid));
+    const user = currentUserSync(security);
+    if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
+    const answers = security.readSddlSync(entries.map(entry => entry.path));
+    return entries.every(entry => pathIsInfo(entry.path, entry.info)) && answers.every(sddl => sddlIsOwnedBy(sddl, user));
+  } catch { return false; }
+}
+
+/** Every entry is private to this account; Windows reads them all in one call. */
+export function everyOwnerPrivateSync(entries, options = {}) {
+  if (!isWindows(options)) return entries.every(entry => posixPrivate(entry.info, options.exactMode));
+  if (!entries.length) return true;
+  const security = windowsSecurity(options);
+  try {
+    const user = currentUserSync(security);
+    if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
+    const answers = security.readSddlSync(entries.map(entry => entry.path));
+    return entries.every(entry => pathIsInfo(entry.path, entry.info)) && answers.every(sddl => sddlIsOwnerPrivate(sddl, user));
   } catch { return false; }
 }
 
@@ -370,8 +477,9 @@ export async function isOwnerPrivate(path, info, options = {}) {
   if (!isWindows(options)) return posixPrivate(info, options.exactMode);
   const security = windowsSecurity(options);
   try {
+    if (!pathIsInfo(path, info)) return false;
     const [sddl] = await security.readSddl([path]);
-    return sddlIsOwnerPrivate(sddl, await security.currentUserSid());
+    return pathIsInfo(path, info) && sddlIsOwnerPrivate(sddl, await currentUser(security));
   } catch { return false; }
 }
 
@@ -379,8 +487,9 @@ export function isOwnerPrivateSync(path, info, options = {}) {
   if (!isWindows(options)) return posixPrivate(info, options.exactMode);
   const security = windowsSecurity(options);
   try {
+    if (!pathIsInfo(path, info)) return false;
     const [sddl] = security.readSddlSync([path]);
-    return sddlIsOwnerPrivate(sddl, security.currentUserSidSync());
+    return pathIsInfo(path, info) && sddlIsOwnerPrivate(sddl, currentUserSync(security));
   } catch { return false; }
 }
 
@@ -409,18 +518,45 @@ export function assertOwnerPrivateSync(path, options = {}) {
 
 // ---------------------------------------------------------------- making private paths
 
-/** POSIX: chmod 0700/0600. Windows: a protected DACL for this account and SYSTEM. */
+function notProtected(path) {
+  return privateError(`Could not make ${path} private to this account: other entries remain in its permissions.`);
+}
+
+/**
+ * POSIX: chmod 0700/0600. Windows: a protected DACL for this account and
+ * SYSTEM, read back afterwards. An entry the protect call left behind (a
+ * domain group a profile inherits, say) is removed by SID; if the result is
+ * still not private, this throws, as a failed chmod would.
+ */
 export async function protectOwnerPrivate(path, kind, options = {}) {
   if (!isWindows(options)) return chmod(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   // A missing path fails with ENOENT, as chmod does, so callers that skip a missing file still can.
   await lstat(path);
-  await windowsSecurity(options).protect(path, kind);
+  const security = windowsSecurity(options);
+  await security.protect(path, kind);
+  const user = await currentUser(security);
+  let [sddl] = await security.readSddl([path]);
+  if (sddlIsOwnerPrivate(sddl, user)) return;
+  const extra = sddlExtraGrantSids(sddl, user);
+  if (!extra?.length || !security.removeGrants) throw notProtected(path);
+  await security.removeGrants(path, extra);
+  [sddl] = await security.readSddl([path]);
+  if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
 }
 
 export function protectOwnerPrivateSync(path, kind, options = {}) {
   if (!isWindows(options)) return chmodSync(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   lstatSync(path);
-  windowsSecurity(options).protectSync(path, kind);
+  const security = windowsSecurity(options);
+  security.protectSync(path, kind);
+  const user = currentUserSync(security);
+  let [sddl] = security.readSddlSync([path]);
+  if (sddlIsOwnerPrivate(sddl, user)) return;
+  const extra = sddlExtraGrantSids(sddl, user);
+  if (!extra?.length || !security.removeGrantsSync) throw notProtected(path);
+  security.removeGrantsSync(path, extra);
+  [sddl] = security.readSddlSync([path]);
+  if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
 }
 
 /**
@@ -429,6 +565,25 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
  * never changed. (mkdir's own answer cannot be compared as text: on Windows it
  * may spell the same folder another way, such as a short 8.3 name.)
  */
+function identity(path) {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    return `${info.dev}:${info.ino}`;
+  } catch { return null; }
+}
+
+/**
+ * Of the folders that were missing, the ones this mkdir made: from the folder
+ * it reports as the first it made (matched by identity, not by spelling) down
+ * to `path`. A folder another process made in the meantime, above that one,
+ * is left alone. If no folder matches, only `path` itself is protected.
+ */
+function foldersMade(missing, made, path) {
+  const first = identity(made);
+  const index = first ? missing.findIndex(folder => identity(folder) === first) : -1;
+  return index < 0 ? [resolve(path)] : missing.slice(index);
+}
+
 function missingFolders(path) {
   const missing = [];
   for (let current = resolve(path); ; current = dirname(current)) {
@@ -448,7 +603,7 @@ export async function createPrivateDir(path, { recursive = false } = {}, options
   const missing = isWindows(options) && recursive ? missingFolders(path) : [];
   const made = await mkdir(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
   if (isWindows(options)) {
-    const folders = recursive ? (made === undefined ? [] : missing) : [resolve(path)];
+    const folders = recursive ? (made === undefined ? [] : foldersMade(missing, made, path)) : [resolve(path)];
     for (const folder of folders) await protectOwnerPrivate(folder, "directory", options);
   }
   return made;
@@ -458,7 +613,7 @@ export function createPrivateDirSync(path, { recursive = false } = {}, options =
   const missing = isWindows(options) && recursive ? missingFolders(path) : [];
   const made = mkdirSync(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
   if (isWindows(options)) {
-    const folders = recursive ? (made === undefined ? [] : missing) : [resolve(path)];
+    const folders = recursive ? (made === undefined ? [] : foldersMade(missing, made, path)) : [resolve(path)];
     for (const folder of folders) protectOwnerPrivateSync(folder, "directory", options);
   }
   return made;
@@ -529,47 +684,78 @@ export function openNoFollowSync(path, flags, mode, options = {}) {
 const EXCLUSIVE_WRITE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL;
 
 /**
+ * Windows: a new folder beside `path`, made private before anything is put in
+ * it. A file made inside it inherits only the private entries, so no other
+ * account can open it in the moment before its own DACL is set (a handle
+ * opened then would keep its access after the DACL changes).
+ */
+export async function createPrivateStagingFolder(path, options = {}) {
+  const folder = await mkdtemp(join(dirname(path), `.${pathName(path)}.letagents-`));
+  try { await protectOwnerPrivate(folder, "directory", options); }
+  catch (error) { await rm(folder, { recursive: true, force: true }).catch(() => undefined); throw error; }
+  return folder;
+}
+
+function privateStagingFolderSync(path, options) {
+  const folder = mkdtempSync(join(dirname(path), `.${pathName(path)}.letagents-`));
+  try { protectOwnerPrivateSync(folder, "directory", options); }
+  catch (error) { try { rmSync(folder, { recursive: true, force: true }); } catch { /* already failing */ } throw error; }
+  return folder;
+}
+
+/**
  * Write `data` to `path` so a reader sees the old file or the whole new one,
  * never a part: a private temporary file beside it, fsync, rename, then fsync
- * the folder. On Windows the temporary file gets the private DACL before any
- * byte is written, and the rename has the bounded retry.
+ * the folder. POSIX creates it 0600 in one step. Windows creates it inside a
+ * private staging folder, gives it its own DACL before any byte is written,
+ * and renames with the bounded retry.
  */
 export async function writePrivateFileAtomically(path, data, options = {}) {
-  const temporary = join(dirname(path), `.${randomUUID()}.${pathName(path)}.tmp`);
-  const handle = await openNoFollow(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
-  let closed = false;
+  const staging = isWindows(options) ? await createPrivateStagingFolder(path, options) : null;
+  const temporary = staging ? join(staging, "data") : join(dirname(path), `.${randomUUID()}.${pathName(path)}.tmp`);
   try {
-    if (isWindows(options)) await protectOwnerPrivate(temporary, "file", options);
-    await handle.writeFile(data);
-    await handle.sync();
-    await handle.close();
-    closed = true;
-    await renameWithRetryAsync(temporary, path, { platform: ownerPrivatePlatform(options) });
-    if (options.syncDirectory !== false) await syncDirectory(dirname(path), options);
-  } catch (error) {
-    if (!closed) await handle.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-    throw error;
+    const handle = await openNoFollow(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
+    let closed = false;
+    try {
+      if (staging) await protectOwnerPrivate(temporary, "file", options);
+      await handle.writeFile(data);
+      await handle.sync();
+      await handle.close();
+      closed = true;
+      await renameWithRetryAsync(temporary, path, { platform: ownerPrivatePlatform(options) });
+      if (options.syncDirectory !== false) await syncDirectory(dirname(path), options);
+    } catch (error) {
+      if (!closed) await handle.close().catch(() => undefined);
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
 export function writePrivateFileAtomicallySync(path, data, options = {}) {
-  const temporary = join(dirname(path), `.${randomUUID()}.${pathName(path)}.tmp`);
-  const descriptor = openNoFollowSync(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
-  let closed = false;
+  const staging = isWindows(options) ? privateStagingFolderSync(path, options) : null;
+  const temporary = staging ? join(staging, "data") : join(dirname(path), `.${randomUUID()}.${pathName(path)}.tmp`);
   try {
-    if (isWindows(options)) protectOwnerPrivateSync(temporary, "file", options);
-    const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
-    for (let offset = 0; offset < bytes.length;) offset += writeSync(descriptor, bytes, offset, bytes.length - offset);
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    closed = true;
-    renameSyncWithRetry(temporary, path, { platform: ownerPrivatePlatform(options) });
-    if (options.syncDirectory !== false) syncDirectorySync(dirname(path), options);
-  } catch (error) {
-    if (!closed) { try { closeSync(descriptor); } catch { /* already failing */ } }
-    try { unlinkSync(temporary); } catch { /* best effort */ }
-    throw error;
+    const descriptor = openNoFollowSync(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
+    let closed = false;
+    try {
+      if (staging) protectOwnerPrivateSync(temporary, "file", options);
+      const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+      for (let offset = 0; offset < bytes.length;) offset += writeSync(descriptor, bytes, offset, bytes.length - offset);
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      closed = true;
+      renameSyncWithRetry(temporary, path, { platform: ownerPrivatePlatform(options) });
+      if (options.syncDirectory !== false) syncDirectorySync(dirname(path), options);
+    } catch (error) {
+      if (!closed) { try { closeSync(descriptor); } catch { /* already failing */ } }
+      try { unlinkSync(temporary); } catch { /* best effort */ }
+      throw error;
+    }
+  } finally {
+    if (staging) { try { rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
 }
 

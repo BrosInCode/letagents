@@ -132,24 +132,48 @@ test("Windows: moving a Cursor conversation reads every owner in one call, and a
     await writeFile(join(source, "s1", "store.db"), "db");
     reads.length = 0;
     relocateCursorConversationNamespace({ configDir }, workspaceA, workspaceB, "s1");
-    assert.deepEqual(reads, [3]);
+    // One read for the three entries of the walk (each folder protect also reads its own result back).
+    assert.deepEqual(reads.filter(count => count > 1), [3]);
     const target = join(chats, createHash("md5").update(workspaceB).digest("hex"));
     assert.equal(await readFile(join(target, "s1", "store.db"), "utf8"), "db");
-    fake.security.readSddlSync = paths => paths.map((_, index) => index === 0 ? null : "x");
+    // The walk's one read says its first entry has another owner; single-path reads (protect's read-back) are real.
+    fake.security.readSddlSync = paths => paths.length > 1 ? paths.map((_, index) => index === 0 ? null : "x") : readSddlSync(paths);
     assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /unsupported or redirected entries/);
   });
 });
 
 // ---------------------------------------------------------------- supervised workspace git
 
-test("the trusted git environment keeps /tmp and /var/empty on POSIX and uses private Windows folders", async () => {
+test("the trusted git environment keeps /tmp and /var/empty on POSIX and uses private Windows folders", async (t) => {
   assert.equal(gitTemporaryRoot(), process.platform === "win32" ? tmpdir() : "/tmp");
+  if (process.platform !== "win32") assert.equal(gitEmptyHome(), "/var/empty");
+  const root = await scratch(t);
+  const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
+  process.env.HOME = root;
+  process.env.USERPROFILE = root;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+  });
   const fake = fakeWindowsSecurity();
-  await asWindows(fake, () => {
+  await asWindows(fake, async () => {
     assert.equal(gitTemporaryRoot(), tmpdir());
     const home = gitEmptyHome();
-    assert.equal(home, join(tmpdir(), "letagents-git-empty-home"));
+    assert.equal(home, join(root, ".letagents", "git-empty-home"));
+    assert.equal(fake.isProtected(home), true);
     assert.equal(gitEmptyHome(), home);
+    // Not empty, or not private (made by someone else): a new private folder instead.
+    await writeFile(join(home, ".gitconfig"), "[core]\n\tfsmonitor = calc.exe\n");
+    const fresh = gitEmptyHome();
+    t.after(() => rm(fresh, { recursive: true, force: true }));
+    assert.notEqual(fresh, home);
+    assert.equal(dirname(fresh), tmpdir());
+    assert.equal(fake.isProtected(fresh), true);
+    await rm(join(home, ".gitconfig"));
+    fake.tamper(home);
+    const another = gitEmptyHome();
+    t.after(() => rm(another, { recursive: true, force: true }));
+    assert.notEqual(another, home);
   });
-  if (process.platform !== "win32") assert.equal(gitEmptyHome(), "/var/empty");
 });

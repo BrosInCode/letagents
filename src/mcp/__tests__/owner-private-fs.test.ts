@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -12,7 +12,9 @@ import {
   createPrivateDirSync,
   createWindowsSecurity,
   everyOwnedByCurrentUserSync,
+  everyOwnerPrivateSync,
   icaclsProtectArguments,
+  icaclsRemoveArguments,
   INHERITED_GROUP_SIDS,
   isOwnedByCurrentUser,
   isOwnerPrivate,
@@ -22,8 +24,13 @@ import {
   openNoFollowSync,
   parseSddl,
   parseSddlLines,
+  parseWhoamiUser,
   parseWhoamiUserSid,
+  protectOwnerPrivate,
+  protectOwnerPrivateSync,
+  sddlExtraGrantSids,
   sddlIsOwnerPrivate,
+  userSidAliases,
   syncDirectory,
   windowsSystemTool,
   windowsToolPaths,
@@ -45,18 +52,25 @@ function scratch(): string {
   return mkdtempSync(join(tmpdir(), "owner-private-fs-"));
 }
 
-/** A fake WindowsSecurity: SDDL per path from a map, every call recorded. */
+/**
+ * A fake WindowsSecurity: SDDL per path from a map (a protected path reads as
+ * private unless the map says otherwise). Protect calls go in `calls`, reads
+ * in `reads`, and `sid` lookups are not recorded.
+ */
 function fakeSecurity(sddl: Record<string, string | null> = {}, sid = USER) {
   const calls: string[] = [];
+  const reads: string[] = [];
+  const read = (paths: readonly string[]) => { reads.push(paths.join("|")); return paths.map(path => sddl[path] ?? null); };
+  const protect = (path: string, kind: string) => { calls.push(`protect:${kind}:${path}`); if (!(path in sddl)) sddl[path] = PRIVATE_FILE; };
   const security: WindowsSecurity = {
-    async currentUserSid() { calls.push("sid"); return sid; },
-    currentUserSidSync() { calls.push("sid"); return sid; },
-    async readSddl(paths) { calls.push(`read:${paths.join("|")}`); return paths.map(path => sddl[path] ?? null); },
-    readSddlSync(paths) { calls.push(`read:${paths.join("|")}`); return paths.map(path => sddl[path] ?? null); },
-    async protect(path, kind) { calls.push(`protect:${kind}:${path}`); },
-    protectSync(path, kind) { calls.push(`protect:${kind}:${path}`); },
+    async currentUserSid() { return sid; },
+    currentUserSidSync() { return sid; },
+    async readSddl(paths) { return read(paths); },
+    readSddlSync(paths) { return read(paths); },
+    async protect(path, kind) { protect(path, kind); },
+    protectSync(path, kind) { protect(path, kind); },
   };
-  return { security, calls };
+  return { security, calls, reads, sddl };
 }
 
 test("Windows tools run by absolute System32 path, from SystemRoot or the default Windows folder", () => {
@@ -78,6 +92,7 @@ test("whoami's CSV answer gives the SID only; anything else is refused", () => {
   assert.equal(parseWhoamiUserSid(`"DOMAINE\\Benutzer, ä","s-1-5-21-1-2-3-500"`), "S-1-5-21-1-2-3-500");
   assert.throws(() => parseWhoamiUserSid("INFO: no user"), { code: "EOWNERPRIVATE" });
   assert.throws(() => parseWhoamiUserSid(`"a","S-1-"`), { code: "EOWNERPRIVATE" });
+  assert.deepEqual(parseWhoamiUser(`"runnervm1\\runneradmin","S-1-5-21-1-2-3-500"\r\n`), { sid: "S-1-5-21-1-2-3-500", domain: "runnervm1" });
 });
 
 test("icacls gets a protected DACL for only this account and SYSTEM; folders pass it to new children", () => {
@@ -172,9 +187,16 @@ test("only an owned, protected DACL with entries for this account and SYSTEM is 
   // A deny entry only takes access away.
   assert.equal(sddlIsOwnerPrivate(`O:${USER}D:P(D;;FA;;;WD)(A;;FA;;;${USER})`, USER), true);
 
-  // The built-in Administrator (RID 500) is written as "LA".
+  // This machine's built-in Administrator (RID 500) is written as "LA"; it is the
+  // user only when the user is that local account (aliases from userSidAliases).
   const ADMIN = "S-1-5-21-3776380004-1005456608-3524014338-500";
-  assert.equal(sddlIsOwnerPrivate("O:LAG:S-1-5-21-1-2-3-513D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)", ADMIN), true);
+  const ADMIN_SDDL = "O:LAG:S-1-5-21-1-2-3-513D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)";
+  assert.equal(sddlIsOwnerPrivate(ADMIN_SDDL, { sid: ADMIN, aliases: ["LA"] }), true);
+  assert.equal(sddlIsOwnerPrivate(ADMIN_SDDL, ADMIN), false);
+  assert.deepEqual(userSidAliases({ sid: ADMIN, domain: "runnervm1" }, "RUNNERVM1"), ["LA"]);
+  assert.deepEqual(userSidAliases({ sid: ADMIN, domain: "CORP" }, "RUNNERVM1"), []);
+  assert.deepEqual(userSidAliases({ sid: USER, domain: "runnervm1" }, "RUNNERVM1"), []);
+  assert.deepEqual(userSidAliases({ sid: ADMIN, domain: null }, "RUNNERVM1"), []);
   assert.equal(sddlIsOwnerPrivate("O:LAD:P(A;;FA;;;LA)", USER), false);
   assert.equal(sddlIsOwnerPrivate(`O:${USER}D:P(A;;FA;;;LA)(A;;FA;;;${USER})`, USER), false);
 
@@ -216,7 +238,7 @@ test("POSIX checks read only the stat: the mode and uid rules are today's", { sk
 });
 
 test("Windows checks ignore mode bits and read the path's owner and DACL", async () => {
-  const { security, calls } = fakeSecurity({
+  const { security, reads } = fakeSecurity({
     "C:\\state\\private": PRIVATE_FILE,
     "C:\\state\\open": `O:${USER}D:AI(A;ID;FA;;;BU)`,
     "C:\\state\\theirs": `O:${OTHER}D:P(A;;FA;;;${USER})`,
@@ -238,7 +260,7 @@ test("Windows checks ignore mode bits and read the path's owner and DACL", async
     { path: "C:\\state\\private", info: windowsStat }, { path: "C:\\state\\theirs", info: windowsStat },
   ], options), false);
   // The whole list is one read.
-  assert.equal(calls.filter(call => call.startsWith("read:")).at(-1), "read:C:\\state\\private|C:\\state\\theirs");
+  assert.equal(reads.at(-1), "C:\\state\\private|C:\\state\\theirs");
 });
 
 test("on Windows a tool failure counts as not private", async () => {
@@ -316,18 +338,30 @@ test("Windows: an atomic private file is protected before its bytes are written"
     const target = join(root, "state.json");
     const seen: string[] = [];
     const { security, calls } = fakeSecurity();
+    const look = (path: string, kind: string) => { seen.push(kind === "file" ? readFileSync(path, "utf8") : readdirSync(path).join(",")); };
     const recording: WindowsSecurity = {
       ...security,
-      async protect(path, kind) { seen.push(readFileSync(path, "utf8")); await security.protect(path, kind); },
-      protectSync(path, kind) { seen.push(readFileSync(path, "utf8")); security.protectSync(path, kind); },
+      async protect(path, kind) { look(path, kind); await security.protect(path, kind); },
+      protectSync(path, kind) { look(path, kind); security.protectSync(path, kind); },
     };
     const options = { platform: "win32" as const, windowsSecurity: recording };
     await writePrivateFileAtomically(target, "secret", options);
     writePrivateFileAtomicallySync(target, "secret 2", options);
     assert.equal(readFileSync(target, "utf8"), "secret 2");
-    // The temporary file was empty when its DACL was set, and it sat beside the target.
-    assert.deepEqual(seen, ["", ""]);
-    for (const call of calls) assert.match(call, new RegExp(`^protect:file:${root.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}.+\\.tmp$`));
+    // Each write: a staging folder beside the target is made private while still
+    // empty, then the file inside it gets its own DACL while still empty.
+    assert.deepEqual(seen, ["", "", "", ""]);
+    assert.equal(calls.length, 4);
+    for (const [index, call] of calls.entries()) {
+      const match = /^protect:(directory|file):(.+)$/.exec(call)!;
+      assert.equal(match[1], index % 2 ? "file" : "directory");
+      const folder = index % 2 ? dirname(match[2]) : match[2];
+      assert.equal(dirname(folder), root);
+      assert.match(basename(folder), /^\.state\.json\.letagents-/);
+      if (index % 2) assert.equal(match[2], join(calls[index - 1]!.replace(/^protect:directory:/, ""), "data"));
+    }
+    // The staging folders are gone.
+    assert.deepEqual(readdirSync(root), ["state.json"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -369,6 +403,81 @@ test("the async rename is retried on Windows only, with the same bounded waits",
 test("the null device is /dev/null on POSIX and \\\\.\\nul on Windows", () => {
   assert.equal(nullDevice({ platform: "darwin" }), "/dev/null");
   assert.equal(nullDevice({ platform: "win32" }), "\\\\.\\nul");
+});
+
+test("Windows: protect reads the result back, removes leftover entries by SID, and otherwise throws", async () => {
+  const root = scratch();
+  try {
+    const file = join(root, "token.json");
+    writeFileSync(file, "{}");
+    const leftover = `O:${USER}D:PAI(A;;FA;;;SY)(A;;FA;;;${USER})(A;;FR;;;${OTHER})(A;;FR;;;BA)`;
+    const removed: string[][] = [];
+    const { security, sddl } = fakeSecurity({ [file]: leftover });
+    const withRemoval: WindowsSecurity = {
+      ...security,
+      async removeGrants(path, sids) { removed.push([...sids]); sddl[path] = PRIVATE_FILE; },
+      removeGrantsSync(path, sids) { removed.push([...sids]); sddl[path] = PRIVATE_FILE; },
+    };
+    await protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: withRemoval });
+    assert.deepEqual(removed, [[OTHER, "S-1-5-32-544"]]);
+
+    // No way to remove the leftover: throw, as a failed chmod would.
+    sddl[file] = leftover;
+    await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: security }), { code: "EOWNERPRIVATE" });
+    assert.throws(() => protectOwnerPrivateSync(file, "file", { platform: "win32", windowsSecurity: security }), { code: "EOWNERPRIVATE" });
+    // A removal that does not take: throw.
+    const stubborn: WindowsSecurity = { ...security, async removeGrants() {}, removeGrantsSync() {} };
+    await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: stubborn }), { code: "EOWNERPRIVATE" });
+    // A missing path keeps chmod's ENOENT.
+    await assert.rejects(protectOwnerPrivate(join(root, "missing"), "file", { platform: "win32", windowsSecurity: security }), { code: "ENOENT" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("only extra allow entries with a known SID can be removed; anything else needs a new DACL", () => {
+  assert.deepEqual(sddlExtraGrantSids(`O:${USER}D:P(A;;FA;;;${USER})(A;;FR;;;WD)(A;OICIIO;FA;;;CO)(D;;FA;;;BG)`, USER), ["S-1-1-0", "S-1-3-0"]);
+  assert.deepEqual(sddlExtraGrantSids(PRIVATE_FOLDER, USER), []);
+  assert.equal(sddlExtraGrantSids(`O:${USER}D:P(A;;FR;;;DU)`, USER), null);
+  assert.equal(sddlExtraGrantSids(`O:${USER}D:AI(A;ID;FR;;;WD)`, USER), null);
+  assert.equal(sddlExtraGrantSids(`O:${OTHER}D:P(A;;FR;;;WD)`, USER), null);
+  assert.equal(sddlExtraGrantSids(`O:${USER}D:P(AU;;FR;;;WD)`, USER), null);
+  assert.deepEqual(icaclsRemoveArguments("C:\\a", [OTHER, "S-1-1-0"]), ["C:\\a", "/remove:g", `*${OTHER}`, "*S-1-1-0", "/q"]);
+  assert.throws(() => icaclsRemoveArguments("C:\\a", ["WD"]), { code: "EOWNERPRIVATE" });
+});
+
+test("Windows: a batch privacy check reads every path in one call", () => {
+  const { security, reads } = fakeSecurity({ "C:\\a": PRIVATE_FILE, "C:\\b": PRIVATE_FOLDER, "C:\\c": `O:${USER}D:AI(A;ID;FA;;;BU)` });
+  const options = { platform: "win32" as const, windowsSecurity: security };
+  const stat = { mode: 0o666, uid: 0 };
+  assert.equal(everyOwnerPrivateSync([{ path: "C:\\a", info: stat }, { path: "C:\\b", info: stat }], options), true);
+  assert.equal(everyOwnerPrivateSync([{ path: "C:\\a", info: stat }, { path: "C:\\c", info: stat }], options), false);
+  assert.deepEqual(reads, ["C:\\a|C:\\b", "C:\\a|C:\\c"]);
+});
+
+test("Windows: the built-in Administrator alias is resolved from whoami and the computer name", () => {
+  const answer = (domain: string) => () => `"${domain}\\Administrator","S-1-5-21-1-2-3-500"`;
+  const local = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", COMPUTERNAME: "HOST1" }, runSync: answer("host1") });
+  assert.deepEqual(local.currentUserAliasesSync!(), ["LA"]);
+  const domain = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", COMPUTERNAME: "HOST1" }, runSync: answer("CORP") });
+  assert.deepEqual(domain.currentUserAliasesSync!(), []);
+});
+
+test("Windows: a check is bound to the caller's file; a path that names another file now is refused", async () => {
+  const root = scratch();
+  try {
+    const opened = join(root, "opened");
+    const swapped = join(root, "swapped");
+    writeFileSync(opened, "a");
+    writeFileSync(swapped, "b");
+    const { security } = fakeSecurity({ [opened]: PRIVATE_FILE, [swapped]: PRIVATE_FILE });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    const openedInfo = lstatSync(opened);
+    assert.equal(await isOwnerPrivate(opened, openedInfo, options), true);
+    // The caller holds `opened`, but the path now names `swapped`: refused, private or not.
+    assert.equal(await isOwnerPrivate(swapped, openedInfo, options), false);
+    assert.equal(isOwnerPrivateSync(swapped, openedInfo, options), false);
+    assert.equal(await isOwnedByCurrentUser(swapped, openedInfo, options), false);
+    assert.equal(everyOwnerPrivateSync([{ path: swapped, info: openedInfo }], options), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 // ---------------------------------------------------------------- real Windows
