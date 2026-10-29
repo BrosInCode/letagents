@@ -329,7 +329,7 @@ test("application registers startup preparation before rental recovery without d
   let backgroundDone!: () => void;
   const reconciled = new Promise<void>((resolve) => { backgroundDone = resolve; });
   const mockApp = { once: (_name: string, handler: () => Promise<void>) => { ready = handler; },
-    on() {}, setName() {}, isPackaged: true };
+    on() {}, setName() {}, setAppUserModelId() {}, isPackaged: true };
   const previousSmoke = process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
   delete process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
   const mocks = [
