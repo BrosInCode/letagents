@@ -155,7 +155,7 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   ]);
 });
 
-test("Windows: a protect is icacls owner + DACL and one Get-Acl read-back; nothing runs again for what it made", async () => {
+test("Windows: a protect reads the owner, sets owner + DACL, reads back; nothing runs again for what it made", async () => {
   const root = scratch();
   try {
     const folder = join(root, "state");
@@ -171,7 +171,8 @@ test("Windows: a protect is icacls owner + DACL and one Get-Acl read-back; nothi
     const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, run: async (...args) => runner(...args), runSync: runner });
     const options = { platform: "win32" as const, windowsSecurity: security };
     await protectOwnerPrivate(folder, "directory", options);
-    assert.deepEqual(calls, [["whoami.exe", "/fo"], ["icacls.exe", "/setowner"], ["icacls.exe", "/inheritance:r"], ["powershell.exe", "-NoProfile"]]);
+    // The owner is read first (an existing entry may be another account's), then owner, DACL, read-back.
+    assert.deepEqual(calls, [["powershell.exe", "-NoProfile"], ["whoami.exe", "/fo"], ["icacls.exe", "/setowner"], ["icacls.exe", "/inheritance:r"], ["powershell.exe", "-NoProfile"]]);
     calls.length = 0;
     // Made by the helper inside the verified folder: known, so nothing runs again.
     await writePrivateFileAtomically(join(folder, "token"), "t", options);
@@ -183,7 +184,7 @@ test("Windows: a protect is icacls owner + DACL and one Get-Acl read-back; nothi
     // A file that was not made through the helper is protected in full (it may be another account's).
     writeFileSync(join(folder, "plain"), "p");
     await protectOwnerPrivate(join(folder, "plain"), "file", options);
-    assert.deepEqual(calls.map(call => call[0]), ["icacls.exe", "icacls.exe", "powershell.exe"]);
+    assert.deepEqual(calls.map(call => call[0]), ["powershell.exe", "icacls.exe", "icacls.exe", "powershell.exe"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -192,7 +193,7 @@ test("Windows: a protect refuses an entry that was replaced during it", async ()
   try {
     const file = join(root, "token");
     writeFileSync(file, "ours");
-    const { security } = fakeSecurity();
+    const { security } = fakeSecurity({ [file]: `O:${USER}D:AI(A;ID;FA;;;BU)` });
     const swapping: WindowsSecurity = {
       ...security,
       // Made before the old one goes, so it is a different file on every file system.
@@ -394,18 +395,29 @@ test("Windows: an entry another account left in a folder before it was verified 
     const folder = join(root, "state");
     mkdirSync(folder);
     writeFileSync(join(folder, "planted"), "x");
-    const { security, calls, sddl } = fakeSecurity({ [join(folder, "planted")]: `O:${OTHER}D:P(A;;FA;;;${USER})(A;;FA;;;${OTHER})` });
+    const { security, calls, sddl } = fakeSecurity({
+      [folder]: `O:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;${USER})`,
+      [join(folder, "planted")]: `O:${OTHER}D:P(A;;FA;;;${USER})(A;;FA;;;${OTHER})`,
+    });
     const options = { platform: "win32" as const, windowsSecurity: security };
-    // The folder is protected (and verified) after the entry was planted in it.
-    await protectOwnerPrivate(folder, "directory", options);
+    // The folder becomes private (and is verified here) after the entry was planted in it.
     sddl[folder] = PRIVATE_FOLDER;
+    assert.equal(await isOwnerPrivate(folder, lstatSync(folder), options), true);
     const stat = lstatSync(join(folder, "planted"));
     assert.equal(await isOwnerPrivate(join(folder, "planted"), stat, options), false);
     assert.equal(await isOwnedByCurrentUser(join(folder, "planted"), stat, options), false);
-    // A protect of it runs in full and fails, as chmod fails with EPERM on another account's file.
+    // A protect of it fails with EPERM, as chmod does on another account's file, and icacls never
+    // runs: its DACL grants this account full control, so icacls would take the file over.
     calls.length = 0;
-    await assert.rejects(protectOwnerPrivate(join(folder, "planted"), "file", options), { code: "EOWNERPRIVATE" });
-    assert.deepEqual(calls, [`protect:file:${join(folder, "planted")}`]);
+    await assert.rejects(protectOwnerPrivate(join(folder, "planted"), "file", options), { code: "EPERM" });
+    await assert.rejects(protectOwnerPrivate(join(folder, "planted"), "file", { ...options, force: true }), { code: "EPERM" });
+    assert.throws(() => protectOwnerPrivateSync(join(folder, "planted"), "file", options), { code: "EPERM" });
+    assert.deepEqual(calls, []);
+    // An entry Administrators own (what an elevated process makes) is this machine's admins': it is protected.
+    writeFileSync(join(folder, "elevated"), "e");
+    sddl[join(folder, "elevated")] = `O:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)`;
+    await assert.rejects(protectOwnerPrivate(join(folder, "elevated"), "file", options), { code: "EOWNERPRIVATE" });
+    assert.deepEqual(calls, [`protect:file:${join(folder, "elevated")}`]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -659,7 +671,8 @@ test("Windows: a tool that cannot start is EOWNERPRIVATE, never a missing file",
     await assert.rejects(protectOwnerPrivate(file, "file", options), { code: "EOWNERPRIVATE" });
     assert.throws(() => protectOwnerPrivateSync(file, "file", options), { code: "EOWNERPRIVATE" });
     // A backend that throws ENOENT itself (a native helper, say) is wrapped too.
-    const { security: fake } = fakeSecurity();
+    const owned = `O:${USER}D:AI(A;ID;FA;;;BU)`;
+    const { security: fake } = fakeSecurity({ [file]: owned, [join(root, "vanishing")]: owned });
     const throwing: WindowsSecurity = { ...fake, async protect() { notStarting(); }, protectSync() { notStarting(); } };
     await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: throwing }), { code: "EOWNERPRIVATE" });
     // Only a missing path itself is ENOENT.

@@ -566,7 +566,8 @@ export function forgetOwnerPrivateCache() { verifiedFolders = new WeakMap(); kno
 function identityOf(path) {
   try {
     const info = lstatSync(path, { bigint: true });
-    return info.isSymbolicLink() ? null : `${info.dev}:${info.ino}`;
+    // A link is never trusted; a file system without file IDs (ino 0) gives no identity.
+    return info.isSymbolicLink() || info.ino === 0n ? null : `${info.dev}:${info.ino}`;
   } catch { return null; }
 }
 
@@ -611,25 +612,30 @@ function parentIsVerified(security, path) {
  */
 export async function privateEntryCreated(path, kind, options = {}) {
   if (!isWindows(options)) return;
+  if (!identityOf(path)) throw privateError(`Refusing a link (or an entry without a file ID) at ${path}.`);
   const security = windowsSecurity(options);
   if (parentIsVerified(security, path)) {
     if (kind === "directory") rememberPrivateFolder(security, path);
     else addTo(knownEntries, security, path);
     return;
   }
-  await protectOwnerPrivate(path, kind, { ...options, force: true });
+  await protectOwnerPrivate(path, kind, { ...options, force: true, [JUST_CREATED]: true });
 }
 
 export function privateEntryCreatedSync(path, kind, options = {}) {
   if (!isWindows(options)) return;
+  if (!identityOf(path)) throw privateError(`Refusing a link (or an entry without a file ID) at ${path}.`);
   const security = windowsSecurity(options);
   if (parentIsVerified(security, path)) {
     if (kind === "directory") rememberPrivateFolder(security, path);
     else addTo(knownEntries, security, path);
     return;
   }
-  protectOwnerPrivateSync(path, kind, { ...options, force: true });
+  protectOwnerPrivateSync(path, kind, { ...options, force: true, [JUST_CREATED]: true });
 }
+
+/** Internal: this process just made the entry, so its owner is this account and need not be read first. */
+const JUST_CREATED = Symbol("owner-private just created");
 
 /** `path` and every folder above it, nearest first. */
 function chainOf(path) {
@@ -698,7 +704,7 @@ function privatePlan(security, entries) {
 async function windowsEntriesArePrivate(security, entries) {
   const plan = privatePlan(security, entries);
   if (!plan) return false;
-  if (!plan.pending.length) return true;
+  if (!plan.pending.length) return entries.every(entry => pathIsInfo(entry.path, entry.info));
   const answers = await readAll(security, plan.plans.flatMap(item => item.read));
   const user = await currentUser(security);
   return plan.pending.every((entry, index) => decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info)))
@@ -708,7 +714,7 @@ async function windowsEntriesArePrivate(security, entries) {
 function windowsEntriesArePrivateSync(security, entries) {
   const plan = privatePlan(security, entries);
   if (!plan) return false;
-  if (!plan.pending.length) return true;
+  if (!plan.pending.length) return entries.every(entry => pathIsInfo(entry.path, entry.info));
   const answers = readAllSync(security, plan.plans.flatMap(item => item.read));
   const user = currentUserSync(security);
   return plan.pending.every((entry, index) => decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info)))
@@ -835,7 +841,7 @@ export function assertOwnerPrivateSync(path, options = {}) {
 function protectFailure(path, error) {
   try { lstatSync(path); }
   catch (missing) { if (missing?.code === "ENOENT") return missing; }
-  return error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error);
+  return error?.code === "EOWNERPRIVATE" || error?.code === "EPERM" ? error : toolError("protect", error);
 }
 
 function notProtected(path) {
@@ -845,8 +851,9 @@ function notProtected(path) {
 /**
  * POSIX: chmod 0700/0600. Windows: for an entry known private in this process
  * (made here inside a verified folder, or already protected or read) there is
- * nothing to do. Else a protected DACL for this account and SYSTEM, set by
- * icacls (which fails on another account's entry) and read back afterwards: an
+ * nothing to do. Else, if this account owns it (an entry another account owns
+ * fails with EPERM, as chmod does), a protected DACL for this account and
+ * SYSTEM, set by icacls and read back afterwards: an
  * entry the protect call left behind (a domain group a profile inherits, say)
  * is removed by SID; if the result is still not private, this throws, as a
  * failed chmod would. A protected folder is then verified for the process.
@@ -859,7 +866,7 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
   await lstat(path);
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
-  try { await protectWindowsPath(security, path, kind); }
+  try { await protectWindowsPath(security, path, kind, options[JUST_CREATED] === true); }
   catch (error) { throw protectFailure(path, error); }
   if (kind === "directory") rememberPrivateFolder(security, path);
   else addTo(knownEntries, security, path);
@@ -874,9 +881,28 @@ function replaced(path) {
  * the result of /setowner is not assumed), and the path must still name the
  * same object as before the protect, so a swap in a writable folder fails.
  */
-async function protectWindowsPath(security, path, kind) {
+/**
+ * An entry this process did not just make is protected only when this account
+ * (or Administrators, the owner an elevated process gives) owns it: icacls
+ * would otherwise take over another account's entry whenever its DACL lets
+ * this account change the owner, where chmod fails with EPERM. Another
+ * account that planted it could still hold an open handle.
+ */
+function assertProtectableOwner(path, sddl, user) {
+  const owner = parseSddl(sddl)?.owner;
+  if (!owner || !(sidIsUser(owner, who(user)) || owner === "BA" || owner === "S-1-5-32-544")) {
+    throw privateError(`${path} belongs to another account; it is not taken over.`, "EPERM");
+  }
+}
+
+async function protectWindowsPath(security, path, kind, justCreated) {
   const before = identityOf(path);
   if (!before) throw privateError(`Refusing to protect a link at ${path}.`);
+  if (!justCreated) {
+    const [current] = await security.readSddl([path]);
+    assertProtectableOwner(path, current, await currentUser(security));
+    if (identityOf(path) !== before) throw replaced(path);
+  }
   await security.protect(path, kind);
   const user = await currentUser(security);
   let [sddl] = await security.readSddl([path]);
@@ -895,15 +921,20 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
   lstatSync(path);
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
-  try { protectWindowsPathSync(security, path, kind); }
+  try { protectWindowsPathSync(security, path, kind, options[JUST_CREATED] === true); }
   catch (error) { throw protectFailure(path, error); }
   if (kind === "directory") rememberPrivateFolder(security, path);
   else addTo(knownEntries, security, path);
 }
 
-function protectWindowsPathSync(security, path, kind) {
+function protectWindowsPathSync(security, path, kind, justCreated) {
   const before = identityOf(path);
   if (!before) throw privateError(`Refusing to protect a link at ${path}.`);
+  if (!justCreated) {
+    const [current] = security.readSddlSync([path]);
+    assertProtectableOwner(path, current, currentUserSync(security));
+    if (identityOf(path) !== before) throw replaced(path);
+  }
   security.protectSync(path, kind);
   const user = currentUserSync(security);
   let [sddl] = security.readSddlSync([path]);
@@ -1104,7 +1135,7 @@ export async function writePrivateFileAtomically(path, data, options = {}) {
     let closed = false;
     try {
       // The file leaves the staging folder, so it needs a protected DACL of its own.
-      if (staging) await protectOwnerPrivate(temporary, "file", { ...options, force: true });
+      if (staging) await protectOwnerPrivate(temporary, "file", { ...options, force: true, [JUST_CREATED]: true });
       else await privateEntryCreated(temporary, "file", options);
       await handle.writeFile(data);
       await handle.sync();
@@ -1129,7 +1160,7 @@ export function writePrivateFileAtomicallySync(path, data, options = {}) {
     const descriptor = openNoFollowSync(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
     let closed = false;
     try {
-      if (staging) protectOwnerPrivateSync(temporary, "file", { ...options, force: true });
+      if (staging) protectOwnerPrivateSync(temporary, "file", { ...options, force: true, [JUST_CREATED]: true });
       else privateEntryCreatedSync(temporary, "file", options);
       const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
       for (let offset = 0; offset < bytes.length;) offset += writeSync(descriptor, bytes, offset, bytes.length - offset);

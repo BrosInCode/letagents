@@ -141,7 +141,7 @@ test("Windows: moving a Cursor conversation reads every owner in one call, and a
     fake.security.readSddlSync = readSddlSync;
     // So does a profile folder another account owns.
     fake.giveAway(dirname(configDir));
-    assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /private to this account/);
+    assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /belongs to another account/);
   });
 });
 
