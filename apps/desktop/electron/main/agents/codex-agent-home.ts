@@ -144,16 +144,17 @@ const WINDOWS_OWN_DATABASE = /\.(?:sqlite3?|db)(?:-wal|-shm|-journal)?$/i;
  * Windows: the hard links this code made in the agents' home, by name, with
  * the file each was when it was last seen linked. A hard link is a file like
  * any other, so without this record a link whose owner's file was replaced
- * (an editor's save, a sign-out and sign-in) could not be told from a file
- * the agents' Codex made, and would be kept for good. An entry that is still
- * exactly that file is a former link: nothing wrote it since, so it is
- * removed and linked again. One that changed is an entry of its own.
+ * (an editor's save) could not be told from a file the agents' Codex made,
+ * and would be kept for good. An entry that is still exactly that file is a
+ * former link: nothing wrote it since, so it is removed and linked again. One
+ * that changed is an entry of its own. The sign-in is never repaired this
+ * way: one that is no longer the owner's (after a sign-out and sign-in)
+ * refuses the launch until the owner deletes it, so no credential is ever
+ * moved or deleted here.
  */
 const WINDOWS_LINK_RECORD = ".letagents-links.json";
 /** Windows: the name a former link that changed while it was moved aside is kept under. */
 const WINDOWS_FORMER_LINK_PREFIX = ".letagents-former-";
-/** A former sign-in kept that way. */
-const FORMER_SIGN_IN = /^\.letagents-former-[0-9a-f]{12}-auth\.json$/;
 /** `mtimeNs` in full (NTFS keeps 100 ns), as text: a millisecond would let a write in the same one pass for no write. */
 type LinkedFileState = { id: string; size: string; mtimeNs: string };
 
@@ -315,9 +316,9 @@ export function codexAgentHomeDirectory(env: NodeJS.ProcessEnv): string {
 }
 
 /** A sign-in file of the agents' home's own: nothing is started until the owner has looked at it. */
-function signInOfItsOwn(home: string, file: string = SIGN_IN_FILE): CodexAgentHomeSignInError {
+function signInOfItsOwn(home: string): CodexAgentHomeSignInError {
   return new CodexAgentHomeSignInError(
-    `LetAgents found a Codex sign-in file of its own (${file.replace(/[^\x20-\x7e]/g, "?").slice(0, 80)}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
+    `LetAgents found a Codex sign-in file of its own (${SIGN_IN_FILE}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
     + "Two sign-in files can sign you out of Codex, so LetAgents will not start a sandboxed Codex agent. "
     + "Open Codex and check that it is still signed in, then delete that file and start the agent again. "
     + "If Codex asks you to sign in, sign in again: your conversations and settings are kept.",
@@ -410,8 +411,10 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
   const linkedFile = (path: string, entry: Stats, name: string) => windows && entry.isFile() && isFileLink(path, join(owner, name), platform);
   // Windows: a hard link of this code's whose owner's file is gone or replaced, and that nothing wrote since.
   const record = windows ? readLinkRecord(home) : {};
+  // Never the sign-in: a credential is never moved, put back or deleted here. A sign-in that is no
+  // longer the owner's refuses the launch, and the owner deletes it, as on every platform.
   const formerLink = (path: string, entry: Stats, name: string) => {
-    if (!windows || !entry.isFile() || !record[name] || linkedFile(path, entry, name)) return false;
+    if (!windows || name === SIGN_IN_FILE || !entry.isFile() || !record[name] || linkedFile(path, entry, name)) return false;
     const now = linkedFileState(path);
     return now !== null && now.id === record[name].id && now.size === record[name].size && now.mtimeNs === record[name].mtimeNs;
   };
@@ -421,13 +424,9 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
     for (const name of readdirSync(home)) if (name.startsWith(`${WINDOWS_LINK_RECORD}.`)) rmSync(join(home, name), { force: true });
   }
   const before = readdirSync(home).filter((name) => name !== "rules" && !(windows && name === WINDOWS_LINK_RECORD)).sort().map((name) => ({ name, path: join(home, name), entry: lstatSync(join(home, name)) }));
-  if (before.some(({ name, path, entry }) => name === SIGN_IN_FILE && !entry.isSymbolicLink() && !linkedFile(path, entry, name) && !formerLink(path, entry, name))) {
+  if (before.some(({ name, path, entry }) => name === SIGN_IN_FILE && !entry.isSymbolicLink() && !linkedFile(path, entry, name))) {
     throw signInOfItsOwn(home);
   }
-  // Windows: a former sign-in that changed and could not be put back. No Read-only profile denies its
-  // name, so nothing starts with this home while it is there.
-  const keptSignIn = before.find(({ name }) => windows && FORMER_SIGN_IN.test(name));
-  if (keptSignIn) throw signInOfItsOwn(home, keptSignIn.name);
   // A link into another folder than this owner's home was made for another home, or by something
   // else. An agent may be running with it, so it is never turned to this home under that agent.
   if (before.some(({ path, entry }) => entry.isSymbolicLink() && !sameName(dirname(target(path)), owner))) {
@@ -463,33 +462,19 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
       // Still exactly the owner's former file. It is moved aside first and looked at again there, so a
       // write that a running agent makes between the look and the move is never deleted: a file that
       // changed stays, under its new name, as an entry of the agents' own. The name is linked again below.
-      // The sign-in is never kept beside the owner's: a second one can sign the owner out, and under
-      // another name no Read-only profile denies it. So it is put back and the launch refused instead.
       const aside = join(home, `${WINDOWS_FORMER_LINK_PREFIX}${randomBytes(6).toString("hex")}-${name}`);
       try {
         renameSyncWithRetry(path, aside);
       } catch {
         // Held open without delete sharing, or gone: kept as it is, as an entry of its own.
-        if (name === SIGN_IN_FILE) throw signInOfItsOwn(home);
         own.push(name);
         if (toLink.delete(name)) inPlaceOfOwners.push(name);
         continue;
       }
       const moved = linkedFileState(aside);
       const recorded = record[name]!;
-      if (moved && moved.id === recorded.id && moved.size === recorded.size && moved.mtimeNs === recorded.mtimeNs) {
-        unlinkSync(aside);
-      } else if (name === SIGN_IN_FILE) {
-        try {
-          renameSyncWithRetry(aside, path);
-        } catch {
-          // Kept under the aside name, which every later launch refuses (FORMER_SIGN_IN).
-          throw signInOfItsOwn(home, basename(aside));
-        }
-        throw signInOfItsOwn(home);
-      } else {
-        own.push(basename(aside));
-      }
+      if (moved && moved.id === recorded.id && moved.size === recorded.size && moved.mtimeNs === recorded.mtimeNs) unlinkSync(aside);
+      else own.push(basename(aside));
       continue;
     }
     // Windows: a sign-in that stopped being a link, or changed, after the check above is a second sign-in.

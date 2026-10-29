@@ -69,7 +69,7 @@ test("Windows: nothing can be saved into the agents' rules folder, and the next 
   assert.deepEqual(readdirSync(join(agents, "rules")), []);
 });
 
-test("Windows: a link whose owner's file was replaced is linked again while nothing wrote it, and kept or refused once something did", { skip: windowsOnly }, (t) => {
+test("Windows: a link whose owner's file was replaced is linked again while nothing wrote it and kept once something did; a sign-in is never repaired", { skip: windowsOnly }, (t) => {
   const { owner, agents, remove } = fixture();
   t.after(remove);
   linkCodexAgentHome(owner, agents);
@@ -81,19 +81,23 @@ test("Windows: a link whose owner's file was replaced is linked again while noth
     rmSync(join(owner, `${name}.new`));
   };
   replace("config.toml", "model = \"newer\"\n");
-  replace("auth.json", "{\"tokens\":\"signed in again\"}");
   assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
   assert.ok(sameFile(join(agents, "config.toml"), join(owner, "config.toml")), "the old file is replaced by a link to the new one");
-  assert.ok(sameFile(join(agents, "auth.json"), join(owner, "auth.json")), "after a sign-out and sign-in, the new sign-in is linked");
+
+  // A sign-in is never repaired: after a sign-out and sign-in the old one refuses the launch, and stays,
+  // until the owner deletes it; then the new one is linked.
+  replace("auth.json", "{\"tokens\":\"signed in again\"}");
+  assert.throws(() => linkCodexAgentHome(owner, agents), CodexAgentHomeSignInError);
+  assert.equal(readFileSync(join(agents, "auth.json"), "utf8"), "{\"tokens\":\"before\"}", "the old sign-in is not touched");
+  rmSync(join(agents, "auth.json"));
+  linkCodexAgentHome(owner, agents);
+  assert.ok(sameFile(join(agents, "auth.json"), join(owner, "auth.json")));
 
   // Written after it stopped being the owner's: content is never deleted, and a second sign-in stops the launch.
   replace("config.toml", "model = \"newest\"\n");
   appendFileSync(join(agents, "config.toml"), "# the agents' Codex wrote this\n");
   assert.deepEqual(linkCodexAgentHome(owner, agents), { own: ["config.toml"], inPlaceOfOwners: ["config.toml"] });
   assert.match(readFileSync(join(agents, "config.toml"), "utf8"), /the agents' Codex wrote this/);
-  replace("auth.json", "{\"tokens\":\"third\"}");
-  appendFileSync(join(agents, "auth.json"), " ");
-  assert.throws(() => linkCodexAgentHome(owner, agents), CodexAgentHomeSignInError);
 });
 
 test("Windows: Codex's SQLite databases get no second name, and the agents' own database is neither linked nor reported", { skip: windowsOnly }, (t) => {
@@ -151,14 +155,4 @@ test("Windows: an owner's file under the record's name is never linked, and the 
   linkCodexAgentHome(owner, agents);
   assert.equal(readFileSync(join(owner, ".letagents-links.json"), "utf8"), "the owner's own file");
   assert.ok(!sameFile(join(agents, ".letagents-links.json"), join(owner, ".letagents-links.json")));
-});
-
-test("Windows: while a former sign-in is kept under another name, no launch uses the agents' home, and the owner is told its name", { skip: windowsOnly }, (t) => {
-  const { owner, agents, remove } = fixture();
-  t.after(remove);
-  linkCodexAgentHome(owner, agents);
-  writeFileSync(join(agents, ".letagents-former-0123456789ab-auth.json"), "{\"tokens\":\"kept\"}");
-  assert.throws(() => linkCodexAgentHome(owner, agents), (error: Error) => error instanceof CodexAgentHomeSignInError && error.message.includes(".letagents-former-0123456789ab-auth.json"));
-  rmSync(join(agents, ".letagents-former-0123456789ab-auth.json"));
-  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
 });
