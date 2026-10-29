@@ -16,6 +16,6 @@ export function currentWindowsAccount(): string;
 export function windowsPipeName(prefix: string, key: string, account: string): string;
 export function daemonEndpoint(stateDir: string, options?: { platform?: NodeJS.Platform; account?: string }): DaemonEndpoint;
 export function resolveDaemonProofPath(connectPath: string, options?: { env?: NodeJS.ProcessEnv; home?: string }): string | null;
-export function ensureDaemonProof(proofPath: string, options?: import("./owner-private-fs.mjs").OwnerPrivateOptions): Promise<string>;
+export function ensureDaemonProof(proofPath: string, options?: import("./owner-private-fs.mjs").OwnerPrivateOptions & { recheckDelayMs?: number }): Promise<string>;
 export function connectDaemon(connectPath: string, options?: { proofPath?: string | null; handshake?: boolean; handshakeTimeoutMs?: number }): Socket;
 export function acceptDaemonPeer(socket: Socket, proof: string, onAccepted: (socket: Socket) => void, options?: { timeoutMs?: number }): void;

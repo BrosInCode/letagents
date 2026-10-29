@@ -88,6 +88,31 @@ test("the proof is created once, private, and survives restarts", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("one failed privacy check does not rotate a valid proof; two do", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
+  try {
+    const proofPath = join(root, DAEMON_PROOF_FILE);
+    const first = await ensureDaemonProof(proofPath);
+    // The injected Windows facts answer "no DACL" once, then the real answer.
+    let reads = 0;
+    const flaky = (failures: number) => ({
+      platform: "win32" as const,
+      windowsSecurity: {
+        currentUserSid: async () => "S-1-5-21-1-2-3-1001",
+        currentUserSidSync: () => "S-1-5-21-1-2-3-1001",
+        readSddl: async (paths: readonly string[]) => paths.map(() => (reads++ < failures ? null : "O:S-1-5-21-1-2-3-1001D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)")),
+        readSddlSync: (paths: readonly string[]) => paths.map(() => null),
+        protect: async () => undefined,
+        protectSync: () => undefined,
+      },
+    });
+    assert.equal(await ensureDaemonProof(proofPath, { ...flaky(1), recheckDelayMs: 1 }), first, "a single failed read keeps the proof");
+    reads = 0;
+    assert.notEqual(await ensureDaemonProof(proofPath, { ...flaky(2), recheckDelayMs: 1 }).catch(() => "rotation attempted"), first,
+      "two failed reads replace it");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a proof others could read is replaced, not reused", { skip: process.platform === "win32" && "POSIX mode bits; the Windows DACL case is covered by the owner-private helper's tests" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
   try {

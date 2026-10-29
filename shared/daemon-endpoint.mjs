@@ -104,10 +104,15 @@ function parseProof(raw) {
  * proof is written in a private staging folder before it is renamed into
  * place, so no other account can hold a handle to it.
  */
-export async function ensureDaemonProof(proofPath, options = {}) {
+export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, ...options } = {}) {
   try {
     const info = await lstat(proofPath);
-    if (info.isFile() && await isOwnerPrivate(proofPath, info, options)) {
+    // On Windows a failed DACL read and a "not private" answer look the same.
+    // A rotation mid-handoff fails clients holding the old proof, so a valid
+    // proof is replaced only when a second check agrees.
+    const isPrivate = async () => await isOwnerPrivate(proofPath, info, options)
+      || (await new Promise((resolve) => setTimeout(resolve, recheckDelayMs)), await isOwnerPrivate(proofPath, info, options));
+    if (info.isFile() && await isPrivate()) {
       const existing = parseProof(await readFile(proofPath, "utf8"));
       if (existing) return existing;
     }
