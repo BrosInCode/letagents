@@ -49,8 +49,10 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
     writeFileSync(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
 
     phaseDone("npm pack");
+    // The job's own `npm ci` has filled npm's cache with these versions;
+    // --prefer-offline uses it without asking the registry about each one.
     runNpm(
-      ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+      ["install", "--prefer-offline", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
       { cwd: installRoot, stdio: "pipe" },
     );
     phaseDone("npm install of the tarball");
