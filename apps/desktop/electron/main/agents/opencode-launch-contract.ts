@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { link, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { renameWithRetryAsync } from "../../../../../shared/rename-retry.mjs";
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
+import { daemonStateDirEnvironment, environmentValue, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 export const OPEN_MODEL_OPENCODE_PROVIDER_ID = "letagents-open-model";
 export const OPENCODE_SERVER_USERNAME = "opencode";
@@ -187,11 +189,13 @@ export async function shieldOwnerInstructions(configHome: string): Promise<void>
   const staged = join(directory, `.AGENTS.md.${randomBytes(6).toString("hex")}.shield`);
   try {
     await writeFile(staged, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await rename(staged, target).catch(async (error) => {
+    // Windows refuses a rename over a file that another launch of this runtime is
+    // renaming or reading at that moment (EPERM); the bounded retry waits it out.
+    await renameWithRetryAsync(staged, target).catch(async (error) => {
       // A rename replaces a file or a link, but not a directory.
       if (!existing?.isDirectory()) throw error;
       await rm(target, { recursive: true, force: true });
-      await rename(staged, target);
+      await renameWithRetryAsync(staged, target);
     });
   } finally {
     await unlink(staged).catch(() => undefined);
@@ -246,6 +250,7 @@ export function supervisedOpenCodeMcpEnvironment(
     LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
     LETAGENTS_SUPERVISOR_ENTRY_ID: request.supervisorEntryId || "",
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: request.supervisorSocketPath || "",
+    ...daemonStateDirEnvironment(request.supervisorSocketPath),
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: request.workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID:
       request.supervisorExecutionGenerationId || "",
@@ -353,10 +358,13 @@ export function minimalOpenCodeEnvironment(
   source: NodeJS.ProcessEnv,
   extra: Record<string, string>,
   commitEnvironment: Record<string, string> = {},
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
+  // Windows: what any program there needs to start and reach the network.
+  const environment: NodeJS.ProcessEnv = windowsSystemEnvironment(source, platform);
   for (const key of INHERITED_ENVIRONMENT_KEYS) {
-    if (source[key] !== undefined) environment[key] = source[key];
+    const value = environmentValue(source, key, platform);
+    if (value !== undefined) environment[key] = value;
   }
   return {
     ...environment,

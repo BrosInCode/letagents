@@ -1,6 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 import {
   CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS,
   CLAUDE_BACKGROUND_NOTICE_START_LIMIT_MS,

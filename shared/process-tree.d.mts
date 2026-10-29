@@ -31,11 +31,7 @@ export function processTreeHelperPath(options?: {
 export function quoteWindowsArgument(argument: string): string;
 export function windowsCommandLine(file: string, args: readonly string[]): string;
 export function parseWindowsCommandLine(line: string): string[];
-export function resolveWindowsCommand(command: string, options?: {
-  env?: NodeJS.ProcessEnv;
-  cwd?: string | URL;
-  exists?: (filePath: string) => boolean;
-}): string | null;
+export { resolveWindowsCommand } from "./provider-executable.mjs";
 
 export interface SpawnTreeOptions extends ProcessTreeHelperOptions {
   platform?: NodeJS.Platform;
@@ -43,6 +39,8 @@ export interface SpawnTreeOptions extends ProcessTreeHelperOptions {
   env?: NodeJS.ProcessEnv;
   exists?: (filePath: string) => boolean;
   launchOptions?: Omit<CodexLaunchCommandOptions, "platform" | "env">;
+  /** Whether this process is Electron (default: `process.versions.electron` is set). */
+  electron?: boolean;
   spawn?: (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 }
 export function spawnTree(

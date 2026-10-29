@@ -410,13 +410,19 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     handle.child.markIntentionalClose();
     const exitPromise = this.requireExitPromise(handle);
     const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity : undefined;
+    const graceMs = options.graceMs ?? this.stopGraceMs;
+    if (process.platform === "win32" && handle.child.terminate) {
+      // Windows has no SIGTERM. terminateTree closes the CLI's input, which is
+      // its stop request, and ends the tree's job when the grace period is over.
+      void handle.child.terminate({ graceful: !options.force, graceMs }).catch(() => undefined);
+      return exitPromise;
+    }
     if (options.force) {
       this.deps.signalProcess(handle.pid, "SIGKILL", identity);
       return exitPromise;
     }
 
     this.deps.signalProcess(handle.pid, "SIGTERM", identity);
-    const graceMs = options.graceMs ?? this.stopGraceMs;
     const graceful = await Promise.race([
       exitPromise.then((payload) => ({ payload })),
       delay(graceMs).then(() => null),
