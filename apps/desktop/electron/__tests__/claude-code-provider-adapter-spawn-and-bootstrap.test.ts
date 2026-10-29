@@ -27,6 +27,7 @@ import {
   flush,
   withLoopAlive,
 } from "./claude-code-provider-adapter.fixture.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 test("spawn launches the headless CLI with verbatim policy flags and establishes an idle daemon continuation", async () => {
   const harness = createHarness();
@@ -305,7 +306,7 @@ test("Claude launches with the managed commit identity for its work attempt", as
   assert.equal(env.LETAGENTS_SUPERVISOR_ENTRY_ID, "manifest_exact", "the supervisor coordinates are kept");
 });
 
-test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", async () => {
+test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-mcp-test-"));
   try {
     const config = await createEphemeralClaudeMcpConfig({

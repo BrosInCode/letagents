@@ -5,7 +5,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { type AddressInfo } from "node:net";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { ManifestStore } from "../manifest-store.js";
 import { type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";

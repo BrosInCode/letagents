@@ -7,12 +7,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { captureRecordedRemoteTips, captureRemoteTips } from '../../../../shared/workspace-turn-capture.mjs';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, assertPlainRows, commit, count, fixture, git, listed, recorded, turn } from './fixtures/workspace-turns.js';
+import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
 
 // What the capture takes for "upstream" is the answer of the remote that the daemon
 // recorded, asked before the turn. Nothing that an agent can write locally changes
 // that answer or what the capture reads from it.
 
-test('the remote is asked for its branches, and local refs are not part of the answer', async t => {
+test('the remote is asked for its branches, and local refs are not part of the answer', { skip: supervisedAgentsOnly }, async t => {
   const f = fixture(t);
   const workspace = f.clone();
   f.pushFeatureBranch();
@@ -54,7 +55,7 @@ const redirects: Record<string, (workspace: string, own: string, real: string, r
   },
 };
 for (const [name, redirect] of Object.entries(redirects)) {
-  test(`the agent's own repository is never taken for the remote - ${name}`, async t => {
+  test(`the agent's own repository is never taken for the remote - ${name}`, { skip: supervisedAgentsOnly }, async t => {
     const f = fixture(t);
     const workspace = f.clone();
     git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -78,7 +79,7 @@ for (const [name, redirect] of Object.entries(redirects)) {
   });
 }
 
-test('when the owner\'s own Git configuration sends the recorded address elsewhere, there is no answer', async t => {
+test('when the owner\'s own Git configuration sends the recorded address elsewhere, there is no answer', { skip: supervisedAgentsOnly }, async t => {
   const f = fixture(t);
   const own = join(f.root, 'own.git');
   git(f.root, 'clone', '-q', '--bare', f.remote, own);

@@ -20,6 +20,11 @@ import {
   resolveWorkspaceRoom,
 } from "../repo-status.js";
 
+// Git prints a folder by its long name. On Windows only the native realpath
+// expands an 8.3 short name such as RUNNER~1 in the temp path, so it is the
+// one that names the folder the way Git does.
+const canonicalPath = (path: string): string => realpathSync.native(path);
+
 function commitAll(cwd: string, message: string): void {
   execFileSync("git", ["add", "-A"], { cwd, stdio: "ignore" });
   execFileSync(
@@ -70,21 +75,32 @@ exit 1
 });
 
 test("parseGitWorktreePorcelain marks the first worktree as the main checkout", () => {
+  // Git for Windows prints drive paths with '/'; the parser gives them back
+  // in the form Node and the folder picker use.
+  const [main, task] = process.platform === "win32"
+    ? [
+      { git: "C:/Users/emmy/Projects/letagents", path: "C:\\Users\\emmy\\Projects\\letagents" },
+      { git: "C:/Users/emmy/Projects/letagents-task-170", path: "C:\\Users\\emmy\\Projects\\letagents-task-170" },
+    ]
+    : [
+      { git: "/Users/emmy/Projects/letagents", path: "/Users/emmy/Projects/letagents" },
+      { git: "/Users/emmy/Projects/letagents-task-170", path: "/Users/emmy/Projects/letagents-task-170" },
+    ];
   const worktrees = parseGitWorktreePorcelain([
-    "worktree /Users/emmy/Projects/letagents",
+    `worktree ${main.git}`,
     "HEAD 1111111111111111111111111111111111111111",
     "branch refs/heads/staging",
     "",
-    "worktree /Users/emmy/Projects/letagents-task-170",
+    `worktree ${task.git}`,
     "HEAD 2222222222222222222222222222222222222222",
     "branch refs/heads/codex/desktop-codex-room-agents",
     "",
-  ].join("\n"), "/Users/emmy/Projects/letagents-task-170");
+  ].join("\n"), task.path);
 
-  assert.equal(worktrees[0]?.path, "/Users/emmy/Projects/letagents");
+  assert.equal(worktrees[0]?.path, main.path);
   assert.equal(worktrees[0]?.isMain, true);
   assert.equal(worktrees[0]?.isCurrent, false);
-  assert.equal(worktrees[1]?.path, "/Users/emmy/Projects/letagents-task-170");
+  assert.equal(worktrees[1]?.path, task.path);
   assert.equal(worktrees[1]?.isMain, false);
   assert.equal(worktrees[1]?.isCurrent, true);
 });
@@ -203,7 +219,7 @@ test("resolveRoomIdentifierFromPath opens no-remote repositories as local Git ro
 
     const resolved = await resolveRoomIdentifierFromPath(tempDir);
 
-    assert.equal(resolved.repoRoot, realpathSync(tempDir));
+    assert.equal(resolved.repoRoot, canonicalPath(tempDir));
     assert.equal(resolved.source, "local_git");
     assert.equal(resolved.warning, null);
     assert.match(resolved.roomIdentifier, /^git-room:local:[a-f0-9]{16}:branch:/);
@@ -224,7 +240,7 @@ test("resolveWorkspaceRoom resolves no-remote repositories for lazy auto-open", 
 
     const resolved = await resolveWorkspaceRoom(tempDir);
 
-    assert.equal(resolved?.repoRoot, realpathSync(tempDir));
+    assert.equal(resolved?.repoRoot, canonicalPath(tempDir));
     assert.equal(resolved?.source, "local_git");
     assert.match(resolved?.roomIdentifier || "", /^git-room:local:[a-f0-9]{16}:branch:/);
     assert.equal(resolved?.gitRoom?.accessMode, "local");
@@ -295,14 +311,14 @@ test("buildRepoStatus exposes local Git room routing for no-remote repositories"
 
     const status = await buildRepoStatus(tempDir);
 
-    assert.equal(status.rootPath, realpathSync(tempDir));
+    assert.equal(status.rootPath, canonicalPath(tempDir));
     assert.equal(status.isGitRepo, true);
     assert.equal(status.branch, "feature/git-room-status");
     assert.equal(status.roomSource, "local_git");
     assert.match(status.roomIdentifier || "", /^git-room:local:[a-f0-9]{16}:branch:/);
     assert.equal(status.changes?.staged, 1);
     assert.equal(status.dirty, true);
-    assert.ok(status.gitHeadPath?.endsWith(".git/HEAD"));
+    assert.ok(status.gitHeadPath?.endsWith(join(".git", "HEAD")), String(status.gitHeadPath));
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -372,7 +388,7 @@ test("buildRepoStatus uses local default branches for no-remote branch deltas", 
       "the room-opening status must not wait for any branch comparison");
     assert.equal(initial.defaultBranch, "main");
     assert.equal(initial.branch, "feature/delta");
-    assert.equal(initial.mainRootPath, realpathSync(tempDir));
+    assert.equal(initial.mainRootPath, canonicalPath(tempDir));
     assert.equal(initial.branchDelta, null);
     assert.deepEqual(initial.branchDeltas, []);
 
@@ -607,7 +623,7 @@ test("linked worktrees of a local repo resolve to the same repository room key",
     assert.ok(mainKey, "main checkout should produce a local room key");
     assert.equal(linkedKey, mainKey);
     // The returned repoRoot stays the actually-opened worktree root.
-    assert.equal(linkedResolved.repoRoot, realpathSync(linkedRoot));
+    assert.equal(linkedResolved.repoRoot, canonicalPath(linkedRoot));
     // The gitRoom repository id is stable across worktrees too.
     assert.equal(linkedResolved.gitRoom?.repository.id, mainResolved.gitRoom?.repository.id);
   } finally {

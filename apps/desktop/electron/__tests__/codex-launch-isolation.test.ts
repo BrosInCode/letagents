@@ -5,7 +5,8 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import type { TestContext } from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 

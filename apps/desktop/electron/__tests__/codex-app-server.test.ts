@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 

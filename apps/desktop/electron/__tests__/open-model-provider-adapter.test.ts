@@ -38,6 +38,7 @@ import { clearOpenModelEffortCatalogCacheForTest } from "../main/agents/open-mod
 import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
+import { supervisedAgentsOnly } from "./platform.js";
 
 type LaunchRecord = {
   binary: string;
@@ -437,7 +438,7 @@ function assistantWithTool(
   };
 }
 
-test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", async () => {
+test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", { skip: supervisedAgentsOnly }, async () => {
   const keys = ["GH_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME", "APPDATA", "GH_TOKEN", "GITHUB_TOKEN"] as const;
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   try {
@@ -2729,7 +2730,7 @@ test("Open Model instruction shield replaces a link without writing through it",
   assert.deepEqual(await readdir(join(configHome, "opencode")), ["AGENTS.md"]);
 });
 
-test("Open Model instruction shield survives concurrent launches of one runtime", async (t) => {
+test("Open Model instruction shield survives concurrent launches of one runtime", { skip: supervisedAgentsOnly }, async (t) => {
   const configHome = await mkdtemp(join(tmpdir(), "letagents-opencode-shield-race-"));
   t.after(() => rm(configHome, { recursive: true, force: true }));
   const target = join(configHome, "opencode", "AGENTS.md");
@@ -4893,7 +4894,7 @@ const OPEN_MODEL_SESSION_AFTER_EXIT = {
 } as const;
 
 for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
-  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, async () => {
+  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, { skip: supervisedAgentsOnly }, async () => {
     const { ACTIVITY_RECORD_CONTINUED_NOTICE } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
     const agent = await openModelDaemonFixture();
     let letConverge = () => {};
@@ -4984,7 +4985,7 @@ async function ownerAllowsTheCommand(agent: OpenModelDaemonAgent, turn: Awaited<
   assert.equal(agent.read<{ state: string }>("SELECT state FROM execution_approval_requests WHERE agent_id=?").at(-1)?.state, "resolved");
 }
 
-test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", async () => {
+test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     // The owner saves the new mode while a turn runs, so the process has not been replaced when it crashes.
@@ -4999,7 +5000,7 @@ test("an Open Model agent whose process crashed after its owner changed its perm
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent that was paused and resumed after its owner changed its permission mode still gets answerable approval cards", async () => {
+test("an Open Model agent that was paused and resumed after its owner changed its permission mode still gets answerable approval cards", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5015,7 +5016,7 @@ test("an Open Model agent that was paused and resumed after its owner changed it
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent asks its owner about a command while the mode the owner saved waits for the turn to end, and the owner's answer is accepted", async () => {
+test("an Open Model agent asks its owner about a command while the mode the owner saved waits for the turn to end, and the owner's answer is accepted", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5031,7 +5032,7 @@ test("an Open Model agent asks its owner about a command while the mode the owne
 const FULL_ACCESS = { "*": "allow" };
 const ASK_BEFORE_WRITE = { "*": "allow", edit: "ask", bash: "ask" };
 
-test("an idle Open Model agent is restarted at once with the permission mode its owner saved, and takes its next message under it", async () => {
+test("an idle Open Model agent is restarted at once with the permission mode its owner saved, and takes its next message under it", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   const releaseConvergence = agent.holdConvergence();
   try {
@@ -5059,7 +5060,7 @@ test("an idle Open Model agent is restarted at once with the permission mode its
   } finally { releaseConvergence(); await agent.cleanup(); }
 });
 
-test("an Open Model agent in the middle of a turn finishes it under the old mode, and the queued message waits for the replacement", async () => {
+test("an Open Model agent in the middle of a turn finishes it under the old mode, and the queued message waits for the replacement", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5087,7 +5088,7 @@ test("an Open Model agent in the middle of a turn finishes it under the old mode
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent whose background service restarted between its owner's save and the restart is still replaced with the saved mode", async () => {
+test("an Open Model agent whose background service restarted between its owner's save and the restart is still replaced with the saved mode", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
@@ -5109,7 +5110,7 @@ test("an Open Model agent whose background service restarted between its owner's
   } finally { await agent.cleanup(); }
 });
 
-test("an Open Model agent whose background service restarted in the middle of its turn is replaced with the saved mode when that turn ends", async () => {
+test("an Open Model agent whose background service restarted in the middle of its turn is replaced with the saved mode when that turn ends", { skip: supervisedAgentsOnly }, async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);

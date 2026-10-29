@@ -5,6 +5,7 @@ import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mj
 registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
+import { supervisedAgentsOnly } from "./platform.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -105,8 +106,10 @@ const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_P
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
 });
-await boardSocket.start();
-test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+// The board socket is a Unix socket served by the supervisor daemon; Windows named
+// pipes are tier 3, so on Windows it is not started and the tests that use it skip.
+if (!supervisedAgentsOnly) await boardSocket.start();
+test.after(async () => { if (!supervisedAgentsOnly) await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const ROOM = "focus_fallback_room";
 
@@ -1315,7 +1318,7 @@ test("failed storage selection cleans up startup and permits a same-room retry",
   }
 });
 
-test("local board follows cross-process commits with no idle, message, or other-room board reads", async () => {
+test("local board follows cross-process commits with no idle, message, or other-room board reads", { skip: supervisedAgentsOnly }, async () => {
   const room = "local_board_events";
   const otherRoom = "local_other_board";
   const exec = promisify(execFile);
@@ -1366,7 +1369,7 @@ test("local board follows cross-process commits with no idle, message, or other-
   }
 });
 
-test("switching rooms fences a board read already in flight", async () => {
+test("switching rooms fences a board read already in flight", { skip: supervisedAgentsOnly }, async () => {
   const oldRoom = "local_board_stale_read";
   const newRoom = "local_board_replacement";
   const task = await localStore.addLocalTask(oldRoom, { title: "Old room task" });

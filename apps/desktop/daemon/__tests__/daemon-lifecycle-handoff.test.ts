@@ -4,7 +4,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { DatabaseSync } from "node:sqlite";
 import { AuditLog } from "../audit-log.js";
 import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";

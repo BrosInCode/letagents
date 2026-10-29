@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError } from "../main.js";

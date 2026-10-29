@@ -21,8 +21,9 @@ import {
   enqueue,
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
-test("SupervisorDaemon stop fences and drains its production-owned delivery before releasing stores", async () => {
+test("SupervisorDaemon stop fences and drains its production-owned delivery before releasing stores", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-delivery-drain-"));
   let daemon: SupervisorDaemon | null = null;
   try {
@@ -75,7 +76,7 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
   }
 });
 
-test("SupervisorDaemon stop detaches an unresolved provider turn without retaining the daemon", async () => {
+test("SupervisorDaemon stop detaches an unresolved provider turn without retaining the daemon", { skip: supervisedAgentsOnly }, async () => {
   // Keep the Unix-socket path below macOS's short sockaddr_un limit.
   const root = await mkdtemp(join(tmpdir(), "la-sud-"));
   let daemon: SupervisorDaemon | null = null;
@@ -719,7 +720,7 @@ test("retry acknowledges durable scheduling without waiting for a long provider 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("daemon socket retry accepts only the exact blocked binding and reports committed no-reply settlement", async t => {
+test("daemon socket retry accepts only the exact blocked binding and reports committed no-reply settlement", { skip: supervisedAgentsOnly }, async t => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-socket-"));
   let daemon: SupervisorDaemon | null = null;
   let release: ReturnType<typeof deferred<{ turnId: string; outcome: "no_reply"; text: null }>> | null = null;

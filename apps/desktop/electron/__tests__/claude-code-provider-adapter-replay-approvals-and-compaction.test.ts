@@ -2,7 +2,7 @@ import "./isolated-home.js";
 import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { CLAUDE_BACKGROUND_WORK_TEXT, ClaudeCodeProviderAdapter, createManagedClaudeMcpConfig } from "../main/agents/claude-code-provider-adapter.js";
 import type { ProviderStreamEvent, NativeExecutionObservation } from "../main/agents/provider-adapter.js";

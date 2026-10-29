@@ -15,6 +15,7 @@ import { validateExecutionApprovalPublicationSchema } from "../execution-approva
 import { LifecycleProjectionLedger, validateLegacyLifecycleProjectionLedgerSchema,
   validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
+import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -535,7 +536,7 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, { skip: supervisedAgentsOnly }, async () => {
   const env = await fixture();
   try {
     (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture
@@ -757,7 +758,7 @@ test("prepared operational opener never creates missing state and preserves reje
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("prepared operational opener escapes URI metacharacters in existing paths", async () => {
+test("prepared operational opener escapes URI metacharacters in existing paths", { skip: supervisedAgentsOnly }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-prepared-uri-"));
   try {
     const path = join(directory, "state space?#%.sqlite");
@@ -837,7 +838,7 @@ test("observation opener never creates absent databases or directories and rejec
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("observation opener escapes URI metacharacters in existing local paths", async () => {
+test("observation opener escapes URI metacharacters in existing local paths", { skip: supervisedAgentsOnly }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-observation-uri-"));
   try {
     const path = join(directory, "state space?#%.sqlite");

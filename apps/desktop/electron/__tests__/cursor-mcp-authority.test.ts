@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createServer } from "node:net";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 
 import { assertCursorSupervisedMcpAuthority } from "../main/agents/cursor-mcp-authority.js";
 

@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";

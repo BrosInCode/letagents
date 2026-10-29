@@ -649,7 +649,7 @@ async function desktopMenuAudit(t: any, flags = 63, extra: Record<string, unknow
   const pins = await vite.ssrLoadModule('/renderer/src/composables/useRoomMessagePins.ts');
   const reactions = await vite.ssrLoadModule('/renderer/src/composables/useRoomMessageReactions.ts');
   const reminders = await vite.ssrLoadModule('/renderer/src/composables/useMessageReminders.ts');
-  const { unreadMenuKey } = await vite.ssrLoadModule('/@fs' + fileURLToPath(new URL('../../../../shared/room-unread-client.ts', import.meta.url)));
+  const { unreadMenuKey } = await vite.ssrLoadModule('/@fs/' + fileURLToPath(new URL('../../../../shared/room-unread-client.ts', import.meta.url)));
   reminders.setReminderAccount(flags & 8 ? 'person' : null);
   t.after(() => { reminders.setReminderAccount(null); Object.assign(globalThis, originals); });
   const invoker = new MenuAuditElement('message');

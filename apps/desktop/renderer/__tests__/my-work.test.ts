@@ -261,14 +261,14 @@ before(async () => {
     "DisclosurePanel.vue",
     "ThreadTransition.vue",
   ]) {
-    const component = (await vite.ssrLoadModule(`/@fs${shared}${file}`))
+    const component = (await vite.ssrLoadModule(`/@fs/${shared}${file}`))
       .default;
     await attachClientRender(component, `${shared}${file}`);
     if (file === "my-work/MyWork.vue") MyWork = component;
     if (file === "my-work/WorkDetail.vue") WorkDetail = component;
     if (file === "FilterDropdown.vue") FilterDropdown = component;
   }
-  useMyWork = (await vite.ssrLoadModule(`/@fs${shared}my-work/useMyWork.ts`))
+  useMyWork = (await vite.ssrLoadModule(`/@fs/${shared}my-work/useMyWork.ts`))
     .useMyWork;
 });
 after(async () => {

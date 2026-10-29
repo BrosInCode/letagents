@@ -10,6 +10,7 @@ import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
   for (const failureTiming of ["before", "during-callback"] as const) {
@@ -738,7 +739,7 @@ test("Codex custodial polling fails closed on old runtime contracts and incomple
   }
 });
 
-test("Codex custodial polling reads the selected built executable contract without owner environment or fallback", async () => {
+test("Codex custodial polling reads the selected built executable contract without owner environment or fallback", { skip: supervisedAgentsOnly }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-codex-contract-"));
   const entry = join(directory, "dist", "mcp", "server.js");
   const previousDev = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
@@ -868,7 +869,7 @@ test("Codex supervised launch fails closed before app-server start when bridge c
   assert.deepEqual(harness.launchOptions, []);
 });
 
-test("Codex supervisor bridge context is owner-only, atomic, and contains no worker credential", async () => {
+test("Codex supervisor bridge context is owner-only, atomic, and contains no worker credential", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-supervisor-context-"));
   try {
     const base = {
@@ -891,7 +892,7 @@ test("Codex supervisor bridge context is owner-only, atomic, and contains no wor
   }
 });
 
-test("Codex dev MCP entry override adds exact command/args/cwd overrides when devMcpServerEntryPath is supplied", async () => {
+test("Codex dev MCP entry override adds exact command/args/cwd overrides when devMcpServerEntryPath is supplied", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-entry-"));
   try {
     const quotedDirectory = join(root, 'path with spaces and "quotes"');

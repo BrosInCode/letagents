@@ -1,6 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../../shared/room-turn-no-reply.mjs";
 import { ClaudeCodeProviderAdapter } from "../main/agents/claude-code-provider-adapter.js";
 import type {

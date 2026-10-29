@@ -18,7 +18,7 @@ import {
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 import {
   CursorProviderAdapter,
   defaultLaunchTurn,

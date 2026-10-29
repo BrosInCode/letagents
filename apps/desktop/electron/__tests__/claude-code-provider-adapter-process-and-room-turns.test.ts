@@ -2,7 +2,7 @@ import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 import { ClaudeCodeProviderAdapter, claudeChildEnvironment, claudeTranscriptsRoot } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderRoomTurnRequest,

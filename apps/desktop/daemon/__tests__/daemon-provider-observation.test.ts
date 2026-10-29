@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { DatabaseSync } from "node:sqlite";
 import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";

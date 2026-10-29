@@ -495,11 +495,132 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The desktop app must install, update and run on Windows, with supervised
+  # agents off until they are ported. This job type checks and builds it and
+  # runs every desktop suite on a Windows runner, split as desktop-tests is
+  # (plus one entry for the type check and build). The daemon suite runs too:
+  # its tests of supervised-agent behaviour skip themselves on Windows through
+  # one helper that names the reason; everything else must pass.
+  #
+  # As in mcp-tests-windows: the dependency gates ran in dependency-audit, the
+  # Windows-only optional packages are verified here right after each install
+  # and before any lifecycle script runs, and each step names bash because the
+  # policy test forbids a `defaults:` block.
+  desktop-tests-windows:
+    name: desktop-tests-windows (${{ matrix.suite }})
+    needs: dependency-audit
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: windows-latest
+    # The daemon entry takes about 35 minutes on a Windows runner.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The electron entries name the same shard total as desktop-tests.
+        suite:
+          - build
+          - renderer
+          - daemon
+          - electron 1/3
+          - electron 2/3
+          - electron 3/3
+    env:
+      # Pin the API base URL to an unroutable local address so no test can
+      # reach the production API. Nothing listens on port 9.
+      LETAGENTS_API_URL: http://127.0.0.1:9
+    steps:
+      # The desktop tests write under the home directory, so HOME and
+      # USERPROFILE point at a scratch folder, here and in every later step.
+      # The tests read the committed LF bytes, not a CRLF checkout.
+      - name: Use a scratch home and keep committed line endings
+        shell: bash
+        run: |
+          home="${RUNNER_TEMP//\\//}/home"
+          mkdir -p "${home}"
+          export HOME="${home}" USERPROFILE="${home}"
+          git config --global core.autocrlf false
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      # The gate: lifecycle scripts run only after both trees were verified,
+      # and the suite runs only when they succeeded.
+      - name: Run verified dependency lifecycle scripts
+        id: setup
+        shell: bash
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      # Within an entry, each command runs even when the one before it failed,
+      # so one run reports every failure; the step fails when any did.
+      - name: Test desktop (${{ matrix.suite }})
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -uo pipefail
+          status=0
+          case "${SUITE}" in
+            build)
+              npm --prefix apps/desktop run typecheck || status=1
+              npm --prefix apps/desktop run build || status=1
+              ;;
+            renderer)
+              npm --prefix apps/desktop run test:renderer || status=1
+              npm --prefix apps/desktop run test:packaging || status=1
+              ;;
+            daemon)
+              npm --prefix apps/desktop run test:daemon || status=1
+              ;;
+            "electron "*)
+              shard="${SUITE#electron }"
+              cd apps/desktop
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/electron-test-weights.json electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt" || exit 1
+              mapfile -t files < <(tr -d '\r' < "${RUNNER_TEMP}/electron-shard.txt")
+              if [ "${#files[@]}" -eq 0 ]; then
+                echo "Electron shard ${shard} has no test files." >&2
+                exit 1
+              fi
+              echo "Electron shard ${shard} runs ${#files[@]} files:"
+              printf '  %s\n' "${files[@]}"
+              npm run test:electron:files -- "${files[@]}" || status=1
+              ;;
+            *)
+              echo "Unknown desktop test suite '${SUITE}'." >&2
+              exit 1
+              ;;
+          esac
+          exit "${status}"
+
   # The required "build" check. GitHub counts a skipped check as passing, so
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows]
+    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows, desktop-tests-windows]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

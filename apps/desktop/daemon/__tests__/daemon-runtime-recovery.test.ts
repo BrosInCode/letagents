@@ -2,7 +2,7 @@ import { recordInterruptedCursorRecovery } from "../runtime-recovery-journal.js"
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { DatabaseSync } from "node:sqlite";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
