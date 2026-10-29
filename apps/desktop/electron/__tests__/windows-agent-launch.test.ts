@@ -22,6 +22,7 @@ import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contr
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
 import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
 import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
+import { buildCursorChildEnv } from "../main/agents/cursor-runner.js";
 
 const ELECTRON = "C:\\Program Files\\LetAgents\\LetAgents.exe";
 const SHIM = [
@@ -250,4 +251,28 @@ test("Cursor on Windows takes its program from the shared resolver: no cmd.exe, 
     launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
   }), /C:\\npm\\cursor-agent\.cmd is a batch file that only cmd\.exe can run/);
   assert.throws(() => cursorWindowsProgram("cursor-agent", { env: windowsEnv, exists: () => false }), /'cursor-agent' was not found on this computer/);
+});
+
+test("Cursor's environment keeps ComSpec and windir as Windows spells them, and still nothing outside its allowlist", () => {
+  const overrides = { ComSpec: "C:\\Windows\\System32\\cmd.exe", windir: "C:\\Windows", LETAGENTS_TOKEN: "secret" };
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  let windows: NodeJS.ProcessEnv;
+  try {
+    windows = buildCursorChildEnv(overrides);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+  assert.equal(windows.ComSpec, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(windows.windir, "C:\\Windows");
+  assert.equal(windows.LETAGENTS_TOKEN, undefined);
+  const posix = buildCursorChildEnv(overrides);
+  assert.equal(posix.ComSpec, undefined, "POSIX matches names exactly, as before");
+  assert.equal(posix.windir, undefined);
+});
+
+test("Windows: a missing program named by path is ENOENT as it is, never a batch-file refusal", () => {
+  const missing = providerLaunchCommand("C:\\x\\agent.cmd", ["-p", "line\n\"two\""], { platform: "win32", env: windowsEnv, exists: () => false });
+  assert.deepEqual(missing, { file: "C:\\x\\agent.cmd", args: ["-p", "line\n\"two\""], resolved: null, envAdditions: null });
+  assert.throws(() => cursorWindowsProgram("C:\\x\\agent.cmd", { env: windowsEnv, exists: () => false }), /'C:\\x\\agent\.cmd' was not found on this computer/);
 });

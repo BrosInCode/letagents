@@ -182,7 +182,7 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
     ...(launch.argv0 ? { argv0: launch.argv0 } : {}),
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   };
-  // Not found: spawn it as given, so the caller sees Node's own ENOENT.
+  // Not found: the path providerLaunchCommand gives (one that cannot exist, for a bare name), so the caller sees Node's own ENOENT.
   if (!helper || !resolved) return remember(spawnProcess(launch.file, launch.args, direct), null);
   const commandLine = launch.windowsVerbatimArguments
     ? [launch.argv0 ?? quoteWindowsArgument(launch.file), ...launch.args].join(" ")
