@@ -14,6 +14,7 @@ import {
   cursorPermissionProfileReadyDetail,
 } from "../main/agents/cursor-permission-profile.js";
 import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
+import { cursorDaemonChildEnv } from "../main/agents/cursor-runner.js";
 import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "../main/agents/cursor-sandbox-policy.js";
 import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.js";
 import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-types.js";
@@ -128,6 +129,8 @@ test("a room turn too long for a Windows command line is refused with a reason",
     /too long for a Windows command line/,
   );
   assert.throws(() => assertCursorWindowsCommandLines("x".repeat(40_000), { ...values, tail: "" }), /too long/);
+  // The wrapper's line fits, but the helper line that starts it (that line quoted once more) does not.
+  assert.throws(() => assertCursorWindowsCommandLines("x".repeat(32_700), { ...values, tail: "" }), /too long/);
 });
 
 test("the wrapper file runs with the same process.argv as node -e", () => {
@@ -153,6 +156,12 @@ test("Windows users and the agent are told Cursor has no operating-system sandbo
   assert.doesNotMatch(cursorPermissionProfileReadyDetail("sandboxed_write", "darwin"), /Windows/);
   assert.equal(cursorPermissionProfileInstructionLines("sandboxed_write", "win32").some((line) => /runs Windows/.test(line)), true);
   assert.equal(cursorPermissionProfileInstructionLines("sandboxed_write", "darwin").some((line) => /owner's Mac/.test(line)), true);
+});
+
+test("Cursor's private Windows APPDATA reaches the native child environment", () => {
+  const env = cursorDaemonChildEnv({ HOME: "/profile/home", APPDATA: "/profile/home/AppData/Roaming", USERPROFILE: "/profile/home" });
+  assert.equal(env.APPDATA, "/profile/home/AppData/Roaming");
+  assert.equal(env.USERPROFILE, "/profile/home");
 });
 
 test("a stop request reaches only a wrapper this process holds", () => {

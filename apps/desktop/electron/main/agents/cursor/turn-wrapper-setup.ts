@@ -492,18 +492,29 @@ function windowsTurnSource(values: CursorWindowsTurnValues): string {
 let nativeHelperBirth = null;
 let windowsConnectorProof = null;
 let windowsConnectorRejections = 0;
+let windowsConnectorsPending = 0;
 function windowsProveConnector(socket, admit) {
   // The pipe's default DACL lets other local accounts connect. Only a client
   // that sends this turn's proof, which only this account can read, is
   // Cursor's connector; anyone else is closed before any MCP byte flows.
-  if (finalizing || authorityRetiring || mcpConnectorAdmitted || !windowsConnectorProof) { socket.destroy(); return; }
+  if (finalizing || authorityRetiring || mcpConnectorAdmitted || !windowsConnectorProof
+    || windowsConnectorsPending >= 8) { socket.destroy(); return; }
+  windowsConnectorsPending += 1;
   let received = Buffer.alloc(0);
   let settled = false;
+  const settle = () => {
+    settled = true;
+    windowsConnectorsPending -= 1;
+    clearTimeout(timer);
+    socket.removeListener("close", refuse);
+  };
   const refuse = () => {
     if (settled) return;
-    settled = true;
-    clearTimeout(timer);
+    settle();
     socket.destroy();
+    // Before Cursor's connector is admitted, many unproven clients fail the
+    // turn closed; once it is admitted, they can no longer touch the turn.
+    if (mcpConnectorAdmitted || finalizing || authorityRetiring) return;
     windowsConnectorRejections += 1;
     if (windowsConnectorRejections > 16) {
       failMcpCapabilityAttestation("Too many connections without the turn's proof reached Cursor's MCP connector pipe.");
@@ -511,6 +522,7 @@ function windowsProveConnector(socket, admit) {
   };
   const timer = setTimeout(refuse, 5000);
   socket.on("error", refuse);
+  socket.once("close", refuse);
   const onData = (chunk) => {
     if (settled) return;
     received = Buffer.concat([received, chunk]);
@@ -527,8 +539,7 @@ function windowsProveConnector(socket, admit) {
       refuse();
       return;
     }
-    settled = true;
-    clearTimeout(timer);
+    settle();
     socket.removeListener("error", refuse);
     const rest = received.subarray(newline + 1);
     if (rest.length) socket.unshift(rest);

@@ -186,15 +186,19 @@ const WINDOWS_COMMAND_LINE_LIMIT = 32_766;
 /**
  * Cursor takes the room message only as an argument, and a Windows command
  * line holds at most 32,767 characters. Refuse a turn whose command lines
- * would not fit, with a reason, instead of an ENAMETOOLONG from spawn. The
- * wrapper's own line and the helper's line (the native line quoted once more)
- * are checked; the wrapper adds at most PROXY_ARGUMENT_ROOM for its proxy flags.
+ * would not fit, with a reason, instead of an ENAMETOOLONG from spawn. Both
+ * helper lines are checked: the one spawnTree starts the wrapper with (the
+ * wrapper's line quoted once more) and the one the wrapper starts Cursor with,
+ * where the wrapper adds at most PROXY_ARGUMENT_ROOM for its proxy flags.
  */
 export function assertCursorWindowsCommandLines(wrapperLine: string, values: Pick<CursorWindowsTurnValues, "helper" | "application" | "head" | "tail">): void {
   const PROXY_ARGUMENT_ROOM = 512;
   const nativeLine = `${values.head} ${"x".repeat(PROXY_ARGUMENT_ROOM)} ${values.tail}`;
-  const helperLine = [values.helper, "spawn", values.application, nativeLine].map(quoteWindowsArgument).join(" ");
-  if (wrapperLine.length > WINDOWS_COMMAND_LINE_LIMIT || helperLine.length > WINDOWS_COMMAND_LINE_LIMIT) {
+  const lines = [
+    [values.helper, "spawn", process.execPath, wrapperLine],
+    [values.helper, "spawn", values.application, nativeLine],
+  ].map((line) => line.map(quoteWindowsArgument).join(" "));
+  if (lines.some((line) => line.length > WINDOWS_COMMAND_LINE_LIMIT)) {
     throw new Error("This room turn is too long for a Windows command line, which Cursor needs for its message. Shorten the message or start a new conversation.");
   }
 }
@@ -225,7 +229,12 @@ export function requestCursorWrapperStop(pid: number, graceMs = DEFAULT_STOP_GRA
   void terminateTree(child, {
     graceful: true,
     graceMs,
-    requestStop: () => { child.send?.({ type: "terminate" }); },
+    // With a callback, a closed channel is reported here, not as the child's
+    // 'error' event, which the launcher would take as the wrapper's end. The
+    // tree is still ended after the grace period.
+    requestStop: () => {
+      if (child.connected) child.send({ type: "terminate" }, () => {});
+    },
   });
   return true;
 }
