@@ -18,6 +18,7 @@ import {
   type CodexSettingsInspection,
 } from "./codex-home-harness.js";
 import { createWindowsSecurity, icaclsSetOwnerArguments, INHERITED_GROUP_SIDS, parseSddl, protectOwnerPrivateSync, sddlExtraGrantSids, sddlIsOwnerPrivate, SYSTEM_SID, type UserIdentity, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
+import { renameSyncWithRetry } from "../../../../../shared/rename-retry.mjs";
 import { shadowProfileEnvironment, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 // An owner can save "always allow" command rules in the `rules` folder of
@@ -258,7 +259,8 @@ export function lockRulesFolder(rules: string, platform: NodeJS.Platform = proce
   }
   // The descriptor read back is the proof. A write from this process would not be: Node opens files
   // with backup semantics, so an elevated process whose backup privileges are on (one started from
-  // Git Bash, say) writes past any DACL. Codex opens its rule files without them.
+  // Git Bash, say) writes past any DACL, as root writes past mode 0555. For every other process the
+  // DACL is the control.
 }
 
 /** Which file or folder a path leads to, with links followed. Null when nothing is there. */
@@ -308,6 +310,16 @@ export function codexAgentHomeDirectory(env: NodeJS.ProcessEnv): string {
   const ownerHome = resolvedPath(codexHomeDirectory(env));
   const usual = ownerHome === resolvedPath(join(userHome, ".codex"));
   return join(userHome, ".letagents", usual ? "codex-agent-home" : `codex-agent-home-${createHash("sha256").update(ownerHome).digest("hex").slice(0, 12)}`);
+}
+
+/** A sign-in file of the agents' home's own: nothing is started until the owner has looked at it. */
+function signInOfItsOwn(home: string): CodexAgentHomeSignInError {
+  return new CodexAgentHomeSignInError(
+    `LetAgents found a Codex sign-in file of its own (${SIGN_IN_FILE}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
+    + "Two sign-in files can sign you out of Codex, so LetAgents will not start a sandboxed Codex agent. "
+    + "Open Codex and check that it is still signed in, then delete that file and start the agent again. "
+    + "If Codex asks you to sign in, sign in again: your conversations and settings are kept.",
+  );
 }
 
 /** How the agents' home is named to its owner: by its last two names, never by its full path, which can be shown in a room. */
@@ -402,14 +414,13 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
     return now !== null && now.id === record[name].id && now.size === record[name].size && now.mtimeNs === record[name].mtimeNs;
   };
   // The folder is looked at before anything in it is changed: a launch that is refused leaves it as it was.
+  if (windows) {
+    // A record staged by a launch that stopped before its rename is this code's own leftover.
+    for (const name of readdirSync(home)) if (name.startsWith(`${WINDOWS_LINK_RECORD}.`)) rmSync(join(home, name), { force: true });
+  }
   const before = readdirSync(home).filter((name) => name !== "rules" && !(windows && name === WINDOWS_LINK_RECORD)).sort().map((name) => ({ name, path: join(home, name), entry: lstatSync(join(home, name)) }));
   if (before.some(({ name, path, entry }) => name === SIGN_IN_FILE && !entry.isSymbolicLink() && !linkedFile(path, entry, name) && !formerLink(path, entry, name))) {
-    throw new CodexAgentHomeSignInError(
-      `LetAgents found a Codex sign-in file of its own (${SIGN_IN_FILE}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
-      + "Two sign-in files can sign you out of Codex, so LetAgents will not start a sandboxed Codex agent. "
-      + "Open Codex and check that it is still signed in, then delete that file and start the agent again. "
-      + "If Codex asks you to sign in, sign in again: your conversations and settings are kept.",
-    );
+    throw signInOfItsOwn(home);
   }
   // A link into another folder than this owner's home was made for another home, or by something
   // else. An agent may be running with it, so it is never turned to this home under that agent.
@@ -446,19 +457,28 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
       // Still exactly the owner's former file. It is moved aside first and looked at again there, so a
       // write that a running agent makes between the look and the move is never deleted: a file that
       // changed stays, under its new name, as an entry of the agents' own. The name is linked again below.
+      // The sign-in is never kept beside the owner's: a second one can sign the owner out, and under
+      // another name no Read-only profile denies it. So it is put back and the launch refused instead.
       const aside = join(home, `${WINDOWS_FORMER_LINK_PREFIX}${randomBytes(6).toString("hex")}-${name}`);
       try {
-        renameSync(path, aside);
+        renameSyncWithRetry(path, aside);
       } catch {
-        // Held open without sharing, or gone: kept as it is, as an entry of its own.
+        // Held open without delete sharing, or gone: kept as it is, as an entry of its own.
+        if (name === SIGN_IN_FILE) throw signInOfItsOwn(home);
         own.push(name);
         if (toLink.delete(name)) inPlaceOfOwners.push(name);
         continue;
       }
       const moved = linkedFileState(aside);
       const recorded = record[name]!;
-      if (moved && moved.id === recorded.id && moved.size === recorded.size && moved.mtimeNs === recorded.mtimeNs) unlinkSync(aside);
-      else own.push(basename(aside));
+      if (moved && moved.id === recorded.id && moved.size === recorded.size && moved.mtimeNs === recorded.mtimeNs) {
+        unlinkSync(aside);
+      } else if (name === SIGN_IN_FILE) {
+        try { renameSyncWithRetry(aside, path); } catch { /* kept under the aside name; the owner is told below */ }
+        throw signInOfItsOwn(home);
+      } else {
+        own.push(basename(aside));
+      }
       continue;
     }
     const empty = entry.isDirectory() ? readdirSync(path).length === 0 : entry.isFile() && entry.size === 0;
