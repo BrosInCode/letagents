@@ -11,6 +11,8 @@ import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import {
   defaultGetProcessIdentity,
 } from "./provider-evidence.js";
+import { cursorOsSandbox } from "./cursor-sandbox-policy.js";
+import { cursorWindowsProgram } from "./cursor/windows-turn.js";
 
 export type CursorMcpListResult = {
   ok: boolean;
@@ -416,10 +418,8 @@ export async function runCursorSandboxedInspection(input: {
   signal?: AbortSignal;
   dependencies?: Partial<CursorMcpInspectionDependencies>;
 }): Promise<CursorMcpListResult> {
-  if (process.platform === "win32") {
-    throw new Error("Supervised Cursor inspection requires POSIX process-group cleanup; Windows is not supported.");
-  }
-  if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+  const sandbox = cursorOsSandbox();
+  if (sandbox === "unconfined" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
     throw new Error("Supervised Cursor inspection requires macOS write confinement.");
   }
   if (!input.writableProfileRoot.trim()) {
@@ -445,6 +445,24 @@ export async function runCursorSandboxedInspection(input: {
     throw new Error("Supervised Cursor MCP attestation refuses an unbounded writable root.");
   }
   const inspectionEnv = cursorMcpInspectionEnv(input.env);
+  if (sandbox === "windows-unsandboxed") {
+    // No operating-system sandbox, so no sandbox lists. The wrapper runs in
+    // the process-tree helper's job, which ends what Cursor started.
+    const program = cursorWindowsProgram(input.cursorBin, { env: inspectionEnv, cwd: input.cwd });
+    return execCursorInspection(
+      program.file,
+      [...program.args, ...input.commandArgs],
+      input.cwd,
+      inspectionEnv,
+      [writableRoot],
+      [],
+      [],
+      allowedNetworkRemotes,
+      input.timeoutMs,
+      input.signal,
+      { ...DEFAULT_CURSOR_MCP_INSPECTION_DEPENDENCIES, ...input.dependencies },
+    );
+  }
   const cursorExecutable = resolveExecutablePath(input.cursorBin, input.cwd, inspectionEnv);
   // The wrapper itself runs under process.execPath, and both the inert probe
   // and npm's shebang may legitimately re-exec that same runtime. Admit it

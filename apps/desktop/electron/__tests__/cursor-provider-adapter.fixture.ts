@@ -124,6 +124,20 @@ export interface HarnessOptions {
   beforeLaunch?: CursorProviderAdapterDependencies["launchTurn"] extends (input: infer Input) => unknown ? (input: Input) => void : never;
 }
 
+/**
+ * Windows: Cursor starts inside letagents-process-tree.exe's job. CI builds
+ * the helper outside its default path and names it in
+ * LETAGENTS_TEST_PROCESS_TREE_HELPER, so only the Cursor files that import this
+ * fixture use it (each test file runs in its own process).
+ */
+function useTestProcessTreeHelper(): void {
+  const helper = process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER;
+  if (process.platform === "win32" && helper && !process.env.LETAGENTS_PROCESS_TREE_HELPER) {
+    process.env.LETAGENTS_PROCESS_TREE_HELPER = helper;
+  }
+}
+useTestProcessTreeHelper();
+
 export function birthIdentity(pid: number): string {
   return `fake-cursor-${pid}-birth-1`;
 }

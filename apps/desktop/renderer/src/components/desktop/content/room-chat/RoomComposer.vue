@@ -125,6 +125,9 @@
         @dismiss="focusInput"
       />
     </div>
+    <p v-if="agentCursorWindowsNotice" class="desktop-composer-agent-notice" data-testid="desktop-composer-agent-cursor-windows">
+      <span>{{ agentCursorWindowsNotice }}</span>
+    </p>
     <p v-if="agentNotice" class="desktop-composer-agent-notice" role="status" data-testid="desktop-composer-agent-notice">
       <span>{{ agentNotice }}</span>
       <button v-if="agentNoticeAction" type="button" class="desktop-composer-agent-notice-action"
@@ -275,7 +278,7 @@ import { useComposerAgentDraft } from "./useComposerAgentDraft";
 import { supervisorEntriesKey } from "../add-agent/supervisor-entries-context";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
-import { supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
+import { cursorWindowsSandboxNotice, supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 import { composerDrafting } from "./composer-event-preview";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";
@@ -557,6 +560,8 @@ const {
   chipWorktrees: agentChipWorktrees, openModelHost: agentOpenModelHost, launching: agentLaunching,
   notice: agentNotice, noticeAction: agentNoticeAction, checking: agentChecking, personalAccess: agentPersonalAccess,
 } = agentDraft;
+/** Cursor chosen on Windows: say once, beside the chip, that it runs without an OS sandbox. */
+const agentCursorWindowsNotice = computed(() => cursorWindowsSandboxNotice(agentChip.value?.providerId));
 const agentNoticeActionLabels = {
   "setup": "Set up…", "check-again": "Check again", "retry-providers": "Try again",
   "open-chip": "Choose a model…", "open-chip-where": "Choose a worktree…",

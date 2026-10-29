@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
+
+import { supervisedAgentsOnly } from "./platform.js";
 import {
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
@@ -662,7 +664,7 @@ test("Cursor checkpoints a proven native provider failure and reuses its exact s
   assert.equal((await next).text, "finished");
 });
 
-test("writable Cursor turns launch only in their private generation and retire it before publication", async () => {
+test("writable Cursor turns launch only in their private generation and retire it before publication", { skip: supervisedAgentsOnly }, async () => {
   const harness = createHarness();
   const createGeneration = harness.dependencies.createWorkspaceGeneration;
   harness.dependencies.createWorkspaceGeneration = async (input) => ({
@@ -734,7 +736,7 @@ test("room scratch Cursor turns use their exact workspace without Git generation
   assert.deepEqual(harness.workspaceGenerationEvents, []);
 });
 
-test("an ambiguous native release failure reconciles instead of abandoning or redispatching the generation", async () => {
+test("an ambiguous native release failure reconciles instead of abandoning or redispatching the generation", { skip: supervisedAgentsOnly }, async () => {
   const harness = createHarness({ releaseError: new Error("IPC release acknowledgement failed") });
   const adapter = supervisedAdapter(harness);
   const handle = await adapter.spawn(daemonSpawnRequest({
