@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -258,6 +259,25 @@ test("a proof that becomes exposed is refused at once, despite the cache", { ski
     assert.equal((await exchange(env.connect(), "ping\n")).data, "pong:ping\n");
     await chmod(env.proofPath, 0o644);
     const refused = await exchange(env.connect(), "ping\n");
+    assert.equal(refused.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+  } finally { await env.cleanup(); }
+});
+
+test("Windows: a proof whose DACL is widened is refused at once, despite the cache", { skip: process.platform !== "win32" && "a Windows DACL" }, async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    assert.equal((await exchange(env.connect(), "ping\n")).data, "pong:ping\n", "a private proof is accepted (and cached)");
+    const before = await stat(env.proofPath);
+    // Everyone (S-1-1-0) may read: the proof is no longer a secret.
+    execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "icacls.exe"), [env.proofPath, "/grant", "*S-1-1-0:R"], { windowsHide: true });
+    const after = await stat(env.proofPath);
+    assert.notEqual(after.ctimeMs, before.ctimeMs, "NTFS change time moves with the DACL, so the cache key changes");
+    const refused = await exchange(env.connect(), "ping\n");
+    assert.equal(refused.connected, false);
     assert.equal(refused.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
   } finally { await env.cleanup(); }
 });
