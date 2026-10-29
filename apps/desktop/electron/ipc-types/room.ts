@@ -775,6 +775,15 @@ export interface DesktopStagedAttachment {
   previewDataUrl: string | null;
 }
 
+/** A file chosen in the picker, shown in the composer while it uploads. */
+export interface DesktopChosenAttachment {
+  token: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  previewDataUrl: string | null;
+}
+
 export interface DesktopDroppedAttachmentContent {
   fileName: string;
   mimeType: string;

@@ -130,7 +130,9 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:mark-thread-read", roomIdentifier, threadRootId, messageId ?? null),
     getReasoningSession: (roomIdentifier: string, sessionId: string) =>
       ipcRenderer.invoke("desktop:room:get-reasoning-session", roomIdentifier, sessionId),
-    pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
+    chooseAttachments: (limit: number) => ipcRenderer.invoke("desktop:room:choose-attachments", limit),
+    stageChosenAttachments: (roomIdentifier: string, tokens: string[]) =>
+      ipcRenderer.invoke("desktop:room:stage-chosen-attachments", roomIdentifier, tokens),
     stageDroppedAttachmentContents: (roomIdentifier, files) =>
       ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
     openHtmlDemo: (href: string, fileName: string, senderLabel?: string | null) =>
