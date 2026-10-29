@@ -260,10 +260,12 @@ static int stop_job(HANDLE job, HANDLE stopping, HANDLE unkillable, HANDLE ended
   DWORD owned = stopping ? WaitForSingleObject(stopping, remaining_ms(deadline)) : WAIT_FAILED;
   *error = 0;
   if (stopping && owned != WAIT_OBJECT_0 && owned != WAIT_ABANDONED) {
-    /* The stopper before this one is still waiting on what it held: end the job anyway; nothing is proved. */
+    /* The stopper before this one is still waiting on what it held: end the
+       job anyway; nothing is proved. Said before the end, so the stopper
+       that holds the mutex reads it when it checks again before success. */
+    if (unkillable) SetEvent(unkillable);
     if (!TerminateJobObject(job, 1)) *error = GetLastError();
     if (ended) SetEvent(ended);
-    if (unkillable) SetEvent(unkillable);
     return 0;
   }
   /* No coordination at all, or a stopper that died while it held the job: not provable. */
@@ -286,6 +288,9 @@ static int stop_job(HANDLE job, HANDLE stopping, HANDLE unkillable, HANDLE ended
   if (!wait_held_processes(&held, deadline)) proved = 0;
   if (!wait_held_processes(&late, deadline)) proved = 0;
   if (child && WaitForSingleObject(child, remaining_ms(deadline)) != WAIT_OBJECT_0) proved = 0;
+  /* Again: a stopper that could not wait for this one may have ended the job
+     (emptying its list) between the first check and this one's list. */
+  if (unkillable && WaitForSingleObject(unkillable, 0) == WAIT_OBJECT_0) proved = 0;
   if (!proved && unkillable) SetEvent(unkillable);
   if (stopping) ReleaseMutex(stopping);
   return proved;
