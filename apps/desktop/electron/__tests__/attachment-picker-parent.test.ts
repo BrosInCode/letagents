@@ -23,20 +23,20 @@ test("the attach-files picker is a sheet on the main window", async (t) => {
     localRoomIdentifierForStorage: (_storage: unknown, identifier: string) => identifier,
   } });
 
-  const { pickAndStageDesktopAttachments } = await import("../main/attachments.js");
+  const { chooseDesktopAttachmentFiles } = await import("../main/attachments.js");
 
-  assert.deepEqual(await pickAndStageDesktopAttachments("room_1"), []);
+  assert.deepEqual(await chooseDesktopAttachmentFiles(), []);
   assert.equal(pickerCalls[0]?.length, 2);
   assert.strictEqual(pickerCalls[0]?.[0], parentWindow);
   assert.deepEqual((pickerCalls[0]?.[1] as { properties: string[] }).properties, ["openFile", "multiSelections"]);
 
   // A destroyed main window is not a parent: the picker opens detached.
   parentWindow = { isDestroyed: () => true };
-  assert.deepEqual(await pickAndStageDesktopAttachments("room_1"), []);
+  assert.deepEqual(await chooseDesktopAttachmentFiles(), []);
   assert.equal(pickerCalls[1]?.length, 1);
 
   // Without any main window the picker still opens, detached.
   parentWindow = null;
-  assert.deepEqual(await pickAndStageDesktopAttachments("room_1"), []);
+  assert.deepEqual(await chooseDesktopAttachmentFiles(), []);
   assert.equal(pickerCalls[2]?.length, 1);
 });
