@@ -149,16 +149,25 @@ test("POSIX: a group-readable maintenance record or lock is still refused", { sk
   await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
 });
 
-test("real Windows: a maintenance hold passes the real ACL check, and an extra entry is refused", { skip: windowsOnly }, async (t) => {
+test("real Windows: a maintenance hold passes the real ACL check, and an extra entry on its folder is refused", { skip: windowsOnly }, async (t) => {
   const root = await scratch(t);
-  const path = join(root, ".letagents", "daemon-maintenance.json");
+  const folder = join(root, ".letagents");
+  const path = join(folder, "daemon-maintenance.json");
   const hold = await createDaemonMaintenance(path);
   assert.deepEqual(await readDaemonMaintenance(path), hold);
-  assert.equal(await isOwnerPrivate(join(root, ".letagents"), await lstat(join(root, ".letagents"))), true);
+  assert.equal(await isOwnerPrivate(folder, await lstat(folder)), true);
   const { execFileSync } = await import("node:child_process");
-  const { windowsSystemTool } = await import("../../../../shared/owner-private-fs.mjs");
+  const { forgetOwnerPrivateCache, windowsSystemTool } = await import("../../../../shared/owner-private-fs.mjs");
+  // A cold reader (another process) refuses a record with an extra entry of its own.
   execFileSync(windowsSystemTool("icacls.exe"), [path, "/grant", "*S-1-1-0:R"], { stdio: "ignore", windowsHide: true });
+  forgetOwnerPrivateCache();
   await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+  // And a record in a folder that lost its private DACL.
+  execFileSync(windowsSystemTool("icacls.exe"), [path, "/remove:g", "*S-1-1-0"], { stdio: "ignore", windowsHide: true });
+  execFileSync(windowsSystemTool("icacls.exe"), [folder, "/grant", "*S-1-5-32-545:(OI)(CI)R"], { stdio: "ignore", windowsHide: true });
+  forgetOwnerPrivateCache();
+  await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
+  forgetOwnerPrivateCache();
 });
 
 test("Windows: when the ACL tools fail, a missing maintenance record is not read as no hold", async (t) => {

@@ -88,7 +88,8 @@ jobs:
           node --import tsx --test src/mcp/__tests__/owner-private-fs.test.ts > "${RUNNER_TEMP}/helper.log" 2>&1; code=$?
           end=$(date +%s)
           echo "TIMING ${{ matrix.side }} helper: $((end - start)) s, exit ${code}, $(grep -E '^# (pass|fail) |costs:' "${RUNNER_TEMP}/helper.log" | tr '\n' ' ')"
-          [ "${code}" = 0 ] || grep -E "^not ok" "${RUNNER_TEMP}/helper.log" | head -20
+          grep -E "SDDL|before:|after:|costs:" "${RUNNER_TEMP}/helper.log"
+          [ "${code}" = 0 ] || grep -E -A40 "^not ok" "${RUNNER_TEMP}/helper.log" | head -200
           exit 0
 
       - name: Daemon suite
@@ -101,5 +102,5 @@ jobs:
           end=$(date +%s)
           echo "TIMING daemon suite: $((end - start)) s, exit ${code}"
           grep -E "^# (tests|pass|fail|skipped|duration_ms) " "${RUNNER_TEMP}/daemon.log" | tail -6
-          grep -E -A12 "^not ok" "${RUNNER_TEMP}/daemon.log" | grep -E "^not ok|error:" | head -60
+          grep -E -A40 "^not ok" "${RUNNER_TEMP}/daemon.log" | head -200
           exit "${code}"
