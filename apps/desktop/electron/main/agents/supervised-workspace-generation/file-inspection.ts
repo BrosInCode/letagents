@@ -5,8 +5,9 @@ import { dirname, join } from "node:path";
 import { type ExactFileState, type GenerationManifest, type ReconcileOperation, type RegularFileInfo, SupervisedWorkspaceConflictError, type TreeEntry } from "./types.js";
 import { assertSafeAncestors } from "./manifest.js";
 import { cloneRegularFile } from "./git.js";
-import { fileVersionKey, fsyncDirectory, generationError, isErrno, pathExists, safeRelative, treeEntryEqual } from "./helpers.js";
+import { fileVersionKey, fsyncDirectory, generationError, isErrno, isWindowsGeneration, pathExists, safeRelative, treeEntryEqual } from "./helpers.js";
 import { macFileMetadataDigest, removeEmptyAncestors, treeEntryForRegularFile } from "./worktree.js";
+import { windowsFileMetadataDigest } from "./worktree-windows.js";
 
 /**
  * Bound expensive content/flags/ACL/xattr probes to one reconciliation call.
@@ -57,7 +58,7 @@ export class FileInspectionSession {
     }
     const [entry, metadataDigest] = await Promise.all([
       treeEntryForRegularFile(manifest, target, info, beforeKey, relativePath),
-      macFileMetadataDigest(manifest, target, info),
+      isWindowsGeneration() ? windowsFileMetadataDigest(info) : macFileMetadataDigest(manifest, target, info),
     ]);
     const after = await lstat(target, { bigint: true }).catch((error) => {
       if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) return null;

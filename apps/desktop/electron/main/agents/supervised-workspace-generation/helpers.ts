@@ -81,8 +81,16 @@ export function normalizeLimits(input: Partial<SupervisedWorkspaceGenerationLimi
   return result;
 }
 
+/**
+ * Windows generations are a Git worktree (no clonefile), with Windows file
+ * metadata: see worktree-windows.ts. Every other step and journal state is shared.
+ */
+export function isWindowsGeneration(): boolean {
+  return ownerPrivatePlatform() === "win32";
+}
+
 export function assertClonePlatform(): void {
-  if (process.platform !== "darwin") {
+  if (process.platform !== "darwin" && !isWindowsGeneration()) {
     throw generationError("Writable supervised generations require macOS clonefile support; no ordinary-copy fallback is allowed.", "CLONE_PLATFORM_UNSUPPORTED");
   }
 }
@@ -108,7 +116,21 @@ export function decodeGitPath(value: Buffer): string {
   if (!Buffer.from(decoded, "utf8").equals(value)) {
     throw generationError("Git returned a path that is not valid UTF-8.", "UNSUPPORTED_GIT_PATH_ENCODING");
   }
+  if (isWindowsGeneration()) {
+    // Git separates with "/"; every check here (protected names, ".." and the
+    // workspace prefix) splits on the native separator. A "\" inside a Git
+    // path name is a separator on Windows, so such a path cannot be mapped.
+    if (decoded.includes("\\")) {
+      throw generationError("Git returned a path that contains a backslash.", "UNSUPPORTED_GIT_PATH_ENCODING");
+    }
+    return decoded.split("/").join(sep);
+  }
   return decoded;
+}
+
+/** A native relative path as Git writes it ("/"). Identity on POSIX. */
+export function gitRelativePath(relativePath: string): string {
+  return relativePath.split(sep).join("/");
 }
 
 export function splitNulBuffer(buffer: Buffer): Buffer[] {

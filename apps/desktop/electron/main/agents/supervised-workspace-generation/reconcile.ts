@@ -4,11 +4,12 @@ import { link, lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, FINAL_INDEX_NAME, type GenerationManifest, RETIRED_NAME, type ReconcileOperation, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type TreeEntry } from "./types.js";
 import { FileInspectionSession, assertCanonicalDirectoryIdentity, canonicalDirectoryIdentity, ensureDesiredArtifact, inspectExactFile, matchesOperationState, restoreDisplacedWithoutOverwrite, validateAppliedOperationArtifacts } from "./file-inspection.js";
-import { assertSafeAncestors, cleanupTrees, transition, validateManifest } from "./manifest.js";
-import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, invokeFailpoint, isErrno, isProtectedPath, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, treeEntryEqual } from "./helpers.js";
+import { assertNoShortNameAncestors, assertSafeAncestors, cleanupTrees, transition, validateManifest } from "./manifest.js";
+import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, gitRelativePath, invokeFailpoint, isErrno, isProtectedPath, isWindowsGeneration, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, splitNul, treeEntryEqual } from "./helpers.js";
 import { assertTreeHasNoNormalizedPathCollisions, diffTreeEntries, readGitBlob, snapshotWorktree, treeEntryForRegularFile } from "./worktree.js";
 import { assertTrustedAuthority } from "./source-authority.js";
-import { cloneRegularFile } from "./git.js";
+import { cloneRegularFile, gitAuthorityBuffer } from "./git.js";
+import { WINDOWS_DEFAULT_FILE_MODE, assertGenerationObjectsComplete, ignoredGitPaths, inheritWorkspaceAcl, readWindowsBaselineModes, windowsFileMetadataDigest } from "./worktree-windows.js";
 
 export async function retireAndReconcile(
   initial: GenerationManifest,
@@ -19,13 +20,23 @@ export async function retireAndReconcile(
   const inspections = new FileInspectionSession(manifest.limits.maxChangedPaths);
   const retiredRoot = join(manifest.generationRoot, RETIRED_NAME);
   const authorityRoot = join(manifest.generationRoot, AUTHORITY_NAME);
+  // Windows: checked before the rename, so a generation whose borrowed objects
+  // are gone stays ready and can be abandoned for a fresh one.
+  let baseObjectsChecked = false;
+  const assertBaseObjects = async (): Promise<void> => {
+    if (!isWindowsGeneration() || baseObjectsChecked) return;
+    await assertGenerationObjectsComplete(authorityRoot, [manifest.headOid, manifest.baselineTreeOid!], manifest.limits);
+    baseObjectsChecked = true;
+  };
   if (manifest.phase === "ready") {
+    await assertBaseObjects();
     await ensureQuarantined(manifest, retiredRoot, authorityRoot);
     manifest = await transition(manifest, "quarantined");
     await invokeFailpoint(failpoint, "after_quarantined", manifestPathOf(manifest));
   }
   if (manifest.phase === "quarantined") {
     await assertTrustedAuthority(manifest, authorityRoot);
+    await assertBaseObjects();
     const finalTreeOid = await snapshotWorktree(
       authorityRoot,
       retiredRoot,
@@ -38,6 +49,9 @@ export async function retireAndReconcile(
     await invokeFailpoint(failpoint, "after_frozen", manifestPathOf(manifest));
   }
   if (manifest.phase === "frozen") {
+    if (isWindowsGeneration()) {
+      await assertGenerationObjectsComplete(authorityRoot, [manifest.baselineTreeOid!, manifest.finalTreeOid!], manifest.limits);
+    }
     const operationJournal = await buildPlan(manifest, authorityRoot, inspections);
     manifest = await transition(manifest, "planned", { operationJournal });
     await invokeFailpoint(failpoint, "after_planned", manifestPathOf(manifest));
@@ -116,8 +130,71 @@ export async function ensureQuarantined(
     await rm(embeddedAuthority, { recursive: true, force: true, maxRetries: 2 });
     await fsyncDirectory(retiredRoot);
   }
-  await assertNoProtectedPathAliases(retiredRoot, manifest.limits);
+  if (isWindowsGeneration()) await assertWindowsRetiredTree(manifest, retiredRoot);
+  else await assertNoProtectedPathAliases(retiredRoot, manifest.limits);
   await assertTrustedAuthority(manifest, authorityRoot);
+}
+
+/**
+ * Windows, in place of assertNoProtectedPathAliases: before Git snapshots the
+ * retired tree, refuse protected-name aliases, every DOS device name (NUL,
+ * CON, COM1...), which Windows does not open as a plain path, and every link
+ * or junction Git does not ignore except the dependency junctions this
+ * generation made (any user can make a junction, and whether Git records one
+ * as a link depends on its settings). The walk skips an ignored folder, so a
+ * package manager's node_modules neither blocks retirement nor counts against
+ * the path limit, unless it holds a baseline path: the agent writes the
+ * .gitignore files, and Git still refreshes tracked files under them.
+ */
+export async function assertWindowsRetiredTree(manifest: GenerationManifest, retiredRoot: string): Promise<void> {
+  const mapped = new Set(manifest.readOnlyRoots
+    .filter((entry) => entry.purpose === "dependency" && entry.generationPath !== null)
+    .map((entry) => safeRelative(manifest.liveSourceRoot, entry.generationPath!)));
+  const authorityRoot = join(manifest.generationRoot, AUTHORITY_NAME);
+  // Folded: NTFS ignores case, so "SRC" reaches the tracked "src".
+  const fold = (path: string) => path.normalize("NFC").toLowerCase();
+  const trackedFiles = new Set((await treePaths(authorityRoot, manifest.baselineTreeOid!, manifest.limits)).map(fold));
+  const trackedFolders = new Set([...trackedFiles].flatMap(ancestorPaths));
+  let level = [""];
+  let visited = 0;
+  while (level.length > 0) {
+    const links: string[] = [];
+    const folders: string[] = [];
+    for (const parentRelativePath of level) {
+      for (const entry of await readdir(join(retiredRoot, parentRelativePath), { withFileTypes: true })) {
+        const relativePath = parentRelativePath ? join(parentRelativePath, entry.name) : entry.name;
+        assertSafeRelativePath(relativePath, manifest.limits);
+        visited += 1;
+        if (visited > manifest.limits.maxChangedPaths) throw limitError("retired path count", manifest.limits.maxChangedPaths);
+        assertNotProtectedAlias(entry.name, relativePath);
+        if (WINDOWS_DEVICE_NAME.test(entry.name)) {
+          throw generationError(`A Windows device name cannot be reconciled at ${JSON.stringify(relativePath)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
+        }
+        if (entry.isSymbolicLink()) {
+          if (!mapped.has(relativePath)) links.push(relativePath);
+        } else if (entry.isDirectory()) folders.push(relativePath);
+      }
+    }
+    const ignored = await ignoredGitPaths(authorityRoot, retiredRoot, [
+      ...links.map(gitRelativePath),
+      ...folders.map((folder) => `${gitRelativePath(folder)}/`),
+    ], manifest.limits);
+    const exported = links.find((link) => !ignored.has(gitRelativePath(link))
+      || trackedFiles.has(fold(link)) || trackedFolders.has(fold(link)));
+    if (exported !== undefined) {
+      throw generationError(`Symlink, junction, or unsupported tree entry denied at ${JSON.stringify(exported)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
+    }
+    level = folders.filter((folder) => !ignored.has(`${gitRelativePath(folder)}/`) || trackedFolders.has(fold(folder)));
+  }
+}
+
+/** CON, PRN, AUX, NUL, COM1-9, LPT1-9 (also with an extension or trailing dots and spaces). */
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.[^.]*)?[. ]*$/i;
+
+async function treePaths(gitDirectory: string, treeOid: string, limits: SupervisedWorkspaceGenerationLimits): Promise<string[]> {
+  const paths = splitNul(await gitAuthorityBuffer(gitDirectory, null, ["ls-tree", "-r", "--name-only", "-z", treeOid], limits.maxPatchBytes));
+  if (paths.length > limits.maxChangedPaths) throw limitError("tree path count", limits.maxChangedPaths);
+  return paths;
 }
 
 export async function assertNoProtectedPathAliases(
@@ -134,16 +211,20 @@ export async function assertNoProtectedPathAliases(
       assertSafeRelativePath(relativePath, limits);
       visited += 1;
       if (visited > limits.maxChangedPaths) throw limitError("retired path count", limits.maxChangedPaths);
-      const normalized = entry.name.normalize("NFC");
-      const folded = normalized.toLowerCase();
-      if ([".git", ".cursor", ".claude", ".letagents-fence"].includes(folded) && entry.name !== folded) {
-        throw generationError(
-          `Generation changed a case- or Unicode-normalization alias of protected workspace authority at ${JSON.stringify(relativePath)}.`,
-          "PROTECTED_GENERATION_CHANGE",
-        );
-      }
+      assertNotProtectedAlias(entry.name, relativePath);
       if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push(relativePath);
     }
+  }
+}
+
+function assertNotProtectedAlias(name: string, relativePath: string): void {
+  const normalized = name.normalize("NFC");
+  const folded = normalized.toLowerCase();
+  if ([".git", ".cursor", ".claude", ".letagents-fence"].includes(folded) && name !== folded) {
+    throw generationError(
+      `Generation changed a case- or Unicode-normalization alias of protected workspace authority at ${JSON.stringify(relativePath)}.`,
+      "PROTECTED_GENERATION_CHANGE",
+    );
   }
 }
 
@@ -160,6 +241,7 @@ export async function buildPlan(
     manifest.finalTreeOid!,
     manifest.limits,
   );
+  let baselineModes: Map<string, number> | undefined;
   const normalizedPaths = new Map<string, string>();
   for (const change of changes) {
     const relativePath = projectRelativePath(change.sourceRelativePath, manifest.workspaceRelativePath);
@@ -186,7 +268,19 @@ export async function buildPlan(
     const id = operationId(sourceRelativePath, before, after);
     let baselineMode: number | null = null;
     let baselineMetadataDigest: string | null = null;
-    if (before) {
+    if (before && isWindowsGeneration()) {
+      // Windows keeps no baseline copies (the tree is a checkout, not a
+      // clone). The real file must still hold the baseline bytes; its
+      // metadata is the one Windows reports (the read-only attribute).
+      const realState = await inspections.inspect(manifest, join(manifest.realWorkspace, relativePath), relativePath);
+      if (!realState) throw new SupervisedWorkspaceConflictError(relativePath, "the immutable baseline file disappeared");
+      if (!treeEntryEqual(realState.entry, before)) {
+        throw new SupervisedWorkspaceConflictError(relativePath, "content or metadata no longer matches the immutable baseline");
+      }
+      baselineModes ??= await readWindowsBaselineModes(manifest);
+      baselineMode = baselineModes.get(sourceRelativePath) ?? WINDOWS_DEFAULT_FILE_MODE;
+      baselineMetadataDigest = windowsFileMetadataDigest({ size: 0, mode: baselineMode, uid: 0, gid: 0 });
+    } else if (before) {
       const baselineRoot = join(manifest.generationRoot, BASELINE_FILES_NAME);
       await assertSafeAncestors(baselineRoot, sourceRelativePath, false);
       const baselinePath = join(baselineRoot, sourceRelativePath);
@@ -234,6 +328,8 @@ export async function buildPlan(
   if (operations.length > manifest.limits.maxChangedPaths) throw limitError("changed path count", manifest.limits.maxChangedPaths);
   const byPath = new Map(operations.map((operation) => [operation.relativePath, operation]));
   for (const operation of operations) {
+    // Windows: refuse an alias ancestor (see assertSafeAncestors) before anything is applied.
+    if (isWindowsGeneration()) await assertNoShortNameAncestors(manifest.realWorkspace, operation.relativePath);
     const observed = await inspectPlanEntry(manifest, operation.relativePath, inspections);
     if (observed.kind === "file") {
       if (!treeEntryEqual(observed.entry, operation.baseline)
@@ -383,6 +479,7 @@ export async function applyOperation(
         throw new SupervisedWorkspaceConflictError(operation.relativePath, `the retained displaced file changed at ${JSON.stringify(displacedArtifact)}`);
       }
     }
+    if (operation.desired && isWindowsGeneration()) await inheritWorkspaceAcl(target);
     await assertCanonicalDirectoryIdentity(parent, parentIdentity, manifest.realWorkspace, operation.relativePath);
     return;
   }
@@ -401,6 +498,7 @@ export async function applyOperation(
       if (isErrno(error, "EEXIST")) throw new SupervisedWorkspaceConflictError(operation.relativePath, "a concurrent entry won the no-replace install");
       throw error;
     }
+    if (isWindowsGeneration()) await inheritWorkspaceAcl(target);
     await fsyncDirectory(parent);
     await assertCanonicalDirectoryIdentity(parent, parentIdentity, manifest.realWorkspace, operation.relativePath);
     const installed = await inspectExactFile(manifest, target, undefined, inspections);
@@ -439,6 +537,7 @@ export async function applyOperation(
       }
       throw error;
     }
+    if (isWindowsGeneration()) await inheritWorkspaceAcl(target);
   }
   await fsyncDirectory(parent);
   await assertCanonicalDirectoryIdentity(parent, parentIdentity, manifest.realWorkspace, operation.relativePath);

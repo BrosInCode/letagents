@@ -5,8 +5,9 @@ import { lstat, mkdir, realpath, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isOwnerPrivate, openNoFollow, privateEntryCreated } from "../../../../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../../../../shared/rename-retry.mjs";
-import { AUTHORITY_NAME, BASELINE_FILES_NAME, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, RETIRED_NAME, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type TreeEntry } from "./types.js";
-import { assertSafeRelativePath, fsyncDirectory, generationDirectoryName, generationError, isErrno, isProtectedPath, manifestPathOf, operationId, projectRelativePath, safeRelative } from "./helpers.js";
+import { releaseReadOnlyInstalls } from "./worktree-windows.js";
+import { AUTHORITY_NAME, BASELINE_FILES_NAME, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, PROVIDER_GIT_NAME, RETIRED_NAME, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type TreeEntry } from "./types.js";
+import { assertSafeRelativePath, fsyncDirectory, generationDirectoryName, generationError, isErrno, isProtectedPath, isWindowsGeneration, manifestPathOf, operationId, projectRelativePath, safeRelative } from "./helpers.js";
 
 export async function atomicWrite(target: string, content: Buffer, mode: number, generationId: string): Promise<void> {
   const temporary = join(dirname(target), `.${basename(target)}.letagents-${generationId}-${randomBytes(8).toString("hex")}.tmp`);
@@ -30,8 +31,14 @@ export async function atomicWrite(target: string, content: Buffer, mode: number,
 export async function assertSafeAncestors(root: string, relativePath: string, createMissing: boolean): Promise<void> {
   const components = relativePath.split(sep).filter(Boolean);
   let current = root;
+  // Windows resolves an 8.3 short name (CLAUDE~1) to an existing folder:
+  // each ancestor must resolve to the path named. Case may differ (NTFS
+  // ignores it, and protected names are compared case-folded already).
+  const windowsRoot = isWindowsGeneration() ? await realpath(root) : null;
+  let expected = windowsRoot;
   for (const component of components.slice(0, -1)) {
     current = join(current, component);
+    if (expected !== null) expected = join(expected, component);
     let info: Stats;
     try {
       info = await lstat(current);
@@ -44,7 +51,33 @@ export async function assertSafeAncestors(root: string, relativePath: string, cr
     if (!info.isDirectory() || info.isSymbolicLink()) {
       throw new SupervisedWorkspaceConflictError(relativePath, "an ancestor is not a real directory");
     }
-    safeRelative(root, await realpath(current));
+    const canonical = await realpath(current);
+    safeRelative(root, canonical);
+    if (expected !== null && canonical.toLowerCase() !== expected.toLowerCase()) {
+      throw new SupervisedWorkspaceConflictError(relativePath, "an ancestor name is a short-name alias of another folder");
+    }
+  }
+}
+
+/**
+ * Windows, at plan time: no existing ancestor folder may be reached through
+ * an 8.3 short name (see assertSafeAncestors). A missing ancestor, or one
+ * that is still a file the plan deletes first, ends the walk.
+ */
+export async function assertNoShortNameAncestors(root: string, relativePath: string): Promise<void> {
+  let current = root;
+  let expected = await realpath(root);
+  for (const component of relativePath.split(sep).filter(Boolean).slice(0, -1)) {
+    current = join(current, component);
+    expected = join(expected, component);
+    const info = await lstat(current).catch((error) => {
+      if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) return null;
+      throw error;
+    });
+    if (!info?.isDirectory() || info.isSymbolicLink()) return;
+    if ((await realpath(current)).toLowerCase() !== expected.toLowerCase()) {
+      throw new SupervisedWorkspaceConflictError(relativePath, "an ancestor name is a short-name alias of another folder");
+    }
   }
 }
 
@@ -282,6 +315,11 @@ export async function cleanupTrees(manifest: GenerationManifest, preserveReconci
   const names = preserveReconciliationEvidence
     ? [LIVE_NAME, RETIRED_NAME, AUTHORITY_NAME]
     : [LIVE_NAME, RETIRED_NAME, AUTHORITY_NAME, BASELINE_FILES_NAME, STAGING_NAME];
+  // The worktree's private clone goes after the worktree itself.
+  if (isWindowsGeneration()) {
+    names.splice(names.indexOf(AUTHORITY_NAME), 0, PROVIDER_GIT_NAME);
+    if (!preserveReconciliationEvidence) await releaseReadOnlyInstalls(manifest);
+  }
   for (const name of names) {
     const target = join(manifest.generationRoot, name);
     safeRelative(manifest.generationRoot, target);
