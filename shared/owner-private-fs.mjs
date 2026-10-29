@@ -23,11 +23,11 @@
  * and a protected DACL of its own.
  *
  * The Windows facts are read with built-in tools by absolute path:
- * whoami.exe gives the current user's SID; PowerShell's Get-Acl gives each
+ * whoami.exe gives the current user's SID; PowerShell (.NET GetAccessControl) gives each
  * path's security descriptor as SDDL (owner and DACL, written with SIDs, so
  * the answer does not depend on the display language); icacls.exe sets the
  * owner (the current user, also for an elevated administrator) and the
- * protected DACL, and Get-Acl reads the result back (owner included). Every
+ * protected DACL, and PowerShell reads the result back (owner included). Every
  * answer that cannot be read or parsed counts as "not private".
  */
 import { spawn, execFileSync } from "node:child_process";
@@ -70,16 +70,19 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 //                    this account's with a protected DACL
 //                    for only this account and SYSTEM, through that handle:
 //                    "ok:<new SDDL>"; anything else is "error:".
+// Only .NET calls, no cmdlet: the first cmdlet a PowerShell runs makes it
+// load modules, which takes tens of seconds on a machine with many installed
+// (seen on Windows CI in a process started with a reduced environment).
 const ANSWER_FUNCTION = [
   "function LetAgentsAnswer([string]$p) {",
   "  try {",
   "    if ($p.StartsWith('object:')) {",
-  "      $fs = [System.IO.File]::Open($p.Substring(7), 'Open', 'Read', 'ReadWrite, Delete')",
+  "      $fs = [System.IO.File]::Open($p.Substring(7), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')",
   "      try {",
   // The length is read once: a file that grows meanwhile fails the end-of-file check below.
   `        $length = $fs.Length; if ($length -gt ${OBJECT_LIMIT}) { return 'error:' }`,
-  "        $sddl = $fs.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Access')",
-  "        $bytes = New-Object byte[] $length; $read = 0",
+  "        $sddl = $fs.GetAccessControl().GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]'Owner, Access')",
+  "        $bytes = [byte[]]::new($length); $read = 0",
   "        while ($read -lt $bytes.Length) { $n = $fs.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }",
   "        if ($read -ne $bytes.Length -or $fs.ReadByte() -ne -1) { return 'error:' }",
   "        return 'ok:' + $sddl + '|' + [Convert]::ToBase64String($bytes)",
@@ -87,24 +90,28 @@ const ANSWER_FUNCTION = [
   "    }",
   "    if ($p.StartsWith('upgrade:')) {",
   "      $rights = [System.Security.AccessControl.FileSystemRights]'ReadData, ReadPermissions, ChangePermissions, TakeOwnership'",
-  "      $fs = New-Object System.IO.FileStream($p.Substring(8), [System.IO.FileMode]::Open, $rights, [System.IO.FileShare]'ReadWrite, Delete', 4096, [System.IO.FileOptions]::None)",
+  "      $fs = [System.IO.FileStream]::new($p.Substring(8), [System.IO.FileMode]::Open, $rights, [System.IO.FileShare]'ReadWrite, Delete', 4096, [System.IO.FileOptions]::None)",
   "      try {",
   "        $sid = [System.Security.Principal.SecurityIdentifier]; $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User",
   "        $allowed = @($me.Value, 'S-1-5-18', 'S-1-5-32-544'); $acl = $fs.GetAccessControl()",
   "        $owner = $acl.GetOwner($sid).Value",
   "        if ($owner -ne $me.Value -and $owner -ne 'S-1-5-32-544') { return 'error:' }",
   // GetAccessRules leaves out entries it cannot express (a conditional allow, say): only plain allow and deny pass.
-  "        if (([regex]::Matches($acl.GetSecurityDescriptorSddlForm('Access'), '\\(([A-Z]+);') | Where-Object { $_.Groups[1].Value -ne 'A' -and $_.Groups[1].Value -ne 'D' }).Count -gt 0) { return 'error:' }",
+  "        foreach ($entry in [regex]::Matches($acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access), '\\(([A-Z]+);')) { if ($entry.Groups[1].Value -ne 'A' -and $entry.Groups[1].Value -ne 'D') { return 'error:' } }",
   "        foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) { if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $rule.IdentityReference.Value) { return 'error:' } }",
-  "        $new = New-Object System.Security.AccessControl.FileSecurity",
+  "        $full = [System.Security.AccessControl.FileSystemRights]::FullControl; $allow = [System.Security.AccessControl.AccessControlType]::Allow",
+  "        $new = [System.Security.AccessControl.FileSecurity]::new()",
   "        $new.SetOwner($me); $new.SetAccessRuleProtection($true, $false)",
-  "        $new.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))",
-  "        $new.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'), 'FullControl', 'Allow')))",
+  "        $new.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me, $full, $allow))",
+  "        $new.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'), $full, $allow))",
   "        $fs.SetAccessControl($new)",
-  "        return 'ok:' + $fs.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Access')",
+  "        return 'ok:' + $fs.GetAccessControl().GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]'Owner, Access')",
   "      } finally { $fs.Dispose() }",
   "    }",
-  "    return 'ok:' + (Get-Acl -LiteralPath $p).Sddl",
+  // As Get-Acl -LiteralPath: the owner, group and DACL of a file or folder by path.
+  "    $sections = [System.Security.AccessControl.AccessControlSections]'Owner, Group, Access'",
+  "    if ([System.IO.Directory]::Exists($p)) { $acl = [System.IO.Directory]::GetAccessControl($p, $sections) } else { $acl = [System.IO.File]::GetAccessControl($p, $sections) }",
+  "    return 'ok:' + $acl.GetSecurityDescriptorSddlForm($sections)",
   "  } catch { return 'error:' }",
   "}",
 ].join("\n");
@@ -238,7 +245,7 @@ function chunkPaths(paths) {
   return chunks;
 }
 
-/** The SDDL per path from the PowerShell script's lines; null where Get-Acl failed. */
+/** The SDDL per path from the PowerShell script's lines; null where the read failed. */
 export function parseSddlLines(output, count) {
   const lines = String(output).split(/\r?\n/).filter(line => line.startsWith("ok:") || line === "error:");
   if (lines.length !== count) throw privateError("The Windows permissions answer did not match the paths asked.");

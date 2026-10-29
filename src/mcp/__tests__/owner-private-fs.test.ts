@@ -163,7 +163,9 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   const powershell = calls.find(call => call.file.endsWith("powershell.exe"))!;
   assert.equal(powershell.file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   assert.deepEqual(powershell.args.slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
-  assert.match(String(powershell.args[4]), /Get-Acl -LiteralPath \$p/);
+  // .NET only (no cmdlet, so no module loads): the owner, group and DACL of the path.
+  assert.match(String(powershell.args[4]), /\[System\.IO\.File\]::GetAccessControl\(\$p, \$sections\)/);
+  assert.doesNotMatch(String(powershell.args[4]), /Get-Acl|New-Object|Where-Object/);
   assert.match(String(powershell.args[4]), /\$env:LETAGENTS_OWNER_PRIVATE_PATHS/);
   // The paths travel as JSON in the environment, never in the command text.
   assert.equal(powershell.paths, "C:\\a\nC:\\b missing");
@@ -694,6 +696,8 @@ test("Windows: an atomic private write runs no tool in a private folder, and sta
     assert.deepEqual(readdirSync(root), ["state.json"]);
 
     // In a private folder: no tool runs at all; the file inherits at creation.
+    // (Linux may give the new folder a removed staging folder's inode: start from no known entries.)
+    forgetOwnerPrivateCache();
     const folder = join(root, "private");
     mkdirSync(folder);
     sddl[folder] = PRIVATE_FOLDER;
