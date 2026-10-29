@@ -44,6 +44,9 @@ type RepoStatusWatchHooks = {
   getMainWindow: () => RepoStatusWatchWindowState | null;
   /** Resolves true when Git ignores the directory (relative to the root). */
   isIgnoredDirectory: (rootPath: string, relativeDirectory: string) => Promise<boolean>;
+  /** The file-system watch, and the platform whose events it reports. */
+  watch: typeof watch;
+  platform: NodeJS.Platform;
 };
 
 type RepoStatusWatchTarget = {
@@ -95,6 +98,8 @@ const defaultRepoStatusWatchHooks: RepoStatusWatchHooks = {
   emitToMainWindow,
   getMainWindow,
   isIgnoredDirectory: gitIgnoresDirectory,
+  watch,
+  platform: process.platform,
 };
 
 let repoStatusWatchHooks = defaultRepoStatusWatchHooks;
@@ -308,6 +313,7 @@ function openWatchers(
     if (target.reopenOnRename) fileSignatures.set(target.path, fileSignature(target.path));
     try {
       const listener = (eventType: string, filename: string | Buffer | null) => {
+        if (isWindowsFolderChangeEcho(target, eventType, filename, repoStatusWatchHooks.platform)) return;
         const invalidation = classifyWatchEvent(target, filename);
         if (!invalidation) return;
         if (target.reopenOnRename && eventType !== "rename") {
@@ -339,7 +345,7 @@ function openWatchers(
       };
       let watcher: FSWatcher;
       try {
-        watcher = watch(
+        watcher = repoStatusWatchHooks.watch(
           target.path,
           { persistent: false, recursive: target.recursive },
           listener,
@@ -348,7 +354,7 @@ function openWatchers(
         if (!target.recursive) throw error;
         // Older runtimes/platforms may not support recursive watching. Keep a
         // direct watcher and let the reconciliation pass cover nested misses.
-        watcher = watch(target.path, { persistent: false }, listener);
+        watcher = repoStatusWatchHooks.watch(target.path, { persistent: false }, listener);
       }
       watcher.on("error", () => {
         watchState.watchersNeedReopen = true;
@@ -403,6 +409,33 @@ async function anyIgnoredDirectory(
 
 export function ignoredDirectoryCandidatesForTest(filename: string | null): string[] | null {
   return ignoredDirectoryCandidates(filename);
+}
+
+/**
+ * Windows reports a "change" on a folder whenever a file inside it is
+ * written, because the folder's last-write time moves, and it does so even to
+ * a non-recursive watcher of the folder above. Such an echo carries nothing:
+ * where the write itself is watched it arrives as its own event, and adding or
+ * removing the folder arrives as "rename". Without this check a write in a
+ * linked worktree's metadata folder reached the `worktrees` watcher as a ref
+ * and worktree change, and a write below an ignored folder reached the
+ * working-tree watcher as an unignored top-level event. Git directory
+ * watchers are left alone: they classify each entry by its name. Other
+ * platforms report no such echo, and their events are not inspected here.
+ */
+function isWindowsFolderChangeEcho(
+  target: RepoStatusWatchTarget,
+  eventType: string,
+  filename: string | Buffer | null,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== "win32" || eventType !== "change" || filename === null) return false;
+  if (target.reopenOnRename || target.gitDirectory) return false;
+  try {
+    return statSync(join(target.path, String(filename))).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function classifyWatchEvent(
