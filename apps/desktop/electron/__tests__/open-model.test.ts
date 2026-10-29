@@ -371,6 +371,21 @@ test("OpenCode runtime resolution and install command stay pinned", () => {
     resolveOpenCodeBinary({ LETAGENTS_OPENCODE_BIN: "/custom/opencode" }, ""),
     "/custom/opencode",
   );
+  const resources = join("packaged", "resources");
+  const present = (expected: string) => (path: string) => path === expected;
+  assert.equal(
+    resolveOpenCodeBinary({}, resources, "darwin", present(join(resources, "app", "runtime", "opencode"))),
+    join(resources, "app", "runtime", "opencode"),
+  );
+  assert.equal(
+    resolveOpenCodeBinary({}, resources, "win32", present(join(resources, "app", "runtime", "opencode.exe"))),
+    join(resources, "app", "runtime", "opencode.exe"),
+  );
+  // A Windows package never runs the extensionless macOS name.
+  assert.equal(
+    resolveOpenCodeBinary({}, resources, "win32", present(join(resources, "app", "runtime", "opencode"))),
+    "opencode",
+  );
   const install = openCodeInstallCommand();
   assert.equal(install.command, "npm");
   assert.deepEqual(install.args, [

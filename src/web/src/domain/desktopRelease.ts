@@ -9,13 +9,19 @@ export interface MacDesktopBetaPresentation {
   downloads: {
     arm64: string
     x64: string
+    /** The Windows installer, once the current release has one. */
+    windows: string | null
   }
 }
+
+/** Builds are unsigned for now, so Windows asks before the first run. */
+export const WINDOWS_SMARTSCREEN_NOTE = 'Windows may show SmartScreen: More info → Run anyway.'
 
 function toPresentation(release: {
   version: string
   checksumsUrl?: string
   assets: Record<'arm64' | 'x64', { publicUrl: string }>
+  windows?: { x64: { publicUrl: string } } | null
 }): MacDesktopBetaPresentation {
   return {
     version: release.version,
@@ -23,15 +29,19 @@ function toPresentation(release: {
     downloads: {
       arm64: release.assets.arm64.publicUrl,
       x64: release.assets.x64.publicUrl,
+      windows: release.windows?.x64.publicUrl ?? null,
     },
   }
 }
 
+// The bundled release predates Windows builds; the Windows link appears once
+// the current-release manifest names an installer.
 export const MAC_DESKTOP_BETA: MacDesktopBetaPresentation = {
   ...toPresentation(MAC_DESKTOP_BETA_RELEASE),
   downloads: {
     arm64: '/downloads/mac/arm64',
     x64: '/downloads/mac/x64',
+    windows: null,
   },
 }
 

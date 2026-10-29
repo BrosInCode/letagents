@@ -34,6 +34,20 @@ const currentRelease = {
       sha256: "b".repeat(64),
     },
   },
+  // Released before Windows builds existed.
+  windows: null,
+};
+
+const windowsRelease = {
+  ...JSON.parse(JSON.stringify(currentRelease).replaceAll("0.1.5", "0.1.131")),
+  windows: {
+    x64: {
+      fileName: "LetAgents-0.1.131-win32-x64-setup.exe",
+      publicUrl: "https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe",
+      bytes: 160,
+      sha256: "c".repeat(64),
+    },
+  },
 };
 
 test("durable desktop release high-water accepts forward versions and rejects rollback", async () => {
@@ -417,4 +431,84 @@ test("previous immutable Mac beta checksum routes remain available", async (t) =
     assert.match(body, new RegExp(`LetAgents-${version.replaceAll(".", "\\.")}-darwin-arm64\\.dmg`));
     assert.match(body, new RegExp(`LetAgents-${version.replaceAll(".", "\\.")}-darwin-x64\\.dmg`));
   }
+});
+
+test("Windows beta route redirects to the current release's installer and fails closed without one", async (t) => {
+  let release: unknown = windowsRelease;
+  const app = express();
+  registerDesktopDownloadRoutes(app, {
+    loadCurrentRelease: async () => {
+      if (release instanceof Error) throw release;
+      return release as typeof windowsRelease;
+    },
+    canUseBundledFallback: async () => true,
+  });
+  const server = app.listen(0, "127.0.0.1");
+  t.after(() => server.close());
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  const download = await fetch(`${baseUrl}/downloads/windows/x64`, { redirect: "manual" });
+  assert.equal(download.status, 302);
+  assert.equal(download.headers.get("location"), windowsRelease.windows.x64.publicUrl);
+  assert.equal(download.headers.get("cache-control"), "public, max-age=60, must-revalidate");
+  assert.equal((await fetch(`${baseUrl}/downloads/windows/arm64`, { redirect: "manual" })).status, 404);
+
+  release = currentRelease;
+  assert.equal((await fetch(`${baseUrl}/downloads/windows/x64`, { redirect: "manual" })).status, 404);
+
+  // The bundled macOS fallback never stands in for a Windows installer.
+  release = new Error("R2 unavailable");
+  const unavailable = await fetch(`${baseUrl}/downloads/windows/x64`, { redirect: "manual" });
+  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.headers.get("cache-control"), "no-store");
+});
+
+test("current release loading accepts a Windows installer only at its immutable public URL", async () => {
+  const load = (body: unknown) => createDesktopReleaseManifestLoader({
+    fetcher: async () => new Response(JSON.stringify(body), { status: 200 }),
+  })("https://downloads.letagents.chat/desktop/current.json", 45_000);
+
+  assert.deepEqual((await load(windowsRelease)).windows, windowsRelease.windows);
+  const { windows: _omitted, ...beforeWindows } = currentRelease;
+  assert.equal((await load(beforeWindows)).windows, null);
+  await assert.rejects(load({
+    ...windowsRelease,
+    windows: { x64: { ...windowsRelease.windows.x64, publicUrl: "https://example.com/LetAgents-0.1.131-win32-x64-setup.exe" } },
+  }), /Windows x64 desktop release asset does not use the immutable public URL/);
+  await assert.rejects(load({ ...windowsRelease, windows: { x64: { ...windowsRelease.windows.x64, sha256: "C".repeat(64) } } }), /lowercase SHA-256/);
+});
+
+test("artifact proof covers the Windows installer and its checksum sidecar", async () => {
+  const requested: string[] = [];
+  const installers = [windowsRelease.assets.arm64, windowsRelease.assets.x64, windowsRelease.windows.x64];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    requested.push(`${init?.method ?? "GET"} ${url}`);
+    const asset = installers.find((candidate) => url.startsWith(candidate.publicUrl));
+    assert.ok(asset, url);
+    if (init?.method === "HEAD") {
+      return new Response(null, {
+        status: 200,
+        headers: { "Content-Length": String(asset.bytes), "Cache-Control": "public,max-age=31536000,immutable" },
+      });
+    }
+    return new Response(`${asset.sha256}  ${asset.fileName}\n`, {
+      status: 200,
+      headers: { "Cache-Control": "public,max-age=31536000,immutable" },
+    });
+  };
+  await verifyMacDesktopReleaseArtifacts(windowsRelease, fetcher);
+  assert.equal(requested.length, 6);
+  assert.ok(requested.includes(`HEAD ${windowsRelease.windows.x64.publicUrl}`));
+  assert.ok(requested.includes(`GET ${windowsRelease.windows.x64.publicUrl}.sha256`));
+
+  await assert.rejects(
+    verifyMacDesktopReleaseArtifacts(windowsRelease, async (input, init) => String(input).includes("win32")
+      ? new Response("Not found", { status: 404 })
+      : fetcher(input, init)),
+    /Windows x64 desktop release asset returned HTTP 404/,
+  );
 });

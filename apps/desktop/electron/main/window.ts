@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { classifyLinkNavigation } from "./link-routing.js";
 import { openExternalWebUrl } from "./external-url.js";
 import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
+import { supervisedAgentsSupported } from "./platform-capabilities.js";
 
 const { app, BrowserWindow } = electron as typeof import("electron");
 
@@ -160,6 +161,9 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
     : null;
   const boardScreenshotWidth = Math.max(480, Math.min(1800, Number(process.env.LETAGENTS_DESKTOP_BOARD_WIDTH) || 1600));
   const boardScreenshotHeight = Math.max(640, Math.min(1200, Number(process.env.LETAGENTS_DESKTOP_BOARD_HEIGHT) || 1000));
+  // Where agents are off (Windows for now), "Add agent" opens one notice
+  // instead of the add-agent modal, and the smoke check follows that.
+  const agentsSupported = supervisedAgentsSupported();
   window.setMinimumSize(360, 480);
 
   if (process.env.LETAGENTS_DESKTOP_SMOKE_DEBUG === "1") {
@@ -361,6 +365,28 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         addAgentButton.click();
         const addAgentMenuItem = await waitFor("composer add-agent menu item", () => document.querySelector('[data-testid="desktop-composer-menu-add-agent"]'));
         addAgentMenuItem.click();
+
+        if (!${JSON.stringify(agentsSupported)}) {
+          const unavailableModal = '[data-testid="desktop-add-agent-unavailable-modal"]';
+          const notice = await waitFor(
+            "add-agent unavailable notice",
+            () => document.querySelector(unavailableModal + ' [data-testid="supervised-agents-unavailable"]')
+          );
+          const agentsOff = {
+            appInfo: result.appInfo,
+            roomSnapshot: result.roomSnapshot,
+            workerProviders: result.workerProviders,
+            desktopShell: result.desktopShell,
+            addAgentButton: result.addAgentButton,
+            addAgentUnavailableNotice: Boolean(notice.textContent?.trim()),
+            addAgentModalAbsent: !document.querySelector('[data-testid="desktop-add-agent-modal"]'),
+            addAgentUnavailableCloses: false
+          };
+          document.querySelector(unavailableModal + ' button.desktop-modal-close[aria-label="Close add agent dialog"]')?.click();
+          await waitFor("add-agent unavailable notice closed", () => !document.querySelector(unavailableModal));
+          agentsOff.addAgentUnavailableCloses = true;
+          return agentsOff;
+        }
 
         await waitFor("add-agent modal", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
         result.addAgentModal = true;
