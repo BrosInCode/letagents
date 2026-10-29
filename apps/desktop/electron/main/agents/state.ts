@@ -1,19 +1,30 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { getLetAgentsLocalStatePath } from "../paths.js";
-import { ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../shared/owner-private-fs.mjs";
+import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
+import {
+  ensurePrivateStateFolderSync,
+  ownerPrivatePlatform,
+  prepareOwnerPrivateReads,
+  protectOwnerPrivateSync,
+  readOwnerPrivateFileSync,
+  writePrivateFileAtomicallySync,
+} from "../../../../../shared/owner-private-fs.mjs";
+
+// Windows: the first state read checks the file's DACL; start PowerShell for it now (POSIX: nothing).
+prepareOwnerPrivateReads();
 
 const STATE_LOCK_WAIT_MS = 25;
 const STATE_LOCK_TIMEOUT_MS = 2_000;
@@ -133,11 +144,33 @@ function dropDesktopManagedCodexSessions(state: SharedCodexLiveSessionKeys): voi
   if (Object.keys(currentIds).length === 0) delete state.current_codex_live_session_ids;
 }
 
+/** The state file holds worker tokens: Windows reads it only while its own DACL is private (POSIX: readFileSync). */
+function readStateFile(statePath: string): string {
+  return readOwnerPrivateFileSync(statePath, "utf-8", { upgradeAdministratorsOnly: true });
+}
+
+/** A file that is not private is refused, never read as empty state (which the next write would replace). */
+function isRefusedStateFile(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "EOWNERPRIVATE";
+}
+
+/**
+ * Whether there is anything at the state path. Windows: a link counts (the
+ * reader then refuses it), where existsSync would follow it and call a
+ * dangling link absent. POSIX: existsSync, as before.
+ */
+function stateFileExists(statePath: string): boolean {
+  if (ownerPrivatePlatform() !== "win32") return existsSync(statePath);
+  try { lstatSync(statePath); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+}
+
 function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
-  if (!existsSync(statePath)) return {};
+  if (!stateFileExists(statePath)) return {};
   try {
-    return parseLocalState(readFileSync(statePath, "utf-8"));
-  } catch {
+    return parseLocalState(readStateFile(statePath));
+  } catch (error) {
+    if (isRefusedStateFile(error)) throw error;
     return {};
   }
 }
@@ -147,13 +180,14 @@ export function readAgentLocalStateSnapshot(): {
   complete: boolean;
 } {
   const statePath = getLetAgentsLocalStatePath();
-  if (!existsSync(statePath)) {
+  if (!stateFileExists(statePath)) {
     return { state: {}, complete: true };
   }
 
   try {
-    return { state: parseLocalState(readFileSync(statePath, "utf-8")), complete: true };
-  } catch {
+    return { state: parseLocalState(readStateFile(statePath)), complete: true };
+  } catch (error) {
+    if (isRefusedStateFile(error)) throw error;
     return { state: {}, complete: false };
   }
 }
@@ -166,6 +200,8 @@ function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState)
   // Windows has no mode bits: the shared writer makes the file private before
   // any token is written in it, and before it is published.
   if (ownerPrivatePlatform() === "win32") {
+    // LetAgents' own folder is made private when that hides nothing; any other folder is left as it is.
+    if (resolve(dirname(statePath)) === resolve(letagentsHome())) ensurePrivateStateFolderSync(dirname(statePath));
     writePrivateFileAtomicallySync(statePath, `${JSON.stringify(state, null, 2)}\n`, { syncDirectory: false });
     return;
   }

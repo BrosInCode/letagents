@@ -1,7 +1,7 @@
 /** OpenCode runtime launch ownership, process launch, port and connection discovery, deadlines, runtime control files and default dependencies. */
 import { execFile, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawnTree } from "../../../../../../shared/process-tree.mjs";
@@ -11,7 +11,7 @@ import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProc
 import type { OpenCodeEvent, OpenCodeRuntimeAuth } from "../opencode-server-client.js";
 import { OpenCodeBoundedTurnError } from "./errors.js";
 import type { OpenModelProviderAdapterDependencies } from "./types.js";
-import { protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { ownerPrivatePlatform, protectOwnerPrivate, readOwnerPrivateFile, writePrivateFileAtomically } from "../../../../../../shared/owner-private-fs.mjs";
 
 export function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
@@ -192,7 +192,8 @@ export async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeC
   if (!info.isFile() || info.isSymbolicLink() || info.size > 8_192) {
     throw new Error("OpenCode server authentication sidecar is invalid.");
   }
-  const value = JSON.parse(await readFile(path, "utf8")) as Partial<OpenCodeRuntimeControl>;
+  // The server password: Windows reads it only while its own DACL is private (POSIX: readFile).
+  const value = JSON.parse(await readOwnerPrivateFile(path, "utf8")) as Partial<OpenCodeRuntimeControl>;
   if (typeof value.username !== "string" || !value.username
     || typeof value.password !== "string" || !value.password) {
     throw new Error("OpenCode server authentication sidecar is malformed.");
@@ -241,6 +242,11 @@ export async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeC
 }
 
 export async function writeRuntimeControl(path: string, value: OpenCodeRuntimeControl): Promise<void> {
+  // Windows: in the private runtime folder the file is private from its exclusive create; no tool runs per write.
+  if (ownerPrivatePlatform() === "win32") {
+    await writePrivateFileAtomically(path, `${JSON.stringify(value)}\n`, { syncDirectory: false });
+    return;
+  }
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, {
     encoding: "utf8",

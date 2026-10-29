@@ -23,7 +23,24 @@ export interface WindowsSecurity {
   /** Remove every allow entry for these SIDs (the default backend has it; a fake may leave it out). */
   removeGrants?(path: string, sids: readonly string[]): Promise<void>;
   removeGrantsSync?(path: string, sids: readonly string[]): void;
+  /** Start the synchronous reader now, without waiting (the default backend has it). */
+  prepare?(): void;
+  /** Per path, the owner and DACL (SDDL) and the bytes, all read through one open handle; null where it failed. */
+  readObjects?(paths: readonly string[]): Promise<(SecretObject | null)[]>;
+  readObjectsSync?(paths: readonly string[]): (SecretObject | null)[];
+  /**
+   * Through one open handle: when the file is owned by this account or Administrators and only this account,
+   * SYSTEM and Administrators are allowed in, make it this account's with a protected DACL for this account
+   * and SYSTEM. Its new SDDL, or null when refused.
+   */
+  upgradeObject?(path: string): Promise<string | null>;
+  upgradeObjectSync?(path: string): string | null;
 }
+export interface SecretObject { sddl: string; data: Buffer }
+/** An "owner-alias:<SID>" answer (`O:LA`, or `O:<SID>`): the SDDL aliases that name that SID. */
+export declare function sddlOwnerAliases(answer: string | null | undefined, sid: string): string[];
+/** An "object:" answer, `<SDDL>|<base64 bytes>`, or null. */
+export declare function parseObjectAnswer(answer: string | null | undefined): SecretObject | null;
 export type ToolRunner = (file: string, args: readonly string[], options: { env: NodeJS.ProcessEnv }) => Promise<string>;
 export type ToolRunnerSync = (file: string, args: readonly string[], options: { env: NodeJS.ProcessEnv }) => string;
 
@@ -68,10 +85,18 @@ export declare function icaclsProtectArguments(path: string, kind: PrivateKind, 
 export interface SddlServer { readonly usable: boolean; read(paths: readonly string[]): Promise<(string | null)[]>; stop(): void }
 /** One long-lived PowerShell reader for asynchronous reads; `start` returns its child process. */
 export declare function createSddlServer(start: () => import("node:child_process").ChildProcess): SddlServer;
+export type SyncSddlReaderStart = (channel: { port: import("node:worker_threads").MessagePort; signal: SharedArrayBuffer; timeoutMs: number; startTimeoutMs: number }) => import("node:worker_threads").Worker;
+/** The worker that owns a synchronous reader: `command args` speaks the long-lived reader's line protocol. */
+export declare function syncSddlReaderWorker(command: string, args: readonly string[], env?: NodeJS.ProcessEnv): SyncSddlReaderStart;
+export interface SyncSddlServer { readonly usable: boolean; readonly answeredOnce: boolean; prepare(): void; read(paths: readonly string[]): (string | null)[]; stop(): void }
+/** One long-lived reader for synchronous reads: the caller waits (Atomics.wait) for its worker's answer. */
+export declare function createSyncSddlServer(start: SyncSddlReaderStart, options?: { timeoutMs?: number; startTimeoutMs?: number }): SyncSddlServer;
 export declare function createWindowsSecurity(options?: {
   run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv;
   /** The long-lived reader's child process; null for none. Default: PowerShell, only with the real runners. */
   startServer?: (() => import("node:child_process").ChildProcess) | null;
+  /** The synchronous reader's worker; null for none. Default: PowerShell, only with the real runners. */
+  startSyncServer?: SyncSddlReaderStart | null;
 }): WindowsSecurity;
 
 export interface ParsedSddl {
@@ -81,6 +106,8 @@ export interface ParsedSddl {
 export declare function parseSddl(sddl: string | null | undefined): ParsedSddl | null;
 export declare function sddlIsOwnedBy(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlExtraGrantSids(sddl: string | null | undefined, sid: UserIdentity): string[] | null;
+/** Owned by the user or Administrators; allow entries only for the user, SYSTEM and Administrators. */
+export declare function sddlHasOnlyAdministratorAccess(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlHasProfileDefaultAccess(sddl: string | null | undefined, sid: UserIdentity): boolean;
 /** As sddlIsOwnerPrivate, but inheritance may be on: the entries alone are private. */
 export declare function sddlHasPrivateEntries(sddl: string | null | undefined, sid: UserIdentity): boolean;
@@ -98,6 +125,28 @@ export declare function hasProfileDefaultAccess(path: string, info: StatLike, op
 export declare function isOwnerPrivateSync(path: string, info: StatLike, options?: OwnerPrivateCheckOptions): boolean;
 export declare function assertOwnerPrivate(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Promise<Stats>;
 export declare function assertOwnerPrivateSync(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Stats;
+
+export interface SecretReadOptions extends OwnerPrivateOptions {
+  /** Windows: make a file private, by itself, when only this account, SYSTEM and Administrators can open it (state an older version left). */
+  upgradeAdministratorsOnly?: boolean;
+}
+/**
+ * Read a high-value secret (a token, a key). POSIX: exactly readFileSync(path, encoding).
+ * Windows: read through a no-follow handle only when the file's own DACL is private to this
+ * account (checked again whenever its identity, change time included, is new, and after five
+ * minutes); else EOWNERPRIVATE naming the file. A missing file is ENOENT.
+ */
+export declare function readOwnerPrivateFileSync(path: string, encoding: BufferEncoding, options?: SecretReadOptions): string;
+export declare function readOwnerPrivateFileSync(path: string, encoding?: undefined, options?: SecretReadOptions): Buffer;
+export declare function readOwnerPrivateFile(path: string, encoding: BufferEncoding, options?: SecretReadOptions): Promise<string>;
+export declare function readOwnerPrivateFile(path: string, encoding?: undefined, options?: SecretReadOptions): Promise<Buffer>;
+/** Windows: start the synchronous permissions reader (PowerShell) now, without waiting. POSIX: nothing. */
+export declare function prepareOwnerPrivateReads(options?: OwnerPrivateOptions): void;
+/**
+ * Windows: make LetAgents' own state folder private when only this account, SYSTEM and Administrators
+ * have access to it; leave any other folder as it is. Returns whether it is private now. POSIX: false, nothing done.
+ */
+export declare function ensurePrivateStateFolderSync(folder: string, options?: OwnerPrivateOptions): boolean;
 
 /** `force`: run the full Windows protect even under a verified folder (a repair after a failed check). */
 export declare function protectOwnerPrivate(path: string, kind: PrivateKind, options?: OwnerPrivateOptions & { force?: boolean }): Promise<void>;

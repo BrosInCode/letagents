@@ -38,6 +38,7 @@ import { clearOpenModelEffortCatalogCacheForTest } from "../main/agents/open-mod
 import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { supervisedAgentsOnly } from "./platform.js";
 
 type LaunchRecord = {
@@ -2629,7 +2630,8 @@ test("Open Model reattaching through a sidecar outside its runtime directory wri
   assert.ok(connection?.kind === "opencode_server");
   assert.ok(handle.providerContinuationId);
   const foreignAuthPath = join(foreign, "server-auth.json");
-  await writeFile(foreignAuthPath, await readFile(connection.serverAuthPath, "utf8"), { mode: 0o600 });
+  // A password sidecar is read only while it is private (on Windows, its own DACL).
+  await writePrivateFileAtomically(foreignAuthPath, await readFile(connection.serverAuthPath, "utf8"));
   const kept = join(foreign, "config", "opencode", "AGENTS.md", "nested", "keep.txt");
   await mkdir(join(kept, ".."), { recursive: true });
   await writeFile(kept, "not ours");

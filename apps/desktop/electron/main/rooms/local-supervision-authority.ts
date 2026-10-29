@@ -1,13 +1,14 @@
 import { requestDesktopBoardMutation } from "./local-task-subscription.js";
 import { isLocalBoardOwner } from "../../../../../shared/local-board-owner.mjs";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { localChatDatabasePath, readLocalProfileId } from "../chat-storage/settings.js";
 import { getOrCreateDesktopHostId, saveAgentSession, markAgentSessionEnded, type StoredAgentSessionState } from "../agents/state.js";
 import { beginImmediate, rollback } from "./local-db.js";
 import { getLocalRoom, getLocalTaskDatabase } from "./local-store.js";
 import { endLocalWorkerLeases } from "../../../../../shared/local-work-leases.mjs";
+import { ownerPrivatePlatform, readOwnerPrivateFile, writePrivateFileAtomically } from "../../../../../shared/owner-private-fs.mjs";
 
 // Local authority belongs to this user's local database, never a cloud account.
 // Only public identity and revocation state live in SQLite; bearers are derived
@@ -47,16 +48,47 @@ export async function localSupervisionDatabase() {
 async function key(): Promise<Buffer> {
   signingKey ??= (async () => {
     await localSupervisionDatabase(); // creates the parent directory
-    const path = `${localChatDatabasePath}.supervisor-key`;
-    try { await writeFile(path, randomBytes(32), { flag: "wx", mode: 0o600 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-    await chmod(path, 0o600);
-    const value = await readFile(path);
-    if (value.length !== 32) throw new Error("The local supervisor authority key is invalid.");
-    return value;
+    return loadLocalSupervisorKey(`${localChatDatabasePath}.supervisor-key`);
   })().catch((error) => { signingKey = undefined; throw error; });
   return signingKey;
 }
+
+/** The owner-only key local grant and worker bearers are derived from, made on first use. */
+export async function loadLocalSupervisorKey(path: string): Promise<Buffer> {
+  let value: Buffer;
+  if (ownerPrivatePlatform() === "win32") value = await windowsKey(path);
+  else {
+    try { await writeFile(path, randomBytes(32), { flag: "wx", mode: 0o600 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    await chmod(path, 0o600);
+    value = await readFile(path);
+  }
+  if (value.length !== 32) throw new Error("The local supervisor authority key is invalid.");
+  return value;
+}
+
+/**
+ * Windows: a new key is written private from birth under another name, then
+ * linked into place, so an existing key is never replaced. It is read only
+ * while its own DACL is private to this account; one that is not is refused.
+ */
+async function windowsKey(path: string): Promise<Buffer> {
+  const exists = await lstat(path).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+  if (!exists) {
+    const staged = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writePrivateFileAtomically(staged, randomBytes(32), { syncDirectory: false });
+      await link(staged, path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    } finally {
+      await rm(staged, { force: true });
+    }
+  }
+  return readOwnerPrivateFile(path);
+}
+
 async function token(kind: "grant" | "worker", id: string): Promise<string> {
   return `local_${kind}_${createHmac("sha256", await key()).update(`${kind}\0${id}`).digest("hex")}`;
 }

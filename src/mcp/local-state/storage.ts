@@ -1,20 +1,28 @@
 import { withStateFileLock } from "../../../shared/local-worker-state-fence.mjs";
 import {
   mkdirSync,
-  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "fs";
 import { randomBytes } from "crypto";
-import { dirname } from "path";
+import { dirname, resolve } from "path";
 
-import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
+import { letagentsHome, letagentsHomePath } from "../../../shared/letagents-home.mjs";
+import {
+  ensurePrivateStateFolderSync,
+  ownerPrivatePlatform,
+  prepareOwnerPrivateReads,
+  readOwnerPrivateFileSync,
+  writePrivateFileAtomicallySync,
+} from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetry } from "./rename-retry.js";
 import type { LetagentsLocalState } from "./types.js";
 import { currentSessionScope, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
 
 const DEFAULT_STATE_PATH = letagentsHomePath("mcp-state.json");
+// Windows: the first state read checks the file's DACL; start PowerShell for it now (POSIX: nothing).
+prepareOwnerPrivateReads();
 
 export function getLocalStatePath(): string {
   // A remote session has no state file; the name keys per-session maps.
@@ -30,13 +38,17 @@ export type LocalStateSnapshot = {
 };
 
 function readLocalStateSnapshotFromPath(statePath: string): LocalStateSnapshot {
+  // The file holds the owner token and worker tokens. Windows reads it only
+  // while its own DACL is private (POSIX: readFileSync); one that is not is
+  // refused, never read as empty state that the next write would replace.
   try {
-    const raw = readFileSync(statePath, "utf-8");
+    const raw = readOwnerPrivateFileSync(statePath, "utf-8", { upgradeAdministratorsOnly: true });
     const parsed = JSON.parse(raw) as LetagentsLocalState;
     return typeof parsed === "object" && parsed && !Array.isArray(parsed)
       ? { state: parsed, complete: true }
       : { state: {}, complete: false };
   } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EOWNERPRIVATE") throw error;
     return (error as NodeJS.ErrnoException)?.code === "ENOENT"
       ? { state: {}, complete: true }
       : { state: {}, complete: false };
@@ -68,6 +80,15 @@ export function withLocalStateReadLock<T>(callback: (snapshot: LocalStateSnapsho
 }
 
 function writeLocalStateUnlocked(statePath: string, state: LetagentsLocalState): void {
+  // Windows has no mode bits: the new file is private from its exclusive
+  // create, before any token is written in it. LetAgents' own folder is made
+  // private when that hides nothing (then no tool runs per write); any other
+  // folder is left as it is and each file gets a protected DACL of its own.
+  if (ownerPrivatePlatform() === "win32") {
+    if (resolve(dirname(statePath)) === resolve(letagentsHome())) ensurePrivateStateFolderSync(dirname(statePath));
+    writePrivateFileAtomicallySync(statePath, JSON.stringify(state, null, 2) + "\n", { syncDirectory: false });
+    return;
+  }
   const tempPath = `${statePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
     writeFileSync(tempPath, JSON.stringify(state, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
