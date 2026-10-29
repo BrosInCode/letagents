@@ -29,12 +29,40 @@ export function assertHostApprovalSender(event: IpcMainInvokeEvent): void {
     || event.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame) {
     throw new Error("Host approvals require the main application window.");
   }
-  const expected = new URL(devServerUrl || pathToFileURL(rendererDistPath).toString());
-  const actual = new URL(event.senderFrame.url);
-  if (devServerUrl ? actual.origin !== expected.origin
-    : actual.protocol !== "file:" || actual.pathname !== expected.pathname) {
+  if (!isTrustedAppPageUrl(event.senderFrame.url, devServerUrl || pathToFileURL(rendererDistPath).toString(), {
+    devServer: Boolean(devServerUrl),
+  })) {
     throw new Error("Host approvals require the trusted application page.");
   }
+}
+
+/**
+ * The page is the app's own renderer: the dev server's origin, or exactly the
+ * packaged index.html. Windows paths are case-insensitive and Chromium writes
+ * the drive letter of a file URL in upper case, so there the decoded paths
+ * are compared without case.
+ */
+export function isTrustedAppPageUrl(
+  actualUrl: string,
+  expectedUrl: string,
+  options: { devServer: boolean; platform?: NodeJS.Platform },
+): boolean {
+  let actual: URL;
+  let expected: URL;
+  try {
+    actual = new URL(actualUrl);
+    expected = new URL(expectedUrl);
+  } catch {
+    return false;
+  }
+  if (options.devServer) return actual.origin === expected.origin;
+  if (actual.protocol !== "file:" || actual.host !== expected.host) return false;
+  if ((options.platform ?? process.platform) !== "win32") return actual.pathname === expected.pathname;
+  const comparable = (url: URL) => {
+    try { return decodeURIComponent(url.pathname).toLowerCase(); } catch { return null; }
+  };
+  const actualPath = comparable(actual);
+  return actualPath !== null && actualPath === comparable(expected);
 }
 
 /** Demo windows do not count: the app is open only while its main window is. */

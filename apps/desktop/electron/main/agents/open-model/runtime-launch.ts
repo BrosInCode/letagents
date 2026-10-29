@@ -1,7 +1,7 @@
 /** OpenCode runtime launch ownership, process launch, port and connection discovery, deadlines, runtime control files and default dependencies. */
 import { execFile, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawnTree } from "../../../../../../shared/process-tree.mjs";
@@ -11,6 +11,7 @@ import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProc
 import type { OpenCodeEvent, OpenCodeRuntimeAuth } from "../opencode-server-client.js";
 import { OpenCodeBoundedTurnError } from "./errors.js";
 import type { OpenModelProviderAdapterDependencies } from "./types.js";
+import { protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
 
 export function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
@@ -245,7 +246,7 @@ export async function writeRuntimeControl(path: string, value: OpenCodeRuntimeCo
     encoding: "utf8",
     mode: 0o600,
   });
-  await chmod(temporaryPath, 0o600);
+  await protectOwnerPrivate(temporaryPath, "file");
   await rename(temporaryPath, path);
 }
 

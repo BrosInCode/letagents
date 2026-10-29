@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { letagentsHomePath } from "../../../../../shared/letagents-home.mjs";
+import { SupervisedAgentsUnsupportedError, supervisedAgentsSupported } from "../platform-capabilities.js";
 import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -106,7 +107,7 @@ export abstract class SupervisorDaemonClientBase {
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.loadApprovalSigner = options.loadApprovalSigner ?? loadHostApprovalSigner;
-    this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
+    this.socketPath = options.socketPath ?? letagentsHomePath("daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
     this.lifecycleLogPath = options.lifecycleLogPath ?? join(dirname(this.socketPath), "daemon-lifecycle.jsonl");
@@ -182,6 +183,8 @@ export abstract class SupervisorDaemonClientBase {
     maintenance = false,
   ): Promise<T> {
     if (!maintenance && this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
+    // No supervisor exists where agents are unsupported: never open its socket.
+    if (!supervisedAgentsSupported()) return Promise.reject(new SupervisedAgentsUnsupportedError());
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = createConnection(this.socketPath);

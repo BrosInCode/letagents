@@ -7,14 +7,14 @@ import {
   writeFileSync,
 } from "fs";
 import { randomBytes } from "crypto";
-import { homedir } from "os";
-import { dirname, join } from "path";
+import { dirname } from "path";
 
+import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
 import { renameWithRetry } from "./rename-retry.js";
 import type { LetagentsLocalState } from "./types.js";
 import { currentSessionScope, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
 
-const DEFAULT_STATE_PATH = join(homedir(), ".letagents", "mcp-state.json");
+const DEFAULT_STATE_PATH = letagentsHomePath("mcp-state.json");
 
 export function getLocalStatePath(): string {
   // A remote session has no state file; the name keys per-session maps.

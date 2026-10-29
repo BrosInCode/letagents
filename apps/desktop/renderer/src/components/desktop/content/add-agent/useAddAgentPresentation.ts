@@ -24,6 +24,7 @@ import {
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
 import type { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import type { useAddAgentSetup } from "./useAddAgentSetup";
+import { thisComputerLabel } from "../../../../domain/supervised-agents-support";
 
 interface AddAgentPresentationProps {
   roomIdentifier: string;
@@ -220,8 +221,8 @@ export function useAddAgentPresentation(
   });
 
   const lifecycleDescription = computed(() => props.roomStorageMode === "local"
-    ? "Runs on this Mac and keeps working after you quit LetAgents. Room history is stored on this Mac."
-    : "Runs on this Mac and keeps working after you quit LetAgents. Room messages are shared in the cloud.");
+    ? `Runs on ${thisComputerLabel()} and keeps working after you quit LetAgents. Room history is stored on ${thisComputerLabel()}.`
+    : `Runs on ${thisComputerLabel()} and keeps working after you quit LetAgents. Room messages are shared in the cloud.`);
   const showOpenModelConfig = computed(() => shouldShowOpenModelConfig(selectedProvider.value));
   const showModelSelector = computed(() => shouldShowManagedModelSelector(selectedProvider.value));
   const providerModelOptions = computed(() => providerModels.value?.models ?? []);

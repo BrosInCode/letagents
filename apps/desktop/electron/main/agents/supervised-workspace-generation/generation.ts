@@ -1,7 +1,8 @@
 /** The public entry points: support checks, create, recover, open and remove a generation, and its handle. */
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, lstat, mkdir, realpath, rm, stat } from "node:fs/promises";
+import { access, lstat, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { createPrivateDir, isOwnedByCurrentUser, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, type RecoverSupervisedWorkspaceGenerationOptions, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport } from "./types.js";
 import { FileInspectionSession, validateAppliedOperationArtifacts } from "./file-inspection.js";
 import { ProcessExitError, canonicalGitControlTarget, discoverSourceGitText, gitControlPath, gitText, readStableGitControlFile, runGit, sourceAuthorityText } from "./git.js";
@@ -117,7 +118,7 @@ export async function assertSupervisedWorkspaceGenerationSupported(
   }
   const parent = dirname(sourceRoot);
   const parentInfo = await lstat(parent);
-  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() || parentInfo.uid !== process.getuid?.()) {
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() || !await isOwnedByCurrentUser(parent, parentInfo)) {
     throw generationError("The adjacent generation parent is not a canonical user-owned directory.", "UNSAFE_GENERATION_PARENT");
   }
   try {
@@ -194,7 +195,7 @@ export async function createSupervisedWorkspaceGeneration(
     }
     throw error;
   }
-  await chmod(generationRoot, 0o700);
+  await protectOwnerPrivate(generationRoot, "directory");
   const liveSourceRoot = join(generationRoot, LIVE_NAME);
   const liveWorkspace = support.workspaceRelativePath === "" ? liveSourceRoot : join(liveSourceRoot, support.workspaceRelativePath);
   const now = new Date().toISOString();
@@ -236,7 +237,7 @@ export async function createSupervisedWorkspaceGeneration(
     await disableTrustedGitAuthority(join(generationRoot, AUTHORITY_NAME));
     await reproduceProviderIndex(support.gitIndexPath, liveSourceRoot, limits);
     const baselineFilesRoot = join(generationRoot, BASELINE_FILES_NAME);
-    await mkdir(baselineFilesRoot, { mode: 0o700 });
+    await createPrivateDir(baselineFilesRoot);
     await materializeSourceWorktree(support, liveSourceRoot, baselineFilesRoot, limits);
     const dependencyRoots = await linkIgnoredDependencyRoots(support, liveSourceRoot, limits);
     await installDependencyExcludes(join(liveSourceRoot, ".git"), dependencyRoots, liveSourceRoot, generationId);

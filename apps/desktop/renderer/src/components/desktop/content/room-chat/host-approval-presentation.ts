@@ -1,4 +1,5 @@
 import type { DesktopHostApproval, HostApprovalPresentation, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
+import { localPathBasename } from "../../../../domain/local-path";
 
 type Field = { label: string; value: string };
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object"
@@ -47,7 +48,7 @@ export function hostApprovalTitle(presentation: HostApprovalPresentation): strin
   if (presentation.provider === "claude-code" && request) {
     const input = record(request.input);
     if (["Read", "Write", "Edit"].includes(String(request.tool_name)) && typeof input?.file_path === "string") {
-      return `${request.tool_name} ${text(input.file_path.split("/").at(-1) || input.file_path)}`;
+      return `${request.tool_name} ${text(localPathBasename(input.file_path) || input.file_path)}`;
     }
     if (request.tool_name === "Bash") return "Run a command";
     if (typeof request.tool_name === "string") return `Run ${text(request.tool_name)}`;

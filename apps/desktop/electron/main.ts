@@ -17,6 +17,7 @@ import {
   setExecutionDelegationInvalidationHandler,
   stopDesktopRoomStream,
 } from "./main/room-stream.js";
+import { supervisedAgentsSupported, supervisorDaemonAllowed } from "./main/platform-capabilities.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
 import { allowMainWindowQuit, createWindow, focusMainWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
@@ -52,7 +53,10 @@ function startDesktopApp(): void {
   ]);
 
   const startRentalServices = registerDesktopIpcHandlers();
-  setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDaemonClient.syncExecutionDelegations(roomId); });
+  // Without supervised agents there is no daemon to hold execution delegations.
+  if (supervisedAgentsSupported()) {
+    setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDaemonClient.syncExecutionDelegations(roomId); });
+  }
 
   app.once("ready", async (_event, launchInfo) => {
     prepareDesktopNotificationLaunch(launchInfo);
@@ -62,7 +66,7 @@ function startDesktopApp(): void {
       });
     })();
     const backgroundStartup = (async () => {
-      if (process.platform === "darwin") {
+      if (supervisorDaemonAllowed()) {
         // Register startup before opening the window, including its prerequisites,
         // so passive readers can wait for the same readiness operation.
         await supervisorDaemonClient.ensureRunning(startupPreparation).catch((error) => {

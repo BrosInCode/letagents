@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, opendir, readFile, realpath, rename, rm, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, opendir, readFile, realpath, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { ensureScratchWorkspaceRepository } from "../../../shared/scratch-workspace-repository.mjs";
+import { ownerPrivatePlatform, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 import { WORKSPACE_MARKER, WORKSPACE_MARKER_EXCLUDE, type WorkspaceMarker } from "./workspace-provisioner.js";
 
 const EPHEMERAL_REMOTE_PREFIX = "letagents-ephemeral:";
@@ -54,7 +56,7 @@ export class EphemeralWorkspaceProvisioner {
     const parent = resolve(canonicalRoot, "worktrees", EPHEMERAL_REPO);
     if (!inside(canonicalRoot, parent)) throw new Error("Ephemeral workspace escaped the daemon root.");
     await mkdir(parent, { recursive: true, mode: 0o700 });
-    await chmod(parent, 0o700);
+    await protectOwnerPrivate(parent, "directory");
 
     const path = resolve(parent, input.workAttemptId);
     if (!inside(parent, path)) throw new Error("Ephemeral workspace escaped its private parent.");
@@ -67,7 +69,7 @@ export class EphemeralWorkspaceProvisioner {
       await mkdir(path, { mode: 0o700 });
       reused = false;
     }
-    await chmod(path, 0o700);
+    await protectOwnerPrivate(path, "directory");
 
     const canonicalPath = await realpath(path);
     if (!inside(await realpath(parent), canonicalPath)) throw new Error("Ephemeral workspace resolved outside its private parent.");
@@ -198,13 +200,15 @@ export class EphemeralWorkspaceProvisioner {
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     const handle = await open(temporary, "wx", 0o600);
     try {
+      // Windows has no mode bits: the empty file gets its private DACL before the marker is written.
+      if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(temporary, "file");
       await handle.writeFile(`${JSON.stringify(marker)}\n`, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
     }
     try {
-      await rename(temporary, path);
+      await renameWithRetryAsync(temporary, path);
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw error;

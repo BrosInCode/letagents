@@ -4,6 +4,7 @@ import { withDaemonMaintenanceOperation, readDaemonMaintenance, DAEMON_MAINTENAN
 import { forceStopDaemon, waitForConfirmedDaemonExit } from "../force-daemon-restart.js";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
 import { desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
+import { SupervisedAgentsUnsupportedError, supervisorDaemonAllowed } from "../platform-capabilities.js";
 import { prepareSupervisorState } from "../supervisor-state-recovery.js";
 import {
   HANDOFF_DRAIN_REQUEST_TIMEOUT_MS,
@@ -86,8 +87,8 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
 
   ensureRunning(startupPreparation?: Promise<void>): Promise<DesktopSupervisorDaemonStatus> {
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
-    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
-      return Promise.reject(new Error("Supervised agents currently require macOS."));
+    if (!supervisorDaemonAllowed()) {
+      return Promise.reject(new SupervisedAgentsUnsupportedError());
     }
     if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
       return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
@@ -130,8 +131,9 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   prepareForApplicationUpdate(): Promise<void> {
     this.invalidateReadyStatus();
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
-    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
-      return Promise.reject(new Error("Application update handoff currently requires macOS."));
+    if (!supervisorDaemonAllowed()) {
+      // No supervisor runs on this platform, so there is nothing to hand off.
+      return Promise.resolve();
     }
     if (this.applicationUpdatePrepared) return Promise.resolve();
     if (!this.applicationUpdateHandoff) {
@@ -156,8 +158,8 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
   /** Explicit setup action: reconcile provider environment without replacing an already current service. */
   restartForEnvironmentRefresh(): Promise<DesktopSupervisorDaemonStatus> {
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
-    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
-      return Promise.reject(new Error("Supervised agents currently require macOS."));
+    if (!supervisorDaemonAllowed()) {
+      return Promise.reject(new SupervisedAgentsUnsupportedError());
     }
     if (!this.environmentRefreshHandoff) {
       this.environmentRefreshHandoff = (async () => {
@@ -198,7 +200,7 @@ export abstract class SupervisorDaemonLifecycleClient extends SupervisorDaemonCl
    * never spawn or resurrect the supervisor process.
    */
   async connectIfRunning(): Promise<DesktopSupervisorDaemonStatus | null> {
-    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+    if (!supervisorDaemonAllowed()) {
       return null;
     }
     try {

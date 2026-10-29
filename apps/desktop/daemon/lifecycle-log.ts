@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   closeSync,
   mkdirSync,
   openSync,
@@ -12,6 +11,7 @@ import { dirname, join } from "node:path";
 import { redactCredentialText } from "./credential-redaction.js";
 import { setRoomLatencyReporter } from "./room-latency-trace.js";
 import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
+import { protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
@@ -33,14 +33,14 @@ export class DaemonLifecycleLog {
   constructor(readonly path: string, private readonly maxBytes = MAX_LIFECYCLE_LOG_BYTES) {
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      chmodSync(dirname(path), 0o700);
+      protectOwnerPrivateSync(dirname(path), "directory");
       try {
         if (statSync(path).size >= maxBytes) renameSync(path, `${path}.previous`);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
       this.descriptor = openSync(path, "a", 0o600);
-      chmodSync(path, 0o600);
+      protectOwnerPrivateSync(path, "file");
     } catch {
       this.descriptor = null;
     }
@@ -56,7 +56,7 @@ export class DaemonLifecycleLog {
         this.descriptor = null;
         renameSync(this.path, `${this.path}.previous`);
         this.descriptor = openSync(this.path, "a", 0o600);
-        chmodSync(this.path, 0o600);
+        protectOwnerPrivateSync(this.path, "file");
       }
       const detail = event.detail == null
         ? null

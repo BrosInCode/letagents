@@ -3,7 +3,6 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   constants,
   copyFileSync,
@@ -23,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { openNoFollowSync, ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../../shared/owner-private-fs.mjs";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
 import {
   CURSOR_STATSIG_TEMP_PATTERN,
@@ -267,6 +267,11 @@ export function writePrivateFileAtomic(destination: string, data: string | Buffe
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
     throw new Error(`Cursor private profile parent is not a real directory: ${parent}`);
   }
+  // Windows has no mode bits: the shared writer gives the temporary file the private DACL first.
+  if (ownerPrivatePlatform() === "win32") {
+    writePrivateFileAtomicallySync(destination, data);
+    return;
+  }
   const temporary = `${destination}.tmp-${randomUUID()}`;
   try {
     writeFileSync(temporary, data, { mode: 0o600, flag: "wx" });
@@ -370,13 +375,13 @@ function ensurePrivateDirectory(directory: string): void {
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error(`Cursor private profile path is not a real directory: ${directory}`);
   }
-  chmodSync(directory, 0o700);
+  protectOwnerPrivateSync(directory, "directory");
 }
 
 export function readRegularFileNoFollow(path: string, maxBytes: number): Buffer {
   let fd: number | null = null;
   try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    fd = openNoFollowSync(path, constants.O_RDONLY);
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw new Error("not a regular file");
     if (stat.size > maxBytes) throw new Error(`exceeds the ${maxBytes}-byte limit`);

@@ -306,6 +306,7 @@
 
     <PersonActionsHost ref="personActions" :viewer-login="viewerLogin" :room-identifier="room.identifier" @open-messages-with="emit('open-messages-with', $event)" @work-open="selectedAgentDetailRequest && closeAgentDetail(); selectedReasoningSessionId && closeReasoningInspector()" />
     <AddAgentModal
+      v-if="supervisedAgentsSupported"
       :room-storage-mode="storage.effectiveMode"
       :open="addAgentModalOpen"
       :room-identifier="room.identifier"
@@ -319,6 +320,7 @@
       @close="closeAddAgentModal"
       @choose-worktree="openAgentWorktree"
     />
+    <AddAgentUnavailableModal v-else :open="addAgentModalOpen" @close="closeAddAgentModal" />
   </section>
 </template>
 
@@ -328,6 +330,8 @@ import { computed, nextTick, provide, ref } from "vue";
 import type { DesktopAgentProviderId } from "../../../../../electron/ipc-types";
 import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
 import AddAgentModal from "./AddAgentModal.vue";
+import AddAgentUnavailableModal from "./AddAgentUnavailableModal.vue";
+import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
