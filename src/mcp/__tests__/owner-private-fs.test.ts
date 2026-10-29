@@ -30,6 +30,7 @@ import {
   nullDevice,
   openNoFollow,
   openNoFollowSync,
+  parseObjectAnswer,
   parseSddl,
   parseSddlLines,
   parseWhoamiUser,
@@ -318,6 +319,10 @@ test("many paths are read in a few PowerShell calls, each under the Windows envi
 
 test("a PowerShell answer with the wrong number of lines is refused, not guessed", () => {
   assert.deepEqual(parseSddlLines("noise\r\nok:O:SYD:P\r\nerror:\r\n", 2), ["O:SYD:P", null]);
+  // "error:busy" (an object another process holds without sharing it) is its own answer, and never SDDL.
+  const [busy] = parseSddlLines("error:busy\r\n", 1);
+  assert.equal(parseSddl(busy!), null);
+  assert.deepEqual(parseObjectAnswer(busy), { sddl: "", data: Buffer.alloc(0), busy: true });
   assert.throws(() => parseSddlLines("ok:O:SYD:P", 2), { code: "EOWNERPRIVATE" });
 });
 
@@ -1014,6 +1019,70 @@ test("Windows: a secret another account owns is refused and never taken over, ev
     // No upgrade for another account's file.
     assert.throws(() => readOwnerPrivateFileSync(file, "utf8", { ...options, upgradeAdministratorsOnly: true }), { code: "EOWNERPRIVATE" });
     assert.deepEqual(calls, []);
+  } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: a lapsed verdict whose renewal hangs is used for ten seconds at most", async () => {
+  const root = scratch();
+  const realNow = Date.now;
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const file = join(folder, "proof");
+    writeFileSync(file, "secret");
+    const { security } = fakeSecurity({ [folder]: PRIVATE_FOLDER, [file]: PRIVATE_FILE });
+    let hang = false;
+    let objectReads = 0;
+    const slow: WindowsSecurity = {
+      ...security,
+      async readObjects(paths) { objectReads += 1; return hang ? new Promise(() => undefined) : security.readObjects!(paths); },
+    };
+    const options = { platform: "win32" as const, windowsSecurity: slow, renewInBackground: true };
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    let offset = 6 * 60_000;
+    Date.now = () => realNow() + offset;
+    hang = true;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    assert.equal(objectReads, 2, "the renewal started (and hangs)");
+    offset += 9_000;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret", "still within the grace");
+    assert.equal(objectReads, 2);
+    offset += 2_000;
+    hang = false;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    assert.equal(objectReads, 3, "past the grace the read waits for its own check");
+  } finally { Date.now = realNow; forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: a secret another process holds without sharing it is tried again, then refused as busy, never as exposed", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const file = join(folder, "proof");
+    writeFileSync(file, "secret");
+    const { security } = fakeSecurity({ [folder]: PRIVATE_FOLDER, [file]: PRIVATE_FILE });
+    let busy = 0;
+    const answer = (paths: readonly string[]) => paths.map(() => ({ sddl: "", data: Buffer.alloc(0), busy: true }));
+    const locking: WindowsSecurity = {
+      ...security,
+      async readObjects(paths) { if (busy > 0) { busy -= 1; return answer(paths); } return security.readObjects!(paths); },
+      readObjectsSync(paths) { if (busy > 0) { busy -= 1; return answer(paths); } return security.readObjectsSync!(paths); },
+    };
+    const options = { platform: "win32" as const, windowsSecurity: locking };
+    // A lock that ends within the retries is not seen.
+    busy = 1;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    forgetOwnerPrivateCache();
+    busy = 1;
+    assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "secret");
+    forgetOwnerPrivateCache();
+    // One that lasts is refused with the lock as its cause.
+    const isBusy = (error: NodeJS.ErrnoException) => error.code === "EOWNERPRIVATE" && (error.cause as NodeJS.ErrnoException)?.code === "EBUSY";
+    busy = 3;
+    await assert.rejects(readOwnerPrivateFile(file, "utf8", options), isBusy);
+    busy = 3;
+    assert.throws(() => readOwnerPrivateFileSync(file, "utf8", options), isBusy);
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 

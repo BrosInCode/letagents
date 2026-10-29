@@ -401,7 +401,7 @@ test("a remembered proof whose permissions change afterwards is checked again", 
   } finally { await env.cleanup(); }
 });
 
-test("a failed client privacy check is asked again, not remembered", async () => {
+test("a failed client privacy check is asked again, not remembered", { skip: process.platform === "win32" && "an injected POSIX check; the Windows version uses the fake reader" }, async () => {
   const env = await harness();
   try {
     await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
@@ -545,9 +545,11 @@ const FAKE_EXPOSED_FILE = `O:${FAKE_USER}G:${FAKE_USER}D:P(A;;FA;;;SY)(A;;FA;;;$
  * A fake Windows permissions reader. Folders read as private; a file's
  * "object:" answer is its bytes now and a private DACL, unless its path is in
  * `exposed`. `failures` fails that many object reads (as a slow PowerShell
- * does; with `failureCode`, as an open does), `hang` never answers, and
- * `afterRead` runs once an answer is taken (before it is returned), to change
- * the file under the reader.
+ * does; with `failureCode`, as an open that fails with it), `busy` answers
+ * that many as a file another process holds without
+ * sharing it ("error:busy"), `hang` never answers, and `afterRead` runs once
+ * an answer is taken (before it is returned), to change the file under the
+ * reader.
  */
 function fakeWindows() {
   const counts = { objects: 0, protects: 0 };
@@ -556,6 +558,7 @@ function fakeWindows() {
     exposed: new Set<string>(),
     failures: 0,
     failureCode: undefined as string | undefined,
+    busy: 0,
     hang: false,
     afterRead: null as null | ((path: string) => void),
     options: null as unknown as { platform: "win32"; windowsSecurity: WindowsSecurity },
@@ -567,6 +570,7 @@ function fakeWindows() {
       state.failures -= 1;
       return Promise.reject(Object.assign(new Error("the permissions reader did not answer"), { code: state.failureCode }));
     }
+    if (state.busy > 0) { state.busy -= 1; return Promise.resolve(paths.map(() => ({ sddl: "", data: Buffer.alloc(0), busy: true }))); }
     const answers = paths.map((path) => {
       try { return { sddl: state.exposed.has(resolve(path)) ? FAKE_EXPOSED_FILE : FAKE_PRIVATE_FILE, data: readFileSync(path) }; }
       catch { return null; }
@@ -595,6 +599,73 @@ function swapFile(path: string, data: string): void {
   writeFileSync(`${path}.swap`, data);
   renameSync(`${path}.swap`, path);
 }
+
+test("Windows: a failed client proof read is asked again, not remembered", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    const windows = fakeWindows();
+    // The first read fails (as a slow PowerShell read can); later reads answer "private".
+    windows.failures = 1;
+    const connect = () => connectDaemon(env.path, { proofPath: env.proofPath, handshake: true, ...windows.options });
+    const first = await exchange(connect(), "ping\n");
+    assert.equal(first.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+    assert.equal(isRetryableSupervisorBridgeError(first.error), false);
+    const second = await exchange(connect(), "ping\n");
+    assert.equal(second.data, "pong:ping\n", "the next connection reads again and succeeds");
+    assert.equal(windows.counts.objects, 2);
+  } finally { forgetOwnerPrivateCache(); await env.cleanup(); }
+});
+
+test("Windows: concurrent connections share one proof read; a denied open keeps its code", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    const windows = fakeWindows();
+    const connect = () => connectDaemon(env.path, { proofPath: env.proofPath, handshake: true, ...windows.options });
+    const results = await Promise.all([1, 2, 3].map(() => exchange(connect(), "ping\n")));
+    assert.deepEqual(results.map((result) => result.data), ["pong:ping\n", "pong:ping\n", "pong:ping\n"]);
+    assert.equal(windows.counts.objects, 1, "one handle read for three connections");
+    // Access denied on every try (EACCES; EPERM as libuv reports it): retrying cannot help, and it is not "absent".
+    for (const code of ["EACCES", "EPERM"]) {
+      forgetOwnerPrivateCache();
+      windows.failures = 3;
+      windows.failureCode = code;
+      const denied = await exchange(connect(), "ping\n");
+      assert.equal(denied.error?.code, code);
+      assert.equal(isRetryableSupervisorBridgeError(denied.error), false);
+    }
+  } finally { forgetOwnerPrivateCache(); await env.cleanup(); }
+});
+
+test("Windows: a background renewal whose reader fails drops the lapsed verdict; the next request checks in full", async () => {
+  const env = await harness();
+  const realNow = Date.now;
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    const windows = fakeWindows();
+    const connect = () => connectDaemon(env.path, { proofPath: env.proofPath, handshake: true, ...windows.options });
+    assert.equal((await exchange(connect(), "ping\n")).data, "pong:ping\n");
+    Date.now = () => realNow() + 6 * 60_000;
+    // The renewal's read fails (the reader stopped): a refusal, which is not tried again.
+    windows.failures = 1;
+    assert.equal((await exchange(connect(), "ping\n")).data, "pong:ping\n", "the lapsed verdict serves this request");
+    await new Promise((resolvePause) => setTimeout(resolvePause, 150));
+    assert.equal(windows.failures, 0, "the renewal ran");
+    const objects = windows.counts.objects;
+    assert.equal((await exchange(connect(), "ping\n")).data, "pong:ping\n");
+    assert.equal(windows.counts.objects, objects + 1, "the dropped verdict made this request check in full");
+  } finally { Date.now = realNow; forgetOwnerPrivateCache(); await env.cleanup(); }
+});
 
 test("Windows: one failed proof read does not rotate a valid proof; two do", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
@@ -744,14 +815,18 @@ test("Windows: a missing proof still reads as an absent daemon, and a locked one
     assert.equal(absent.error?.code, "ENOENT");
     assert.equal(isRetryableSupervisorBridgeError(absent.error), true, "the bridge keeps waiting, as for an absent socket");
     assert.equal(windows.counts.objects, 0);
-    // A proof another process holds without sharing (an antivirus scan) past the reader's own retries.
+    // A proof another process holds without sharing it (an antivirus scan) past the reader's own retries.
     await writeFile(proofPath, `${"d".repeat(64)}\n`);
-    windows.failures = 3;
-    windows.failureCode = "EBUSY";
+    windows.busy = 3;
     const locked = await exchange(connect(), "ping\n");
     assert.equal(locked.error?.code, "ENOENT");
     assert.equal(isRetryableSupervisorBridgeError(locked.error), true, "a locked proof is waited for too");
     assert.equal(windows.counts.objects, 3);
+    // The daemon does not replace a proof that stays locked: the lock says nothing about its DACL.
+    windows.busy = 6;
+    await assert.rejects(ensureDaemonProof(proofPath, { ...windows.options, recheckDelayMs: 1 }), (error: NodeJS.ErrnoException) =>
+      error.code === "EOWNERPRIVATE" && (error.cause as NodeJS.ErrnoException)?.code === "EBUSY");
+    assert.equal((await readFile(proofPath, "utf8")).trim(), "d".repeat(64));
   } finally { forgetOwnerPrivateCache(); await rm(root, { recursive: true, force: true }); }
 });
 
@@ -843,4 +918,24 @@ test("real Windows: an exposed file renamed over the proof is refused, despite t
     // The daemon replaces it.
     assert.notEqual(await ensureDaemonProof(env.proofPath, { recheckDelayMs: 1 }), env.proof);
   } finally { await env.cleanup(); }
+});
+
+test("real Windows: a proof another process holds without sharing it is waited for, then accepted", { skip: process.platform !== "win32" && "a Windows share mode" }, async () => {
+  const env = await harness();
+  const { openSync, closeSync, constants } = await import("node:fs");
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    forgetOwnerPrivateCache();
+    // UV_FS_O_EXLOCK: share mode 0, as a scanner that locks the file does.
+    const lock = openSync(env.proofPath, constants.O_RDONLY | (constants as unknown as { UV_FS_O_EXLOCK: number }).UV_FS_O_EXLOCK);
+    let locked;
+    try { locked = await exchange(env.connect(), "ping\n"); } finally { closeSync(lock); }
+    assert.equal(locked.connected, false);
+    assert.equal(locked.error?.code, "ENOENT", `a lock is not a refusal: ${locked.error?.message}`);
+    assert.equal(isRetryableSupervisorBridgeError(locked.error), true);
+    assert.equal((await exchange(env.connect(), "ping\n")).data, "pong:ping\n", "accepted once the lock is gone");
+  } finally { forgetOwnerPrivateCache(); await env.cleanup(); }
 });

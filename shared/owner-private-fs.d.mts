@@ -36,7 +36,8 @@ export interface WindowsSecurity {
   upgradeObject?(path: string): Promise<string | null>;
   upgradeObjectSync?(path: string): string | null;
 }
-export interface SecretObject { sddl: string; data: Buffer }
+/** `busy`: another process held the file without sharing it (a sharing or lock violation); not an answer about privacy. */
+export interface SecretObject { sddl: string; data: Buffer; busy?: boolean }
 /** An "owner-alias:<SID>" answer (`O:LA`, or `O:<SID>`): the SDDL aliases that name that SID. */
 export declare function sddlOwnerAliases(answer: string | null | undefined, sid: string): string[];
 /** An "object:" answer, `<SDDL>|<base64 bytes>`, or null. */
