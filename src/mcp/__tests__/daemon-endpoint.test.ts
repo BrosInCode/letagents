@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { Socket, createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
   acceptDaemonPeer,
   connectDaemon,
   currentWindowsAccount,
+  daemonConnectionTransport,
   daemonEndpoint,
   ensureDaemonProof,
   isWindowsPipePath,
@@ -35,6 +36,23 @@ test("POSIX endpoint is the unchanged socket file and needs no proof", () => {
     });
   }
   assert.throws(() => daemonEndpoint("", { platform: "darwin" }), /state directory is required/);
+});
+
+test("POSIX clients get the plain Unix socket connection, unchanged", { skip: process.platform === "win32" && "a Windows pipe always runs the handshake" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-endpoint-"));
+  const server = createServer((socket) => socket.end("pong\n"));
+  try {
+    const path = daemonEndpoint(root).connectPath;
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, resolve); });
+    const client = connectDaemon(path);
+    // Exactly createConnection(path): a net.Socket of its own class, no handshake transport under it.
+    assert.equal(Object.getPrototypeOf(client), Socket.prototype);
+    assert.equal(daemonConnectionTransport(client), null);
+    assert.deepEqual(await exchange(client, ""), { connected: true, data: "pong\n", error: null });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Windows endpoint is a per-user, per-state-root named pipe with a proof file beside the state", () => {
@@ -279,7 +297,7 @@ test("unref() on a daemon connection still applies after the deferred connect", 
     const client = env.connect();
     client.unref();
     await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
-    const handle = (client as unknown as { _handle: { hasRef?: () => boolean } | null })._handle;
+    const handle = (daemonConnectionTransport(client) as unknown as { _handle: { hasRef?: () => boolean } | null } | null)?._handle;
     assert.equal(handle?.hasRef?.(), false, "the pipe handle does not keep the process alive");
     client.destroy();
   } finally { await env.cleanup(); }
@@ -317,6 +335,31 @@ test("a caller that paused the stream before connect gets it back paused", async
     await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
     assert.equal(client.readableFlowing, false);
     client.destroy();
+  } finally { await env.cleanup(); }
+});
+
+test("a reply the caller has not read yet survives the daemon closing the connection", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", () => admitted.end("pong\n"));
+    }));
+    const client = env.connect();
+    await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
+    client.pause();
+    const transport = daemonConnectionTransport(client);
+    assert.ok(transport);
+    const transportClosed = new Promise<void>((resolve) => transport.once("close", () => resolve()));
+    client.write("ping\n");
+    await transportClosed;
+    let data = "";
+    client.setEncoding("utf8");
+    client.on("data", (chunk: string) => { data += chunk; });
+    const closed = new Promise<void>((resolve) => client.once("close", () => resolve()));
+    client.resume();
+    await closed;
+    assert.equal(data, "pong\n", "the reply waited for the reader, as on a net.Socket");
   } finally { await env.cleanup(); }
 });
 

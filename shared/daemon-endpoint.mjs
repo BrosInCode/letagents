@@ -1,9 +1,11 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { closeSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { Socket, createConnection } from "node:net";
 import { userInfo } from "node:os";
 import { posix, win32 } from "node:path";
 
+import { loadDaemonPipeAddon } from "./daemon-pipe-native.mjs";
 import { letagentsHome } from "./letagents-home.mjs";
 import { isOwnerPrivate, writePrivateFileAtomically } from "./owner-private-fs.mjs";
 
@@ -27,6 +29,11 @@ import { isOwnerPrivate, writePrivateFileAtomically } from "./owner-private-fs.m
 //      sends it no request. The daemon closes every connection that fails.
 //      The check is pluggable (DaemonControlSocket's `peerProofPath`), so a
 //      native peer-SID check can replace it later.
+//   3. A client opens the pipe only through letagents-daemon-pipe.node
+//      (shared/daemon-pipe-native.mjs), never with libuv's connect: with
+//      SECURITY_IDENTIFICATION, so whatever serves the name cannot act as the
+//      client (libuv's default lets it impersonate), and only when the server
+//      process runs as this user, before the client writes a byte.
 
 export const DAEMON_SOCKET_FILE = "daemon.sock";
 export const DAEMON_PROOF_FILE = "daemon-endpoint.proof";
@@ -262,106 +269,242 @@ async function readClientProof(path, options) {
 }
 
 /**
- * Start the client's proof check ahead of the first request, so a short first
- * budget does not pay for it. Errors surface on the request itself.
+ * Start the client's proof check, and load and check the pipe addon, ahead of
+ * the first request, so a short first budget does not pay for either. Errors
+ * surface on the request itself.
  */
 export function prepareDaemonConnection(connectPath, { proofPath, ...options } = {}) {
   if (!isWindowsPipePath(connectPath)) return;
   void Promise.resolve().then(() => readClientProof(proofPath ?? resolveDaemonProofPath(connectPath), options)).catch(() => undefined);
+  setImmediate(() => { try { loadDaemonPipeAddon(); } catch { /* the request reports it */ } }).unref?.();
+}
+
+const PIPE_BUSY_RETRY_MS = 20;
+const kTransport = Symbol("letagents.daemonTransport");
+
+/**
+ * Open a Windows daemon pipe through letagents-daemon-pipe.node (see
+ * shared/daemon-pipe-native.mjs): with SECURITY_IDENTIFICATION, so the server
+ * end cannot act as this user, and only when the process serving it runs as
+ * this user, before this process writes anything. libuv's own connect has
+ * neither property and is never used for this pipe. Every instance busy: try
+ * again until `cancelled()`; each wait is handed to `holdWait`, so it keeps
+ * the process alive exactly while the caller's connection is referenced, as
+ * a connecting socket does.
+ */
+async function openDaemonPipe(connectPath, cancelled, holdWait) {
+  const addon = loadDaemonPipeAddon();
+  for (;;) {
+    let opened;
+    try {
+      opened = addon.open(connectPath);
+    } catch (error) {
+      if (error?.code !== "EBUSY" || cancelled()) throw error;
+      await new Promise((resolve) => holdWait(setTimeout(resolve, PIPE_BUSY_RETRY_MS)));
+      holdWait(null);
+      continue;
+    }
+    // A failed N-API call returns nothing; never wrap a socket without the pipe.
+    if (!Number.isInteger(opened?.fd) || opened.fd < 0) throw Object.assign(new Error("The daemon pipe addon returned no descriptor."), { code: "EIO" });
+    try {
+      return new Socket({ fd: opened.fd, readable: true, writable: true });
+    } catch (error) {
+      closeSync(opened.fd);
+      throw error;
+    }
+  }
+}
+
+/** A Unix socket for the handshake in tests, once it connected. */
+function openUnixSocket(connectPath) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(connectPath);
+    socket.once("error", reject);
+    socket.once("connect", () => { socket.off("error", reject); resolve(socket); });
+  });
+}
+
+/**
+ * What connectDaemon returns for a handshake connection: a net.Socket the
+ * caller uses as any other, whose bytes travel over a transport opened after
+ * the proof was read (the addon's pipe, or a Unix socket in tests). It emits
+ * "connect" (and "ready") only after both sides proved themselves; the
+ * handshake lines never reach the caller.
+ */
+class DaemonConnection extends Socket {
+  #transport = null;
+  #open = false;
+  #referenced = true;
+  /** The busy-pipe retry timer while one runs; it follows ref() and unref(). */
+  #wait = null;
+  #ended = false;
+
+  constructor() {
+    super();
+    this.connecting = true;
+  }
+
+  /** Hold (or, with null, drop) the timer the connection waits on before it has a transport. */
+  holdWait(timer) {
+    this.#wait = timer;
+    if (timer && !this.#referenced) timer.unref();
+  }
+
+  /** The transport socket, for tests that look at its handle. */
+  get [kTransport]() { return this.#transport; }
+
+  attach(transport) {
+    if (this.destroyed) { transport.destroy(); return false; }
+    this.#transport = transport;
+    if (!this.#referenced) transport.unref();
+    transport.on("error", (error) => this.destroy(error));
+    transport.on("end", () => this.#pushEnd());
+    transport.once("close", () => {
+      // Before the handshake nothing reached the caller: close now. After it,
+      // as a net.Socket does, the end follows any data not yet read, and the
+      // stream closes itself once the caller read it.
+      if (!this.#open) this.destroy();
+      else this.#pushEnd();
+    });
+    return true;
+  }
+
+  /** The handshake passed: hand the stream to the caller. */
+  admit() {
+    const transport = this.#transport;
+    this.#open = true;
+    transport.on("data", (chunk) => {
+      this._unrefTimer();
+      if (!this.push(chunk)) transport.pause();
+    });
+    this.connecting = false;
+    this.emit("connect");
+    this.emit("ready");
+  }
+
+  #pushEnd() {
+    if (this.#ended || !this.#open) return;
+    this.#ended = true;
+    this.push(null);
+  }
+
+  _read() {
+    if (this.#open) this.#transport.resume();
+  }
+
+  _write(chunk, encoding, callback) {
+    if (!this.#open) { callback(new Error("connectDaemon: write only after the connect event.")); return; }
+    this._unrefTimer();
+    this.#transport.write(chunk, encoding, callback);
+  }
+
+  _writev(chunks, callback) {
+    if (!this.#open) { callback(new Error("connectDaemon: write only after the connect event.")); return; }
+    this._unrefTimer();
+    this.#transport.cork();
+    chunks.forEach(({ chunk, encoding }, index) => this.#transport.write(chunk, encoding, index === chunks.length - 1 ? callback : undefined));
+    this.#transport.uncork();
+  }
+
+  _final(callback) {
+    const transport = this.#transport;
+    if (!this.#open || !transport || transport.destroyed || transport.writableFinished) { callback(); return; }
+    // A transport error reaches the caller through its "error" listener.
+    transport.end(() => callback());
+  }
+
+  _destroy(error, callback) {
+    this.#transport?.destroy();
+    super._destroy(error, callback);
+  }
+
+  ref() {
+    this.#referenced = true;
+    this.#wait?.ref();
+    this.#transport?.ref();
+    return this;
+  }
+
+  unref() {
+    this.#referenced = false;
+    this.#wait?.unref();
+    this.#transport?.unref();
+    return this;
+  }
+}
+
+/** The transport of a handshake connection (tests only). */
+export function daemonConnectionTransport(socket) {
+  return socket instanceof DaemonConnection ? socket[kTransport] : null;
 }
 
 /**
  * Connect to the daemon. On POSIX this is exactly `createConnection(path)`.
- * On a Windows pipe the handshake runs first: the caller's "connect" (and
- * "ready") fire only after both sides proved themselves, and the daemon's
- * handshake line never reaches the caller's "data" listeners. A missing proof
- * file reads as ENOENT (no daemon has run here); an exposed proof or a daemon
- * that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED. `handshake: true` runs it over a Unix
- * socket too, for tests on hosts without pipes.
+ * On a Windows pipe the proof is read and found private first, then the pipe
+ * is opened through letagents-daemon-pipe.node (never by libuv), then the
+ * handshake runs: the caller's "connect" (and "ready") fire only after both
+ * sides proved themselves, and the handshake lines never reach the caller's
+ * "data" listeners. A missing proof file or pipe reads as ENOENT (no daemon
+ * has run here); an exposed proof, a pipe served by another account or a
+ * daemon that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED; a missing or
+ * unsealed addon is ERR_LETAGENTS_DAEMON_PIPE_ADDON. `handshake: true` runs
+ * the handshake over a Unix socket too, for tests on hosts without pipes.
+ * On Windows every path takes the addon: one that is not `\\.\pipe\<name>`
+ * (another spelling of a pipe, a remote pipe, a file) is refused there, never
+ * handed to libuv.
  */
 export function connectDaemon(connectPath, { proofPath, handshake = false, handshakeTimeoutMs = 10_000, ...privacy } = {}) {
-  if (!handshake && !isWindowsPipePath(connectPath)) return createConnection(connectPath);
-  // The socket connects only after the proof is read and found private (see
-  // readClientProof); until then the daemon sees nothing from this client.
-  const socket = new Socket();
-  let proof = null;
-  // unref() on a socket without a handle waits for "connect", which the
-  // handshake holds; apply it again once connect() made the handle.
-  const unref = socket.unref;
-  let unrefRequested = false;
-  socket.unref = function unrefAfterConnect() { unrefRequested = true; return unref.call(this); };
-  void Promise.resolve().then(() => readClientProof(proofPath ?? resolveDaemonProofPath(connectPath), privacy)).then((value) => {
-    if (socket.destroyed) return;
-    proof = value;
-    socket.connect(connectPath);
-    if (unrefRequested) unref.call(socket);
-  }, (error) => {
-    // A missing or briefly locked proof (no daemon yet; an antivirus scan is a
-    // sharing violation, EBUSY) reads as an absent daemon, which callers retry.
-    // Denied access (EACCES, or EPERM as libuv reports it on Windows) and an
-    // untrusted or exposed proof keep their own codes: retrying cannot help.
-    const code = error?.code === "ENOENT" || error?.code === "EBUSY" ? "ENOENT" : error?.code ?? "ENOENT";
-    socket.destroy(Object.assign(new Error(`Cannot prove this client to the supervisor daemon: ${error.message}`), { code, cause: error }));
-  });
-  const emit = socket.emit;
-  const write = socket.write;
-  const held = [];
-  let open = false;
-  let forcedFlow = false;
-  let priorFlowing = null;
-  // An absolute bound on connect + handshake. A caller's own timeout may be
-  // unlimited (handoff, configuration apply) or reset by trickled bytes; this
-  // one is not. It ends once the daemon proved itself or the socket closed.
+  const pipe = process.platform === "win32";
+  if (!handshake && !pipe) return createConnection(connectPath);
+  const socket = new DaemonConnection();
+  // An absolute bound on proof, connect and handshake. A caller's own timeout
+  // may be unlimited (handoff, configuration apply) or reset by trickled
+  // bytes; this one is not. It ends once the daemon proved itself or the
+  // socket closed.
   const deadline = setTimeout(() => socket.destroy(Object.assign(
     new Error("The supervisor daemon did not complete its handshake in time."), { code: "ETIMEDOUT" })), handshakeTimeoutMs);
   deadline.unref?.();
   socket.once("close", () => clearTimeout(deadline));
-  const clientNonce = nonce();
-  const read = lineReader((line, rest) => {
-    const frame = handshakeFrame(line, ["letagents_daemon_server", "letagents_daemon_challenge"]);
-    if (!frame || rest.length || !sameHex(frame.letagents_daemon_server, answer(proof, "server", clientNonce))) {
-      socket.destroy(untrusted("The supervisor daemon pipe did not prove it belongs to this user."));
+  void (async () => {
+    let proof;
+    try {
+      // The transport opens only after the proof is read and found private
+      // (see readClientProof); until then the daemon sees nothing from this client.
+      proof = await readClientProof(proofPath ?? resolveDaemonProofPath(connectPath), privacy);
+    } catch (error) {
+      // A missing or briefly locked proof (no daemon yet; an antivirus scan is a
+      // sharing violation, EBUSY) reads as an absent daemon, which callers retry.
+      // Denied access (EACCES, or EPERM as libuv reports it on Windows) and an
+      // untrusted or exposed proof keep their own codes: retrying cannot help.
+      const code = error?.code === "ENOENT" || error?.code === "EBUSY" ? "ENOENT" : error?.code ?? "ENOENT";
+      socket.destroy(Object.assign(new Error(`Cannot prove this client to the supervisor daemon: ${error.message}`), { code, cause: error }));
+      return;
+    }
+    if (socket.destroyed) return;
+    let transport;
+    try {
+      transport = pipe ? await openDaemonPipe(connectPath, () => socket.destroyed, (timer) => socket.holdWait(timer)) : await openUnixSocket(connectPath);
+    } catch (error) {
+      socket.destroy(error);
+      return;
+    }
+    if (!socket.attach(transport)) return;
+    const clientNonce = nonce();
+    const read = lineReader((line, rest) => {
+      const frame = handshakeFrame(line, ["letagents_daemon_server", "letagents_daemon_challenge"]);
+      if (!frame || rest.length || !sameHex(frame.letagents_daemon_server, answer(proof, "server", clientNonce))) {
+        socket.destroy(untrusted("The supervisor daemon pipe did not prove it belongs to this user."));
+        return false;
+      }
+      transport.off("data", read);
+      transport.write(`${JSON.stringify({ letagents_daemon_client: answer(proof, "client", frame.letagents_daemon_challenge) })}\n`);
+      clearTimeout(deadline);
+      socket.admit();
       return false;
-    }
-    write.call(socket, `${JSON.stringify({ letagents_daemon_client: answer(proof, "client", frame.letagents_daemon_challenge) })}\n`);
-    open = true;
-    clearTimeout(deadline);
-    // Hand the stream back as the caller left it: with no consumer yet, a
-    // later "data" listener starts the flow as on any fresh socket.
-    if (forcedFlow && priorFlowing === false) socket.pause();
-    else if (forcedFlow && socket.listenerCount("data") === 0) {
-      socket.pause();
-      socket.readableFlowing = null;
-    }
-    for (const [event, args] of held) emit.call(socket, event, ...args);
-    return false;
-  }, () => socket.destroy(untrusted("The supervisor daemon handshake is too large.")));
-  // Node queues a write made before "connect" behind that event, which the
-  // handshake holds, so such a write would wait forever. Callers write from
-  // their "connect" listener; anything earlier ends the connection loudly.
-  socket.write = function writeAfterHandshake(...args) {
-    if (open) return write.apply(this, args);
-    socket.destroy(new Error("connectDaemon: write only after the connect event."));
-    return false;
-  };
-  socket.emit = function emitAfterHandshake(event, ...args) {
-    if (open) return emit.call(this, event, ...args);
-    if (event === "connect") {
-      write.call(socket, `${JSON.stringify({ letagents_daemon_hello: clientNonce })}\n`);
-      held.push([event, args]);
-      // net.Socket defers its first read to a "connect" listener, which runs
-      // only when the held event is replayed. Start reading now; the deferred
-      // call is a no-op once the handle reads.
-      socket._read(socket.readableHighWaterMark);
-      // The daemon's line arrives as "data" only in flowing mode; flow even if
-      // the caller attaches its listener later (it is restored afterwards).
-      if (socket.readableFlowing !== true) { priorFlowing = socket.readableFlowing; forcedFlow = true; socket.resume(); }
-      return true;
-    }
-    if (event === "ready") { held.push([event, args]); return true; }
-    if (event === "data") { read(args[0]); return true; }
-    return emit.call(this, event, ...args);
-  };
+    }, () => socket.destroy(untrusted("The supervisor daemon handshake is too large.")));
+    transport.on("data", read);
+    transport.write(`${JSON.stringify({ letagents_daemon_hello: clientNonce })}\n`);
+  })();
   return socket;
 }
 

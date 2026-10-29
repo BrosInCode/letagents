@@ -7,8 +7,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { desktopAssetNames } from "./release-metadata.mjs";
+import { sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
 import { sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
 import {
+  DAEMON_PIPE_ADDON_APP_PATH,
   PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_APP_USER_MODEL_ID,
   WINDOWS_EXECUTABLE_NAME,
@@ -19,7 +21,8 @@ import {
 // the installed app's smoke check (LETAGENTS_DESKTOP_SMOKE_CHECK=1 loads the
 // real window against seeded local state and exits 0 when it renders), then
 // checks that the installed app finds and uses the sealed process-tree
-// helper, updates the running app the way electron-updater does, and uninstalls it
+// helper, and loads its sealed daemon pipe addon to reach a daemon through
+// it, updates the running app the way electron-updater does, and uninstalls it
 // and checks that the install folder and registration are gone.
 // For CI runners: it installs into the runner user's own profile.
 
@@ -134,6 +137,49 @@ const probe = JSON.parse(/LETAGENTS_PROCESS_TREE_PROBE (.+)/.exec(helperProbe.st
 assert(probe?.helperPath === installedHelper, `The installed app did not accept its helper: ${JSON.stringify(probe)}.`);
 // The job held the app as node and its child (the helper is outside its own job), and ended both.
 assert(probe.before >= 2 && probe.outcome === "exited" && probe.after === 0, `The installed helper did not end its tree: ${JSON.stringify(probe)}.`);
+
+// The daemon pipe addon: the sealed bytes, at the path the app looks in, and
+// loaded by the installed app (as node) to reach a daemon over a real pipe.
+const installedAddon = join(installDirectory, "resources", "app", ...DAEMON_PIPE_ADDON_APP_PATH.split("/"));
+assert(existsSync(installedAddon), `The install has no ${DAEMON_PIPE_ADDON_APP_PATH}.`);
+const installedAddonSha256 = createHash("sha256").update(readFileSync(installedAddon)).digest("hex");
+assert(
+  installedAddonSha256 === sealedDaemonPipeAddonSha256("x64"),
+  `The installed daemon pipe addon is ${installedAddonSha256}; the seal names ${sealedDaemonPipeAddonSha256("x64")}.`,
+);
+const pipeProbe = run(executable, ["-e", [
+  "(async () => {",
+  "  const { mkdtempSync, rmSync } = require('node:fs');",
+  "  const net = require('node:net');",
+  "  const os = require('node:os');",
+  "  const path = require('node:path');",
+  "  const install = process.argv[process.argv.length - 1];",
+  "  const load = (name) => import(require('node:url').pathToFileURL(path.join(install, 'shared', name)).href);",
+  "  const endpoint = await load('daemon-endpoint.mjs');",
+  "  const native = await load('daemon-pipe-native.mjs');",
+  "  const root = mkdtempSync(path.join(os.tmpdir(), 'letagents-pipe-smoke-'));",
+  "  const { connectPath, listenPath, proofPath } = endpoint.daemonEndpoint(root);",
+  "  const proof = await endpoint.ensureDaemonProof(proofPath);",
+  "  const server = net.createServer((socket) => endpoint.acceptDaemonPeer(socket, proof, (admitted) => {",
+  "    admitted.setEncoding('utf8'); admitted.on('data', (chunk) => admitted.end('pong:' + chunk));",
+  "  }));",
+  "  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(listenPath, resolve); });",
+  "  const reply = await new Promise((resolve, reject) => {",
+  "    const socket = endpoint.connectDaemon(connectPath, { proofPath });",
+  "    let data = ''; socket.setEncoding('utf8');",
+  "    socket.once('connect', () => socket.write('smoke\\n'));",
+  "    socket.on('data', (chunk) => { data += chunk; });",
+  "    socket.once('error', reject);",
+  "    socket.once('close', () => resolve(data));",
+  "  });",
+  "  await new Promise((resolve) => server.close(resolve));",
+  "  rmSync(root, { recursive: true, force: true });",
+  "  console.log('LETAGENTS_DAEMON_PIPE_PROBE ' + JSON.stringify({ addon: native.loadDaemonPipeAddon().path, reply }));",
+  "})().catch((error) => { console.error(error); process.exit(1); });",
+].join("\n"), installDirectory], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 2 * 60_000 });
+assert(pipeProbe.status === 0, `The installed daemon pipe probe exited with ${pipeProbe.status}.`);
+const pipe = JSON.parse(/LETAGENTS_DAEMON_PIPE_PROBE (.+)/.exec(pipeProbe.stdout)?.[1] ?? "null");
+assert(pipe?.addon === installedAddon && pipe.reply === "pong:smoke\n", `The installed app did not reach a daemon through its addon: ${JSON.stringify(pipe)}.`);
 const updaterConfig = JSON.parse(readFileSync(join(installDirectory, "resources", "app-update.yml"), "utf8"));
 assert(updaterConfig.url === "https://downloads.letagents.chat/desktop/feeds/win32-x64/", `Unexpected update feed ${updaterConfig.url}.`);
 assert(!("publisherName" in updaterConfig), "Unsigned builds must not ask the updater for a publisher signature.");

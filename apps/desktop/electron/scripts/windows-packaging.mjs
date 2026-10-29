@@ -7,10 +7,12 @@ import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { DAEMON_PIPE_ADDON_NAME, sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
 import { PROCESS_TREE_HELPER_NAME, sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
 
 const execFileAsync = promisify(execFile);
 const processTreeSource = fileURLToPath(new URL("../../native/win-process-tree/", import.meta.url));
+const daemonPipeSource = fileURLToPath(new URL("../../native/win-daemon-pipe/", import.meta.url));
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** Sizes Windows picks from for the taskbar, Start menu, Explorer and Alt+Tab. */
@@ -205,8 +207,43 @@ export function assertWindowsExecutableBytes(bytes, label) {
   }
 }
 
+// The sealed native pieces the installer ships under resources/app/runtime:
+// the process-tree helper and the daemon pipe addon. Each is built where its
+// seal was made (a release job on windows-latest, `build.mjs --check
+// --strict`), and written into the app only when its bytes are the sealed
+// build that the app itself checks before it uses them.
+
 /** Where shared/process-tree.mjs looks for the helper in the packaged app, under resources/app. */
 export const PROCESS_TREE_HELPER_APP_PATH = `runtime/${PROCESS_TREE_HELPER_NAME}`;
+/** Where shared/daemon-pipe-native.mjs looks for the daemon pipe addon in the packaged app, under resources/app. */
+export const DAEMON_PIPE_ADDON_APP_PATH = `runtime/${DAEMON_PIPE_ADDON_NAME}`;
+
+/** `prebuilt` when another job built it, else `build.mjs --arch <arch> --check --strict` in `source`. */
+function buildSealedPiece({ source, name, arch, prebuilt, run }) {
+  if (prebuilt?.trim()) return prebuilt.trim();
+  const built = run(process.execPath, [join(source, "build.mjs"), "--arch", arch, "--check", "--strict"], { stdio: "inherit" });
+  if (built.status !== 0) {
+    throw new Error(`build.mjs --arch ${arch} --check --strict failed (exit ${built.status ?? built.signal ?? built.error?.message}).`);
+  }
+  return join(source, "build", arch, name);
+}
+
+/** Write `from` to `destination` only when its bytes are a Windows image with the sealed sha256. */
+async function stageSealedPiece({ from, destination, arch, name, expected, sealFile }) {
+  const bytes = await readFile(from);
+  assertWindowsExecutableBytes(bytes, from);
+  if (!expected) throw new Error(`No ${arch} build of ${name} is sealed in ${sealFile}.`);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== expected) {
+    throw new Error(
+      `${from} (sha256 ${sha256}) is not the sealed ${name} (${expected}), so the app would refuse it. `
+        + `Build it with the MSVC and SDK the seal names, or reseal ${sealFile}.`,
+    );
+  }
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, bytes);
+  return { sha256, bytes: bytes.length };
+}
 
 /**
  * The process-tree helper to ship: LETAGENTS_PROCESS_TREE_HELPER_BUILD when
@@ -215,13 +252,7 @@ export const PROCESS_TREE_HELPER_APP_PATH = `runtime/${PROCESS_TREE_HELPER_NAME}
  * fails unless this machine built the sealed bytes.
  */
 export function buildProcessTreeHelper({ arch, env = process.env, run = spawnSync } = {}) {
-  const prebuilt = env.LETAGENTS_PROCESS_TREE_HELPER_BUILD?.trim();
-  if (prebuilt) return prebuilt;
-  const built = run(process.execPath, [join(processTreeSource, "build.mjs"), "--arch", arch, "--check", "--strict"], { stdio: "inherit" });
-  if (built.status !== 0) {
-    throw new Error(`build.mjs --arch ${arch} --check --strict failed (exit ${built.status ?? built.signal ?? built.error?.message}).`);
-  }
-  return join(processTreeSource, "build", arch, PROCESS_TREE_HELPER_NAME);
+  return buildSealedPiece({ source: processTreeSource, name: PROCESS_TREE_HELPER_NAME, arch, prebuilt: env.LETAGENTS_PROCESS_TREE_HELPER_BUILD, run });
 }
 
 /**
@@ -230,21 +261,25 @@ export function buildProcessTreeHelper({ arch, env = process.env, run = spawnSyn
  * the app uses at run time). Any other bytes fail the build: the app would
  * refuse them. The checked bytes are the ones written.
  */
-export async function stageProcessTreeHelper({ helper, destination, arch, seal }) {
-  const bytes = await readFile(helper);
-  assertWindowsExecutableBytes(bytes, helper);
+export function stageProcessTreeHelper({ helper, destination, arch, seal }) {
   const expected = seal === undefined ? sealedProcessTreeHelperSha256(arch) : sealedProcessTreeHelperSha256(arch, seal);
-  if (!expected) throw new Error(`No ${arch} build of ${PROCESS_TREE_HELPER_NAME} is sealed in shared/letagents-process-tree.seal.json.`);
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  if (sha256 !== expected) {
-    throw new Error(
-      `${helper} (sha256 ${sha256}) is not the sealed ${PROCESS_TREE_HELPER_NAME} (${expected}), so the app would refuse it. `
-        + "Build it with the MSVC and SDK the seal names, or reseal shared/letagents-process-tree.seal.json.",
-    );
-  }
-  await mkdir(dirname(destination), { recursive: true });
-  await writeFile(destination, bytes);
-  return { sha256, bytes: bytes.length };
+  return stageSealedPiece({ from: helper, destination, arch, name: PROCESS_TREE_HELPER_NAME, expected, sealFile: "shared/letagents-process-tree.seal.json" });
+}
+
+/** The daemon pipe addon to ship: LETAGENTS_DAEMON_PIPE_ADDON_BUILD when set, else a strict build here, as for the helper. */
+export function buildDaemonPipeAddon({ arch, env = process.env, run = spawnSync } = {}) {
+  return buildSealedPiece({ source: daemonPipeSource, name: DAEMON_PIPE_ADDON_NAME, arch, prebuilt: env.LETAGENTS_DAEMON_PIPE_ADDON_BUILD, run });
+}
+
+/**
+ * Write the daemon pipe addon into the app only when its bytes are the
+ * sealed build (shared/letagents-daemon-pipe.seal.json, read by the same
+ * function the app uses before it loads the addon). Other bytes fail the
+ * build: the app would refuse them, and no daemon client could connect.
+ */
+export function stageDaemonPipeAddon({ addon, destination, arch, seal }) {
+  const expected = seal === undefined ? sealedDaemonPipeAddonSha256(arch) : sealedDaemonPipeAddonSha256(arch, seal);
+  return stageSealedPiece({ from: addon, destination, arch, name: DAEMON_PIPE_ADDON_NAME, expected, sealFile: "shared/letagents-daemon-pipe.seal.json" });
 }
 
 /**

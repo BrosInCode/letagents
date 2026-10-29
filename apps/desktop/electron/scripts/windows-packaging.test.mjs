@@ -9,15 +9,18 @@ import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
 import {
+  DAEMON_PIPE_ADDON_APP_PATH,
   PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_EXECUTABLE_NAME,
   assertWindowsExecutableBytes,
+  buildDaemonPipeAddon,
   buildProcessTreeHelper,
   createIcoFile,
   createNsisPayloadInclude,
   findMakensis,
   readPngDimensions,
   resolveWindowsOpenCodeExecutable,
+  stageDaemonPipeAddon,
   stageProcessTreeHelper,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
@@ -222,9 +225,38 @@ test("only the sealed helper bytes are staged; any other bytes fail the build", 
   }
 });
 
-test("the packaged app gets the helper, and its runtime side and seal are required files", async () => {
+test("the packaged app gets the helper and the daemon pipe addon, and their runtime sides and seals are required files", async () => {
   const packager = await readFile(join(scriptsDirectory, "package-artifact.mjs"), "utf8");
   assert.match(packager, /stageProcessTreeHelper\(\{\s*helper: buildProcessTreeHelper\(\{ arch: desktopArch \}\),\s*destination: join\(app, PROCESS_TREE_HELPER_APP_PATH\)/);
-  assert.match(packager, /windows \? \[PROCESS_TREE_HELPER_APP_PATH\] : \[\]/);
+  assert.match(packager, /stageDaemonPipeAddon\(\{\s*addon: buildDaemonPipeAddon\(\{ arch: desktopArch \}\),\s*destination: join\(app, DAEMON_PIPE_ADDON_APP_PATH\)/);
+  assert.match(packager, /windows \? \[PROCESS_TREE_HELPER_APP_PATH, DAEMON_PIPE_ADDON_APP_PATH\] : \[\]/);
   assert.match(packager, /"shared\/letagents-process-tree\.seal\.json"/);
+  assert.match(packager, /"shared\/daemon-endpoint\.mjs", "shared\/daemon-pipe-native\.mjs", "shared\/letagents-daemon-pipe\.seal\.json"/);
+});
+
+test("the installer ships only the sealed daemon pipe addon, where the app looks for it", async () => {
+  assert.equal(DAEMON_PIPE_ADDON_APP_PATH, "runtime/letagents-daemon-pipe.node");
+  const folder = await mkdtemp(join(tmpdir(), "letagents-daemon-pipe-stage-"));
+  try {
+    const addon = join(folder, "built.node");
+    const bytes = Buffer.from([0x4d, 0x5a, 0x90, 0, 1, 2, 3]);
+    await writeFile(addon, bytes);
+    const seal = { builds: { x64: { sha256: createHash("sha256").update(bytes).digest("hex") } } };
+    const destination = join(folder, "app", ...DAEMON_PIPE_ADDON_APP_PATH.split("/"));
+    assert.deepEqual(await stageDaemonPipeAddon({ addon, destination, arch: "x64", seal }), { sha256: seal.builds.x64.sha256, bytes: bytes.length });
+    assert.deepEqual(await readFile(destination), bytes);
+    await rm(destination);
+    await assert.rejects(() => stageDaemonPipeAddon({ addon, destination, arch: "x64", seal: { builds: { x64: { sha256: "0".repeat(64) } } } }), /not the sealed/);
+    await assert.rejects(() => stageDaemonPipeAddon({ addon, destination, arch: "x64", seal: { builds: {} } }), /No x64 build/);
+    await writeFile(addon, "not a DLL");
+    await assert.rejects(() => stageDaemonPipeAddon({ addon, destination, arch: "x64", seal }), /not a Windows executable/);
+    await assert.rejects(() => readFile(destination), { code: "ENOENT" }, "nothing is written for refused bytes");
+  } finally { await rm(folder, { recursive: true, force: true }); }
+  // A prebuilt addon from the release job is used as given; otherwise build.mjs runs strict.
+  assert.equal(buildDaemonPipeAddon({ arch: "x64", env: { LETAGENTS_DAEMON_PIPE_ADDON_BUILD: "D:\\a\\addon.node" } }), "D:\\a\\addon.node");
+  const calls = [];
+  const built = buildDaemonPipeAddon({ arch: "x64", env: {}, run: (command, args) => { calls.push(args.slice(1)); return { status: 0 }; } });
+  assert.deepEqual(calls, [["--arch", "x64", "--check", "--strict"]]);
+  assert.match(built, /win-daemon-pipe[\\/]build[\\/]x64[\\/]letagents-daemon-pipe\.node$/);
+  assert.throws(() => buildDaemonPipeAddon({ arch: "x64", env: {}, run: () => ({ status: 1 }) }), /--strict failed/);
 });

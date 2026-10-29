@@ -23,3 +23,5 @@ export function rememberPrivateDaemonProof(path: string, checkedInfo: import("no
 export function prepareDaemonConnection(connectPath: string, options?: { proofPath?: string | null } & import("./owner-private-fs.mjs").OwnerPrivateOptions): void;
 export function connectDaemon(connectPath: string, options?: { proofPath?: string | null; handshake?: boolean; handshakeTimeoutMs?: number; checkPrivacy?: ProofPrivacyCheck } & import("./owner-private-fs.mjs").OwnerPrivateOptions): Socket;
 export function acceptDaemonPeer(socket: Socket, proof: string, onAccepted: (socket: Socket) => void, options?: { timeoutMs?: number }): void;
+/** The transport under a handshake connection from connectDaemon, or null (tests only). */
+export function daemonConnectionTransport(socket: Socket): Socket | null;
