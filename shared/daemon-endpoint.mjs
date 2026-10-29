@@ -103,14 +103,14 @@ function parseProof(raw) {
  * proof is written in a private staging folder before it is renamed into
  * place, so no other account can hold a handle to it.
  */
-export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, ...options } = {}) {
+export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, checkPrivacy = isOwnerPrivate, ...options } = {}) {
   try {
     const info = await lstat(proofPath);
     // On Windows a failed DACL read and a "not private" answer look the same.
     // A rotation mid-handoff fails clients holding the old proof, so a valid
     // proof is replaced only when a second check agrees.
-    const isPrivate = async () => await isOwnerPrivate(proofPath, info, options)
-      || (await new Promise((resolve) => setTimeout(resolve, recheckDelayMs)), await isOwnerPrivate(proofPath, info, options));
+    const isPrivate = async () => await checkPrivacy(proofPath, info, options)
+      || (await new Promise((resolve) => setTimeout(resolve, recheckDelayMs)), await checkPrivacy(proofPath, info, options));
     if (info.isFile() && await isPrivate()) {
       const existing = parseProof(await readFile(proofPath, "utf8"));
       if (existing) {
@@ -126,7 +126,7 @@ export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, ...op
   // Only a new or rotated proof pays for this check; it binds the record to
   // the file as it is after the rename.
   const written = await lstat(proofPath);
-  if (written.isFile() && await isOwnerPrivate(proofPath, written, options)) rememberPrivateDaemonProof(proofPath, written);
+  if (written.isFile() && await checkPrivacy(proofPath, written, options)) rememberPrivateDaemonProof(proofPath, written);
   return proof;
 }
 
@@ -203,7 +203,8 @@ function checkProofPrivacy(path, info, identity, options) {
   let pending = pendingChecks.get(identity);
   if (!pending) {
     pending = (async () => {
-      const isPrivate = info.isFile() && await isOwnerPrivate(path, info, options);
+      const { checkPrivacy = isOwnerPrivate, ...privacy } = options;
+      const isPrivate = info.isFile() && await checkPrivacy(path, info, privacy);
       if (isPrivate) privateProofs.set(path, { identity, refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
       else if (privateProofs.get(path)?.identity === identity) privateProofs.delete(path);
       return isPrivate;

@@ -94,19 +94,9 @@ test("one failed privacy check does not rotate a valid proof; two do", async () 
   try {
     const proofPath = join(root, DAEMON_PROOF_FILE);
     const first = await ensureDaemonProof(proofPath);
-    // The injected Windows facts answer "no DACL" once, then the real answer.
+    // An injected check answers "not private" (as a failed DACL read does) a given number of times.
     let reads = 0;
-    const flaky = (failures: number) => ({
-      platform: "win32" as const,
-      windowsSecurity: {
-        currentUserSid: async () => "S-1-5-21-1-2-3-1001",
-        currentUserSidSync: () => "S-1-5-21-1-2-3-1001",
-        readSddl: async (paths: readonly string[]) => paths.map(() => (reads++ < failures ? null : "O:S-1-5-21-1-2-3-1001D:P(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)")),
-        readSddlSync: (paths: readonly string[]) => paths.map(() => null),
-        protect: async () => undefined,
-        protectSync: () => undefined,
-      },
-    });
+    const flaky = (failures: number) => ({ checkPrivacy: async () => reads++ >= failures });
     assert.equal(await ensureDaemonProof(proofPath, { ...flaky(1), recheckDelayMs: 1 }), first, "a single failed read keeps the proof");
     reads = 0;
     assert.notEqual(await ensureDaemonProof(proofPath, { ...flaky(2), recheckDelayMs: 1 }).catch(() => "rotation attempted"), first,
@@ -378,20 +368,9 @@ test("a failed client privacy check is asked again, not remembered", async () =>
     // A proof this process did not make: the client must check it.
     const foreignPath = join(env.root, "foreign.proof");
     await writeFile(foreignPath, `${env.proof}\n`, { mode: 0o600 });
+    // The first check fails (as a slow PowerShell read can); later checks answer "private".
     let reads = 0;
-    const sid = "S-1-5-21-1-2-3-1001";
-    const flaky = {
-      platform: "win32" as const,
-      windowsSecurity: {
-        currentUserSid: async () => sid,
-        currentUserSidSync: () => sid,
-        // The first DACL read fails (as a slow PowerShell can); later reads answer "private".
-        readSddl: async (paths: readonly string[]) => paths.map(() => (reads++ === 0 ? null : `O:${sid}D:P(A;;FA;;;${sid})(A;;FA;;;SY)`)),
-        readSddlSync: (paths: readonly string[]) => paths.map(() => null),
-        protect: async () => undefined,
-        protectSync: () => undefined,
-      },
-    };
+    const flaky = { checkPrivacy: async () => reads++ > 0 };
     const connect = () => connectDaemon(env.path, { proofPath: foreignPath, handshake: true, ...flaky });
     const first = await exchange(connect(), "ping\n");
     assert.equal(first.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
