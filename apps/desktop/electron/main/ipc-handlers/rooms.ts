@@ -51,6 +51,7 @@ import type {
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
   DesktopSendRoomMessageResult,
+  DesktopChosenAttachment,
   DesktopStagedAttachment,
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
@@ -68,7 +69,8 @@ import type {
 } from "../../ipc-types/board-governance.js";
 import {
   discardDesktopAttachment,
-  pickAndStageDesktopAttachments,
+  chooseDesktopAttachmentFiles,
+  stageChosenDesktopAttachments,
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
@@ -281,12 +283,18 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       getDesktopReasoningSession(roomIdentifier, sessionId),
   );
   targetIpcMain.handle(
-    "desktop:room:pick-attachments",
+    "desktop:room:choose-attachments",
+    async (_event, limit: unknown): Promise<DesktopChosenAttachment[]> =>
+      chooseDesktopAttachmentFiles(typeof limit === "number" ? limit : undefined),
+  );
+  targetIpcMain.handle(
+    "desktop:room:stage-chosen-attachments",
     async (
       _event,
       roomIdentifier: string,
+      tokens: string[],
     ): Promise<DesktopStagedAttachment[]> =>
-      pickAndStageDesktopAttachments(roomIdentifier),
+      stageChosenDesktopAttachments(roomIdentifier, Array.isArray(tokens) ? tokens.filter((token) => typeof token === "string") : []),
   );
   targetIpcMain.handle(
     "desktop:room:stage-dropped-attachment-contents",

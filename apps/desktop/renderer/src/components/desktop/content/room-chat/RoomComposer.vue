@@ -165,6 +165,7 @@
           aria-controls="desktop-mention-listbox"
           :aria-activedescendant="suggestionsOpen ? `desktop-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
           :disabled="roomLoading || !roomIdentifier"
+          :readonly="sendAfterUpload !== null"
           data-testid="desktop-composer-input"
           @input="handleDraftInput"
           @keydown="handleComposerKey"
@@ -189,7 +190,7 @@
         :disabled="roomLoading || sending || agentLaunching || agentChecking || slash.busy.value || !canSend"
         data-testid="desktop-composer-send"
       >
-        <LoaderCircle v-if="sending || agentLaunching || agentChecking" :size="16" aria-hidden="true" />
+        <LoaderCircle v-if="sending || sendAfterUpload !== null || agentLaunching || agentChecking" :size="16" aria-hidden="true" />
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
     </div>
@@ -605,10 +606,22 @@ function dismissAgentCoach(dontShowAgain: boolean): void {
 
 const canSend = computed(() => Boolean(!props.roomLoading && props.roomIdentifier && (agentChip.value
   ? draft.value.trim() && !agentLaunching.value
-  : draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0)));
+  : draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0)));
+// Enter while files upload sends the message as soon as they finish, with them.
+// The value is how many attachments the message waits for. A failed or removed
+// upload cancels the send, and the draft stays.
+const sendAfterUpload = ref<number | null>(null);
+watch(() => props.pendingAttachmentDrafts.length, (pending) => {
+  const expected = sendAfterUpload.value;
+  if (expected === null || pending > 0) return;
+  sendAfterUpload.value = null;
+  if (props.attachmentDrafts.length >= expected) void submitMessage();
+});
+watch(() => props.messageNamespace || props.roomIdentifier, () => { sendAfterUpload.value = null; });
 const sendLabel = computed(() => {
   if (agentLaunching.value) return `Starting ${agentChipName.value}`;
   if (agentChip.value) return "Start agent with this message";
+  if (sendAfterUpload.value !== null) return "Sends when the files finish uploading";
   return props.sending ? "Sending message" : "Send message";
 });
 // Steering is plain text for one agent's private session, so a reply,
@@ -754,6 +767,10 @@ async function submitMessage(): Promise<void> {
     return;
   }
   if (openGifCommand()) return;
+  if (props.pendingAttachmentDrafts.length) {
+    sendAfterUpload.value = props.attachmentDrafts.length + props.pendingAttachmentDrafts.length;
+    return;
+  }
   await slash.submit(sendRoomMessage);
 }
 

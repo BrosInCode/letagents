@@ -8,7 +8,6 @@ export type AttachmentProblem =
   | { kind: "too-large"; fileName: string | null; limit: string }
   | { kind: "failed"; fileName: string | null }
   | { kind: "too-many"; max: number }
-  | { kind: "busy" }
   | { kind: "no-room" }
   | { kind: "restart" };
 
@@ -46,8 +45,6 @@ export function attachmentProblemNotice(problem: AttachmentProblem): CalmNoticeI
         : { icon: "attach", lead: "Couldn't attach the file", action: { key: "retry-attachment", label: "Try again" } };
     case "too-many":
       return { icon: "attach", lead: `You can attach up to ${problem.max} files to one message` };
-    case "busy":
-      return { icon: "attach", lead: "A file is still attaching · add this one after it" };
     case "no-room":
       return { icon: "attach", lead: "Open a room to attach files" };
     case "restart":
