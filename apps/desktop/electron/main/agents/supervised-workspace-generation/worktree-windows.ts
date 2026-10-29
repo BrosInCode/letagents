@@ -194,7 +194,10 @@ export async function releaseReadOnlyInstalls(manifest: GenerationManifest): Pro
       lstat(target, { bigint: true }).catch(() => null),
       readReleaseIntent(intentPath),
     ]);
-    if (!targetInfo?.isFile()) continue;
+    if (!targetInfo?.isFile()) {
+      if (intent) throw unresolvedRelease(intentPath, target, intent.mode);
+      continue;
+    }
     const sameTarget = (info: { dev: bigint; ino: bigint }) => info.dev === targetInfo.dev && info.ino === targetInfo.ino;
     if (artifactInfo && sameTarget(artifactInfo)) {
       // The file's attribute now (the user may have changed it), unless an
@@ -213,11 +216,25 @@ export async function releaseReadOnlyInstalls(manifest: GenerationManifest): Pro
       await chmod(artifact, mode | 0o222);
       await unlink(artifact);
       await chmod(target, mode);
-    } else if (intent && sameTarget(intent)) {
+    } else if (intent) {
+      // A crash cleared the attribute; the file must still be the one recorded.
+      if (!sameTarget(intent)) throw unresolvedRelease(intentPath, target, intent.mode);
       await chmod(target, intent.mode);
     }
     await unlink(intentPath).catch((error) => { if (!isErrno(error, "ENOENT")) throw error; });
   }
+}
+
+/**
+ * The recorded file moved or was replaced after a crash cleared its
+ * attribute: keep the receipt (and this record) rather than lose it. A person
+ * sets the attribute where the file is now and deletes the record.
+ */
+function unresolvedRelease(intentPath: string, target: string, mode: number): Error {
+  return generationError(
+    `An interrupted cleanup cleared the read-only attribute of ${JSON.stringify(target)}, and that file has since moved or been replaced. Set mode ${mode.toString(8)} on it where it is now, then delete ${JSON.stringify(intentPath)} to finish the cleanup.`,
+    "READ_ONLY_RELEASE_UNRESOLVED",
+  );
 }
 
 async function readReleaseIntent(path: string): Promise<{ dev: bigint; ino: bigint; mode: number } | null> {

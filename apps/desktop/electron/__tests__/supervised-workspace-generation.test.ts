@@ -1449,6 +1449,17 @@ windowsTest("a read-only release interrupted after the journal link is gone stil
         JSON.stringify({ dev: String(info.dev), ino: String(info.ino), mode: 0o444 }));
       chmodSync(target, 0o666);
       rmSync(join(manifest.generationRoot, operation.desiredArtifactRelativePath));
+
+      // The user moved the file meanwhile: the record is kept, cleanup stops.
+      const moved = join(repo, "moved.txt");
+      renameSync(target, moved);
+      await assert.rejects(
+        removeSupervisedWorkspaceGenerationReceipt(handle.manifestPath, { settlementVerified: true }),
+        (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "READ_ONLY_RELEASE_UNRESOLVED",
+      );
+      assert.equal(existsSync(handle.manifestPath), true);
+      renameSync(moved, target);
+
       await removeSupervisedWorkspaceGenerationReceipt(handle.manifestPath, { settlementVerified: true });
       assert.equal(existsSync(dirname(handle.manifestPath)), false);
       assert.equal(lstatSync(target).mode & 0o7777, 0o444);
