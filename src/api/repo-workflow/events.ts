@@ -247,8 +247,11 @@ export function formatRepoBranchLifecycleEventMessage(input: {
   return `${actor} ${action} ${input.branch.refType} ${input.branch.ref} in ${input.repositoryFullName}${taskSuffix}`;
 }
 
+// A cancelled check is almost always a run that a newer push replaced (CI
+// cancels a pull request's unfinished run), and a stale one never ran: each
+// posted one message per job, so a busy PR filled the room with them.
 function isLowSignalCheckRunConclusion(conclusion: string | null | undefined): boolean {
-  return ["success", "skipped", "neutral"].includes((conclusion || "").toLowerCase());
+  return ["success", "skipped", "neutral", "cancelled", "stale"].includes((conclusion || "").toLowerCase());
 }
 
 export function buildRepoRoomEventArtifactMatches(event: RepoRoomEvent): TaskWorkflowArtifactMatch[] {
