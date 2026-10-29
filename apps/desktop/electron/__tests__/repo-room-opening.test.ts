@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, parse } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -166,14 +166,20 @@ test("opening a fetched repo room preserves its identity without calculating bra
       try {
         setHome(join(repoPath, ".."));
         const notAProject = "Choose a project folder, not your home folder or the top of the disk.";
+        // On Windows a full path starts with a drive or a network share: the
+        // top of the disk is the drive root, and "/" is not a full path.
+        const windows = process.platform === "win32";
+        const fullPathHint = windows
+          ? "Enter the full path to the folder, starting with a drive letter (C:\\), \\\\ or ~\\."
+          : "Enter the full path to the folder, starting with / or ~/.";
         for (const [path, error] of [
           [join(repoPath, "missing-folder"), "No folder exists at that path."],
-          ["relative/project", process.platform === "win32"
-            ? "Enter the full path to the folder, starting with a drive letter (C:\\), \\\\ or ~\\."
-            : "Enter the full path to the folder, starting with / or ~/."],
+          ["relative/project", fullPathHint],
           [filePath, "That path is a file. Enter the folder that contains it."],
           ["   ", "Choose a project folder."],
-          ["/", notAProject],
+          ...(windows
+            ? [[parse(repoPath).root, notAProject], ["/", fullPathHint]] as const
+            : [["/", notAProject]] as const),
           ["~", notAProject],
           ["~/", notAProject],
           ...(permissionEnforced
