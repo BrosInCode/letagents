@@ -15,7 +15,7 @@ import {
   RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY,
   WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL,
 } from "./worker-binding-retention.js";
-import { protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -842,6 +842,7 @@ export class WorkerBindingStore {
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
       handle = await open(temporary, "wx", 0o600);
+      await privateEntryCreated(temporary, "file");
       await handle.writeFile(redactedLegacyBackup(raw, expectedChecksum), "utf8");
       await handle.sync();
     } finally { await handle?.close(); }
@@ -874,6 +875,7 @@ export class WorkerBindingStore {
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
       handle = await open(temporary, "wx", 0o600);
+      await privateEntryCreated(temporary, "file");
       // Recovery evidence proves the exact imported source without retaining
       // its bearer token in a second filesystem artifact.
       await handle.writeFile(redactedLegacyBackup(raw, expectedChecksum), "utf8");

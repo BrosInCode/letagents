@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { lstat, mkdir, realpath, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { isOwnerPrivate, openNoFollow, privateEntryCreated } from "../../../../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../../../../shared/rename-retry.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, RETIRED_NAME, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type TreeEntry } from "./types.js";
 import { assertSafeRelativePath, fsyncDirectory, generationDirectoryName, generationError, isErrno, isProtectedPath, manifestPathOf, operationId, projectRelativePath, safeRelative } from "./helpers.js";
@@ -56,7 +56,7 @@ export async function persistManifest(manifest: GenerationManifest): Promise<voi
   let closed = false;
   try {
     // Windows has no mode bits: the empty file gets its private DACL before the manifest is written.
-    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(temporary, "file");
+    await privateEntryCreated(temporary, "file");
     await descriptor.writeFile(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     await descriptor.sync();
     await descriptor.close();

@@ -48,12 +48,29 @@ export declare function parseWhoamiUser(output: string): { sid: string; domain: 
 export declare function userSidAliases(user: { sid: string; domain: string | null }, computerName: string | undefined): string[];
 /** A SID string, or the SID with the SDDL aliases that also name it. */
 export type UserIdentity = string | { sid: string; aliases?: readonly string[] };
+/** The environment value that carries paths to the PowerShell read: one per line. */
+export declare function encodeSddlPaths(paths: readonly string[]): string;
 export declare function parseSddlLines(output: string, count: number): (string | null)[];
 export declare function icaclsRemoveArguments(path: string, sids: readonly string[]): string[];
+/**
+ * After this process made `path` exclusively (open "wx", mkdir): POSIX no-op;
+ * Windows marks it known when its folder is verified, else protects it.
+ */
+export declare function privateEntryCreated(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): Promise<void>;
+export declare function privateEntryCreatedSync(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): void;
+/** Forget every folder verified private in this process (tests that change a DACL behind the cache's back). */
+export declare function forgetOwnerPrivateCache(): void;
 export declare function icaclsSetOwnerArguments(path: string, sid: string): string[];
 export declare const INHERITED_GROUP_SIDS: readonly string[];
 export declare function icaclsProtectArguments(path: string, kind: PrivateKind, sid: string): string[];
-export declare function createWindowsSecurity(options?: { run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv }): WindowsSecurity;
+export interface SddlServer { readonly usable: boolean; read(paths: readonly string[]): Promise<(string | null)[]>; stop(): void }
+/** One long-lived PowerShell reader for asynchronous reads; `start` returns its child process. */
+export declare function createSddlServer(start: () => import("node:child_process").ChildProcess): SddlServer;
+export declare function createWindowsSecurity(options?: {
+  run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv;
+  /** The long-lived reader's child process; null for none. Default: PowerShell, only with the real runners. */
+  startServer?: (() => import("node:child_process").ChildProcess) | null;
+}): WindowsSecurity;
 
 export interface ParsedSddl {
   owner: string;
@@ -63,6 +80,10 @@ export declare function parseSddl(sddl: string | null | undefined): ParsedSddl |
 export declare function sddlIsOwnedBy(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlExtraGrantSids(sddl: string | null | undefined, sid: UserIdentity): string[] | null;
 export declare function sddlHasProfileDefaultAccess(sddl: string | null | undefined, sid: UserIdentity): boolean;
+/** As sddlIsOwnerPrivate, but inheritance may be on: the entries alone are private. */
+export declare function sddlHasPrivateEntries(sddl: string | null | undefined, sid: UserIdentity): boolean;
+/** The DACL has an allow entry for this account that files and folders inherit (OI and CI). */
+export declare function sddlPassesPrivateEntriesOn(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlIsOwnerPrivate(sddl: string | null | undefined, sid: UserIdentity): boolean;
 
 export declare function isOwnedByCurrentUser(path: string, info: StatLike, options?: OwnerPrivateOptions): Promise<boolean>;
@@ -76,8 +97,9 @@ export declare function isOwnerPrivateSync(path: string, info: StatLike, options
 export declare function assertOwnerPrivate(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Promise<Stats>;
 export declare function assertOwnerPrivateSync(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Stats;
 
-export declare function protectOwnerPrivate(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): Promise<void>;
-export declare function protectOwnerPrivateSync(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): void;
+/** `force`: run the full Windows protect even under a verified folder (a repair after a failed check). */
+export declare function protectOwnerPrivate(path: string, kind: PrivateKind, options?: OwnerPrivateOptions & { force?: boolean }): Promise<void>;
+export declare function protectOwnerPrivateSync(path: string, kind: PrivateKind, options?: OwnerPrivateOptions & { force?: boolean }): void;
 export declare function createPrivateDir(path: string, mkdirOptions?: { recursive?: boolean }, options?: OwnerPrivateOptions): Promise<string | undefined>;
 export declare function createPrivateDirSync(path: string, mkdirOptions?: { recursive?: boolean }, options?: OwnerPrivateOptions): string | undefined;
 export declare function syncDirectory(path: string, options?: OwnerPrivateOptions): Promise<void>;
