@@ -83,7 +83,7 @@ export function signalExactProcess(
 ): "signalled" | "absent" | "ambiguous" {
   const status = adapter.exactProcessStatus(pid, processIdentity);
   if (status !== "exact") return status;
-  adapter.deps.signalProcess(pid, signal);
+  adapter.deps.signalProcess(pid, signal, processIdentity);
   return "signalled";
 }
 

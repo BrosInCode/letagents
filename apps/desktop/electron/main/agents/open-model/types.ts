@@ -24,7 +24,8 @@ export interface OpenModelProviderAdapterDependencies {
   }): { child: ChildProcess; exited: Promise<ProviderProcessExit> };
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
-  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  /** `identity`: the recorded birth; on Windows a pid this process does not hold is ended only with it. */
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
   allocatePort(): Promise<number>;
   discoverRuntimeConnection(runtimeRoot: string): Promise<{ pid: number; url: string } | null>;
   fetch(input: string, init?: RequestInit): Promise<Response>;

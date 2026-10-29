@@ -43,7 +43,8 @@ export interface CursorProviderAdapterDependencies {
     signal?: AbortSignal;
   }): Promise<CursorPersonalIdentity>;
   bindPersonalIdentity(profile: CursorManagedProfile, identity: CursorPersonalIdentity): void;
-  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  /** `identity`: the recorded birth; on Windows a pid this process does not hold is ended only with it. */
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   prepareTurnState(path: string): void;

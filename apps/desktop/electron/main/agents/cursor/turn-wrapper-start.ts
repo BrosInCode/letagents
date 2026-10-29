@@ -285,6 +285,8 @@ async function finishNotStarted(error, calledFromStart = false) {
   process.exit(1);
 }
 process.on("message", (message) => {
+  // The stop request where there are no signals (Windows): the same as SIGTERM.
+  if (message && message.type === "terminate") { if (native) void beginFatalReaping(); else void finishNotStarted(); return; }
   if (!message || message.type !== "start") return;
   if (restrictRemoteAuthority) {
     if (typeof message.providerAuthorization !== "string"

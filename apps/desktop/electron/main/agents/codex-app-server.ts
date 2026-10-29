@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
 import { CODEX_TOKEN_SERVICE_OVERRIDES, codexHomeForSandboxedLaunch } from "./codex-agent-home.js";
 import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-home-harness.js";
 import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
@@ -548,7 +548,7 @@ export function launchCodexAppServer(
   const outputCapture = createCodexAppServerOutputCapture(
     sensitiveCodexAppServerLaunchValues(env, options),
   );
-  const child = spawn(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
+  const child = spawnTree(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
     cwd: options.trustedProjectPath?.trim() || undefined,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -639,18 +639,6 @@ export async function launchManagedCodexAppServer(
 }
 
 export function terminateSpawnedProcess(pid: number): void {
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, "SIGTERM");
-      return;
-    }
-  } catch {
-    // Fall through to direct process termination.
-  }
-
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    // Already gone.
-  }
+  // The process group, else the pid; on Windows the tree's job.
+  signalTree(pid, "SIGTERM");
 }

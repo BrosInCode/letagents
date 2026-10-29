@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import http from "node:http";
@@ -7,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { CODEX_OWNER_FEATURE_OVERRIDES, codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
 
 /**
  * A guest Codex (an agent given to someone else's room) runs with no tool
@@ -117,7 +117,7 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
     const isolation = await codexOwnerIsolationOverrides(codexBin, { env, cwd: folder, configOverrides: [...CODEX_GUEST_TOOL_OVERRIDES] });
     await new Promise<void>(resolve => {
       // stdin closed: `codex exec` otherwise waits to read more of the prompt from it.
-      const child = spawn(codexBin, [
+      const child = spawnTree(codexBin, [
         "exec", "--skip-git-repo-check", "--cd", folder, "-s", "read-only",
         "-c", 'model_provider="letagents_probe"',
         "-c", `model_providers.letagents_probe={name="letagents_probe",base_url="http://127.0.0.1:${port}/v1",wire_api="responses",env_key="LETAGENTS_PROBE_KEY"}`,
@@ -125,8 +125,9 @@ export async function probeCodexGuestTools(codexBin: string, env: NodeJS.Process
         ...[...isolation, ...CODEX_GUEST_TOOL_OVERRIDES].flatMap(override => ["-c", override]),
         "probe",
       ], { env: { ...env, LETAGENTS_PROBE_KEY: "probe" }, stdio: ["ignore", "ignore", "ignore"], detached: process.platform !== "win32" });
-      // An npm-installed `codex` is a Node wrapper around the native binary: stop the whole group, not just the wrapper.
-      const stopGroup = () => { try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ } };
+      // An npm-installed `codex` is a Node wrapper around the native binary: stop the whole group (on Windows the
+      // helper's job), not just the wrapper.
+      const stopGroup = () => { if (child.pid) signalTree(child.pid, "SIGKILL", { child, groupOnly: true }); };
       const timer = setTimeout(() => { stopGroup(); child.kill("SIGKILL"); }, timeoutMs);
       // The wrapper can exit while the native binary keeps running: end what is left of its group.
       child.on("exit", () => { clearTimeout(timer); stopGroup(); resolve(); });

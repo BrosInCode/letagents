@@ -55,7 +55,8 @@ export interface CodexProviderAdapterDependencies {
     serverUrl: string,
     onNotification: (notification: RpcNotification) => void,
   ): CodexAdapterRpc;
-  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  /** `identity`: the recorded birth; on Windows a pid this process does not hold is ended only with it. */
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<CodexAppServerExit>;
