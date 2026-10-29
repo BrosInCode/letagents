@@ -29,8 +29,6 @@ jobs:
           home="${RUNNER_TEMP//\\//}/home"
           mkdir -p "${home}"
           git config --global core.autocrlf false
-          git config --global user.email ci@example.invalid
-          git config --global user.name ci
           printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,7 +41,7 @@ jobs:
           if [ "${{ matrix.side }}" = "before" ]; then git checkout -q origin/staging; fi
           git log --oneline -1
           git fetch -q origin claude/win2-desktop-ci-a8fb64
-          git merge -q --no-edit FETCH_HEAD
+          git -c user.email=ci@example.invalid -c user.name=ci merge -q --no-edit FETCH_HEAD
           git log --oneline -3
 
       - name: Setup Node.js
