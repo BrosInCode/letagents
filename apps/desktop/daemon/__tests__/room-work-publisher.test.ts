@@ -1166,7 +1166,7 @@ test('only a recorded remote that is reached over the network is asked', async (
   assert.equal(recordedRemote(identity('letagents-ephemeral:room', '0'.repeat(40))), null);
 });
 
-test('a remote that does not answer delays neither the start of a turn nor its capture for long', async t => {
+test('a remote that does not answer delays neither the start of a turn nor its capture for long', { skip: supervisedAgentsOnly }, async t => {
   const f = await fixture(t);
   // The recorded remote accepts the connection and never says anything.
   const sockets: Socket[] = [];

@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { supervisedAgentsOnly } from "./platform.js";
 import { randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { createElectronTestEnv } from "./harness.js";
+import { readFile } from "node:fs/promises";
+import { assertOwnerPrivateFile, createElectronTestEnv } from "./harness.js";
 
 const environment = createElectronTestEnv({ prefix: "local-supervision-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
@@ -70,7 +70,7 @@ test("local worker authority is scoped, stable, private, and independent of clou
   assert.equal(getStoredAgentSession(oak.session.session_id)?.agent_key, oak.grant.agentKey);
   assert.equal(getStoredAgentSession(oak.session.session_id)?.session_token, "");
   assert.ok(!(await readFile(environment.statePath!, "utf8")).includes(oak.session.worker_bearer));
-  assert.equal((await stat(`${environment.localChatDbPath}.supervisor-key`)).mode & 0o777, 0o600);
+  assertOwnerPrivateFile(`${environment.localChatDbPath}.supervisor-key`, environment.tempDir);
   await setChatStorageMode("cloud");
   assert.equal((await oak.request("join")).room_id, roomId);
   await createLocalRoom({ roomIdentifier: "local_other" });
@@ -556,7 +556,7 @@ test("local saved work is atomic, replayable, and readable while signed out", as
 });
 
 
-test("daemon restart restores local authority and the unread cursor without cloud access", async () => {
+test("daemon restart restores local authority and the unread cursor without cloud access", { skip: supervisedAgentsOnly }, async () => {
   const { join } = await import("node:path");
   const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
   const { ManifestStore } = await import(new URL("../../daemon/manifest-store.ts", import.meta.url).href);
