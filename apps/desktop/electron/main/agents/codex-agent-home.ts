@@ -149,13 +149,14 @@ const WINDOWS_OWN_DATABASE = /\.(?:sqlite3?|db)(?:-wal|-shm|-journal)?$/i;
  * removed and linked again. One that changed is an entry of its own.
  */
 const WINDOWS_LINK_RECORD = ".letagents-links.json";
-type LinkedFileState = { id: string; size: number; mtimeMs: number };
+/** `mtimeNs` in full (NTFS keeps 100 ns), as text: a millisecond would let a write in the same one pass for no write. */
+type LinkedFileState = { id: string; size: string; mtimeNs: string };
 
 function linkedFileState(path: string): LinkedFileState | null {
   try {
     const entry = lstatSync(path, { bigint: true });
     if (!entry.isFile() || entry.ino === 0n) return null;
-    return { id: `${entry.dev}:${entry.ino}`, size: Number(entry.size), mtimeMs: Number(entry.mtimeMs) };
+    return { id: `${entry.dev}:${entry.ino}`, size: String(entry.size), mtimeNs: String(entry.mtimeNs) };
   } catch {
     return null;
   }
@@ -167,7 +168,7 @@ function readLinkRecord(home: string): Record<string, LinkedFileState> {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, LinkedFileState] => {
       const state = entry[1] as Partial<LinkedFileState> | null;
-      return typeof state?.id === "string" && typeof state.size === "number" && typeof state.mtimeMs === "number";
+      return typeof state?.id === "string" && typeof state.size === "string" && typeof state.mtimeNs === "string";
     }));
   } catch {
     return {};
@@ -214,7 +215,7 @@ export function sddlIsReadOnlyFolderFor(sddl: string | null | undefined, user: U
   const { sid, aliases = [] } = typeof user === "string" ? { sid: user } : user;
   const isUser = (ace: string) => ace === sid.toUpperCase() || aliases.includes(ace);
   return parseSddl(sddl)!.dacl!.aces.every((ace) => {
-    if (ace.type !== "A" || !isUser(ace.sid)) return true;
+    if ((ace.type !== "A" && ace.type !== "OA") || !isUser(ace.sid)) return true;
     if (!/^0x[0-9a-f]{1,8}$/i.test(ace.rights)) return false;
     return (Number.parseInt(ace.rights, 16) & ~READ_ONLY_FOLDER_MASK) === 0;
   });
@@ -226,8 +227,8 @@ let rulesFolderSecurity: Required<ReturnType<typeof createWindowsSecurity>> | nu
 /**
  * Make the empty `rules` folder one nothing can be saved into: mode 0555 on
  * POSIX, and on Windows a DACL that lets this account only read it. On
- * Windows the effect is proved, not assumed: a file is made in it, and when
- * that works the folder is not used.
+ * Windows the descriptor is read back, and a folder whose descriptor is not
+ * exactly that one is not used.
  */
 export function lockRulesFolder(rules: string, platform: NodeJS.Platform = process.platform): void {
   if (platform !== "win32") {
@@ -253,17 +254,9 @@ export function lockRulesFolder(rules: string, platform: NodeJS.Platform = proce
   if (!sddlIsReadOnlyFolderFor(sddl, identity)) {
     throw Object.assign(new Error("The rules folder of the agents' Codex home could not be made read-only: other entries remain in its permissions."), { code: "EPERM" });
   }
-  // And the effect, for this account's own token.
-  const probe = join(rules, ".letagents-read-only-check");
-  try {
-    writeFileSync(probe, "", { flag: "wx" });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EPERM" || code === "EACCES") return;
-    throw error;
-  }
-  rmSync(probe, { force: true });
-  throw Object.assign(new Error("The rules folder of the agents' Codex home could not be made read-only."), { code: "EPERM" });
+  // The descriptor read back is the proof. A write from this process would not be: Node opens files
+  // with backup semantics, so an elevated process whose backup privileges are on (one started from
+  // Git Bash, say) writes past any DACL. Codex opens its rule files without them.
 }
 
 /** Which file or folder a path leads to, with links followed. Null when nothing is there. */
@@ -404,7 +397,7 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
   const formerLink = (path: string, entry: Stats, name: string) => {
     if (!windows || !entry.isFile() || !record[name] || linkedFile(path, entry, name)) return false;
     const now = linkedFileState(path);
-    return now !== null && now.id === record[name].id && now.size === record[name].size && now.mtimeMs === record[name].mtimeMs;
+    return now !== null && now.id === record[name].id && now.size === record[name].size && now.mtimeNs === record[name].mtimeNs;
   };
   // The folder is looked at before anything in it is changed: a launch that is refused leaves it as it was.
   const before = readdirSync(home).filter((name) => name !== "rules" && !(windows && name === WINDOWS_LINK_RECORD)).sort().map((name) => ({ name, path: join(home, name), entry: lstatSync(join(home, name)) }));

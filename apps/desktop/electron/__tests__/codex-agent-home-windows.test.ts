@@ -8,9 +8,10 @@ import assert from "node:assert/strict";
 import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { CodexAgentHomeSignInError, linkCodexAgentHome } from "../main/agents/codex-agent-home.js";
+import { CodexAgentHomeError, CodexAgentHomeSignInError, linkCodexAgentHome } from "../main/agents/codex-agent-home.js";
 
 const windowsOnly = process.platform === "win32" ? false : "a Windows host is needed";
 
@@ -54,8 +55,13 @@ test("Windows: nothing can be saved into the agents' rules folder, and the next 
   const { owner, agents, remove } = fixture();
   t.after(remove);
   linkCodexAgentHome(owner, agents);
-  assert.throws(() => writeFileSync(join(agents, "rules", "default.rules"), "prefix_rule()\n"), (error: NodeJS.ErrnoException) => error.code === "EPERM" || error.code === "EACCES");
-  assert.throws(() => mkdirSync(join(agents, "rules", "nested")), (error: NodeJS.ErrnoException) => error.code === "EPERM" || error.code === "EACCES");
+  // Written as Codex writes, without backup semantics: Node uses them, so an elevated test process
+  // whose backup privileges are on (one started from Git Bash) would write past any DACL.
+  const cmd = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe");
+  const runs = (line: string) => spawnSync(cmd, ["/d", "/c", line], { windowsHide: true }).status === 0;
+  assert.equal(runs(`type nul > "${join(agents, "rules", "default.rules")}"`), false, "no rule file can be made");
+  assert.equal(runs(`mkdir "${join(agents, "rules", "nested")}"`), false, "no folder can be made");
+  assert.deepEqual(readdirSync(join(agents, "rules")), []);
   // Linking again is the same home, and the read-only folder is replaced without trouble.
   assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
   assert.ok(sameFile(join(agents, "auth.json"), join(owner, "auth.json")));
@@ -122,4 +128,16 @@ test("Windows: a file that is a link in the owner's home is linked as the file i
   assert.ok(sameFile(join(agents, "config.toml"), dotfile), "the agents' name is the file the owner's link leads to");
   // Linking again keeps it: it is still the owner's file, not one of the agents' own.
   assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
+});
+
+test("Windows: an agents' home whose junction leads into another Codex home is refused and left as it was", { skip: windowsOnly }, (t) => {
+  const { owner, agents, remove } = fixture();
+  t.after(remove);
+  linkCodexAgentHome(owner, agents);
+  const other = join(owner, "..", "other-codex");
+  mkdirSync(join(other, "sessions"), { recursive: true });
+  rmSync(join(agents, "sessions"));
+  symlinkSync(join(other, "sessions"), join(agents, "sessions"), "junction");
+  assert.throws(() => linkCodexAgentHome(owner, agents), CodexAgentHomeError);
+  assert.ok(lstatSync(join(agents, "sessions")).isSymbolicLink(), "the junction is not turned under a running agent");
 });

@@ -219,3 +219,10 @@ test("the read-only rules folder is accepted only as exactly the account's read-
   assert.equal(sddlIsReadOnlyFolderFor(null, sid), false);
   assert.equal(sddlIsReadOnlyFolderFor(readOnly.replace(sid + ")", "LA)"), { sid, aliases: ["LA"] }), true, "the account by its alias");
 });
+
+test("an object allow entry of the account is held to the same read-only rights", () => {
+  const sid = "S-1-5-21-1-2-3-1001";
+  const base = `O:${sid}G:${sid}D:PAI(A;OICI;FA;;;SY)(A;OICI;0x1e00a9;;;${sid})`;
+  assert.equal(sddlIsReadOnlyFolderFor(`${base}(OA;OICI;0x1e00a9;;;${sid})`, sid), true);
+  assert.equal(sddlIsReadOnlyFolderFor(`${base}(OA;OICI;0x1f01ff;;;${sid})`, sid), false);
+});
