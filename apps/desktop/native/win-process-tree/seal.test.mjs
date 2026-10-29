@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { checkProcessTreeSeal, sourceDigest } from "./seal.mjs";
 
-const seal = JSON.parse(readFileSync(new URL("./letagents-process-tree.seal.json", import.meta.url), "utf8"));
+const seal = JSON.parse(readFileSync(new URL("../../../../shared/letagents-process-tree.seal.json", import.meta.url), "utf8"));
 
 test("the seal names the committed source", () => {
   assert.equal(sourceDigest(readFileSync(new URL("./letagents-process-tree.c", import.meta.url))), seal.sourceSha256);

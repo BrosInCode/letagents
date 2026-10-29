@@ -1,5 +1,6 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,15 +23,33 @@ export { resolveWindowsCommand } from "./provider-executable.mjs";
 // only ever ended through that job, or after its creation time was checked
 // against the recorded one while a handle to it was held, so a pid that
 // Windows gave to another process is never killed.
+//
+// Ending a job is asynchronous, and a process can outlast it (a driver that
+// never completes its I/O). The helper waits for an ended job to empty for a
+// bounded time only; what is left then is reported "unkillable", which is
+// neither success nor an ordinary failure. The helper is used only when its
+// bytes are the sealed build (shared/letagents-process-tree.seal.json).
 
 export const PROCESS_TREE_HELPER_NAME = "letagents-process-tree.exe";
 /** The birth identity of a Windows process: its creation FILETIME in decimal. */
 export const WINDOWS_BIRTH_PREFIX = "win32-ft:";
 const WINDOWS_BIRTH = /^win32-ft:([1-9]\d{0,19})$/;
 const HELPER_TIMEOUT_MS = 15_000;
+/**
+ * The exit code of a helper-held child whose job still held processes when
+ * the helper's wait ran out after the job was ended: the tree is unkillable.
+ * It stands in for the program's own exit code.
+ */
+export const PROCESS_TREE_UNKILLABLE_EXIT_CODE = 0xE04C5401;
+/** How long the helper waits for an ended tree to empty, unless a caller names another bound. */
+export const PROCESS_TREE_UNKILLABLE_AFTER_MS = 5_000;
+const MAX_UNKILLABLE_AFTER_MS = 600_000;
+const SEAL_URL = new URL("./letagents-process-tree.seal.json", import.meta.url);
 
 /** Children this process started through the helper and that have not exited. */
 const liveTrees = new Map();
+/** Helper children a kill reported unkillable: later answers about them stay unkillable. */
+const unkillableTrees = new WeakSet();
 
 const MAX_FILETIME = 2n ** 64n - 1n;
 
@@ -61,7 +80,9 @@ export function isBirthEvidence(identity, platform = process.platform) {
 /**
  * Where letagents-process-tree.exe is, or null when it is not there: the
  * LETAGENTS_PROCESS_TREE_HELPER path, then `<resources>/app/runtime/`, where
- * the packaged app ships it, then the local build beside its source.
+ * the packaged app ships it, then the local build beside its source. A file
+ * whose sha256 is not the sealed build's for this architecture is refused as
+ * if it were absent; `processTreeHelperRefusal()` says why.
  */
 export function processTreeHelperPath(options = {}) {
   const platform = options.platform ?? process.platform;
@@ -70,21 +91,85 @@ export function processTreeHelperPath(options = {}) {
   const exists = options.exists ?? isFile;
   const resourcesPath = options.resourcesPath ?? (typeof process.resourcesPath === "string" ? process.resourcesPath : "");
   const arch = options.arch ?? process.arch;
+  const sealed = (candidate) => helperMatchesSeal(candidate, { ...options, arch });
   const candidates = [];
   const configured = env.LETAGENTS_PROCESS_TREE_HELPER?.trim();
   if (configured) {
-    // A configured helper that is missing is an error to see, not a reason to use another.
-    return path.win32.isAbsolute(configured) && exists(configured) ? configured : null;
+    // A configured helper that is missing (or not sealed) is an error to see, not a reason to use another.
+    return path.win32.isAbsolute(configured) && exists(configured) && sealed(configured) ? configured : null;
   }
   if (resourcesPath.trim()) candidates.push(path.win32.join(resourcesPath, "app", "runtime", PROCESS_TREE_HELPER_NAME));
   if (options.includeLocalBuild !== false) {
     candidates.push(fileURLToPath(new URL(`../apps/desktop/native/win-process-tree/build/${arch === "arm64" ? "arm64" : "x64"}/${PROCESS_TREE_HELPER_NAME}`, import.meta.url)));
   }
-  return candidates.find((candidate) => exists(candidate)) ?? null;
+  return candidates.find((candidate) => exists(candidate) && sealed(candidate)) ?? null;
 }
 
 function isFile(filePath) {
   try { return statSync(filePath).isFile(); } catch { return false; }
+}
+
+let loadedSeal;
+/** shared/letagents-process-tree.seal.json, or null when it cannot be read. */
+function processTreeSeal() {
+  if (loadedSeal === undefined) {
+    try { loadedSeal = JSON.parse(readFileSync(SEAL_URL, "utf8")); } catch { loadedSeal = null; }
+  }
+  return loadedSeal;
+}
+
+/** The sealed sha256 of the helper built for `arch`, or null when no build for it is sealed. */
+export function sealedProcessTreeHelperSha256(arch = process.arch, seal = processTreeSeal()) {
+  const digest = seal?.builds?.[arch === "arm64" ? "arm64" : "x64"]?.sha256;
+  return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+}
+
+/**
+ * sha256 of a file, null when unreadable. Read on every use (the helper is
+ * small): size, time and file id can all be kept by an edit in place.
+ */
+function fileSha256(filePath) {
+  try {
+    return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+let helperRefusal = null;
+const reportedRefusals = new Set();
+/** Why the last helper found was not used (its bytes are not the sealed build), or null. */
+export function processTreeHelperRefusal() {
+  return helperRefusal;
+}
+
+function helperMatchesSeal(filePath, options) {
+  const expected = sealedProcessTreeHelperSha256(options.arch, options.seal === undefined ? processTreeSeal() : options.seal);
+  let actual = null;
+  if (options.readFile) {
+    try { actual = createHash("sha256").update(options.readFile(filePath)).digest("hex"); } catch { actual = null; }
+  } else {
+    actual = fileSha256(filePath);
+  }
+  if (expected && actual === expected) return true;
+  helperRefusal = expected
+    ? `${filePath} is not the sealed ${PROCESS_TREE_HELPER_NAME} (sha256 ${actual ?? "unreadable"}, sealed ${expected}), so it is not used.`
+    : `No ${options.arch} build of ${PROCESS_TREE_HELPER_NAME} is sealed, so ${filePath} is not used.`;
+  if (!reportedRefusals.has(helperRefusal)) {
+    reportedRefusals.add(helperRefusal);
+    process.emitWarning(helperRefusal, { code: "LETAGENTS_PROCESS_TREE_UNSEALED" });
+  }
+  return false;
+}
+
+/** The helper's optional <wait-ms> argument: none for its default bound. */
+function waitArgument(options) {
+  const wait = options.unkillableAfterMs;
+  if (wait === undefined) return [];
+  if (!Number.isSafeInteger(wait) || wait < 0 || wait > MAX_UNKILLABLE_AFTER_MS) {
+    throw new RangeError(`unkillableAfterMs must be a whole number of milliseconds from 0 to ${MAX_UNKILLABLE_AFTER_MS}.`);
+  }
+  return [String(wait)];
 }
 
 /**
@@ -184,11 +269,12 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
   };
   // Not found: the path providerLaunchCommand gives (one that cannot exist, for a bare name), so the caller sees Node's own ENOENT.
   if (!helper || !resolved) return remember(spawnProcess(launch.file, launch.args, direct), null);
+  const wait = waitArgument(treeOptions);
   const commandLine = launch.windowsVerbatimArguments
     ? [launch.argv0 ?? quoteWindowsArgument(launch.file), ...launch.args].join(" ")
     : windowsCommandLine(launch.file, launch.args);
   const { argv0: _argv0, windowsVerbatimArguments: _verbatim, ...helperOptions } = spawnOptions;
-  return remember(spawnProcess(helper, ["spawn", launch.file, commandLine], { ...helperOptions, ...(childEnv ? { env: childEnv } : {}), windowsHide: true }), helper);
+  return remember(spawnProcess(helper, ["spawn", launch.file, commandLine, ...wait], { ...helperOptions, ...(childEnv ? { env: childEnv } : {}), windowsHide: true }), helper);
 }
 
 /** Windows: keep a spawned child findable by pid until it exits; `helper` null for a direct child. */
@@ -208,8 +294,10 @@ export function isProcessTree(child) {
 }
 
 function runHelper(helper, args, options) {
+  // A kill waits up to its bound for the job to empty: the timeout leaves room for it.
+  const timeout = Math.max(HELPER_TIMEOUT_MS, (options.unkillableAfterMs ?? PROCESS_TREE_UNKILLABLE_AFTER_MS) + 10_000);
   const run = options.runHelper ?? ((file, helperArgs) => spawnSync(file, helperArgs, {
-    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: HELPER_TIMEOUT_MS,
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout,
   }));
   return run(helper, args);
 }
@@ -295,19 +383,30 @@ export function windowsProcessInfo(pid, options = {}) {
  * helper started it, else that one process after the helper checked its
  * creation time while holding it. Without a recorded birth nothing is
  * ended. A child spawned without the helper is ended alone, as before.
- * Returns false when nothing was ended on Windows, or when `groupOnly` found
- * no group on POSIX; otherwise true.
+ * Returns false when the tree was not ended on Windows (nothing matched, or
+ * it is unkillable: see `signalTreeOutcome`), or when `groupOnly` found no
+ * group on POSIX; otherwise true.
  */
 export function signalTree(pid, signal, options = {}) {
+  return signalTreeOutcome(pid, signal, options) === "ended";
+}
+
+/**
+ * `signalTree`, with the Windows outcome told apart: "ended"; "unkillable"
+ * when the job (or the one process) was ended but processes were still
+ * there when the helper's bounded wait (`unkillableAfterMs`) ran out; "none"
+ * when nothing was ended. POSIX gives "ended" or "none".
+ */
+export function signalTreeOutcome(pid, signal, options = {}) {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32") {
     const kill = options.kill ?? ((target, sent) => process.kill(target, sent));
     try {
       kill(-pid, signal);
-      return true;
+      return "ended";
     } catch {
       // groupOnly: the group is gone, and the pid alone may be someone else's.
-      if (options.groupOnly) return false;
+      if (options.groupOnly) return "none";
       // Fall through to the direct child pid. The process group may already be
       // gone while the child exit event is still in flight.
     }
@@ -316,13 +415,18 @@ export function signalTree(pid, signal, options = {}) {
     } catch {
       // Already terminal. The observed exit promise remains authoritative.
     }
-    return true;
+    return "ended";
   }
   return endWindowsTree(pid, options);
 }
 
+/** What a kill reported, as signalTreeOutcome names it. */
+function killOutcome(ended) {
+  return ended === "ended" || ended === "unkillable" ? ended : "none";
+}
+
 function endWindowsTree(pid, options) {
-  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  if (!Number.isSafeInteger(pid) || pid < 1) return "none";
   const identity = options.identity?.trim() || null;
   // The caller's own child decides: a held tree under the same pid is another
   // process once the caller's child has exited.
@@ -341,32 +445,38 @@ function endWindowsTree(pid, options) {
     // birth is proved to be that record; unreadable is not proof, so then the
     // helper's own handle-held check of the recorded birth decides.
     if (identity && !options.child && birth !== identity) {
-      if (isWindowsBirth(birth) || !live?.helper || !isWindowsBirth(identity)) return false;
-      return killByBirth(helper, pid, identity, options) === "ended";
+      if (isWindowsBirth(birth) || !live?.helper || !isWindowsBirth(identity)) return "none";
+      const outcome = killOutcome(killByBirth(helper, pid, identity, options));
+      if (outcome === "unkillable") unkillableTrees.add(child);
+      return outcome;
     }
     if (live?.helper && isWindowsBirth(birth)) {
       const ended = killByBirth(helper, pid, birth, options);
-      if (ended === "ended") return true;
-      if (ended === "absent") return false;
+      // Unkillable: the helper process stays, and the answer is kept for this child.
+      if (ended === "unkillable") unkillableTrees.add(child);
+      if (ended === "ended" || ended === "unkillable") return ended;
+      if (ended === "absent") return "none";
     }
     // The helper could not be asked: a helper's own exit closes its job, so
     // child.kill() ends the tree too.
-    try { return child.kill() !== false; } catch { return false; }
+    try { return child.kill() !== false ? "ended" : "none"; } catch { return "none"; }
   }
-  if (!helper || !isWindowsBirth(identity)) return false;
-  return killByBirth(helper, pid, identity, options) === "ended";
+  if (!helper || !isWindowsBirth(identity)) return "none";
+  return killOutcome(killByBirth(helper, pid, identity, options));
 }
 
 function killByBirth(helper, pid, identity, options) {
   const creation = WINDOWS_BIRTH.exec(identity.trim())[1];
-  const result = runHelper(helper, ["kill", String(pid), creation], options);
+  const result = runHelper(helper, ["kill", String(pid), creation, ...waitArgument(options)], options);
   // The helper ends the job first and then waits for it to empty: a timeout
-  // means the tree is being ended, not that it could not be.
+  // means the tree is being ended, not that it could not be. A held tree's
+  // helper still reports the end of its bounded wait with its exit code.
   if (result?.error?.code === "ETIMEDOUT") return "ended";
   if (!result || result.error) return "unknown";
-  // 0: the job was ended and is empty; 5: the one process with that birth was ended;
-  // 4: ended, with processes still dying after the helper's wait.
-  if (result.status === 0 || result.status === 5 || result.status === 4) return "ended";
+  // 0: the job was ended and is empty; 5: the one process with that birth was ended.
+  if (result.status === 0 || result.status === 5) return "ended";
+  // 4: ended, but processes were still there when the helper's wait ran out.
+  if (result.status === 4) return "unkillable";
   if (result.status === 2) return "absent";
   return "unknown";
 }
@@ -407,9 +517,21 @@ async function settlesWithin(promise, ms) {
  * group as before; Windows, which has no signal, calls `requestStop` (the
  * child's stop message: an IPC message or a stdin frame). Either way the
  * child gets `graceMs` to exit, then the tree is killed (POSIX: SIGKILL to
- * the group). Resolves true when the child has exited.
+ * the group). Resolves true when the tree is gone: the child has exited and,
+ * on Windows, its job did not report processes it could not end. Use
+ * `terminateTreeOutcome` to tell an unkillable tree from a running one.
  */
 export async function terminateTree(child, options = {}) {
+  return (await terminateTreeOutcome(child, options)) === "exited";
+}
+
+/**
+ * `terminateTree`, with its outcome named: "exited" (the tree is gone);
+ * "unkillable" (Windows: the job was ended, but processes were still in it
+ * when the helper's bounded wait ran out; they may never end, so do not
+ * wait for them); "running" (the child had not exited within `killWaitMs`).
+ */
+export async function terminateTreeOutcome(child, options = {}) {
   // A stop message that cannot be sent is reported as an 'error' on the next
   // tick; while this runs it is neither an exit nor an uncaught exception.
   const ignoreError = () => {};
@@ -426,12 +548,18 @@ async function terminateChildTree(child, options) {
   const graceMs = options.graceMs ?? 5_000;
   const exited = exitedPromise(child);
   const pid = child.pid;
-  if (!Number.isSafeInteger(pid) || pid < 1) return child.exitCode !== null || child.signalCode !== null;
-  if (child.exitCode !== null || child.signalCode !== null) {
+  const hasExited = () => child.exitCode !== null || child.signalCode !== null;
+  // A Windows helper exits with this code instead of its program's when the job it ended did not empty;
+  // a kill's earlier unkillable answer about this child stands too.
+  const exitOutcome = () => (platform === "win32" && (child.exitCode === PROCESS_TREE_UNKILLABLE_EXIT_CODE || unkillableTrees.has(child))
+    ? "unkillable"
+    : "exited");
+  if (!Number.isSafeInteger(pid) || pid < 1) return hasExited() ? exitOutcome() : "running";
+  if (hasExited()) {
     // Already exited: no stop request (it could only fail), only what is
     // left of its POSIX group; a Windows helper's exit already emptied its job.
     if (platform !== "win32") signalTree(pid, "SIGKILL", { ...options, groupOnly: true });
-    return true;
+    return exitOutcome();
   }
   if (options.graceful) {
     if (platform === "win32") {
@@ -445,10 +573,17 @@ async function terminateChildTree(child, options) {
       if (platform !== "win32") {
         signalTree(pid, "SIGKILL", { ...options, groupOnly: true });
       }
-      return true;
+      return exitOutcome();
     }
   }
-  signalTree(pid, platform === "win32" ? "SIGTERM" : "SIGKILL", { ...options, child });
+  const signalled = signalTreeOutcome(pid, platform === "win32" ? "SIGTERM" : "SIGKILL", { ...options, child });
   await settlesWithin(exited, options.killWaitMs ?? 5_000);
-  return child.exitCode !== null || child.signalCode !== null;
+  // The kill's answer wins over the helper's exit code: once a kill has ended
+  // the job, the job no longer lists the processes the kill waited on, so the
+  // helper cannot see one that is still there.
+  if (signalled === "unkillable") {
+    unkillableTrees.add(child);
+    return "unkillable";
+  }
+  return hasExited() ? exitOutcome() : "running";
 }

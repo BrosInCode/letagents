@@ -18,13 +18,16 @@ import {
   createDesktopUpdaterConfig,
 } from "./release-metadata.mjs";
 import {
+  PROCESS_TREE_HELPER_APP_PATH,
   WINDOWS_EXECUTABLE_NAME,
   assertWindowsExecutableBytes,
   brandWindowsExecutable,
+  buildProcessTreeHelper,
   createIcoFile,
   readWindowsExecutableVersion,
   renderWindowsIconPngs,
   resolveWindowsOpenCodeExecutable,
+  stageProcessTreeHelper,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
 
@@ -238,6 +241,16 @@ const bundledOpenCode = windows ? "opencode.exe" : "opencode";
 await mkdir(join(app, "runtime"), { recursive: true });
 await cp(openCodePath, join(app, "runtime", bundledOpenCode));
 await chmod(join(app, "runtime", bundledOpenCode), 0o755);
+// Windows holds each agent's process tree in a Job Object through the sealed
+// helper; a build that is not the sealed one fails here, as the app would
+// refuse it at run time.
+if (windows) {
+  await stageProcessTreeHelper({
+    helper: buildProcessTreeHelper({ arch: desktopArch }),
+    destination: join(app, PROCESS_TREE_HELPER_APP_PATH),
+    arch: desktopArch,
+  });
+}
 
 const requiredAppFiles = [
   "dist-electron/main.js",
@@ -338,7 +351,7 @@ const requiredAppFiles = [
 // Contents/... in LetAgents.app, resources/... and shared/... on Windows.
 const bundlePath = (absolutePath) => relative(bundle, absolutePath).split(sep).join("/");
 const required = [
-  ...requiredAppFiles.map((relative) => ({
+  ...[...requiredAppFiles, ...(windows ? [PROCESS_TREE_HELPER_APP_PATH] : [])].map((relative) => ({
     absolutePath: join(app, relative),
     manifestPath: relative,
   })),
@@ -376,6 +389,8 @@ const required = [
     "shared/workspace-attachment-files.mjs",
     "shared/workspace-turn-capture.mjs",
     "shared/workspace-turn-capture-worker.mjs",
+    // The helper's runtime side and the seal it checks the helper against.
+    ...(windows ? ["shared/codex-executable.mjs", "shared/letagents-process-tree.seal.json", "shared/process-tree.mjs", "shared/provider-executable.mjs"] : []),
   ].map((relative) => ({
     absolutePath: join(contents, relative),
     manifestPath: bundlePath(join(contents, relative)),

@@ -18,7 +18,7 @@ export function checkProcessTreeSeal(seal, build) {
     return { level: "error", message: `The source digest ${build.sourceSha256} is not the sealed ${seal.sourceSha256}.` };
   }
   const sealed = seal.builds?.[build.arch];
-  const reseal = `Reseal builds.${build.arch} in letagents-process-tree.seal.json as `
+  const reseal = `Reseal builds.${build.arch} in shared/letagents-process-tree.seal.json as `
     + JSON.stringify({ sha256: build.sha256, vcToolsVersion: build.vcToolsVersion, windowsSdkVersion: build.windowsSdkVersion }) + ".";
   if (!sealed) return { level: "warning", message: `No sealed ${build.arch} build. ${reseal}` };
   if (sealed.vcToolsVersion !== build.vcToolsVersion || sealed.windowsSdkVersion !== build.windowsSdkVersion) {

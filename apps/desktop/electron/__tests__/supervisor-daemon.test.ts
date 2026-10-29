@@ -3669,6 +3669,60 @@ test("acknowledged but unresponsive socket still enters exact-PID bounded enforc
   }
 });
 
+test("a retired daemon the Windows helper reports unkillable is still observed, and its exit continues the handoff", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let oldServer: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    31,
+    undefined,
+    "2.0.25",
+    0,
+    true,
+  );
+  oldServer = old.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      stateDir: env.root, socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 0,
+      terminateTimeoutMs: 100,
+      killTimeoutMs: 25,
+      processPollIntervalMs: 1,
+      requestTimeoutMs: 10,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      signalDaemon: (pid, signal) => {
+        assert.equal(pid, 77);
+        signals.push(signal);
+        if (signal === "SIGTERM") {
+          // Ended, but not exited within the helper's wait; it exits a moment later.
+          void closeServer(oldServer, env.socketPath).then(() => { retiredAlive = false; });
+          throw Object.assign(new Error("not exited within the helper's wait"), { code: "EUNKILLABLE" });
+        }
+      },
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 32)
+          .then((wire) => { replacementServer = wire.server; });
+        return fakeChild();
+      },
+    });
+    const status = await client.ensureRunning();
+    assert.deepEqual(signals, ["SIGTERM"], "EUNKILLABLE is a delivered signal: the bounded observation saw the exit");
+    assert.equal(status.generation, 32);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(oldServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("live socket plus unverifiable PID leaves the existing daemon serving", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
