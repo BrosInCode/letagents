@@ -6,6 +6,7 @@ import { createSSRApp } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 
 import { agentCommitIdentityDescription } from "../src/components/desktop/settings/presentation.ts";
+import { thisComputerLabel } from "../src/domain/supervised-agents-support.ts";
 
 const FAKE_IDENTITY = { name: "octo-fake", email: "424242+octo-fake@users.noreply.github.com" };
 
@@ -21,8 +22,9 @@ test("the agent commit setting says who agents commit as", () => {
   );
   assert.match(
     agentCommitIdentityDescription({ useHostGitIdentity: true, githubIdentity: FAKE_IDENTITY }),
-    /^Agents commit with this Mac's own Git name and email/,
+    new RegExp(`^Agents commit with ${thisComputerLabel()}'s own Git name and email`),
   );
+  assert.equal(thisComputerLabel("MacIntel"), "this Mac", "macOS keeps its own wording");
 });
 
 let vite: ViteDevServer;

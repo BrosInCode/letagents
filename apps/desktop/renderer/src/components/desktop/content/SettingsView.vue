@@ -53,6 +53,14 @@
         @start-auth="$emit('start-auth')"
       />
 
+      <section
+        v-else-if="!supervisedAgentsSupported && agentOnlySettingsPanes.has(activePane)"
+        class="settings-panel"
+        data-testid="settings-agents-unavailable"
+      >
+        <SupervisedAgentsUnavailableNotice />
+      </section>
+
       <SettingsRentingPane
         v-else-if="activePane === 'account:renting'"
         :auth-status="authStatus"
@@ -203,6 +211,8 @@ import SettingsUpdatesPane from "../settings/panes/SettingsUpdatesPane.vue";
 import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
 import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
 import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGrantPane.vue";
+import SupervisedAgentsUnavailableNotice from "./SupervisedAgentsUnavailableNotice.vue";
+import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import ConnectorsPage from "../../../../../../../shared/ui/connectors/ConnectorsPage.vue";
 import { remoteConnectorUrl } from "../settings/connectors";
@@ -277,6 +287,8 @@ const emit = defineEmits<{
 }>();
 
 const activePane = ref<SettingsPaneId>(resolveSettingsPane(props.initialPane));
+/** Panes that only manage agents run by this app; where agents cannot run they show the one notice. */
+const agentOnlySettingsPanes = new Set<SettingsPaneId>(["account:renting", "system:supervisor", "system:diagnostics"]);
 const diagnosticsPane = ref<{
   refresh: () => Promise<void>;
   busy: boolean;
@@ -350,8 +362,8 @@ function openAgentSetup(id: DesktopMcpInstallTargetId) {
 }
 
 function refresh(): void {
-  if (activePane.value === "system:diagnostics") {
-    void diagnosticsPane.value?.refresh();
+  if (activePane.value === "system:diagnostics" && diagnosticsPane.value) {
+    void diagnosticsPane.value.refresh();
     return;
   }
   if (isConnectorsPane.value) {
