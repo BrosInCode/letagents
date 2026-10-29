@@ -155,7 +155,7 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   assert.match(script, /"\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\installer\.exe"/);
   assert.match(script, /WriteRegStr HKCU "\$\{URL_KEY\}\\shell\\open\\command" "" '"\$INSTDIR\\\$\{EXE_NAME\}" "%1"'/);
   // The previous payload is removed only from the folder the install is registered in.
-  const guarded = /Call (?:un\.)?IsRegisteredInstall\s+\$\{If\} \$InstalledHere == "1"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
+  const guarded = /Call (?:un\.)?IsRegisteredInstall\s+(?:;[^\n]*\s+)*\$\{If\} \$InstalledHere == "1"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
   assert.equal(script.match(guarded)?.length, 2);
   assert.match(script, /ReadRegStr \$R0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"/);
   assert.match(script, /^InstallDirRegKey HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"$/m);
