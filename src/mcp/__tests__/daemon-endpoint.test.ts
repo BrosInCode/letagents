@@ -357,6 +357,50 @@ test("a proof this process made private is used without reading its DACL again",
   } finally { await env.cleanup(); }
 });
 
+test("a remembered proof whose permissions change afterwards is checked again", { skip: process.platform === "win32" && "POSIX mode bits" }, async () => {
+  const env = await harness();
+  try {
+    await env.listen(() => assert.fail("no connection is admitted"));
+    // ensureDaemonProof remembered the identity it checked; widen the file after that.
+    await chmod(env.proofPath, 0o644);
+    const result = await exchange(env.connect(), "ping\n");
+    assert.equal(result.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+  } finally { await env.cleanup(); }
+});
+
+test("a failed client privacy check is asked again, not remembered", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    // A proof this process did not make: the client must check it.
+    const foreignPath = join(env.root, "foreign.proof");
+    await writeFile(foreignPath, `${env.proof}\n`, { mode: 0o600 });
+    let reads = 0;
+    const sid = "S-1-5-21-1-2-3-1001";
+    const flaky = {
+      platform: "win32" as const,
+      windowsSecurity: {
+        currentUserSid: async () => sid,
+        currentUserSidSync: () => sid,
+        // The first DACL read fails (as a slow PowerShell can); later reads answer "private".
+        readSddl: async (paths: readonly string[]) => paths.map(() => (reads++ === 0 ? null : `O:${sid}D:P(A;;FA;;;${sid})(A;;FA;;;SY)`)),
+        readSddlSync: (paths: readonly string[]) => paths.map(() => null),
+        protect: async () => undefined,
+        protectSync: () => undefined,
+      },
+    };
+    const connect = () => connectDaemon(env.path, { proofPath: foreignPath, handshake: true, ...flaky });
+    const first = await exchange(connect(), "ping\n");
+    assert.equal(first.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+    const second = await exchange(connect(), "ping\n");
+    assert.equal(second.data, "pong:ping\n", "the next connection checks again and succeeds");
+    assert.equal(reads, 2);
+  } finally { await env.cleanup(); }
+});
+
 test("a client whose proof file is missing fails like an absent daemon", async () => {
   const env = await harness();
   try {

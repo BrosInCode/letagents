@@ -43,8 +43,9 @@ export function listenTestDaemon(server: Server, socketPath: string, callback?: 
       proof = randomBytes(32).toString("hex");
       writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
     }
-    // As the daemon does for its own proof: this process knows it is private.
-    rememberPrivateDaemonProof(proofPath);
+    // As the daemon does for its own proof: remember the identity just checked.
+    const checked = lstatSync(proofPath);
+    if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
     for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
       server.off("connection", listener);
       server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));

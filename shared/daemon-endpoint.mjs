@@ -1,5 +1,4 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { lstatSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { Socket, createConnection } from "node:net";
 import { userInfo } from "node:os";
@@ -115,7 +114,7 @@ export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, ...op
     if (info.isFile() && await isPrivate()) {
       const existing = parseProof(await readFile(proofPath, "utf8"));
       if (existing) {
-        rememberPrivateDaemonProof(proofPath);
+        rememberPrivateDaemonProof(proofPath, info);
         return existing;
       }
     }
@@ -124,7 +123,10 @@ export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, ...op
   }
   const proof = randomBytes(32).toString("hex");
   await writePrivateFileAtomically(proofPath, `${proof}\n`, options);
-  rememberPrivateDaemonProof(proofPath);
+  // Only a new or rotated proof pays for this check; it binds the record to
+  // the file as it is after the rename.
+  const written = await lstat(proofPath);
+  if (written.isFile() && await isOwnerPrivate(proofPath, written, options)) rememberPrivateDaemonProof(proofPath, written);
   return proof;
 }
 
@@ -184,30 +186,42 @@ function untrusted(message) {
 
 const PRIVATE_PROOF_REFRESH_MS = 5 * 60_000;
 /**
- * What this process knows about each proof file, by path: the file identity
- * the verdict is for (path, inode, mtime, ctime, size; ctime moves with the
- * mode or the DACL), whether it was private, and when to check it again.
+ * Proofs this process found private, by path: the file identity the verdict
+ * is for (path, inode, mtime, ctime, size; ctime moves with the mode or the
+ * DACL) and when to check it again. Only "private" is kept: a "not private"
+ * answer may be a failed DACL read, so it is asked again next time.
  */
-const proofVerdicts = new Map();
+const privateProofs = new Map();
+/** One check in flight per file identity, shared by concurrent connections. */
+const pendingChecks = new Map();
 
 function proofIdentity(path, info) {
   return `${path}\0${info.ino}\0${info.mtimeMs}\0${info.ctimeMs}\0${info.size}`;
 }
 
-async function checkProofPrivacy(path, info, identity, options) {
-  const isPrivate = info.isFile() && await isOwnerPrivate(path, info, options);
-  proofVerdicts.set(path, { identity, isPrivate, refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
-  return isPrivate;
+function checkProofPrivacy(path, info, identity, options) {
+  let pending = pendingChecks.get(identity);
+  if (!pending) {
+    pending = (async () => {
+      const isPrivate = info.isFile() && await isOwnerPrivate(path, info, options);
+      if (isPrivate) privateProofs.set(path, { identity, refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
+      else if (privateProofs.get(path)?.identity === identity) privateProofs.delete(path);
+      return isPrivate;
+    })().finally(() => pendingChecks.delete(identity));
+    pendingChecks.set(identity, pending);
+  }
+  return pending;
 }
 
 /**
- * Record a proof this process has just made or found private (the daemon's
- * own ensureDaemonProof, a test fake that wrote it privately), so clients in
- * the same process need not read its DACL again.
+ * Record a proof this process has just found private (the daemon's own
+ * ensureDaemonProof, a test fake that wrote it privately), so clients in the
+ * same process need not read its DACL again. `checkedInfo` is the lstat result
+ * the privacy check ran on: the record binds to that identity, so a change
+ * after the check (a widened DACL moves ctime) is checked again.
  */
-export function rememberPrivateDaemonProof(path) {
-  const info = lstatSync(path);
-  proofVerdicts.set(path, { identity: proofIdentity(path, info), isPrivate: true, refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
+export function rememberPrivateDaemonProof(path, checkedInfo) {
+  privateProofs.set(path, { identity: proofIdentity(path, checkedInfo), refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
 }
 
 /**
@@ -222,24 +236,22 @@ export function rememberPrivateDaemonProof(path) {
  * check only when this process has no verdict for the file as it is now (first
  * contact, a rotated proof, or a mode or DACL change, which moves ctime). A
  * verdict older than five minutes is still used while a background check
- * renews it; a "not private" answer refuses every later connection.
+ * renews it; a "not private" answer drops it, so the next connection checks
+ * again and is refused while the proof stays exposed.
  */
 async function readClientProof(path, options) {
   if (!path) throw untrusted("no LetAgents state directory of this user owns this pipe");
   const info = await lstat(path);
   const identity = proofIdentity(path, info);
-  const known = proofVerdicts.get(path);
-  let isPrivate;
+  const known = privateProofs.get(path);
   if (known?.identity === identity) {
-    isPrivate = known.isPrivate;
-    if (isPrivate && known.refreshAt <= Date.now()) {
+    if (known.refreshAt <= Date.now()) {
       known.refreshAt = Date.now() + PRIVATE_PROOF_REFRESH_MS;
-      void checkProofPrivacy(path, info, identity, options).catch(() => { proofVerdicts.delete(path); });
+      void checkProofPrivacy(path, info, identity, options).catch(() => { privateProofs.delete(path); });
     }
-  } else {
-    isPrivate = await checkProofPrivacy(path, info, identity, options);
+  } else if (!await checkProofPrivacy(path, info, identity, options)) {
+    throw untrusted("the proof file is not private to this account");
   }
-  if (!isPrivate) throw untrusted("the proof file is not private to this account");
   const proof = parseProof(await readFile(path, "utf8"));
   if (!proof) throw untrusted("the proof file is malformed");
   return proof;
