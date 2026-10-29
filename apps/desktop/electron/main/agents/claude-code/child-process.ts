@@ -1,8 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { spawnTree } from "../../../../../../shared/process-tree.mjs";
 import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import { withoutRoomAuthority } from "../room-authority-environment.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
@@ -70,12 +71,13 @@ export function claudeChildEnvironment(
 }
 
 function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; ownerSetup?: true }): ClaudeCliChild {
-  const child = spawn(input.claudeBin, input.args, {
+  const child = spawnTree(input.claudeBin, input.args, {
     cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
     // Its own process group: group-signalling (shared defaultSignalProcess
     // targets -pid first) reaps the CLI's descendants too, and the child is not
     // torn down as a side effect of the supervisor's own stdio going away.
+    // On Windows the process-tree helper's job holds the descendants instead.
     detached: process.platform !== "win32",
     // The strict launch config supplies the API endpoint; these coordinates
     // make every LetAgents MCP effect borrow the exact daemon generation.

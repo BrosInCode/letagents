@@ -1,10 +1,11 @@
 import { chmod, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { npmInvocation } from "../../../../scripts/npm-command.mjs";
 import { assertSquareImageDimensions, parseSipsDimensions } from "./packaging-validation.mjs";
 import {
   assertInstalledMcpPackage,
@@ -13,25 +14,43 @@ import {
 } from "./mcp-runtime-install.mjs";
 import {
   assertDesktopArchitecture,
+  assertWindowsArchitecture,
   createDesktopUpdaterConfig,
 } from "./release-metadata.mjs";
+import {
+  WINDOWS_EXECUTABLE_NAME,
+  assertWindowsExecutableBytes,
+  brandWindowsExecutable,
+  createIcoFile,
+  readWindowsExecutableVersion,
+  renderWindowsIconPngs,
+  resolveWindowsOpenCodeExecutable,
+  windowsFileVersion,
+} from "./windows-packaging.mjs";
 
+if (process.platform !== "darwin" && process.platform !== "win32") {
+  throw new Error("The desktop application artifact must be built on macOS or Windows.");
+}
+const windows = process.platform === "win32";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const release = join(root, "release", "LetAgents-darwin");
-const bundle = join(release, "LetAgents.app");
-const app = join(bundle, "Contents", "Resources", "app");
-const contents = join(bundle, "Contents");
-const resources = join(contents, "Resources");
+const release = join(root, "release", windows ? "LetAgents-win32" : "LetAgents-darwin");
+const bundle = join(release, windows ? "LetAgents" : "LetAgents.app");
+// The compiled desktop imports its shared contracts from four folders above
+// its own files: Contents/shared in the macOS bundle, and the install folder
+// itself on Windows, where Electron keeps the app at resources/app.
+const contents = windows ? bundle : join(bundle, "Contents");
+const resources = windows ? join(bundle, "resources") : join(contents, "Resources");
+const app = join(resources, "app");
 const frameworks = join(contents, "Frameworks");
 const bundleIdentifier = "chat.letagents.desktop";
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const workspacePackageJson = JSON.parse(await readFile(join(root, "..", "..", "package.json"), "utf8"));
 const desktopVersion = packageJson.version;
-const desktopArch = assertDesktopArchitecture(process.arch);
+const desktopArch = windows ? assertWindowsArchitecture(process.arch) : assertDesktopArchitecture(process.arch);
 const openCodeVersion = packageJson.letagentsRuntime?.openCodeVersion;
 const mcpVersion = packageJson.letagentsRuntime?.mcpVersion;
 const execFileAsync = promisify(execFile);
-if (process.platform !== "darwin") throw new Error("The macOS application artifact must be built on macOS.");
+const copyright = "Copyright © LetAgents";
 if (typeof desktopVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(desktopVersion)) {
   throw new Error("package.json must declare a numeric x.y.z desktop version.");
 }
@@ -90,52 +109,76 @@ async function createApplicationIcon() {
   await rm(iconset, { recursive: true, force: true });
 }
 
-await rm(release, { recursive: true, force: true });
-await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, {
-  recursive: true,
-  verbatimSymlinks: true,
-});
+async function assembleMacBundle() {
+  await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
 
-await rename(join(contents, "MacOS", "Electron"), join(contents, "MacOS", "LetAgents"));
-await Promise.all([
-  rebrandHelper({}),
-  rebrandHelper({ qualifier: " (GPU)", bundleIdSuffix: ".GPU" }),
-  rebrandHelper({ qualifier: " (Plugin)", bundleIdSuffix: ".Plugin" }),
-  rebrandHelper({ qualifier: " (Renderer)", bundleIdSuffix: ".Renderer" }),
-]);
-const infoPlist = join(contents, "Info.plist");
-for (const [key, value] of [
-  ["CFBundleExecutable", "LetAgents"],
-  ["CFBundleIdentifier", bundleIdentifier],
-  ["CFBundleName", "LetAgents"],
-  ["CFBundleDisplayName", "LetAgents"],
-  ["CFBundleShortVersionString", desktopVersion],
-  ["CFBundleVersion", desktopVersion],
-  ["CFBundleIconFile", "letagents.icns"],
-  ["LSApplicationCategoryType", "public.app-category.developer-tools"],
-  ["NSUserNotificationAlertStyle", "alert"],
-  ["NSHumanReadableCopyright", "Copyright © LetAgents"],
-]) {
-  await replacePlistString(infoPlist, key, value);
+  await rename(join(contents, "MacOS", "Electron"), join(contents, "MacOS", "LetAgents"));
+  await Promise.all([
+    rebrandHelper({}),
+    rebrandHelper({ qualifier: " (GPU)", bundleIdSuffix: ".GPU" }),
+    rebrandHelper({ qualifier: " (Plugin)", bundleIdSuffix: ".Plugin" }),
+    rebrandHelper({ qualifier: " (Renderer)", bundleIdSuffix: ".Renderer" }),
+  ]);
+  const infoPlist = join(contents, "Info.plist");
+  for (const [key, value] of [
+    ["CFBundleExecutable", "LetAgents"],
+    ["CFBundleIdentifier", bundleIdentifier],
+    ["CFBundleName", "LetAgents"],
+    ["CFBundleDisplayName", "LetAgents"],
+    ["CFBundleShortVersionString", desktopVersion],
+    ["CFBundleVersion", desktopVersion],
+    ["CFBundleIconFile", "letagents.icns"],
+    ["LSApplicationCategoryType", "public.app-category.developer-tools"],
+    ["NSUserNotificationAlertStyle", "alert"],
+    ["NSHumanReadableCopyright", copyright],
+  ]) {
+    await replacePlistString(infoPlist, key, value);
+  }
+  for (const key of [
+    "NSAppTransportSecurity",
+    "NSAudioCaptureUsageDescription",
+    "NSBluetoothAlwaysUsageDescription",
+    "NSBluetoothPeripheralUsageDescription",
+    "NSCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+  ]) {
+    await removePlistKey(infoPlist, key);
+  }
+  // "Ask for an agent" links (letagents://ask/<token>) open the app.
+  await removePlistKey(infoPlist, "CFBundleURLTypes");
+  await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json",
+    JSON.stringify([{ CFBundleURLName: "LetAgents links", CFBundleURLSchemes: ["letagents"] }]), infoPlist]);
+  await createApplicationIcon();
 }
-for (const key of [
-  "NSAppTransportSecurity",
-  "NSAudioCaptureUsageDescription",
-  "NSBluetoothAlwaysUsageDescription",
-  "NSBluetoothPeripheralUsageDescription",
-  "NSCameraUsageDescription",
-  "NSMicrophoneUsageDescription",
-]) {
-  await removePlistKey(infoPlist, key);
+
+// The Windows installer (package-windows.mjs) registers letagents:// links,
+// shortcuts and the uninstaller; the folder itself only needs the branded
+// executable and the icon the installer reuses.
+async function assembleWindowsBundle() {
+  await cp(join(root, "node_modules", "electron", "dist"), bundle, { recursive: true });
+  const executable = join(bundle, WINDOWS_EXECUTABLE_NAME);
+  await rename(join(bundle, "electron.exe"), executable);
+  // Electron's sample app; resources/app takes precedence, so it is never used.
+  await rm(join(resources, "default_app.asar"), { force: true });
+  const source = join(root, "..", "..", "brand", "letagents-app-icon.png");
+  const icon = createIcoFile(await renderWindowsIconPngs(source));
+  await writeFile(join(resources, "letagents.ico"), icon);
+  await brandWindowsExecutable({ executable, icon, version: desktopVersion, copyright });
+  const brandedVersion = await readWindowsExecutableVersion(executable);
+  if (brandedVersion !== windowsFileVersion(desktopVersion)) {
+    throw new Error(`${WINDOWS_EXECUTABLE_NAME} reports version ${brandedVersion ?? "none"}; expected ${windowsFileVersion(desktopVersion)}.`);
+  }
 }
-// "Ask for an agent" links (letagents://ask/<token>) open the app.
-await removePlistKey(infoPlist, "CFBundleURLTypes");
-await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json",
-  JSON.stringify([{ CFBundleURLName: "LetAgents links", CFBundleURLSchemes: ["letagents"] }]), infoPlist]);
-await createApplicationIcon();
+
+await rm(release, { recursive: true, force: true });
+if (windows) await assembleWindowsBundle();
+else await assembleMacBundle();
 await writeFile(
   join(resources, "app-update.yml"),
-  `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch }), null, 2)}\n`,
+  `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch, platform: process.platform }), null, 2)}\n`,
 );
 await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
@@ -147,7 +190,8 @@ await cp(join(root, "..", "..", "shared"), join(contents, "shared"), { recursive
 await writeFile(join(app, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
 await cp(join(root, "package-lock.json"), join(app, "package-lock.json"));
 await cp(join(root, "..", "..", "LICENSE"), join(app, "LICENSE"));
-await execFileAsync("npm", ["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"], { cwd: app, maxBuffer: 8 * 1024 * 1024 });
+const appInstall = npmInvocation(["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"]);
+await execFileAsync(appInstall.command, appInstall.args, { ...appInstall.options, cwd: app, maxBuffer: 8 * 1024 * 1024 });
 await rm(join(app, "node_modules", ".bin"), { recursive: true, force: true });
 // Supervised Cursor must never download executable bridge code at turn time.
 // Install the exact public MCP package into the desktop artifact under forced,
@@ -180,16 +224,20 @@ if (runtimeTreeSha256 !== runtimeIntegrity.LETAGENTS_MCP_RUNTIME_TREE_SHA256) {
   );
 }
 const requestedOpenCode = process.env.LETAGENTS_OPENCODE_BIN?.trim() || "opencode";
-const openCodePath = requestedOpenCode.includes("/")
-  ? await realpath(requestedOpenCode)
-  : await realpath((await execFileAsync("which", [requestedOpenCode])).stdout.trim());
+const openCodePath = windows
+  ? await realpath(resolveWindowsOpenCodeExecutable({ requested: requestedOpenCode }))
+  : requestedOpenCode.includes("/")
+    ? await realpath(requestedOpenCode)
+    : await realpath((await execFileAsync("which", [requestedOpenCode])).stdout.trim());
+if (windows) assertWindowsExecutableBytes(await readFile(openCodePath), openCodePath);
 const openCodeReportedVersion = (await execFileAsync(openCodePath, ["--version"])).stdout.trim();
 if (!openCodeReportedVersion.includes(openCodeVersion)) {
   throw new Error(`Packaging requires OpenCode ${openCodeVersion}; found '${openCodeReportedVersion || "unknown"}'.`);
 }
+const bundledOpenCode = windows ? "opencode.exe" : "opencode";
 await mkdir(join(app, "runtime"), { recursive: true });
-await cp(openCodePath, join(app, "runtime", "opencode"));
-await chmod(join(app, "runtime", "opencode"), 0o755);
+await cp(openCodePath, join(app, "runtime", bundledOpenCode));
+await chmod(join(app, "runtime", bundledOpenCode), 0o755);
 
 const requiredAppFiles = [
   "dist-electron/main.js",
@@ -284,8 +332,11 @@ const requiredAppFiles = [
   "runtime/letagents/node_modules/letagents/dist/mcp/server/daemon-tool-executor.js",
   "runtime/letagents/node_modules/letagents/package.json",
   "runtime/letagents/package-lock.json",
-  "runtime/opencode",
+  `runtime/${bundledOpenCode}`,
 ];
+// Paths outside the app folder are recorded relative to the bundle:
+// Contents/... in LetAgents.app, resources/... and shared/... on Windows.
+const bundlePath = (absolutePath) => relative(bundle, absolutePath).split(sep).join("/");
 const required = [
   ...requiredAppFiles.map((relative) => ({
     absolutePath: join(app, relative),
@@ -293,8 +344,12 @@ const required = [
   })),
   {
     absolutePath: join(resources, "app-update.yml"),
-    manifestPath: "Contents/Resources/app-update.yml",
+    manifestPath: bundlePath(join(resources, "app-update.yml")),
   },
+  ...(windows ? [WINDOWS_EXECUTABLE_NAME, "resources/letagents.ico"] : []).map((relative) => ({
+    absolutePath: join(bundle, relative),
+    manifestPath: relative,
+  })),
   ...[
     "shared/agent-branch.mjs",
     "shared/agent-codenames.mjs",
@@ -323,7 +378,7 @@ const required = [
     "shared/workspace-turn-capture-worker.mjs",
   ].map((relative) => ({
     absolutePath: join(contents, relative),
-    manifestPath: `Contents/${relative}`,
+    manifestPath: bundlePath(join(contents, relative)),
   })),
 ];
 const files = [];
@@ -356,7 +411,7 @@ await writeFile(join(app, "package-artifact-manifest.json"), `${JSON.stringify({
   version: desktopVersion,
   platform: process.platform,
   arch: process.arch,
-  bundle: "LetAgents.app",
+  bundle: windows ? "LetAgents" : "LetAgents.app",
   bundleIdentifier,
   runtimeTreeSha256,
   files,

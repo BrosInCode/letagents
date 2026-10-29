@@ -415,6 +415,9 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
     "node scripts/retry-command.mjs npm audit signatures\nnode scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    // build-windows: one tree per step, each right after its install.
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
   ]);
 
   assert.deepEqual(
@@ -440,9 +443,41 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     [
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\n" +
         "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
     ],
     "release installs must disable npm's implicit unbounded audit",
   );
+});
+
+test("the Windows release build verifies each tree it installs before anything runs it", () => {
+  const jobs = workflowJobs(".github/workflows/desktop-release.yml");
+  const windows = jobs.find((candidate) => candidate.name === "build-windows");
+  assert.ok(windows, "desktop-release.yml must build Windows");
+  // The macOS builds run the lockfile gates (cooldown, advisories) first.
+  assert.deepEqual(windows.needs, ["build-macos"]);
+  const steps = windows.steps;
+  const lifecycle = steps.findIndex((step) => step.name === "Run verified dependency lifecycle scripts");
+  assert.ok(lifecycle > 0, "build-windows must run lifecycle scripts only after verification");
+  const checks = steps.filter((step) => containsDirectNpmAudit(step.run ?? ""));
+  assert.equal(checks.length, 2);
+  for (const step of checks) {
+    const index = steps.indexOf(step);
+    const suffix = step.run.endsWith(" --prefix apps/desktop") ? " --prefix apps/desktop" : "";
+    assert.equal(step.run, `node scripts/retry-command.mjs npm audit signatures${suffix}`);
+    assert.equal(steps[index - 1]?.run, `node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit${suffix}`, `${step.name} must verify the tree it just installed`);
+    assert.ok(index < lifecycle, `${step.name} must run before lifecycle scripts`);
+    // A pwsh step checks only its last command's exit code, so each check is
+    // its own one-command step on the default shell.
+    assert.equal(step.shell, null, `${step.name} must use the default shell`);
+    assert.equal(step.condition, null, `${step.name} must not be skipped`);
+    assert.equal(step.continueOnError, null, `${step.name} must fail the job`);
+  }
+  for (const step of steps) {
+    const run = step.run ?? "";
+    assert.doesNotMatch(run, /verify-dependency-advisories\.mjs|verify:dependency-age|dependency-audit-npm/, `${step.name} must not repeat the lockfile gates`);
+    assert.ok(step.condition === null || /provenance/i.test(step.name ?? ""), `${step.name} must not be skipped`);
+  }
 });
 
 test("the dependency gates run once, in dependency-audit, before every check job", () => {
@@ -485,7 +520,7 @@ test("the dependency gates run once, in dependency-audit, before every check job
   // scripts, so each waits for the gates and none repeats them.
   const notGated = new Set(["dependency-audit", "build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
   const checkJobs = jobs.filter((candidate) => !notGated.has(candidate.name));
-  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "integration-db-tests", "mcp-tests-windows"]);
+  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "integration-db-tests", "mcp-tests-windows", "process-tree-windows"]);
   for (const checkJob of checkJobs) {
     assert.deepEqual(checkJob.needs, ["dependency-audit"], `${checkJob.name} must wait for dependency-audit`);
     for (const step of checkJob.steps) {

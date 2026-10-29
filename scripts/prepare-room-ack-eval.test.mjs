@@ -90,6 +90,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
     build: gate,
     "integration-db-tests": checks,
     "mcp-tests-windows": checks,
+    "process-tree-windows": checks,
     "integration-tests": gate,
     "npm-publish": staging,
     docker: staging,

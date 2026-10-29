@@ -1,5 +1,9 @@
 const DESKTOP_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 const SUPPORTED_ARCHITECTURES = new Set(["arm64", "x64"]);
+// Windows ships x64 only. Its feed folder names the platform as well as the
+// architecture, so the macOS x64 and Windows x64 feeds never share a folder.
+const SUPPORTED_WINDOWS_ARCHITECTURES = new Set(["x64"]);
+const SUPPORTED_PLATFORMS = new Set(["darwin", "win32"]);
 
 export function assertDesktopVersion(version) {
   if (typeof version !== "string" || !DESKTOP_VERSION_PATTERN.test(version)) {
@@ -13,6 +17,31 @@ export function assertDesktopArchitecture(arch) {
     throw new Error(`Desktop releases support arm64 or x64; received '${arch ?? ""}'.`);
   }
   return arch;
+}
+
+export function assertDesktopPlatform(platform) {
+  if (!SUPPORTED_PLATFORMS.has(platform)) {
+    throw new Error(`Desktop releases support darwin or win32; received '${platform ?? ""}'.`);
+  }
+  return platform;
+}
+
+export function assertWindowsArchitecture(arch) {
+  if (!SUPPORTED_WINDOWS_ARCHITECTURES.has(arch)) {
+    throw new Error(`Windows desktop releases support x64; received '${arch ?? ""}'.`);
+  }
+  return arch;
+}
+
+function assertPlatformArchitecture(platform, arch) {
+  if (assertDesktopPlatform(platform) === "win32") return assertWindowsArchitecture(arch);
+  return assertDesktopArchitecture(arch);
+}
+
+/** The update feed folder: `arm64`/`x64` for macOS (unchanged), `win32-x64` for Windows. */
+export function desktopFeedName({ arch, platform = "darwin" }) {
+  assertPlatformArchitecture(platform, arch);
+  return platform === "win32" ? `win32-${arch}` : arch;
 }
 
 export function normalizeReleaseBaseUrl(baseUrl) {
@@ -29,9 +58,10 @@ export function normalizeReleaseBaseUrl(baseUrl) {
   return parsed.toString();
 }
 
-export function desktopAssetNames({ version, arch }) {
+export function desktopAssetNames({ version, arch, platform = "darwin" }) {
   assertDesktopVersion(version);
-  assertDesktopArchitecture(arch);
+  assertPlatformArchitecture(platform, arch);
+  if (platform === "win32") return { installer: `LetAgents-${version}-win32-${arch}-setup.exe` };
   const stem = `LetAgents-${version}-darwin-${arch}`;
   return {
     dmg: `${stem}.dmg`,
@@ -39,8 +69,14 @@ export function desktopAssetNames({ version, arch }) {
   };
 }
 
-export function desktopMetadataNames({ arch }) {
-  assertDesktopArchitecture(arch);
+export function desktopMetadataNames({ arch, platform = "darwin" }) {
+  assertPlatformArchitecture(platform, arch);
+  if (platform === "win32") {
+    return {
+      releaseManifest: `desktop-release-win32-${arch}.json`,
+      updaterManifest: `latest-win32-${arch}.yml`,
+    };
+  }
   return {
     releaseManifest: `desktop-release-${arch}.json`,
     squirrelManifest: `RELEASES-${arch}.json`,
@@ -48,11 +84,15 @@ export function desktopMetadataNames({ arch }) {
   };
 }
 
-export function createDesktopUpdaterConfig({ arch }) {
-  assertDesktopArchitecture(arch);
+export function createDesktopUpdaterConfig({ arch, platform = "darwin" }) {
+  // Windows builds ship unsigned for now, so this config has no publisherName:
+  // electron-updater's NsisUpdater verifies an installer's Authenticode
+  // signature only when publisherName is set. The feed is HTTPS and every
+  // download is checked against the SHA-512 in latest.yml either way. Add
+  // publisherName here once the builds are signed.
   return {
     provider: "generic",
-    url: `https://downloads.letagents.chat/desktop/feeds/${arch}/`,
+    url: `https://downloads.letagents.chat/desktop/feeds/${desktopFeedName({ arch, platform })}/`,
     updaterCacheDirName: "letagents-desktop-updater",
   };
 }
@@ -92,6 +132,46 @@ export function createElectronUpdaterMacManifest({
   };
 }
 
+/**
+ * NsisUpdater's latest.yml: the installer's absolute URL, size and base64
+ * SHA-512. It downloads `<url>.blockmap` next to the installer for a
+ * differential update and falls back to the whole installer without one.
+ */
+export function createElectronUpdaterWindowsManifest({
+  version,
+  arch,
+  baseUrl,
+  publishedAt,
+  notes = "",
+  installerArtifact,
+}) {
+  const assets = desktopAssetNames({ version, arch, platform: "win32" });
+  const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
+  const publicationDate = new Date(publishedAt);
+  if (Number.isNaN(publicationDate.valueOf())) {
+    throw new Error(`Desktop release metadata requires a valid publication date; received '${publishedAt ?? ""}'.`);
+  }
+  if (
+    installerArtifact?.name !== assets.installer
+    || !Number.isSafeInteger(installerArtifact?.bytes)
+    || installerArtifact.bytes <= 0
+    || typeof installerArtifact?.sha512 !== "string"
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(installerArtifact.sha512)
+  ) {
+    throw new Error("electron-updater metadata requires the Windows installer size and base64 SHA-512 digest.");
+  }
+  const url = new URL(assets.installer, normalizedBaseUrl).toString();
+  return {
+    version,
+    files: [{ url, sha512: installerArtifact.sha512, size: installerArtifact.bytes }],
+    path: url,
+    sha512: installerArtifact.sha512,
+    releaseName: `LetAgents ${version}`,
+    releaseNotes: String(notes),
+    releaseDate: publicationDate.toISOString(),
+  };
+}
+
 export function createSquirrelMacReleaseManifest({
   version,
   arch,
@@ -121,6 +201,7 @@ export function createSquirrelMacReleaseManifest({
 export function createDesktopReleaseManifest({
   version,
   arch,
+  platform = "darwin",
   baseUrl,
   publishedAt,
   signed,
@@ -128,7 +209,7 @@ export function createDesktopReleaseManifest({
   artifacts,
 }) {
   assertDesktopVersion(version);
-  assertDesktopArchitecture(arch);
+  assertPlatformArchitecture(platform, arch);
   const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
   const publicationDate = new Date(publishedAt);
   if (Number.isNaN(publicationDate.valueOf())) {
@@ -138,7 +219,7 @@ export function createDesktopReleaseManifest({
     format: 1,
     product: "LetAgents",
     version,
-    platform: "darwin",
+    platform,
     arch,
     publishedAt: publicationDate.toISOString(),
     signed: Boolean(signed),

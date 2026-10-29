@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnTree } from "../../../../../shared/process-tree.mjs";
 import {
   accessSync,
   constants as fsConstants,
@@ -36,6 +36,8 @@ export type CursorMcpInspectionDependencies = {
 const DEFAULT_CURSOR_MCP_INSPECTION_DEPENDENCIES: CursorMcpInspectionDependencies = {
   getProcessIdentity: defaultGetProcessIdentity,
   processGroupAlive(pid) {
+    // Windows: the wrapper runs in the process-tree helper's job, and the
+    // helper closes its stdio only once that job is empty.
     if (process.platform === "win32") return false;
     try {
       process.kill(-pid, 0);
@@ -516,7 +518,7 @@ function execCursorInspection(
       return;
     }
     let errorCode: string | null = null;
-    const child = spawn(process.execPath, [
+    const child = spawnTree(process.execPath, [
       "-e",
       CURSOR_MCP_INSPECTION_WRAPPER_SOURCE,
       command,

@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { cp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -11,6 +9,7 @@ import { sign } from "@electron/osx-sign";
 
 import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
 import { notarizeWithStapleRecovery, validateStapledTicket } from "./notarization-staple-recovery.mjs";
+import { describeArtifact } from "./release-artifacts.mjs";
 import {
   assertDesktopArchitecture,
   assertDesktopVersion,
@@ -77,29 +76,6 @@ function notarizationCredentials() {
   throw new Error(
     "Notarization requires MACOS_NOTARY_KEYCHAIN_PROFILE or MACOS_NOTARY_API_KEY plus MACOS_NOTARY_API_KEY_ID. Set MACOS_SKIP_NOTARIZATION=1 only for a signed local test build.",
   );
-}
-
-async function sha256(path) {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest("hex");
-}
-
-async function sha512(path) {
-  const hash = createHash("sha512");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest("base64");
-}
-
-async function describeArtifact(kind, path) {
-  const info = await stat(path);
-  return {
-    kind,
-    name: basename(path),
-    bytes: info.size,
-    sha256: await sha256(path),
-    sha512: await sha512(path),
-  };
 }
 
 await stat(packagedApp).catch(() => {
