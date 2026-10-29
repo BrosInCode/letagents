@@ -4,7 +4,7 @@
   "sourceSha256": "d88f45ebe39cdb08cb4a6964ba68951c853a9ac711a51385be045092ab854e63",
   "builds": {
     "x64": {
-      "sha256": "bf2b12b9acddc235a596659196be05061b1afa2d0df2f3cf03fe65ba10491ae0",
+      "sha256": "c2f980e824055d09ff27a90e2dfedf8a5e37ed926fc8c009bf97dd179330acd6",
       "vcToolsVersion": "14.51.36231",
       "windowsSdkVersion": "10.0.26100.0"
     }
