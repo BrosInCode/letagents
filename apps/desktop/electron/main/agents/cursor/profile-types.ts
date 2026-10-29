@@ -231,7 +231,14 @@ function connect(addon) {
       refuse(67, "refused its pipe: process " + opened.serverPid + " serves it, not this turn's wrapper.");
       return;
     }
-    const socket = new net.Socket({ fd: opened.fd, readable: true, writable: true });
+    let socket;
+    try {
+      socket = new net.Socket({ fd: opened.fd, readable: true, writable: true });
+    } catch (error) {
+      try { fs.closeSync(opened.fd); } catch {}
+      refuse(1, "could not use its pipe: " + describe(error));
+      return;
+    }
     socket.once("error", () => exitAfterOutput(1));
     socket.once("close", () => exitAfterOutput(0));
     process.stdin.once("error", () => socket.destroy());

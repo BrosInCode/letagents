@@ -249,12 +249,13 @@ test("the wrapper's seal limits the pipe to this user, for the instances libuv a
     // libuv starts a new instance for each accepted one, on its next loop
     // turn: hold more than it created at listen, waiting while all are busy.
     const addon = loadDaemonPipeAddon();
+    const deadline = Date.now() + 10_000;
     while (opened.length < 6) {
       let pipe: { fd: number; serverPid: number };
       try {
         pipe = addon.open(state.pipe);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "EBUSY" || Date.now() > deadline) throw error;
         await new Promise((resolve) => setTimeout(resolve, 20));
         continue;
       }
