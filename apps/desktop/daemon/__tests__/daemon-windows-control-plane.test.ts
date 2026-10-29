@@ -150,23 +150,25 @@ test("Windows: a successor takes the pipe name while a slow client still holds t
   const { socketPath, peerProofPath } = testDaemonEndpoint(env.root);
   const first = new DaemonControlSocket(socketPath, () => ({ healthy: true }), undefined, undefined, { peerProofPath });
   let successor: DaemonControlSocket | null = null;
-  // allowHalfOpen: the client does not close its handle when the daemon ends the connection.
-  const lingering = createConnection({ path: socketPath, allowHalfOpen: true });
-  lingering.on("error", () => undefined);
+  let lingering: ReturnType<typeof createConnection> | null = null;
   try {
     await first.start();
-    await new Promise<void>((resolve) => lingering.once("connect", () => resolve()));
+    // allowHalfOpen: the client does not close its handle when the daemon ends the connection.
+    const client = createConnection({ path: socketPath, allowHalfOpen: true });
+    lingering = client;
+    await within(new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); }), "lingering client connect", 5_000);
+    client.on("error", () => undefined);
     await first.stop();
     successor = new DaemonControlSocket(socketPath, () => ({ healthy: true }), undefined, undefined, { peerProofPath, pipeReleaseWaitMs: 10_000 });
     const startedAt = Date.now();
     const releaseAt = 500;
-    const release = setTimeout(() => lingering.destroy(), releaseAt);
+    const release = setTimeout(() => client.destroy(), releaseAt);
     await within(successor.start(), "successor listen while an old client handle lingers", 10_000);
     clearTimeout(release);
     t.diagnostic(`successor listened after ${Date.now() - startedAt} ms (the old client handle closed at ${releaseAt} ms)`);
     assert.equal((await daemonRequest(socketPath, "daemon.status")).ok, true);
   } finally {
-    lingering.destroy();
+    lingering?.destroy();
     await successor?.stop();
     await env.cleanup();
   }
