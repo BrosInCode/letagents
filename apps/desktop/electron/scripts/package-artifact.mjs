@@ -390,7 +390,7 @@ const required = [
     "shared/workspace-turn-capture.mjs",
     "shared/workspace-turn-capture-worker.mjs",
     // The helper's runtime side and the seal it checks the helper against.
-    ...(windows ? ["shared/codex-executable.mjs", "shared/letagents-process-tree.seal.json", "shared/process-tree.mjs"] : []),
+    ...(windows ? ["shared/codex-executable.mjs", "shared/letagents-process-tree.seal.json", "shared/process-tree.mjs", "shared/provider-executable.mjs"] : []),
   ].map((relative) => ({
     absolutePath: join(contents, relative),
     manifestPath: bundlePath(join(contents, relative)),
