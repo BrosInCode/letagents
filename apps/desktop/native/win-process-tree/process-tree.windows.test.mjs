@@ -247,98 +247,97 @@ test("info names an absent pid as absent and reads this process", { skip }, () =
   assert.equal(processBirth(process.pid, helper), `win32-ft:${self.creationTime}`);
 });
 
-// The helper's wait for an ended job is bounded. With a bound of 0 it checks
-// once, right after TerminateJobObject: processes that each hold 256 MB are
-// almost always still tearing down then, so the job is reported unkillable,
-// and it still empties afterwards (they were only slower than 0 ms). The
-// check can also find the job already empty, which is a correct answer too:
-// each test accepts both, retries, and needs one unkillable answer.
-function heavyTree() {
-  const heavy = fixture("heavy.cjs", [
-    "const held = Buffer.alloc(256 * 1024 * 1024, 1);",
-    'require("node:fs").writeFileSync(process.argv[2], String(process.pid));',
-    "setInterval(() => held[0]++, 1000);",
-  ].join("\n"));
-  // Starts three heavy processes, waits until they run, then waits too or exits.
-  return fixture("heavy-parent.cjs", [
-    'const { spawn } = require("node:child_process");',
-    'const fs = require("node:fs");',
-    "const [prefix, mode] = process.argv.slice(2);",
-    `const files = [0, 1, 2].map((index) => { const file = prefix + index; spawn(process.execPath, [${JSON.stringify(heavy)}, file], { stdio: "ignore" }); return file; });`,
-    'const ready = () => files.every((file) => fs.existsSync(file)) ? (mode === "exit" ? process.exit(0) : fs.writeFileSync(prefix + "ready", "1")) : setTimeout(ready, 20);',
-    "ready();",
-    "setInterval(() => {}, 1000);",
-  ].join("\n"));
-}
-
-function heavyPrefix() {
-  return join(folder, `heavy-${Math.random().toString(36).slice(2)}-`);
-}
-
-/** Runs `attempt` until it answers "unkillable" (at most 5 times); every answer must be one of `valid`. */
-async function untilUnkillable(valid, attempt) {
-  const answers = [];
-  while (answers.length < 5 && !answers.includes("unkillable")) {
-    const answer = await attempt();
-    assert.ok(valid.includes(answer), `unexpected answer ${answer}`);
-    answers.push(answer);
+// The helper's wait for an ended job is bounded. A process whose exit is
+// held cannot leave the job: a debugger attached to it receives the
+// EXIT_PROCESS debug event before the process leaves its job, and the
+// process waits there until the debugger continues. The holder below
+// (Windows PowerShell compiling a few lines of C#, both on every Windows
+// runner) holds that event for `holdMs`, so the job stays non-empty past the
+// helper's bound, deterministically, and empties once it lets go.
+const HOLDER = String.raw`
+param([int]$TargetPid, [int]$HoldMs)
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class ExitHolder {
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool DebugActiveProcess(int pid);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool WaitForDebugEvent(byte[] debugEvent, int milliseconds);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool ContinueDebugEvent(int pid, int tid, uint status);
+  const uint Continue = 0x00010002, NotHandled = 0x80010001;
+  public static void Run(int pid, int holdMs) {
+    if (!DebugActiveProcess(pid)) throw new Exception("DebugActiveProcess failed: " + Marshal.GetLastWin32Error());
+    Console.WriteLine("attached");
+    byte[] debugEvent = new byte[1024];
+    DateTime deadline = DateTime.UtcNow.AddMinutes(2);
+    while (DateTime.UtcNow < deadline) {
+      if (!WaitForDebugEvent(debugEvent, 1000)) continue;
+      int code = BitConverter.ToInt32(debugEvent, 0), processId = BitConverter.ToInt32(debugEvent, 4), threadId = BitConverter.ToInt32(debugEvent, 8);
+      if (code == 5) {
+        Console.WriteLine("held");
+        Thread.Sleep(holdMs);
+        ContinueDebugEvent(processId, threadId, Continue);
+        return;
+      }
+      // An exception other than the attach breakpoint (0x80000003) stays the process's own.
+      uint exception = code == 1 ? BitConverter.ToUInt32(debugEvent, 16) : 0;
+      ContinueDebugEvent(processId, threadId, code == 1 && exception != 0x80000003 ? NotHandled : Continue);
+    }
   }
-  assert.ok(answers.includes("unkillable"), `never unkillable in ${answers.join(", ")}`);
+}
+'@
+[ExitHolder]::Run($TargetPid, $HoldMs)
+`;
+
+/** Attaches the holder to `pid`; resolves once it is attached. `held` resolves when it holds the exit, `done` when it let go. */
+async function holdExit(pid, holdMs) {
+  const script = fixture("hold-exit.ps1", HOLDER);
+  const holder = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, String(pid), String(holdMs)], { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
+  let output = "";
+  holder.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
+  const done = exited(holder);
+  await waitFor(() => output.includes("attached") || holder.exitCode !== null, "the exit holder to attach", 60_000);
+  assert.match(output, /attached/, "the exit holder could not attach");
+  return { held: waitFor(() => output.includes("held"), "the held exit", 30_000), done };
 }
 
-test("a kill whose bounded wait runs out reports the tree unkillable, not ended; the job still empties", { skip }, async () => {
-  const parent = heavyTree();
-  await untilUnkillable(["unkillable", "ended"], async () => {
-    const prefix = heavyPrefix();
-    const tree = spawnTree(process.execPath, [parent, prefix, "wait"], { stdio: "ignore" }, helper);
-    await waitFor(() => existsSync(`${prefix}ready`), "the heavy processes", 60_000);
-    const birth = processBirth(tree.pid, helper);
-    const outcome = signalTreeOutcome(tree.pid, "SIGKILL", { ...noHeldTrees, identity: birth, unkillableAfterMs: 0 });
-    // The helper process waits out its own (default) bound and exits once the job is empty.
-    const { code } = await exited(tree);
-    assert.notEqual(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
-    assert.equal(windowsTreeSize(tree.pid, birth, helper), 0);
-    return outcome;
-  });
+const HOLD_MS = 10_000;
+
+test("a kill whose bounded wait runs out reports the tree unkillable; the helper's own bound ends with the unkillable code", { skip }, async () => {
+  const started = await startTree();
+  const holder = await holdExit(started.grandchildPid, HOLD_MS);
+  const before = Date.now();
+  // The job is ended; the held grandchild stays in it past the kill's 1 s bound.
+  assert.equal(signalTreeOutcome(started.tree.pid, "SIGKILL", { ...noHeldTrees, identity: started.births.helper, unkillableAfterMs: 1_000 }), "unkillable");
+  await holder.held;
+  // The kill told the helper its job was ended: the helper's default 5 s bound runs out while the exit is still held.
+  const { code } = await exited(started.tree);
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.ok(Date.now() - before < HOLD_MS, "the helper waited for the held process instead of its bound");
+  // The held process is still there (its job lost its name with the helper's handle, so it is asked by pid).
+  assert.equal(processBirth(started.grandchildPid, helper), started.births.grandchild, "the held process ended early");
+  // Once let go, it ends.
+  await holder.done;
+  await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
+  assert.ok(gone(started.childPid, started.births.child));
 });
 
-test("a helper whose own bounded wait runs out exits with the unkillable code; the job still empties", { skip }, async () => {
-  const parent = heavyTree();
-  // The program exits on its own and leaves the heavy processes behind: the helper ends them and checks once.
-  await untilUnkillable(["unkillable", "exited"], async () => {
-    const left = spawnTree(process.execPath, [parent, heavyPrefix(), "exit"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 0 });
-    const birth = processBirth(left.pid, helper);
-    const { code } = await exited(left);
-    assert.ok(code === 0 || code === PROCESS_TREE_UNKILLABLE_EXIT_CODE, `exit code ${code}`);
-    await waitFor(() => windowsTreeSize(left.pid, birth, helper) === 0, "the job to empty after all");
-    return code === PROCESS_TREE_UNKILLABLE_EXIT_CODE ? "unkillable" : "exited";
-  });
+test("terminateTreeOutcome reports a held tree unkillable, and terminateTree resolves false for it", { skip }, async () => {
+  const started = await startTree();
+  const holder = await holdExit(started.grandchildPid, HOLD_MS);
+  assert.equal(await terminateTreeOutcome(started.tree, { ...helper, unkillableAfterMs: 1_000, killWaitMs: 7_000 }), "unkillable");
+  await exited(started.tree);
+  assert.equal(started.tree.exitCode, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.equal(await terminateTree(started.tree, helper), false);
+  await holder.done;
+  await waitFor(() => gone(started.grandchildPid, started.births.grandchild), "the held process to end once let go");
 });
 
-test("terminateTreeOutcome names an unkillable tree, and terminateTree agrees with the helper's exit", { skip }, async () => {
-  const parent = heavyTree();
-  await untilUnkillable(["unkillable", "exited"], async () => {
-    const prefix = heavyPrefix();
-    const held = spawnTree(process.execPath, [parent, prefix, "wait"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 0 });
-    await waitFor(() => existsSync(`${prefix}ready`), "the heavy processes", 60_000);
-    const birth = processBirth(held.pid, helper);
-    const outcome = await terminateTreeOutcome(held, { ...helper, unkillableAfterMs: 0, killWaitMs: 10_000 });
-    await exited(held);
-    // Once the helper has exited, its exit code alone decides.
-    assert.equal(await terminateTree(held, helper), held.exitCode !== PROCESS_TREE_UNKILLABLE_EXIT_CODE);
-    await waitFor(() => windowsTreeSize(held.pid, birth, helper) === 0, "the job to empty after all");
-    return outcome;
-  });
-});
-
-test("with the default bound a heavy tree ends whole and terminateTree reports it exited", { skip }, async () => {
-  const parent = heavyTree();
-  const prefix = heavyPrefix();
-  const tree = spawnTree(process.execPath, [parent, prefix, "wait"], { stdio: "ignore" }, helper);
-  await waitFor(() => existsSync(`${prefix}ready`), "the heavy processes", 60_000);
-  const birth = processBirth(tree.pid, helper);
-  assert.equal(await terminateTreeOutcome(tree, helper), "exited");
-  assert.equal(windowsTreeSize(tree.pid, birth, helper), 0);
+test("with the default bound a tree ends whole and terminateTreeOutcome reports it exited", { skip }, async () => {
+  const started = await startTree();
+  assert.equal(await terminateTreeOutcome(started.tree, helper), "exited");
+  assertAllGone(started);
 });
 
 test("the helper refuses a wait bound out of range", { skip }, () => {
