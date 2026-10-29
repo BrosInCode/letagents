@@ -1212,8 +1212,29 @@ function forgetSecret(security, path) {
 
 /** The digest of the bytes checked for this identity, while the verdict lasts; else null. */
 function rememberedDigest(security, path, info) {
+  return rememberedVerdict(security, path, info)?.digest ?? null;
+}
+
+/** The verdict for this identity while it lasts (with `lapsed`, also after its five minutes); else null. */
+function rememberedVerdict(security, path, info, lapsed = false) {
   const verdict = secretVerdicts.get(security)?.get(resolve(path));
-  return verdict && verdict.identity === secretIdentity(info) && Date.now() < verdict.until ? verdict.digest : null;
+  return verdict && verdict.identity === secretIdentity(info) && (lapsed || Date.now() < verdict.until) ? verdict : null;
+}
+
+/** Internal: a renewal's read, which checks the file through its handle even when a verdict is kept. */
+const RENEWAL = Symbol("owner-private renewal");
+
+/**
+ * Check a lapsed verdict's file again in the background, once at a time: a
+ * private answer renews the verdict, any other answer (or a failure) drops it,
+ * so the next read waits for a full check.
+ */
+function renewSecret(security, path, verdict, options) {
+  if (verdict.renewing) return;
+  verdict.renewing = true;
+  void readOwnerPrivateFile(path, undefined, { ...options, renewInBackground: false, [RENEWAL]: true }).catch(() => {
+    if (secretVerdicts.get(security)?.get(resolve(path)) === verdict) forgetSecret(security, path);
+  });
 }
 
 function secretRefused(path, cause) {
@@ -1367,7 +1388,15 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
   }
 }
 
-/** As readOwnerPrivateFileSync. POSIX: exactly readFile(path, encoding). */
+/**
+ * As readOwnerPrivateFileSync. POSIX: exactly readFile(path, encoding).
+ *
+ * `renewInBackground` (Windows): a verdict past its five minutes is still
+ * used for an unchanged file (same identity, same bytes) while a background
+ * check through the file's handle renews it, so a caller with a short budget
+ * does not wait for PowerShell. A file that changed is checked before it is
+ * read, as without the option.
+ */
 export async function readOwnerPrivateFile(path, encoding, options = {}) {
   if (!isWindows(options)) return readFile(path, encoding);
   const security = windowsSecurity(options);
@@ -1376,13 +1405,16 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
     let verdict;
     try {
       const info = secretInfo(path, await lstat(path, { bigint: true }));
-      const known = rememberedDigest(security, path, info);
+      const known = options[RENEWAL] ? null : rememberedVerdict(security, path, info, options.renewInBackground === true);
       if (known) {
         const handle = await openNoFollow(path, constants.O_RDONLY, undefined, options);
         try {
           if (openedIsChecked(await handle.stat({ bigint: true }), info)) {
             const data = await readExactly(handle, Number(info.size));
-            if (data && digest(data) === known) return decoded(data, encoding);
+            if (data && digest(data) === known.digest) {
+              if (Date.now() >= known.until) renewSecret(security, path, known, options);
+              return decoded(data, encoding);
+            }
           }
         } finally { await handle.close(); }
         forgetSecret(security, path);

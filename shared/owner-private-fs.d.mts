@@ -129,6 +129,11 @@ export declare function assertOwnerPrivateSync(path: string, options?: OwnerPriv
 export interface SecretReadOptions extends OwnerPrivateOptions {
   /** Windows: make a file private, by itself, when only this account, SYSTEM and Administrators can open it (state an older version left). */
   upgradeAdministratorsOnly?: boolean;
+  /**
+   * readOwnerPrivateFile only, Windows: an unchanged file whose five-minute verdict lapsed is still read while a
+   * background check through its handle renews (or drops) the verdict, for callers with a short budget.
+   */
+  renewInBackground?: boolean;
 }
 /**
  * Read a high-value secret (a token, a key). POSIX: exactly readFileSync(path, encoding).

@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import type { Server, Socket } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { acceptDaemonPeer, daemonEndpoint, rememberPrivateDaemonProof, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
-import { isOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../shared/owner-private-fs.mjs";
+import { acceptDaemonPeer, daemonEndpoint, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
+import { readOwnerPrivateFileSync, writePrivateFileAtomicallySync } from "../../../../shared/owner-private-fs.mjs";
 
 // Platform facts the MCP test suites share. The suites run on Windows in CI;
 // what cannot run there is skipped through these constants, in one place,
@@ -42,17 +42,18 @@ const fakeProofs = new Map<string, string>();
 
 /**
  * The fake daemon's proof for `proofPath`, written once per process as the
- * daemon writes its own (private, then remembered by the identity checked).
- * Later calls reuse it: the synchronous DACL read runs PowerShell (about a
- * second) and would block the event loop a client's retry budget runs on.
+ * daemon writes its own, then read back as a client in this process reads it
+ * (readOwnerPrivateFile keeps the verdict). Both run now, during setup: a
+ * write whose rename moved the change time leaves the read-back a DACL read,
+ * and the synchronous one runs PowerShell, which must not block the event
+ * loop a client's retry budget runs on.
  */
 function fakeProof(proofPath: string): string {
   let proof = fakeProofs.get(proofPath);
   if (!proof) {
     proof = randomBytes(32).toString("hex");
     writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
-    const checked = lstatSync(proofPath);
-    if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
+    readOwnerPrivateFileSync(proofPath, "utf8");
     fakeProofs.set(proofPath, proof);
   }
   return proof;

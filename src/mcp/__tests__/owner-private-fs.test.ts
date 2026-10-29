@@ -1017,6 +1017,49 @@ test("Windows: a secret another account owns is refused and never taken over, ev
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Windows: renewInBackground reads an unchanged secret past its verdict while one background check renews it", async () => {
+  const root = scratch();
+  const realNow = Date.now;
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const file = join(folder, "proof");
+    writeFileSync(file, "secret");
+    const { security, reads, sddl } = fakeSecurity({ [folder]: PRIVATE_FOLDER, [file]: PRIVATE_FILE });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    const objectReads = () => reads.filter(read => read.startsWith("object:")).length;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    assert.equal(objectReads(), 1);
+    let offset = 6 * 60_000;
+    Date.now = () => realNow() + offset;
+    // Without the option a lapsed verdict is checked before the read.
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    assert.equal(objectReads(), 2);
+    // With it, the lapsed verdict is used and one check runs in the background; a private answer renews it.
+    offset += 6 * 60_000;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", { ...options, renewInBackground: true }), "secret");
+    assert.equal(await readOwnerPrivateFile(file, "utf8", { ...options, renewInBackground: true }), "secret");
+    await new Promise(resolvePause => setTimeout(resolvePause, 10));
+    assert.equal(objectReads(), 3, "one background check for both reads");
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    assert.equal(objectReads(), 3, "the renewed verdict holds");
+    // A lapsed verdict whose background check finds the file exposed is dropped: the next read is refused.
+    offset += 6 * 60_000;
+    sddl[file] = `${PRIVATE_FILE}(A;;FR;;;WD)`;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", { ...options, renewInBackground: true }), "secret");
+    await new Promise(resolvePause => setTimeout(resolvePause, 10));
+    await assert.rejects(readOwnerPrivateFile(file, "utf8", { ...options, renewInBackground: true }), { code: "EOWNERPRIVATE" });
+    // A changed file is checked before it is read, with the option too.
+    sddl[file] = PRIVATE_FILE;
+    assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    offset += 6 * 60_000;
+    writeFileSync(`${file}.new`, "other");
+    renameSync(`${file}.new`, file);
+    sddl[file] = `${PRIVATE_FILE}(A;;FR;;;WD)`;
+    await assert.rejects(readOwnerPrivateFile(file, "utf8", { ...options, renewInBackground: true }), { code: "EOWNERPRIVATE" });
+  } finally { Date.now = realNow; forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Windows: a secret another process replaces during the check is opened again and read whole", async () => {
   const root = scratch();
   try {
