@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import type { Server, Socket } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 
@@ -8,6 +8,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { acceptDaemonPeer, daemonEndpoint, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
+import { isOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../shared/owner-private-fs.mjs";
 
 // Platform facts the MCP test suites share. The suites run on Windows in CI;
 // what cannot run there is skipped through these constants, in one place,
@@ -32,9 +33,16 @@ export function listenTestDaemon(server: Server, socketPath: string, callback?: 
   if (process.platform === "win32" && !gatedServers.has(server)) {
     const proofPath = resolveDaemonProofPath(socketPath);
     if (!proofPath) throw new Error(`No test state directory owns ${socketPath}; build it with testDaemonSocketPath.`);
+    // The product client accepts only a proof private to this account, so the
+    // fake writes it the way the daemon does.
     let proof: string;
-    try { proof = readFileSync(proofPath, "utf8").trim(); }
-    catch { proof = randomBytes(32).toString("hex"); writeFileSync(proofPath, `${proof}\n`, { mode: 0o600 }); }
+    try {
+      if (!isOwnerPrivateSync(proofPath, lstatSync(proofPath))) throw new Error("not private");
+      proof = readFileSync(proofPath, "utf8").trim();
+    } catch {
+      proof = randomBytes(32).toString("hex");
+      writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
+    }
     for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
       server.off("connection", listener);
       server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));

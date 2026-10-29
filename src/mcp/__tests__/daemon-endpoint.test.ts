@@ -188,7 +188,7 @@ test("the daemon closes a client without the proof before any request is handled
     assert.equal(raw.data, "");
     // A client holding a different proof.
     const wrongProofPath = join(env.root, "wrong.proof");
-    await writeFile(wrongProofPath, `${"0".repeat(64)}\n`);
+    await ensureDaemonProof(wrongProofPath);
     const wrong = await exchange(env.connect({ proofPath: wrongProofPath }), "ping\n");
     assert.equal(wrong.connected, false);
     assert.equal(wrong.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED", "the daemon's answer does not match a wrong proof");
@@ -229,6 +229,22 @@ test("a proof the client may not read keeps its access error; retrying cannot he
     assert.equal(result.connected, false);
     assert.equal(result.error?.code, process.getuid?.() === 0 ? undefined : "EACCES");
     assert.equal(isRetryableSupervisorBridgeError(result.error), false);
+  } finally { await env.cleanup(); }
+});
+
+test("a client refuses an exposed proof before it connects", { skip: process.platform === "win32" && "POSIX mode bits; the Windows DACL check is the owner-private helper's" }, async () => {
+  const env = await harness();
+  try {
+    let connections = 0;
+    await env.listen(() => { connections += 1; });
+    await chmod(env.proofPath, 0o644);
+    const result = await exchange(env.connect(), "ping\n");
+    assert.equal(result.connected, false);
+    assert.equal(result.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+    assert.match(result.error?.message ?? "", /not private to this account/);
+    assert.equal(isRetryableSupervisorBridgeError(result.error), false);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(connections, 0, "the daemon sees nothing from a client holding an exposed proof");
   } finally { await env.cleanup(); }
 });
 
