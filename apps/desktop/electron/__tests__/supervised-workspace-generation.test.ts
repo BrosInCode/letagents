@@ -1335,6 +1335,41 @@ windowsTest("the agent's .gitignore cannot hide a junction that replaces a track
   }
 });
 
+windowsTest("a dotless-i rename that NTFS reads as the tracked folder cannot hide a junction", async (t) => {
+  const outside = mkdtempSync(join(tmpdir(), "letagents-generation-upcase-junction-"));
+  try {
+    writeFileSync(join(outside, "x.txt"), "outside\n");
+    await withRepository(async (repo) => {
+      mkdirSync(join(repo, "lib"));
+      writeFileSync(join(repo, "lib", "x.txt"), "tracked\n");
+      git(repo, ["add", "."]);
+      git(repo, ["commit", "-qm", "tracked lib"]);
+      // NTFS upper-cases names to compare them: "lıb" (U+0131) is "LIB".
+      const aliases = existsSync(join(repo, "l\u0131b"));
+      t.diagnostic(`NTFS reads l\u0131b as lib: ${aliases}`);
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "upcase-junction" });
+      const renamed = join(handle.liveWorkspace, "l\u0131b");
+      if (aliases) {
+        renameSync(join(handle.liveWorkspace, "lib"), join(handle.liveWorkspace, "lib-moving"));
+        renameSync(join(handle.liveWorkspace, "lib-moving"), renamed);
+      } else {
+        rmSync(join(handle.liveWorkspace, "lib"), { recursive: true });
+        mkdirSync(renamed);
+      }
+      writeFileSync(join(handle.liveWorkspace, ".gitignore"), "l\u0131b/\nnode_modules/\n");
+      rmSync(join(renamed, "x.txt"), { force: true });
+      symlinkSync(outside, join(renamed, "x.txt"), "junction");
+      await assert.rejects(
+        handle.retireAndReconcile(),
+        (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "UNSUPPORTED_GIT_TREE_ENTRY",
+      );
+      assert.equal(readFileSync(join(repo, "lib", "x.txt"), "utf8"), "tracked\n");
+    });
+  } finally {
+    rmSync(outside, { force: true, recursive: true });
+  }
+});
+
 windowsTest("an 8.3 short name cannot reach a protected folder of the real workspace", async (t) => {
   await withRepository(async (repo) => {
     mkdirSync(join(repo, ".claude"));
