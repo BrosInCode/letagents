@@ -18,7 +18,9 @@ import {
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
+
+import { supervisedAgentsOnly } from "./platform.js";
 import {
   CursorProviderAdapter,
   defaultLaunchTurn,
@@ -1216,7 +1218,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the production Cursor turn wrapper never leaks Electron's wrapper-only Node mode into native Cursor", async () => {
+test("the production Cursor turn wrapper never leaks Electron's wrapper-only Node mode into native Cursor", { skip: supervisedAgentsOnly }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-electron-env-"));
   const previousElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
   try {
@@ -1242,7 +1244,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the production Cursor wrapper fences multi-chunk oversized output without buffering it as a live line", async () => {
+test("the production Cursor wrapper fences multi-chunk oversized output without buffering it as a live line", { skip: supervisedAgentsOnly }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-oversized-"));
   try {
     const configDir = join(root, "config");
@@ -1286,7 +1288,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("the production Cursor wrapper fences aggregate byte and event floods", async () => {
+test("the production Cursor wrapper fences aggregate byte and event floods", { skip: supervisedAgentsOnly }, async () => {
   const floods = [
     {
       name: "aggregate-bytes",
@@ -1353,7 +1355,7 @@ ${flood.source}
   }
 });
 
-test("a transient first-session checkpoint failure recovers the exact terminal without splitting live and durable identity", async () => {
+test("a transient first-session checkpoint failure recovers the exact terminal without splitting live and durable identity", { skip: supervisedAgentsOnly }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-recovery-"));
   try {
     const configDir = join(root, "config");
@@ -1438,7 +1440,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", async () => {
+test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", { skip: supervisedAgentsOnly }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-term-recovery-"));
   try {
     const configDir = join(root, "config");
@@ -1496,7 +1498,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", async () => {
+test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", { skip: supervisedAgentsOnly }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-terminal-"));
   try {
     const configDir = join(root, "config");
