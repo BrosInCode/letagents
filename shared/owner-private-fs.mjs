@@ -595,15 +595,16 @@ function isKnown(security, path) {
 
 /**
  * A folder may vouch for what is made in it only when it passes its private
- * entries on: an allow entry for this account that both files and folders
- * inherit (OI and CI). A private folder without one gives new children the
- * creator's default DACL instead.
+ * entries on to every generation: an allow entry for this account that both
+ * files and folders inherit (OI and CI), without NP. A private folder without
+ * one gives new children (or grandchildren) the creator's default DACL.
  */
 export function sddlPassesPrivateEntriesOn(sddl, sid) {
   const parsed = parseSddl(sddl);
   const user = who(sid);
+  // NP (no propagation) stops after one generation: a folder made inside could not pass entries on again.
   return Boolean(parsed?.dacl?.aces.some(ace => ALLOW_TYPES.has(ace.type) && sidIsUser(ace.sid, user)
-    && ace.flags.includes("OI") && ace.flags.includes("CI")));
+    && ace.flags.includes("OI") && ace.flags.includes("CI") && !ace.flags.includes("NP")));
 }
 
 /**

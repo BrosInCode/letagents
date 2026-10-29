@@ -455,6 +455,9 @@ test("Windows: a private folder that passes nothing on does not vouch for new en
     assert.equal(sddlPassesPrivateEntriesOn(PRIVATE_FOLDER, USER), true);
     assert.equal(sddlPassesPrivateEntriesOn(`O:${USER}D:P(A;;FA;;;${USER})`, USER), false);
     assert.equal(sddlPassesPrivateEntriesOn(`O:${USER}D:P(A;OI;FA;;;${USER})`, USER), false);
+    // NP (no propagation): children get it, grandchildren do not.
+    assert.equal(sddlPassesPrivateEntriesOn(`O:${USER}D:P(A;OICINP;FA;;;${USER})(A;OICI;FA;;;SY)`, USER), false);
+    assert.equal(sddlPassesPrivateEntriesOn(`O:${USER}D:P(A;OICIIO;FA;;;${USER})`, USER), true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
