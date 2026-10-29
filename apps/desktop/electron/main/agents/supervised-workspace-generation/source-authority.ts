@@ -198,6 +198,8 @@ export async function assertSourceWorktreeWithinLimits(authority: SourceGitAutho
     if (info.isDirectory() && !info.isSymbolicLink()) continue;
     if (info.isFile() && info.size > limits.maxFileBytes) throw limitError("file size", limits.maxFileBytes);
   }
+  // A Windows generation never copies untracked files, so they cannot exceed a limit there.
+  if (isWindowsGeneration()) return;
   let total = 0;
   for (const relativePath of untracked) {
     assertSafeRelativePath(relativePath, limits);

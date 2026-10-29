@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  ftruncateSync,
   linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -14,6 +17,7 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -129,7 +133,7 @@ generationTest("a linked-worktree marker swap after attestation cannot redirect 
         turnIdentity: "linked-marker-swap",
         failpoint: (point) => {
           if (point === "after_preparing") {
-            writeFileSync(marker, `gitdir: ${join(outside, ".git")}\n`);
+            overwriteGitControlFile(marker, `gitdir: ${join(outside, ".git")}\n`);
           }
         },
       });
@@ -138,7 +142,7 @@ generationTest("a linked-worktree marker swap after attestation cannot redirect 
       assert.equal(readFileSync(join(worktree, "tracked.txt"), "utf8"), "pinned authority\n");
       assert.equal(git(outside, ["status", "--porcelain=v1"]), "");
     } finally {
-      writeFileSync(marker, originalMarker);
+      overwriteGitControlFile(marker, originalMarker);
     }
   });
 });
@@ -189,14 +193,14 @@ generationTest("linked-worktree marker, backlink, and common-directory inconsist
     for (const candidate of cases) {
       const original = readFileSync(candidate.path, "utf8");
       try {
-        writeFileSync(candidate.path, candidate.replacement);
+        overwriteGitControlFile(candidate.path, candidate.replacement);
         await assert.rejects(
           assertSupervisedWorkspaceGenerationSupported(worktree),
           (error: unknown) => error instanceof SupervisedWorkspaceGenerationError
             && ["REDIRECTED_GIT_ROOT", "SEPARATE_GIT_DIR_UNSUPPORTED"].includes(error.code),
         );
       } finally {
-        writeFileSync(candidate.path, original);
+        overwriteGitControlFile(candidate.path, original);
       }
     }
   });
@@ -336,7 +340,8 @@ generationTest("global ignore semantics are honored without copying ignored secr
     try {
       const excludes = join(globalHome, "global-excludes");
       writeFileSync(excludes, "global-secret.env\n");
-      writeFileSync(join(globalHome, ".gitconfig"), `[core]\n\texcludesFile = ${excludes}\n`);
+      // A config value treats "\\" as an escape: Git for Windows reads "/" as well.
+      writeFileSync(join(globalHome, ".gitconfig"), `[core]\n\texcludesFile = ${excludes.replaceAll("\\", "/")}\n`);
       writeFileSync(join(repo, "global-secret.env"), "GLOBAL_SECRET=private\n");
       process.env.HOME = globalHome;
 
@@ -1130,6 +1135,20 @@ test("git.exe is found on absolute PATH folders with a .exe or .com PATHEXT name
     (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "GIT_EXECUTABLE_NOT_FOUND",
   );
 });
+
+/**
+ * Rewrite a Git control file in place. Git for Windows marks `.git` hidden,
+ * and Windows refuses to replace a hidden file (EPERM).
+ */
+function overwriteGitControlFile(path: string, contents: string): void {
+  const descriptor = openSync(path, "r+");
+  try {
+    ftruncateSync(descriptor, 0);
+    writeSync(descriptor, contents, 0);
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 function countLooseObjects(objects: string): number {
   return readdirSync(objects).filter((name) => /^[0-9a-f]{2}$/.test(name))
