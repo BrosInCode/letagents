@@ -8,6 +8,7 @@ import type {
   RepoStatus,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../components/desktop/types";
+import { localPathBasename } from "../domain/local-path";
 import { myWorkEntry, rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import { projectRoomName } from "../domain/project-room-name";
@@ -87,8 +88,8 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     return freshName
       || currentRecentRootRoom.value?.displayName
       || options.rootRoomSnapshot.value?.roomIdentifier
-      || options.repoStatus.value?.rootPath?.split("/").filter(Boolean).pop()
-      || options.appInfo.value?.workspaceRoot?.split("/").filter(Boolean).pop()
+      || localPathBasename(options.repoStatus.value?.rootPath)
+      || localPathBasename(options.appInfo.value?.workspaceRoot)
       || "Room";
   });
 

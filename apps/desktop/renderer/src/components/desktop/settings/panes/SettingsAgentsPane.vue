@@ -1,6 +1,7 @@
 <template>
   <section class="settings-panel" data-testid="settings-agents-panel">
-    <div class="settings-control-list">
+    <SupervisedAgentsUnavailableNotice v-if="!supervisedAgentsSupported" />
+    <div v-else class="settings-control-list">
       <SettingsRow
         title="Commit as your GitHub account"
         :description="commitIdentityDescription"
@@ -21,7 +22,7 @@
     </div>
 
     <p
-      v-if="commitIdentityError"
+      v-if="supervisedAgentsSupported && commitIdentityError"
       class="settings-feedback"
       data-state="error"
       data-testid="settings-agent-commit-identity-feedback"
@@ -48,7 +49,7 @@
 
       <article v-if="!workers.length" class="surface-row single-line" data-testid="worker-status-empty">
         <p class="surface-title">No agents yet.</p>
-        <p class="surface-subtitle">Add an agent to a room to get started.</p>
+        <p v-if="supervisedAgentsSupported" class="surface-subtitle">Add an agent to a room to get started.</p>
       </article>
     </div>
   </section>
@@ -66,6 +67,8 @@ import type {
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { agentCommitIdentityDescription } from "../presentation";
 import SettingsRow from "../SettingsRow.vue";
+import SupervisedAgentsUnavailableNotice from "../../content/SupervisedAgentsUnavailableNotice.vue";
+import { supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
 
 const props = defineProps<{
   workers: WorkerSnapshot[];
@@ -78,7 +81,8 @@ const commitIdentityError = ref<string | null>(null);
 
 const commitIdentityDescription = computed(() => agentCommitIdentityDescription(commitIdentity.value));
 
-onMounted(() => { void loadCommitIdentity(); });
+// How agents commit matters only where this app runs agents.
+onMounted(() => { if (supervisedAgentsSupported.value) void loadCommitIdentity(); });
 
 async function loadCommitIdentity(): Promise<void> {
   try {
