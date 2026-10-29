@@ -6,6 +6,7 @@ import type {
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
 import { projectRoomName } from "./project-room-name";
+import { localPathBasename } from "./local-path";
 import { repositoryRoomName } from "../../../../../shared/project-room-name.mjs";
 
 export type RecentRootRoom = {
@@ -25,7 +26,7 @@ export function normalizeRoomIdentifier(value: string | null | undefined): strin
 }
 
 export function rootPathLabel(rootPath: string | null | undefined): string | null {
-  return rootPath?.split("/").filter(Boolean).pop() || null;
+  return localPathBasename(rootPath) || null;
 }
 
 export function rootRoomEntryId(roomIdentifier: string | null | undefined): string {

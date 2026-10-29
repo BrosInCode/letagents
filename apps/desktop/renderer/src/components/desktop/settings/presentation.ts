@@ -1,4 +1,5 @@
 import { formatDate } from "../../../domain/formatters";
+import { thisComputerLabel } from "../../../domain/supervised-agents-support";
 import type {
   DesktopAccountRoomEntry,
   DesktopAgentCommitIdentitySettings,
@@ -87,10 +88,10 @@ export function roleSourceLabel(room: DesktopAccountRoomEntry): string {
 export function agentCommitIdentityDescription(settings: DesktopAgentCommitIdentitySettings | null): string {
   if (!settings) return "Checking how agents commit…";
   if (settings.useHostGitIdentity) {
-    return "Agents commit with this Mac's own Git name and email. Applies when an agent next starts.";
+    return `Agents commit with ${thisComputerLabel()}'s own Git name and email. Applies when an agent next starts.`;
   }
   if (!settings.githubIdentity) {
-    return "Connect GitHub so agents commit without your Git email. Until then they use this Mac's Git identity.";
+    return `Connect GitHub so agents commit without your Git email. Until then they use ${thisComputerLabel()}'s Git identity.`;
   }
   const { name, email } = settings.githubIdentity;
   return `In GitHub repositories that would use your global Git email, agents commit as ${name} <${email}> instead. Applies when an agent next starts.`;

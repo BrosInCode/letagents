@@ -20,6 +20,7 @@ import {
   visibleDesktopAgentProviders,
 } from "../../../../domain/managed-agents";
 import { savedModelLabel } from "../../../../domain/claude-model-labels";
+import { localPathBasename } from "../../../../domain/local-path";
 import { refreshSupervisedRuntimeEntry } from "../../../../domain/supervised-recovery";
 import { contextualAddAgentError } from "../add-agent/add-agent-errors";
 import { createSupervisedLaunchAttachments } from "../add-agent/supervised-launch-attachments";
@@ -315,7 +316,7 @@ export function useComposerAgentDraft(options: {
     const current = context();
     const root = current?.repoRootPath?.trim();
     if (root) {
-      const name = root.split(/[\\/]/).filter(Boolean).at(-1) ?? root;
+      const name = localPathBasename(root) || root;
       return current?.repoStatus?.branch ? `${name} · ${current.repoStatus.branch}` : name;
     }
     return roomOnly() ? "Private scratch workspace" : "No project yet";
@@ -329,7 +330,7 @@ export function useComposerAgentDraft(options: {
       || branchScopedGitRoomExpectedBranch(current.roomGitRoom, current.repoStatus);
     return matchingManagedAgentWorktreesForBranch(current.repoStatus, expected).map((worktree) => ({
       rootPath: worktree.path,
-      label: `${worktree.path.split(/[\\/]/).filter(Boolean).at(-1) ?? worktree.path} · ${worktree.branch}`,
+      label: `${localPathBasename(worktree.path) || worktree.path} · ${worktree.branch}`,
     }));
   });
 

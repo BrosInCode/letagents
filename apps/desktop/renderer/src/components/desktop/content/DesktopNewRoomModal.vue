@@ -29,9 +29,9 @@
             <button class="new-room-button" type="button" :disabled="busy" data-testid="new-room-pick-project-parent" @click="emit('pickProjectParent')">{{ activeAction === 'pick_project_parent' ? 'Choosing…' : projectParent ? 'Change' : 'Browse' }}</button>
           </div>
           <label v-if="showParentPath" class="new-room-field desktop-new-room-path-field">
-            <span>Location path</span><input v-model="projectParent" type="text" placeholder="~/Projects" autocomplete="off" autocapitalize="off" spellcheck="false" :disabled="busy" data-testid="new-room-project-parent" />
+            <span>Location path</span><input v-model="projectParent" type="text" :placeholder="pathExamples.parent" autocomplete="off" autocapitalize="off" spellcheck="false" :disabled="busy" data-testid="new-room-project-parent" />
           </label>
-          <p v-if="projectParent.trim()" class="new-room-hint desktop-new-room-destination" data-testid="new-room-project-destination">New folder <span>{{ projectParent.trim().replace(/\/$/, '') }}/{{ projectName.trim() || 'your-project' }}</span></p>
+          <p v-if="projectParent.trim()" class="new-room-hint desktop-new-room-destination" data-testid="new-room-project-destination">New folder <span>{{ joinLocalPath(projectParent, projectName.trim() || 'your-project') }}</span></p>
           <p class="new-room-hint desktop-new-room-context">Creates an empty folder and a local room for it. You can connect Git and share the room later.</p>
           <p v-if="projectCreationError" id="new-room-create-error" class="new-room-error" role="alert">{{ projectCreationError }}</p>
         </form>
@@ -40,13 +40,13 @@
           <div class="new-room-field-heading"><span>Project folder</span><button type="button" class="desktop-new-room-text-button" :disabled="busy" :aria-expanded="showProjectPath" @click="showProjectPath = !showProjectPath">Enter path</button></div>
           <div class="new-room-folder">
             <FolderOpen aria-hidden="true" />
-            <div><strong>{{ projectSelection?.folderLabel || 'Choose a folder' }}</strong><small :title="projectSelection?.repoPath || ''">{{ projectSelection?.repoPath || 'Open the room for a project on this Mac.' }}</small></div>
+            <div><strong>{{ projectSelection?.folderLabel || 'Choose a folder' }}</strong><small :title="projectSelection?.repoPath || ''">{{ projectSelection?.repoPath || `Open the room for a project on ${thisComputer}.` }}</small></div>
             <button class="new-room-button" type="button" :disabled="busy" data-testid="new-room-open-project" @click="emit('openProject')">{{ activeAction === 'pick_project' ? 'Choosing…' : projectSelection ? 'Change' : 'Browse' }}</button>
           </div>
           <form v-if="showProjectPath || projectPathError" class="new-room-field desktop-new-room-path-field" data-testid="new-room-project-path-form" @submit.prevent="emit('openProjectPath')">
             <label for="new-room-project-path-input">Folder path</label>
             <div class="desktop-new-room-path-row">
-              <input id="new-room-project-path-input" ref="projectPathInputElement" v-model="projectPath" type="text" placeholder="~/code/my-project" autocomplete="off" autocapitalize="off" spellcheck="false" :disabled="busy" :aria-invalid="Boolean(projectPathError)" :aria-describedby="projectPathError ? 'new-room-project-path-error' : undefined" data-testid="new-room-project-path-input" />
+              <input id="new-room-project-path-input" ref="projectPathInputElement" v-model="projectPath" type="text" :placeholder="pathExamples.project" autocomplete="off" autocapitalize="off" spellcheck="false" :disabled="busy" :aria-invalid="Boolean(projectPathError)" :aria-describedby="projectPathError ? 'new-room-project-path-error' : undefined" data-testid="new-room-project-path-input" />
               <button class="new-room-button" type="submit" :disabled="busy || !projectPath.trim()" data-testid="new-room-project-path-submit">{{ activeAction === 'open_project_path' ? 'Opening…' : 'Use path' }}</button>
             </div>
             <small v-if="projectPathError" id="new-room-project-path-error" class="new-room-error" role="alert">{{ projectPathError }}</small>
@@ -73,9 +73,9 @@
           <fieldset class="new-room-storage" :disabled="busy">
             <legend>Where it lives</legend>
             <label data-testid="new-room-storage-cloud"><input v-model="storage" type="radio" value="cloud" /><Cloud aria-hidden="true" /><span><strong>Shared online</strong><small>Invite your people and agents with a code.</small></span></label>
-            <label data-testid="new-room-storage-local"><input v-model="storage" type="radio" value="local" /><Laptop aria-hidden="true" /><span><strong>Only on this Mac</strong><small>Stays on this device until you choose to share it.</small></span></label>
+            <label data-testid="new-room-storage-local"><input v-model="storage" type="radio" value="local" /><Laptop aria-hidden="true" /><span><strong>Only on {{ thisComputer }}</strong><small>Stays on this device until you choose to share it.</small></span></label>
           </fieldset>
-          <p class="new-room-hint desktop-new-room-context">{{ storage === 'cloud' ? 'You’ll get an invite code to share.' : 'Your room will stay on this Mac.' }}</p>
+          <p class="new-room-hint desktop-new-room-context">{{ storage === 'cloud' ? 'You’ll get an invite code to share.' : `Your room will stay on ${thisComputer}.` }}</p>
         </form>
 
         <form v-else-if="step === 'join'" id="new-room-join-form" data-testid="new-room-join-step" @submit.prevent="emit('join')">
@@ -124,6 +124,8 @@ import { FolderOpen, Hash, KeyRound, X, ChevronRight, Cloud, Laptop, Check, Copy
 import NewRoomFrame from '../../../../../../../shared/ui/NewRoomFrame.vue';
 import type { NewRoomActiveAction, NewRoomRecentProjectFolder, NewRoomStep, NewRoomStorageChoice, NewRoomSuccessState, PendingProjectRoomSelection } from '../../../composables/useDesktopNewRoomModal';
 import { currentFocusableElement, restoreFocus, trapFocusInDialog } from './modal-focus';
+import { joinLocalPath, localPathBasename, localPathExamples } from '../../../domain/local-path';
+import { thisComputerLabel } from '../../../domain/supervised-agents-support';
 
 const props = defineProps<{
   step: NewRoomStep; busy: boolean; canDismiss: boolean; activeAction: NewRoomActiveAction;
@@ -152,7 +154,9 @@ const showTabs = computed(() => !['working', 'success', 'error'].includes(props.
 const showProjectPath = ref(false);
 const showParentPath = ref(false);
 const projectMode = ref<'project' | 'new_project'>(props.step === 'project' ? 'project' : 'new_project');
-const parentLabel = computed(() => projectParent.value.trim().replace(/\/+$/, '').split('/').at(-1) || 'Choose a location');
+const parentLabel = computed(() => localPathBasename(projectParent.value.trim()) || 'Choose a location');
+const pathExamples = localPathExamples();
+const thisComputer = thisComputerLabel();
 const dialogElement = ref<HTMLElement | null>(null);
 const joinInputElement = ref<HTMLInputElement | null>(null);
 const projectPathInputElement = ref<HTMLInputElement | null>(null);

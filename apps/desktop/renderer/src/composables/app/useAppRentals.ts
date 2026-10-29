@@ -1,6 +1,7 @@
 import { loadRentalProviderDashboard, useRentalProviderEvents } from "../useRentalProviderEvents";
 import { rentMarketplaceEntry } from "../../domain/desktop-navigation";
 import { desktopIpc } from "../../ipc/index.js";
+import { supervisedAgentsSupported } from "../../domain/supervised-agents-support";
 import type { AppContextOf } from "./context";
 
 /** Rent marketplace navigation and the provider's pending rental requests. */
@@ -21,7 +22,8 @@ export function useAppRentalActions(context: unknown) {
   }
 
   async function refreshRentalRequestCount(): Promise<void> {
-    if (!authStatus.value?.authenticated || app.authSessionLocked.value) {
+    // Renting out needs agents from this app; where they cannot run there are no requests to check.
+    if (!authStatus.value?.authenticated || app.authSessionLocked.value || !supervisedAgentsSupported.value) {
       rentalRequestCount.value = 0; inboxRentals.value = []; inboxRentalError.value = '';
       return;
     }

@@ -6,6 +6,7 @@ import { rememberEnvironmentPanelOpen, rememberGitHubEventsVisible } from "../..
 import { exportRoomChat } from "../../components/desktop/content/room-shell/roomExport";
 import type { RoomTabId } from "../../components/desktop/content/room-shell/types";
 import { desktopIpc } from "../../ipc/index.js";
+import { supervisedAgentsSupported } from "../../domain/supervised-agents-support";
 import type { RoomShellContextOf } from "./context";
 
 /** Tabs, tool panels, room storage, message reveal, and room links. */
@@ -162,7 +163,8 @@ export function useRoomShellToolActions(context: unknown) {
   }
 
   function openAddAgentModal(): void {
-    if (props.projectRoom && !props.durableProjectRootPath) {
+    // Where agents cannot run, the window only says so; project setup does not matter.
+    if (supervisedAgentsSupported.value && props.projectRoom && !props.durableProjectRootPath) {
       pushActionToast("Connect this room to its local project before adding an agent.", "info", 6_000);
       return;
     }
