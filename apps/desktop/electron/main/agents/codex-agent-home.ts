@@ -152,6 +152,8 @@ const WINDOWS_OWN_DATABASE = /\.(?:sqlite3?|db)(?:-wal|-shm|-journal)?$/i;
 const WINDOWS_LINK_RECORD = ".letagents-links.json";
 /** Windows: the name a former link that changed while it was moved aside is kept under. */
 const WINDOWS_FORMER_LINK_PREFIX = ".letagents-former-";
+/** A former sign-in kept that way. */
+const FORMER_SIGN_IN = /^\.letagents-former-[0-9a-f]{12}-auth\.json$/;
 /** `mtimeNs` in full (NTFS keeps 100 ns), as text: a millisecond would let a write in the same one pass for no write. */
 type LinkedFileState = { id: string; size: string; mtimeNs: string };
 
@@ -313,9 +315,9 @@ export function codexAgentHomeDirectory(env: NodeJS.ProcessEnv): string {
 }
 
 /** A sign-in file of the agents' home's own: nothing is started until the owner has looked at it. */
-function signInOfItsOwn(home: string): CodexAgentHomeSignInError {
+function signInOfItsOwn(home: string, file: string = SIGN_IN_FILE): CodexAgentHomeSignInError {
   return new CodexAgentHomeSignInError(
-    `LetAgents found a Codex sign-in file of its own (${SIGN_IN_FILE}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
+    `LetAgents found a Codex sign-in file of its own (${file.replace(/[^\x20-\x7e]/g, "?").slice(0, 80)}) in the folder it keeps for sandboxed agents (${shownAgentHome(home)}). `
     + "Two sign-in files can sign you out of Codex, so LetAgents will not start a sandboxed Codex agent. "
     + "Open Codex and check that it is still signed in, then delete that file and start the agent again. "
     + "If Codex asks you to sign in, sign in again: your conversations and settings are kept.",
@@ -422,6 +424,10 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
   if (before.some(({ name, path, entry }) => name === SIGN_IN_FILE && !entry.isSymbolicLink() && !linkedFile(path, entry, name) && !formerLink(path, entry, name))) {
     throw signInOfItsOwn(home);
   }
+  // Windows: a former sign-in that changed and could not be put back. No Read-only profile denies its
+  // name, so nothing starts with this home while it is there.
+  const keptSignIn = before.find(({ name }) => windows && FORMER_SIGN_IN.test(name));
+  if (keptSignIn) throw signInOfItsOwn(home, keptSignIn.name);
   // A link into another folder than this owner's home was made for another home, or by something
   // else. An agent may be running with it, so it is never turned to this home under that agent.
   if (before.some(({ path, entry }) => entry.isSymbolicLink() && !sameName(dirname(target(path)), owner))) {
@@ -474,13 +480,20 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
       if (moved && moved.id === recorded.id && moved.size === recorded.size && moved.mtimeNs === recorded.mtimeNs) {
         unlinkSync(aside);
       } else if (name === SIGN_IN_FILE) {
-        try { renameSyncWithRetry(aside, path); } catch { /* kept under the aside name; the owner is told below */ }
+        try {
+          renameSyncWithRetry(aside, path);
+        } catch {
+          // Kept under the aside name, which every later launch refuses (FORMER_SIGN_IN).
+          throw signInOfItsOwn(home, basename(aside));
+        }
         throw signInOfItsOwn(home);
       } else {
         own.push(basename(aside));
       }
       continue;
     }
+    // Windows: a sign-in that stopped being a link, or changed, after the check above is a second sign-in.
+    if (windows && name === SIGN_IN_FILE) throw signInOfItsOwn(home);
     const empty = entry.isDirectory() ? readdirSync(path).length === 0 : entry.isFile() && entry.size === 0;
     if (toLink.has(name) && empty) {
       // Removed only while still empty: neither call removes anything that has content.

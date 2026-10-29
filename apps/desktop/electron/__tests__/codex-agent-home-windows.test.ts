@@ -152,3 +152,13 @@ test("Windows: an owner's file under the record's name is never linked, and the 
   assert.equal(readFileSync(join(owner, ".letagents-links.json"), "utf8"), "the owner's own file");
   assert.ok(!sameFile(join(agents, ".letagents-links.json"), join(owner, ".letagents-links.json")));
 });
+
+test("Windows: while a former sign-in is kept under another name, no launch uses the agents' home, and the owner is told its name", { skip: windowsOnly }, (t) => {
+  const { owner, agents, remove } = fixture();
+  t.after(remove);
+  linkCodexAgentHome(owner, agents);
+  writeFileSync(join(agents, ".letagents-former-0123456789ab-auth.json"), "{\"tokens\":\"kept\"}");
+  assert.throws(() => linkCodexAgentHome(owner, agents), (error: Error) => error instanceof CodexAgentHomeSignInError && error.message.includes(".letagents-former-0123456789ab-auth.json"));
+  rmSync(join(agents, ".letagents-former-0123456789ab-auth.json"));
+  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
+});
