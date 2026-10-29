@@ -58,8 +58,9 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // the file renamed meanwhile cannot make the answer describe another file:
 //   "object:<path>"  the owner and DACL of the handle, and the file's bytes
 //                    read through it: "ok:<SDDL>|<base64>"; "error:busy" when
-//                    another process holds the file without sharing it (a
-//                    sharing or lock violation), which is not a refusal;
+//                    another process holds the file without sharing it or
+//                    locks a range of it (a sharing violation on the open, a
+//                    lock violation on the read), which is not a refusal;
 //   "owner-alias:<SID>" how Windows writes that SID as an SDDL owner
 //                    ("O:LA", or "O:<SID>" when it has no alias);
 //   "upgrade:<path>" if the handle's owner is this account or Administrators
@@ -72,12 +73,17 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // load modules, which takes tens of seconds on a machine with many installed
 // (seen on Windows CI in a process started with a reduced environment).
 const ANSWER_FUNCTION = [
+  // An IOException for ERROR_SHARING_VIOLATION (32: the open) or ERROR_LOCK_VIOLATION (33: a read of a locked
+  // range), under the method call's own exception.
+  "function LetAgentsBusy($record) {",
+  "  $e = $record.Exception; while ($e.InnerException) { $e = $e.InnerException }",
+  "  return ($e -is [System.IO.IOException]) -and ($e.HResult -eq -2147024864 -or $e.HResult -eq -2147024863)",
+  "}",
   "function LetAgentsAnswer([string]$p) {",
   "  try {",
   "    if ($p.StartsWith('object:')) {",
-  // ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33), under the method call's own exception.
   "      try { $fs = [System.IO.File]::Open($p.Substring(7), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete') }",
-  "      catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; $code = $e.HResult -band 0xFFFF; if ($e -is [System.IO.IOException] -and ($code -eq 32 -or $code -eq 33)) { return 'error:busy' }; return 'error:' }",
+  "      catch { if (LetAgentsBusy $_) { return 'error:busy' }; return 'error:' }",
   "      try {",
   // The length is read once: a file that grows meanwhile fails the end-of-file check below.
   `        $length = $fs.Length; if ($length -gt ${OBJECT_LIMIT}) { return 'error:' }`,
@@ -86,7 +92,7 @@ const ANSWER_FUNCTION = [
   "        while ($read -lt $bytes.Length) { $n = $fs.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }",
   "        if ($read -ne $bytes.Length -or $fs.ReadByte() -ne -1) { return 'error:' }",
   "        return 'ok:' + $sddl + '|' + [Convert]::ToBase64String($bytes)",
-  "      } finally { $fs.Dispose() }",
+  "      } catch { if (LetAgentsBusy $_) { return 'error:busy' }; return 'error:' } finally { $fs.Dispose() }",
   "    }",
   "    if ($p.StartsWith('owner-alias:')) { return 'ok:' + [System.Security.AccessControl.RawSecurityDescriptor]::new('O:' + $p.Substring(12)).GetSddlForm([System.Security.AccessControl.AccessControlSections]::Owner) }",
   "    if ($p.StartsWith('upgrade:')) {",

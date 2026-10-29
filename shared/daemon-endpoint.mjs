@@ -150,9 +150,9 @@ async function ensurePosixDaemonProof(proofPath, { recheckDelayMs = 250, checkPr
  * failed DACL read and a "not private" answer look the same (EOWNERPRIVATE),
  * and a rotation mid-handoff fails clients holding the old proof, so a valid
  * proof is replaced only when a second read agrees. A proof another process
- * holds without sharing it (EBUSY) says nothing about its DACL: it is not
- * replaced (the rename would fail on it anyway) and the error is thrown, as
- * a locked read was before. The new proof needs no
+ * keeps locked through both reads (EBUSY) is replaced too: the rename either
+ * succeeds (a holder that shares delete access) or fails, and that error is
+ * thrown, as a locked read was before. The new proof needs no
  * check of its own: writePrivateFileAtomically makes it private from its
  * create (privateEntryCreated in the daemon's verified state folder, no
  * icacls) and remembers what it wrote, so this process reads it back with no
@@ -166,7 +166,6 @@ async function ensureWindowsDaemonProof(proofPath, { recheckDelayMs = 250, check
     } catch (error) {
       if (error?.code === "ENOENT") break;
       if (error?.code !== "EOWNERPRIVATE") throw error;
-      if (read === 2 && error.cause?.code === "EBUSY") throw error;
       if (read === 1) await new Promise((resolve) => setTimeout(resolve, recheckDelayMs));
       continue;
     }
