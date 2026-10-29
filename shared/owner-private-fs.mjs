@@ -154,11 +154,39 @@ export function icaclsSetOwnerArguments(path, sid) {
   return [path, "/setowner", `*${sid}`, "/q"];
 }
 
-/** The arguments that give a path a protected DACL for only `sid` and SYSTEM. */
+/**
+ * The well-known groups a user profile, the temporary folder or a drive root
+ * gives by inheritance. On Windows Server 2022, `/inheritance:r` keeps an
+ * object's inherited entries as explicit ones, so they are removed by name.
+ * Any other entry left behind still fails the check: the result is never
+ * trusted without reading it back.
+ */
+export const INHERITED_GROUP_SIDS = Object.freeze([
+  "S-1-5-32-544", // Administrators
+  "S-1-5-32-545", // Users
+  "S-1-5-32-546", // Guests
+  "S-1-5-32-547", // Power Users
+  "S-1-5-32-555", // Remote Desktop Users
+  "S-1-5-11", // Authenticated Users
+  "S-1-5-4", // Interactive
+  "S-1-5-7", // Anonymous
+  "S-1-1-0", // Everyone
+  "S-1-3-0", // Creator Owner
+  "S-1-3-1", // Creator Group
+  "S-1-3-4", // Owner Rights
+  "S-1-15-2-1", // All application packages
+  "S-1-15-2-2", // All restricted application packages
+]);
+
+/**
+ * The arguments that give a path a protected DACL for only `sid` and SYSTEM:
+ * inheritance off, the inherited groups removed, then the two grants.
+ */
 export function icaclsProtectArguments(path, kind, sid) {
   assertProtectable(path, sid);
   const rights = kind === "directory" ? "(OI)(CI)F" : "F";
-  return [path, "/inheritance:r", "/grant:r", `*${sid}:${rights}`, `*${SYSTEM_SID}:${rights}`, "/q"];
+  return [path, "/inheritance:r", "/remove:g", ...INHERITED_GROUP_SIDS.map(group => `*${group}`),
+    "/grant:r", `*${sid}:${rights}`, `*${SYSTEM_SID}:${rights}`, "/q"];
 }
 
 function powershellArguments() {
@@ -263,19 +291,31 @@ export function parseSddl(sddl) {
 const DENY_TYPES = new Set(["D", "OD"]);
 const ALLOW_TYPES = new Set(["A", "OA"]);
 
+/**
+ * SDDL writes a few well-known accounts as two-letter aliases. "LA" is this
+ * machine's built-in Administrator (RID 500): it names the current user when
+ * that user's SID ends in -500. On a domain machine a domain account with RID
+ * 500 could be read as the local one; both are administrators, who can take
+ * ownership of any file anyway, so no other user gains anything.
+ */
+function sidIsUser(sid, user) {
+  return sid === user || (sid === "LA" && /-500$/.test(user));
+}
+
 export function sddlIsOwnedBy(sddl, sid) {
-  return parseSddl(sddl)?.owner === String(sid).toUpperCase();
+  const owner = parseSddl(sddl)?.owner;
+  return Boolean(owner && sidIsUser(owner, String(sid).toUpperCase()));
 }
 
 /** Owner is `sid`; the DACL is protected; every allow entry is for `sid` or SYSTEM. */
 export function sddlIsOwnerPrivate(sddl, sid) {
   const parsed = parseSddl(sddl);
   const user = String(sid).toUpperCase();
-  if (!parsed || parsed.owner !== user || !parsed.dacl) return false;
+  if (!parsed || !sidIsUser(parsed.owner, user) || !parsed.dacl) return false;
   const { flags, aces } = parsed.dacl;
   if (flags.includes("NO_ACCESS_CONTROL") || !flags.includes("P")) return false;
   return aces.every(ace => DENY_TYPES.has(ace.type)
-    || (ALLOW_TYPES.has(ace.type) && (ace.sid === user || ace.sid === "SY" || ace.sid === SYSTEM_SID)));
+    || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ace.sid === "SY" || ace.sid === SYSTEM_SID)));
 }
 
 // ---------------------------------------------------------------- checks

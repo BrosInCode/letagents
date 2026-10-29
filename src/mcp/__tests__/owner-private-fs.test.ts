@@ -13,6 +13,7 @@ import {
   createWindowsSecurity,
   everyOwnedByCurrentUserSync,
   icaclsProtectArguments,
+  INHERITED_GROUP_SIDS,
   isOwnedByCurrentUser,
   isOwnerPrivate,
   isOwnerPrivateSync,
@@ -36,6 +37,7 @@ const USER = "S-1-5-21-1004336348-1177238915-682003330-1001";
 const OTHER = "S-1-5-21-1004336348-1177238915-682003330-1002";
 const PRIVATE_FILE = `O:${USER}G:${USER}D:P(A;;FA;;;SY)(A;;FA;;;${USER})`;
 const PRIVATE_FOLDER = `O:${USER}G:${USER}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;${USER})`;
+const REMOVED = INHERITED_GROUP_SIDS.map(sid => `*${sid}`);
 const posixOnly = process.platform === "win32" ? "POSIX modes and uids" : false;
 const windowsOnly = process.platform === "win32" ? false : "needs real Windows ACLs";
 
@@ -80,9 +82,9 @@ test("whoami's CSV answer gives the SID only; anything else is refused", () => {
 
 test("icacls gets a protected DACL for only this account and SYSTEM; folders pass it to new children", () => {
   assert.deepEqual(icaclsProtectArguments("C:\\Users\\me\\.letagents\\key", "file", USER),
-    ["C:\\Users\\me\\.letagents\\key", "/inheritance:r", "/grant:r", `*${USER}:F`, "*S-1-5-18:F", "/q"]);
+    ["C:\\Users\\me\\.letagents\\key", "/inheritance:r", "/remove:g", ...REMOVED, "/grant:r", `*${USER}:F`, "*S-1-5-18:F", "/q"]);
   assert.deepEqual(icaclsProtectArguments("C:\\Users\\me\\.letagents", "directory", USER),
-    ["C:\\Users\\me\\.letagents", "/inheritance:r", "/grant:r", `*${USER}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/q"]);
+    ["C:\\Users\\me\\.letagents", "/inheritance:r", "/remove:g", ...REMOVED, "/grant:r", `*${USER}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/q"]);
   assert.throws(() => icaclsProtectArguments("relative\\key", "file", USER), { code: "EOWNERPRIVATE" });
   assert.throws(() => icaclsProtectArguments("C:\\key", "file", "Everyone"), { code: "EOWNERPRIVATE" });
 });
@@ -121,9 +123,9 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   // Owner first (an elevated administrator's files are owned by Administrators), then the DACL.
   assert.deepEqual(calls.filter(call => call.file.endsWith("icacls.exe")).map(call => [call.file, call.args]), [
     ["C:\\Windows\\System32\\icacls.exe", ["C:\\a", "/setowner", `*${USER}`, "/q"]],
-    ["C:\\Windows\\System32\\icacls.exe", ["C:\\a", "/inheritance:r", "/grant:r", `*${USER}:F`, "*S-1-5-18:F", "/q"]],
+    ["C:\\Windows\\System32\\icacls.exe", ["C:\\a", "/inheritance:r", "/remove:g", ...REMOVED, "/grant:r", `*${USER}:F`, "*S-1-5-18:F", "/q"]],
     ["C:\\Windows\\System32\\icacls.exe", ["C:\\d", "/setowner", `*${USER}`, "/q"]],
-    ["C:\\Windows\\System32\\icacls.exe", ["C:\\d", "/inheritance:r", "/grant:r", `*${USER}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/q"]],
+    ["C:\\Windows\\System32\\icacls.exe", ["C:\\d", "/inheritance:r", "/remove:g", ...REMOVED, "/grant:r", `*${USER}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/q"]],
   ]);
 });
 
@@ -169,6 +171,12 @@ test("only an owned, protected DACL with entries for this account and SYSTEM is 
   assert.equal(sddlIsOwnerPrivate(`O:${USER}D:P(A;;FA;;;S-1-5-18)(A;;FA;;;${USER.toLowerCase()})`, USER), true);
   // A deny entry only takes access away.
   assert.equal(sddlIsOwnerPrivate(`O:${USER}D:P(D;;FA;;;WD)(A;;FA;;;${USER})`, USER), true);
+
+  // The built-in Administrator (RID 500) is written as "LA".
+  const ADMIN = "S-1-5-21-3776380004-1005456608-3524014338-500";
+  assert.equal(sddlIsOwnerPrivate("O:LAG:S-1-5-21-1-2-3-513D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)", ADMIN), true);
+  assert.equal(sddlIsOwnerPrivate("O:LAD:P(A;;FA;;;LA)", USER), false);
+  assert.equal(sddlIsOwnerPrivate(`O:${USER}D:P(A;;FA;;;LA)(A;;FA;;;${USER})`, USER), false);
 
   const refused: Record<string, string> = {
     "another owner": `O:${OTHER}D:P(A;;FA;;;${USER})`,
