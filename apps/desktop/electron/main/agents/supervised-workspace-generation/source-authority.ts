@@ -3,11 +3,11 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, sep } from "node:path";
-import { isOwnerPrivate, nullDevice, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { isOwnerPrivate, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, type GenerationManifest, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, SupervisedWorkspaceGenerationError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
-import { ProcessExitError, cloneRegularFile, runGit, sourceAuthorityBuffer, sourceAuthorityExitCode, sourceGitEnvironment } from "./git.js";
+import { ProcessExitError, cloneRegularFile, gitHooksPath, runGit, sourceAuthorityBuffer, sourceAuthorityExitCode, sourceGitEnvironment } from "./git.js";
 import { assertSafeAncestors, atomicWrite } from "./manifest.js";
-import { assertSafeRelativePath, compareUtf8, generationError, isErrno, limitError, pathExists, safeRelative, splitNul, splitNulBuffer } from "./helpers.js";
+import { assertSafeRelativePath, compareUtf8, generationError, gitRelativePath, isErrno, isWindowsGeneration, limitError, pathExists, safeRelative, splitNul, splitNulBuffer } from "./helpers.js";
 import { sourceVisiblePaths } from "./worktree.js";
 
 export async function linkIgnoredDependencyRoots(
@@ -57,14 +57,16 @@ export async function linkIgnoredDependencyRoots(
     assertSafeRelativePath(sourceRelativePath, limits);
     const ignored = await sourceAuthorityExitCode(
       support,
-      ["check-ignore", "-q", "--", sourceRelativePath],
+      ["check-ignore", "-q", "--", gitRelativePath(sourceRelativePath)],
       sourceGitEnvironment(),
     );
     if (ignored !== 0) continue;
     const generationPath = join(liveRoot, sourceRelativePath);
     if (await pathExists(generationPath)) continue;
     await mkdir(dirname(generationPath), { recursive: true, mode: 0o700 });
-    await symlink(candidate, generationPath, "dir");
+    // Windows: a junction needs no symlink privilege; lstat reports it as a
+    // link, so Git, readdir and rm never walk into the source dependency.
+    await symlink(candidate, generationPath, isWindowsGeneration() ? "junction" : "dir");
     mappings.push({ sourcePath: candidate, generationPath, purpose: "dependency" });
   }
   return mappings;
@@ -78,7 +80,7 @@ export async function installDependencyExcludes(
 ): Promise<void> {
   const dependencyPaths = mappings
     .filter((entry): entry is SupervisedWorkspaceReadOnlyRoot & { generationPath: string } => entry.purpose === "dependency" && entry.generationPath !== null)
-    .map((entry) => safeRelative(liveRoot, entry.generationPath))
+    .map((entry) => gitRelativePath(safeRelative(liveRoot, entry.generationPath)))
     .sort(compareUtf8);
   if (dependencyPaths.length === 0) return;
   const excludePath = join(gitDirectory, "info", "exclude");
@@ -108,14 +110,14 @@ export async function readSafeAlternateRoots(
 }
 
 export async function disablePrivateGitAuthority(liveRoot: string): Promise<void> {
-  await runGit(liveRoot, ["config", "--local", "core.hooksPath", nullDevice()], 1024 * 1024);
+  await runGit(liveRoot, ["config", "--local", "core.hooksPath", gitHooksPath()], 1024 * 1024);
   await runGit(liveRoot, ["config", "--local", "core.fsmonitor", "false"], 1024 * 1024);
   await runGit(liveRoot, ["config", "--local", "gc.auto", "0"], 1024 * 1024);
 }
 
 export async function disableTrustedGitAuthority(authorityRoot: string): Promise<void> {
   await protectOwnerPrivate(authorityRoot, "directory");
-  await runGit(authorityRoot, ["config", "--local", "core.hooksPath", nullDevice()], 1024 * 1024);
+  await runGit(authorityRoot, ["config", "--local", "core.hooksPath", gitHooksPath()], 1024 * 1024);
   await runGit(authorityRoot, ["config", "--local", "core.fsmonitor", "false"], 1024 * 1024);
   await runGit(authorityRoot, ["config", "--local", "gc.auto", "0"], 1024 * 1024);
 }

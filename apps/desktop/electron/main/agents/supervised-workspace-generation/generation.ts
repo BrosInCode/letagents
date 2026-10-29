@@ -3,14 +3,15 @@ import { constants as fsConstants } from "node:fs";
 import { access, lstat, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createPrivateDir, isOwnedByCurrentUser, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
-import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, type RecoverSupervisedWorkspaceGenerationOptions, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport } from "./types.js";
+import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, type RecoverSupervisedWorkspaceGenerationOptions, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
 import { FileInspectionSession, validateAppliedOperationArtifacts } from "./file-inspection.js";
-import { ProcessExitError, canonicalGitControlTarget, discoverSourceGitText, gitControlPath, gitText, readStableGitControlFile, runGit, sourceAuthorityText } from "./git.js";
+import { ProcessExitError, canonicalGitControlTarget, discoverSourceGitText, gitControlPath, gitOutputPath, gitText, readStableGitControlFile, runGit, sourceAuthorityText } from "./git.js";
 import { abandonManifest, retireAndReconcile } from "./reconcile.js";
-import { assertClonePlatform, fsyncDirectory, generationDirectoryName, generationError, generationIdFor, invokeFailpoint, isErrno, manifestPathOf, normalizeLimits, resultFor, safeRelative } from "./helpers.js";
+import { assertClonePlatform, fsyncDirectory, generationDirectoryName, generationError, generationIdFor, invokeFailpoint, isErrno, isWindowsGeneration, manifestPathOf, normalizeLimits, resultFor, safeRelative } from "./helpers.js";
 import { assertClonefileSupported, assertIndexHasNoLinksOrGitlinks, assertNoUnmergedEntries, assertSafeBareAlternateRoot, assertSourceWorktreeWithinLimits, assertSparseCheckoutDisabled, disablePrivateGitAuthority, disableTrustedGitAuthority, installDependencyExcludes, linkIgnoredDependencyRoots, readSafeAlternateRoots } from "./source-authority.js";
 import { cleanupTrees, loadManifest, persistManifest, transition } from "./manifest.js";
-import { materializeSourceWorktree, pinPrivateCloneHead, reproduceProviderIndex, snapshotWorktree } from "./worktree.js";
+import { materializeSourceWorktree, pinPrivateCloneHead, reproduceProviderIndex, snapshotWorktree, sourceVisiblePaths } from "./worktree.js";
+import { WINDOWS_FRESH_WORKTREE_NOTE, assertWindowsFreeSpace, carryDirtyTrackedFiles, prepareWindowsWorktree, recordWindowsBaselineModes, sealRawSnapshotAuthority } from "./worktree-windows.js";
 
 export async function assertSupervisedWorkspaceGenerationSupported(
   realWorkspaceInput: string,
@@ -22,13 +23,13 @@ export async function assertSupervisedWorkspaceGenerationSupported(
   if (!selectedInfo.isDirectory() || selectedInfo.isSymbolicLink()) {
     throw generationError("The selected workspace is not a real directory.", "UNSAFE_WORKSPACE_ROOT");
   }
-  const sourceRoot = await discoverSourceGitText(realWorkspace, ["rev-parse", "--show-toplevel"]);
+  const sourceRoot = gitOutputPath(await discoverSourceGitText(realWorkspace, ["rev-parse", "--show-toplevel"]));
   const canonicalSourceRoot = await realpath(sourceRoot);
   if (sourceRoot !== canonicalSourceRoot || resolve(sourceRoot) !== sourceRoot) {
     throw generationError("The Git top-level is symlinked or redirected.", "REDIRECTED_GIT_ROOT");
   }
   const workspaceRelativePath = safeRelative(sourceRoot, realWorkspace);
-  const gitDirectoryRaw = await discoverSourceGitText(sourceRoot, ["rev-parse", "--absolute-git-dir"]);
+  const gitDirectoryRaw = gitOutputPath(await discoverSourceGitText(sourceRoot, ["rev-parse", "--absolute-git-dir"]));
   if (!isAbsolute(gitDirectoryRaw) || resolve(gitDirectoryRaw) !== gitDirectoryRaw) {
     throw generationError("The Git directory is not canonical.", "REDIRECTED_GIT_ROOT");
   }
@@ -38,7 +39,7 @@ export async function assertSupervisedWorkspaceGenerationSupported(
   }
   const expectedGitDirectory = join(sourceRoot, ".git");
   const gitInfo = await lstat(expectedGitDirectory).catch(() => null);
-  const commonDirectoryRaw = await discoverSourceGitText(sourceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const commonDirectoryRaw = gitOutputPath(await discoverSourceGitText(sourceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   const commonDirectoryPath = resolve(isAbsolute(commonDirectoryRaw) ? commonDirectoryRaw : join(sourceRoot, commonDirectoryRaw));
   const commonDirectory = await realpath(commonDirectoryPath);
   if (commonDirectory !== commonDirectoryPath) {
@@ -88,7 +89,7 @@ export async function assertSupervisedWorkspaceGenerationSupported(
     gitDirectory,
     gitCommonDirectory: commonDirectory,
   };
-  const pinnedSourceRoot = await sourceAuthorityText(sourceAuthority, ["rev-parse", "--show-toplevel"]);
+  const pinnedSourceRoot = gitOutputPath(await sourceAuthorityText(sourceAuthority, ["rev-parse", "--show-toplevel"]));
   if (pinnedSourceRoot !== sourceRoot) {
     throw generationError("Pinned Git authority does not match the selected worktree.", "REDIRECTED_GIT_ROOT");
   }
@@ -98,7 +99,7 @@ export async function assertSupervisedWorkspaceGenerationSupported(
       if (error instanceof ProcessExitError && error.exitCode === 1) return null;
       throw error;
     });
-  const gitIndexPathRaw = await sourceAuthorityText(sourceAuthority, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+  const gitIndexPathRaw = gitOutputPath(await sourceAuthorityText(sourceAuthority, ["rev-parse", "--path-format=absolute", "--git-path", "index"]));
   const gitIndexPath = await realpath(gitIndexPathRaw);
   const gitIndexInfo = await lstat(gitIndexPathRaw);
   if (!isAbsolute(gitIndexPathRaw) || resolve(gitIndexPathRaw) !== gitIndexPathRaw
@@ -130,9 +131,9 @@ export async function assertSupervisedWorkspaceGenerationSupported(
       "GENERATION_PATH_UNWRITABLE",
     );
   }
-  await access("/bin/cp", fsConstants.X_OK);
+  if (!isWindowsGeneration()) await access("/bin/cp", fsConstants.X_OK);
   await gitText(sourceRoot, ["--version"]);
-  const gitObjectPath = await sourceAuthorityText(sourceAuthority, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]);
+  const gitObjectPath = gitOutputPath(await sourceAuthorityText(sourceAuthority, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]));
   const gitObjectInfo = await lstat(gitObjectPath);
   const gitObjectDirectory = await realpath(gitObjectPath);
   if (!isAbsolute(gitObjectPath) || resolve(gitObjectPath) !== gitObjectPath
@@ -147,7 +148,9 @@ export async function assertSupervisedWorkspaceGenerationSupported(
     if (!isErrno(error, "ENOENT")) throw error;
   }
   if ((await stat(sourceRoot)).dev !== parentInfo.dev) {
-    throw generationError("The repository and its adjacent generation parent are on different filesystems; clonefile isolation cannot be guaranteed.", "CLONE_FILESYSTEM_MISMATCH");
+    throw generationError(isWindowsGeneration()
+      ? "The repository and its adjacent generation parent are on different volumes; reconciliation hard links cannot cross them."
+      : "The repository and its adjacent generation parent are on different filesystems; clonefile isolation cannot be guaranteed.", "CLONE_FILESYSTEM_MISMATCH");
   }
   const support: SupervisedWorkspaceGenerationSupport = {
     sourceRoot,
@@ -164,7 +167,8 @@ export async function assertSupervisedWorkspaceGenerationSupported(
   await assertIndexHasNoLinksOrGitlinks(support, DEFAULT_LIMITS);
   await assertNoUnmergedEntries(support, DEFAULT_LIMITS);
   await assertSourceWorktreeWithinLimits(support, DEFAULT_LIMITS);
-  await assertClonefileSupported(parent);
+  if (isWindowsGeneration()) await assertWindowsFreeSpace(support, parent, DEFAULT_LIMITS);
+  else await assertClonefileSupported(parent);
   return support;
 }
 
@@ -223,34 +227,9 @@ export async function createSupervisedWorkspaceGeneration(
     await persistManifest(manifest);
     await invokeFailpoint(options.failpoint, "after_preparing", manifestPathOf(manifest));
 
-    // The provider-visible clone is disposable compatibility metadata. Trusted
-    // snapshots use the distinct supervisor-only bare authority below and never
-    // consume this .git directory after native release.
-    await runGit(support.sourceRoot, [
-      "clone", "--shared", "--no-checkout", "--no-hardlinks", "--", support.gitCommonDirectory, liveSourceRoot,
-    ], limits.maxPatchBytes);
-    await runGit(support.sourceRoot, [
-      "clone", "--shared", "--bare", "--no-hardlinks", "--", support.gitCommonDirectory, join(generationRoot, AUTHORITY_NAME),
-    ], limits.maxPatchBytes);
-    await pinPrivateCloneHead(liveSourceRoot, support.headOid, support.headRef);
-    await disablePrivateGitAuthority(liveSourceRoot);
-    await disableTrustedGitAuthority(join(generationRoot, AUTHORITY_NAME));
-    await reproduceProviderIndex(support.gitIndexPath, liveSourceRoot, limits);
-    const baselineFilesRoot = join(generationRoot, BASELINE_FILES_NAME);
-    await createPrivateDir(baselineFilesRoot);
-    await materializeSourceWorktree(support, liveSourceRoot, baselineFilesRoot, limits);
-    const dependencyRoots = await linkIgnoredDependencyRoots(support, liveSourceRoot, limits);
-    await installDependencyExcludes(join(liveSourceRoot, ".git"), dependencyRoots, liveSourceRoot, generationId);
-    await installDependencyExcludes(join(generationRoot, AUTHORITY_NAME), dependencyRoots, liveSourceRoot, generationId);
-    const alternateRoots = await readSafeAlternateRoots(liveSourceRoot, support.gitObjectDirectory, limits);
-    await assertSafeBareAlternateRoot(join(generationRoot, AUTHORITY_NAME), support.gitObjectDirectory, limits);
-    const baselineTreeOid = await snapshotWorktree(
-      join(generationRoot, AUTHORITY_NAME),
-      liveSourceRoot,
-      join(generationRoot, AUTHORITY_NAME, BASELINE_INDEX_NAME),
-      support.headOid,
-      limits,
-    );
+    const { baselineTreeOid, alternateRoots, dependencyRoots } = isWindowsGeneration()
+      ? await prepareWindowsGeneration(support, generationRoot, liveSourceRoot, generationId, limits)
+      : await prepareCloneGeneration(support, generationRoot, liveSourceRoot, generationId, limits);
     manifest = await transition(manifest, "ready", {
       baselineTreeOid,
       readOnlyRoots: [
@@ -287,6 +266,92 @@ export async function createSupervisedWorkspaceGeneration(
     }
     throw error;
   }
+}
+
+interface PreparedGeneration {
+  baselineTreeOid: string;
+  alternateRoots: string[];
+  dependencyRoots: SupervisedWorkspaceReadOnlyRoot[];
+}
+
+async function prepareCloneGeneration(
+  support: SupervisedWorkspaceGenerationSupport,
+  generationRoot: string,
+  liveSourceRoot: string,
+  generationId: string,
+  limits: SupervisedWorkspaceGenerationLimits,
+): Promise<PreparedGeneration> {
+  // The provider-visible clone is disposable compatibility metadata. Trusted
+  // snapshots use the distinct supervisor-only bare authority below and never
+  // consume this .git directory after native release.
+  await runGit(support.sourceRoot, [
+    "clone", "--shared", "--no-checkout", "--no-hardlinks", "--", support.gitCommonDirectory, liveSourceRoot,
+  ], limits.maxPatchBytes);
+  await runGit(support.sourceRoot, [
+    "clone", "--shared", "--bare", "--no-hardlinks", "--", support.gitCommonDirectory, join(generationRoot, AUTHORITY_NAME),
+  ], limits.maxPatchBytes);
+  await pinPrivateCloneHead(liveSourceRoot, support.headOid, support.headRef);
+  await disablePrivateGitAuthority(liveSourceRoot);
+  await disableTrustedGitAuthority(join(generationRoot, AUTHORITY_NAME));
+  await reproduceProviderIndex(support.gitIndexPath, liveSourceRoot, limits);
+  const baselineFilesRoot = join(generationRoot, BASELINE_FILES_NAME);
+  await createPrivateDir(baselineFilesRoot);
+  await materializeSourceWorktree(support, liveSourceRoot, baselineFilesRoot, limits);
+  const dependencyRoots = await linkIgnoredDependencyRoots(support, liveSourceRoot, limits);
+  await installDependencyExcludes(join(liveSourceRoot, ".git"), dependencyRoots, liveSourceRoot, generationId);
+  await installDependencyExcludes(join(generationRoot, AUTHORITY_NAME), dependencyRoots, liveSourceRoot, generationId);
+  const alternateRoots = await readSafeAlternateRoots(liveSourceRoot, support.gitObjectDirectory, limits);
+  await assertSafeBareAlternateRoot(join(generationRoot, AUTHORITY_NAME), support.gitObjectDirectory, limits);
+  const baselineTreeOid = await snapshotWorktree(
+    join(generationRoot, AUTHORITY_NAME),
+    liveSourceRoot,
+    join(generationRoot, AUTHORITY_NAME, BASELINE_INDEX_NAME),
+    support.headOid,
+    limits,
+  );
+  return { baselineTreeOid, alternateRoots, dependencyRoots };
+}
+
+/**
+ * Windows: the supervisor authority is the same private bare clone, sealed
+ * for raw snapshots; the provider gets a detached worktree of its own private
+ * clone (worktree-windows.ts). baseline-files holds no copies, only the
+ * tracked files' recorded modes (recordWindowsBaselineModes).
+ */
+async function prepareWindowsGeneration(
+  support: SupervisedWorkspaceGenerationSupport,
+  generationRoot: string,
+  liveSourceRoot: string,
+  generationId: string,
+  limits: SupervisedWorkspaceGenerationLimits,
+): Promise<PreparedGeneration> {
+  const authorityRoot = join(generationRoot, AUTHORITY_NAME);
+  await runGit(support.sourceRoot, [
+    "clone", "--shared", "--bare", "--no-hardlinks", "--", support.gitCommonDirectory, authorityRoot,
+  ], limits.maxPatchBytes);
+  await disableTrustedGitAuthority(authorityRoot);
+  await sealRawSnapshotAuthority(authorityRoot);
+  const providerGit = await prepareWindowsWorktree(support, generationRoot, liveSourceRoot, limits);
+  await createPrivateDir(join(generationRoot, BASELINE_FILES_NAME));
+  const { tracked } = await sourceVisiblePaths(support, limits);
+  await recordWindowsBaselineModes(support, join(generationRoot, BASELINE_FILES_NAME), tracked, limits);
+  const dependencyRoots = await linkIgnoredDependencyRoots(support, liveSourceRoot, limits);
+  await installDependencyExcludes(providerGit, dependencyRoots, liveSourceRoot, generationId);
+  await installDependencyExcludes(authorityRoot, dependencyRoots, liveSourceRoot, generationId);
+  await assertSafeBareAlternateRoot(providerGit, support.gitObjectDirectory, limits);
+  await assertSafeBareAlternateRoot(authorityRoot, support.gitObjectDirectory, limits);
+  const sourceTree = await carryDirtyTrackedFiles(support, authorityRoot, providerGit, liveSourceRoot, tracked, limits);
+  const baselineTreeOid = await snapshotWorktree(
+    authorityRoot,
+    liveSourceRoot,
+    join(authorityRoot, BASELINE_INDEX_NAME),
+    support.headOid,
+    limits,
+  );
+  if (baselineTreeOid !== sourceTree) {
+    throw generationError("The workspace changed while its Git worktree was prepared, or holds a tracked file Git ignores.", "GENERATION_SOURCE_CHANGED");
+  }
+  return { baselineTreeOid, alternateRoots: [support.gitObjectDirectory], dependencyRoots };
 }
 
 /**
@@ -356,6 +421,7 @@ export function makeHandle(
     liveSourceRoot: manifest.liveSourceRoot,
     liveWorkspace: manifest.liveWorkspace,
     readOnlyRoots: manifest.readOnlyRoots,
+    workspaceNote: isWindowsGeneration() ? WINDOWS_FRESH_WORKTREE_NOTE : null,
     retireAndReconcile: async () => retireAndReconcile(await loadManifest(manifestPathOf(manifest)), failpoint),
     recover: async (options = {}) => recoverSupervisedWorkspaceGeneration(manifestPathOf(manifest), {
       ...options,

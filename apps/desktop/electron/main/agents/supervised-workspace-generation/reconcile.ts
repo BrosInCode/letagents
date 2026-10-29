@@ -5,10 +5,11 @@ import { dirname, join, sep } from "node:path";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, FINAL_INDEX_NAME, type GenerationManifest, RETIRED_NAME, type ReconcileOperation, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type TreeEntry } from "./types.js";
 import { FileInspectionSession, assertCanonicalDirectoryIdentity, canonicalDirectoryIdentity, ensureDesiredArtifact, inspectExactFile, matchesOperationState, restoreDisplacedWithoutOverwrite, validateAppliedOperationArtifacts } from "./file-inspection.js";
 import { assertSafeAncestors, cleanupTrees, transition, validateManifest } from "./manifest.js";
-import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, invokeFailpoint, isErrno, isProtectedPath, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, treeEntryEqual } from "./helpers.js";
+import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, invokeFailpoint, isErrno, isProtectedPath, isWindowsGeneration, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, treeEntryEqual } from "./helpers.js";
 import { assertTreeHasNoNormalizedPathCollisions, diffTreeEntries, readGitBlob, snapshotWorktree, treeEntryForRegularFile } from "./worktree.js";
 import { assertTrustedAuthority } from "./source-authority.js";
 import { cloneRegularFile } from "./git.js";
+import { WINDOWS_DEFAULT_FILE_MODE, inheritWorkspaceAcl, readWindowsBaselineModes, windowsFileMetadataDigest } from "./worktree-windows.js";
 
 export async function retireAndReconcile(
   initial: GenerationManifest,
@@ -117,7 +118,35 @@ export async function ensureQuarantined(
     await fsyncDirectory(retiredRoot);
   }
   await assertNoProtectedPathAliases(retiredRoot, manifest.limits);
+  if (isWindowsGeneration()) await assertNoUnmappedLinks(manifest, retiredRoot);
   await assertTrustedAuthority(manifest, authorityRoot);
+}
+
+/**
+ * Windows: any user can make a junction without privilege, and whether Git
+ * records one as a link depends on its own settings. Refuse every link or
+ * junction in the retired tree except the dependency junctions this
+ * generation made, before Git snapshots anything.
+ */
+export async function assertNoUnmappedLinks(manifest: GenerationManifest, retiredRoot: string): Promise<void> {
+  const mapped = new Set(manifest.readOnlyRoots
+    .filter((entry) => entry.purpose === "dependency" && entry.generationPath !== null)
+    .map((entry) => safeRelative(manifest.liveSourceRoot, entry.generationPath!)));
+  const pending = [""];
+  let visited = 0;
+  while (pending.length > 0) {
+    const parentRelativePath = pending.pop()!;
+    for (const entry of await readdir(join(retiredRoot, parentRelativePath), { withFileTypes: true })) {
+      const relativePath = parentRelativePath ? join(parentRelativePath, entry.name) : entry.name;
+      visited += 1;
+      if (visited > manifest.limits.maxChangedPaths) throw limitError("retired path count", manifest.limits.maxChangedPaths);
+      if (entry.isSymbolicLink()) {
+        if (mapped.has(relativePath)) continue;
+        throw generationError(`Symlink, junction, or unsupported tree entry denied at ${JSON.stringify(relativePath)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
+      }
+      if (entry.isDirectory()) pending.push(relativePath);
+    }
+  }
 }
 
 export async function assertNoProtectedPathAliases(
@@ -160,6 +189,7 @@ export async function buildPlan(
     manifest.finalTreeOid!,
     manifest.limits,
   );
+  let baselineModes: Map<string, number> | undefined;
   const normalizedPaths = new Map<string, string>();
   for (const change of changes) {
     const relativePath = projectRelativePath(change.sourceRelativePath, manifest.workspaceRelativePath);
@@ -186,7 +216,19 @@ export async function buildPlan(
     const id = operationId(sourceRelativePath, before, after);
     let baselineMode: number | null = null;
     let baselineMetadataDigest: string | null = null;
-    if (before) {
+    if (before && isWindowsGeneration()) {
+      // Windows keeps no baseline copies (the tree is a checkout, not a
+      // clone). The real file must still hold the baseline bytes; its
+      // metadata is the one Windows reports (the read-only attribute).
+      const realState = await inspections.inspect(manifest, join(manifest.realWorkspace, relativePath), relativePath);
+      if (!realState) throw new SupervisedWorkspaceConflictError(relativePath, "the immutable baseline file disappeared");
+      if (!treeEntryEqual(realState.entry, before)) {
+        throw new SupervisedWorkspaceConflictError(relativePath, "content or metadata no longer matches the immutable baseline");
+      }
+      baselineModes ??= await readWindowsBaselineModes(manifest);
+      baselineMode = baselineModes.get(sourceRelativePath) ?? WINDOWS_DEFAULT_FILE_MODE;
+      baselineMetadataDigest = windowsFileMetadataDigest({ size: 0, mode: baselineMode, uid: 0, gid: 0 });
+    } else if (before) {
       const baselineRoot = join(manifest.generationRoot, BASELINE_FILES_NAME);
       await assertSafeAncestors(baselineRoot, sourceRelativePath, false);
       const baselinePath = join(baselineRoot, sourceRelativePath);
@@ -383,6 +425,7 @@ export async function applyOperation(
         throw new SupervisedWorkspaceConflictError(operation.relativePath, `the retained displaced file changed at ${JSON.stringify(displacedArtifact)}`);
       }
     }
+    if (operation.desired && isWindowsGeneration()) await inheritWorkspaceAcl(target);
     await assertCanonicalDirectoryIdentity(parent, parentIdentity, manifest.realWorkspace, operation.relativePath);
     return;
   }
@@ -401,6 +444,7 @@ export async function applyOperation(
       if (isErrno(error, "EEXIST")) throw new SupervisedWorkspaceConflictError(operation.relativePath, "a concurrent entry won the no-replace install");
       throw error;
     }
+    if (isWindowsGeneration()) await inheritWorkspaceAcl(target);
     await fsyncDirectory(parent);
     await assertCanonicalDirectoryIdentity(parent, parentIdentity, manifest.realWorkspace, operation.relativePath);
     const installed = await inspectExactFile(manifest, target, undefined, inspections);
@@ -439,6 +483,7 @@ export async function applyOperation(
       }
       throw error;
     }
+    if (isWindowsGeneration()) await inheritWorkspaceAcl(target);
   }
   await fsyncDirectory(parent);
   await assertCanonicalDirectoryIdentity(parent, parentIdentity, manifest.realWorkspace, operation.relativePath);

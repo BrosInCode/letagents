@@ -5,8 +5,8 @@ import { lstat, mkdir, realpath, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { isOwnerPrivate, openNoFollow, privateEntryCreated } from "../../../../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../../../../shared/rename-retry.mjs";
-import { AUTHORITY_NAME, BASELINE_FILES_NAME, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, RETIRED_NAME, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type TreeEntry } from "./types.js";
-import { assertSafeRelativePath, fsyncDirectory, generationDirectoryName, generationError, isErrno, isProtectedPath, manifestPathOf, operationId, projectRelativePath, safeRelative } from "./helpers.js";
+import { AUTHORITY_NAME, BASELINE_FILES_NAME, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, PROVIDER_GIT_NAME, RETIRED_NAME, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type TreeEntry } from "./types.js";
+import { assertSafeRelativePath, fsyncDirectory, generationDirectoryName, generationError, isErrno, isProtectedPath, isWindowsGeneration, manifestPathOf, operationId, projectRelativePath, safeRelative } from "./helpers.js";
 
 export async function atomicWrite(target: string, content: Buffer, mode: number, generationId: string): Promise<void> {
   const temporary = join(dirname(target), `.${basename(target)}.letagents-${generationId}-${randomBytes(8).toString("hex")}.tmp`);
@@ -282,6 +282,8 @@ export async function cleanupTrees(manifest: GenerationManifest, preserveReconci
   const names = preserveReconciliationEvidence
     ? [LIVE_NAME, RETIRED_NAME, AUTHORITY_NAME]
     : [LIVE_NAME, RETIRED_NAME, AUTHORITY_NAME, BASELINE_FILES_NAME, STAGING_NAME];
+  // The worktree's private clone goes after the worktree itself.
+  if (isWindowsGeneration()) names.splice(names.indexOf(AUTHORITY_NAME), 0, PROVIDER_GIT_NAME);
   for (const name of names) {
     const target = join(manifest.generationRoot, name);
     safeRelative(manifest.generationRoot, target);
