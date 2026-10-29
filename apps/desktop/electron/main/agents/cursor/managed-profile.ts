@@ -178,7 +178,7 @@ export function prepareCursorManagedProfile(
   const cacheDir = join(profileRoot, "cache");
   const cursorHomeDir = join(homeDir, ".cursor");
 
-  ensurePrivateProfileTree(profileRoot, [homeDir, cursorHomeDir, configDir, dataDir, cacheDir]);
+  ensurePrivateProfileTree(profileRoot, [homeDir, cursorHomeDir, configDir, dataDir, cacheDir, ...windowsProfileHomeFolders(homeDir)]);
 
   copyOptionalFile(
     join(sourceHomeDir, ".cursor", "cli-config.json"),
@@ -209,6 +209,7 @@ export function prepareCursorManagedProfile(
       CURSOR_CONFIG_DIR: join(configDir, "cursor"),
       CURSOR_DATA_DIR: join(dataDir, "cursor"),
       NODE_COMPILE_CACHE: join(cacheDir, "node-compile-cache"),
+      ...windowsProfileHomeEnv(homeDir),
     },
   };
 }
@@ -288,6 +289,7 @@ export function prepareCursorSupervisedProfile(
     dataDir,
     cacheDir,
     tempDir,
+    ...windowsProfileHomeFolders(homeDir),
     ...(mcpConnectorSocketPath ? [] : [
       bridgeRoot,
       bridgeHomeDir,
@@ -560,6 +562,7 @@ export function prepareCursorSupervisedProfile(
       CURSOR_DATA_DIR: join(dataDir, "cursor"),
       NODE_COMPILE_CACHE: join(cacheDir, "node-compile-cache"),
       TMPDIR: tempDir,
+      ...windowsProfileHomeEnv(homeDir, tempDir),
       ...(permissionProfileId === "full_access" ? {
         GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || join(sourceConfigDir, "gh"),
       } : {}),
@@ -592,4 +595,25 @@ function isCursorMcpConnectorSocketPath(path: string): boolean {
   }
   return basename(path) === "stdio.sock"
     && new RegExp(cursorMcpConnectorRootPattern(CURSOR_MCP_CONNECTOR_PARENT, "win32")).test(dirname(path));
+}
+
+/**
+ * Windows programs find the home folder through USERPROFILE (os.homedir())
+ * and their settings through APPDATA and LOCALAPPDATA, not HOME. Point them
+ * into the private profile too, so Cursor reads the sealed ~/.cursor there,
+ * never the owner's own MCP servers and permissions.
+ */
+function windowsProfileHomeEnv(homeDir: string, tempDir?: string): Record<string, string> {
+  if (process.platform !== "win32") return {};
+  return {
+    USERPROFILE: homeDir,
+    APPDATA: join(homeDir, "AppData", "Roaming"),
+    LOCALAPPDATA: join(homeDir, "AppData", "Local"),
+    ...(tempDir ? { TEMP: tempDir, TMP: tempDir } : {}),
+  };
+}
+
+function windowsProfileHomeFolders(homeDir: string): string[] {
+  if (process.platform !== "win32") return [];
+  return [join(homeDir, "AppData"), join(homeDir, "AppData", "Roaming"), join(homeDir, "AppData", "Local")];
 }
