@@ -571,8 +571,7 @@ function identityOf(path) {
   } catch { return null; }
 }
 
-function addTo(map, security, path) {
-  const id = identityOf(path);
+function addId(map, security, id) {
   if (!id) return;
   let set = map.get(security);
   if (!set) { set = new Set(); map.set(security, set); }
@@ -584,13 +583,27 @@ function inSet(map, security, path) {
   return Boolean(id && map.get(security)?.has(id));
 }
 
-function rememberPrivateFolder(security, path) {
-  addTo(verifiedFolders, security, path);
-  addTo(knownEntries, security, path);
+/** Remember the object with identity `id`: known, and (when it passes private entries on) a verified folder. */
+function rememberId(security, id, verifiedFolder) {
+  addId(knownEntries, security, id);
+  if (verifiedFolder) addId(verifiedFolders, security, id);
 }
 
 function isKnown(security, path) {
   return inSet(knownEntries, security, path);
+}
+
+/**
+ * A folder may vouch for what is made in it only when it passes its private
+ * entries on: an allow entry for this account that both files and folders
+ * inherit (OI and CI). A private folder without one gives new children the
+ * creator's default DACL instead.
+ */
+export function sddlPassesPrivateEntriesOn(sddl, sid) {
+  const parsed = parseSddl(sddl);
+  const user = who(sid);
+  return Boolean(parsed?.dacl?.aces.some(ace => ALLOW_TYPES.has(ace.type) && sidIsUser(ace.sid, user)
+    && ace.flags.includes("OI") && ace.flags.includes("CI")));
 }
 
 /**
@@ -608,29 +621,24 @@ function parentIsVerified(security, path) {
  * exclusively, for example with open(..., "wx") or mkdir. POSIX: nothing to
  * do (the mode was set at creation). Windows: inside a verified folder the
  * entry inherits the private entries, so it is known and nothing runs;
- * elsewhere it is protected in full.
+ * elsewhere it is protected in full. A link is refused.
  */
 export async function privateEntryCreated(path, kind, options = {}) {
   if (!isWindows(options)) return;
-  if (!identityOf(path)) throw privateError(`Refusing a link (or an entry without a file ID) at ${path}.`);
+  const id = identityOf(path);
+  if (!id) throw privateError(`Refusing a link (or an entry without a file ID) at ${path}.`);
   const security = windowsSecurity(options);
-  if (parentIsVerified(security, path)) {
-    if (kind === "directory") rememberPrivateFolder(security, path);
-    else addTo(knownEntries, security, path);
-    return;
-  }
+  // A folder made in a verified folder inherits its OI/CI entries, so it passes them on too.
+  if (parentIsVerified(security, path)) { rememberId(security, id, kind === "directory"); return; }
   await protectOwnerPrivate(path, kind, { ...options, force: true, [JUST_CREATED]: true });
 }
 
 export function privateEntryCreatedSync(path, kind, options = {}) {
   if (!isWindows(options)) return;
-  if (!identityOf(path)) throw privateError(`Refusing a link (or an entry without a file ID) at ${path}.`);
+  const id = identityOf(path);
+  if (!id) throw privateError(`Refusing a link (or an entry without a file ID) at ${path}.`);
   const security = windowsSecurity(options);
-  if (parentIsVerified(security, path)) {
-    if (kind === "directory") rememberPrivateFolder(security, path);
-    else addTo(knownEntries, security, path);
-    return;
-  }
+  if (parentIsVerified(security, path)) { rememberId(security, id, kind === "directory"); return; }
   protectOwnerPrivateSync(path, kind, { ...options, force: true, [JUST_CREATED]: true });
 }
 
@@ -650,29 +658,23 @@ function chainOf(path) {
 /**
  * Private when the path's own entries are private and so are those of every
  * folder above it, up to the first one that is verified in this process or
- * has a protected DACL (inheritance off). The folders on the way, and the
- * path, are remembered.
+ * has a protected DACL (inheritance off). Returns what may be remembered (the
+ * path and the folders that were read), or null. Nothing is remembered here:
+ * the caller first confirms that every path still names the object it read.
  */
 function decideChain(security, chain, answers, user, pathIsFolder) {
+  const learned = (end) => chain.slice(0, end).map((path, index) => ({
+    path,
+    folder: index > 0 || pathIsFolder,
+    passesOn: (index > 0 || pathIsFolder) && sddlPassesPrivateEntriesOn(answers.get(path), user),
+  }));
   for (let index = 0; index < chain.length; index += 1) {
-    if (index > 0 && inSet(verifiedFolders, security, chain[index])) {
-      rememberChain(security, chain, index, pathIsFolder);
-      return true;
-    }
+    if (index > 0 && inSet(verifiedFolders, security, chain[index])) return learned(index);
     const sddl = answers.get(chain[index]);
-    if (!sddlHasPrivateEntries(sddl, user)) return false;
-    if (parseSddl(sddl).dacl.flags.includes("P")) {
-      rememberChain(security, chain, index + 1, pathIsFolder);
-      return true;
-    }
+    if (!sddlHasPrivateEntries(sddl, user)) return null;
+    if (parseSddl(sddl).dacl.flags.includes("P")) return learned(index + 1);
   }
-  return false;
-}
-
-function rememberChain(security, chain, end, pathIsFolder) {
-  for (let index = 1; index < end; index += 1) rememberPrivateFolder(security, chain[index]);
-  if (pathIsFolder) rememberPrivateFolder(security, chain[0]);
-  else addTo(knownEntries, security, chain[0]);
+  return null;
 }
 
 /** The paths to read for an entry that is not known: itself, and the folders above up to a verified one. */
@@ -697,28 +699,42 @@ function readAllSync(security, paths) {
 function privatePlan(security, entries) {
   if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return null;
   const pending = entries.filter(entry => !isKnown(security, entry.path));
-  return { pending, plans: pending.map(entry => pathsToRead(security, entry.path)) };
+  const plans = pending.map(entry => pathsToRead(security, entry.path));
+  // Identities before the read: only these objects may be remembered, and only if they are still there.
+  const identities = new Map(plans.flatMap(item => item.read).map(path => [path, identityOf(path)]));
+  return { pending, plans, identities };
+}
+
+/** Decide each pending entry and remember what was proved, if every path still names the object read. */
+function settlePlan(security, plan, answers, user) {
+  for (const [index, entry] of plan.pending.entries()) {
+    const learned = decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info));
+    if (!learned) return false;
+    if (!learned.every(item => plan.identities.get(item.path) && identityOf(item.path) === plan.identities.get(item.path))) return false;
+    for (const item of learned) rememberId(security, plan.identities.get(item.path), item.passesOn);
+  }
+  return true;
 }
 
 /** Windows: is each entry private? Known entries need no read; the rest are read in one call. */
 async function windowsEntriesArePrivate(security, entries) {
   const plan = privatePlan(security, entries);
   if (!plan) return false;
-  if (!plan.pending.length) return entries.every(entry => pathIsInfo(entry.path, entry.info));
-  const answers = await readAll(security, plan.plans.flatMap(item => item.read));
-  const user = await currentUser(security);
-  return plan.pending.every((entry, index) => decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info)))
-    && entries.every(entry => pathIsInfo(entry.path, entry.info));
+  if (plan.pending.length) {
+    const answers = await readAll(security, plan.plans.flatMap(item => item.read));
+    if (!settlePlan(security, plan, answers, await currentUser(security))) return false;
+  }
+  return entries.every(entry => pathIsInfo(entry.path, entry.info));
 }
 
 function windowsEntriesArePrivateSync(security, entries) {
   const plan = privatePlan(security, entries);
   if (!plan) return false;
-  if (!plan.pending.length) return entries.every(entry => pathIsInfo(entry.path, entry.info));
-  const answers = readAllSync(security, plan.plans.flatMap(item => item.read));
-  const user = currentUserSync(security);
-  return plan.pending.every((entry, index) => decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info)))
-    && entries.every(entry => pathIsInfo(entry.path, entry.info));
+  if (plan.pending.length) {
+    const answers = readAllSync(security, plan.plans.flatMap(item => item.read));
+    if (!settlePlan(security, plan, answers, currentUserSync(security))) return false;
+  }
+  return entries.every(entry => pathIsInfo(entry.path, entry.info));
 }
 
 /** Windows: is each entry owned by this account? Known entries are; the rest are read in one call. */
@@ -866,10 +882,10 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
   await lstat(path);
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
-  try { await protectWindowsPath(security, path, kind, options[JUST_CREATED] === true); }
+  let proved;
+  try { proved = await protectWindowsPath(security, path, kind, options[JUST_CREATED] === true); }
   catch (error) { throw protectFailure(path, error); }
-  if (kind === "directory") rememberPrivateFolder(security, path);
-  else addTo(knownEntries, security, path);
+  rememberId(security, proved.id, proved.passesOn);
 }
 
 function replaced(path) {
@@ -907,13 +923,15 @@ async function protectWindowsPath(security, path, kind, justCreated) {
   const user = await currentUser(security);
   let [sddl] = await security.readSddl([path]);
   if (identityOf(path) !== before) throw replaced(path);
-  if (sddlIsOwnerPrivate(sddl, user)) return;
-  const extra = sddlExtraGrantSids(sddl, user);
-  if (!extra?.length || !security.removeGrants) throw notProtected(path);
-  await security.removeGrants(path, extra);
-  [sddl] = await security.readSddl([path]);
-  if (identityOf(path) !== before) throw replaced(path);
-  if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
+  if (!sddlIsOwnerPrivate(sddl, user)) {
+    const extra = sddlExtraGrantSids(sddl, user);
+    if (!extra?.length || !security.removeGrants) throw notProtected(path);
+    await security.removeGrants(path, extra);
+    [sddl] = await security.readSddl([path]);
+    if (identityOf(path) !== before) throw replaced(path);
+    if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
+  }
+  return { id: before, passesOn: kind === "directory" && sddlPassesPrivateEntriesOn(sddl, user) };
 }
 
 export function protectOwnerPrivateSync(path, kind, options = {}) {
@@ -921,10 +939,10 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
   lstatSync(path);
   const security = windowsSecurity(options);
   if (!options.force && isKnown(security, path)) return;
-  try { protectWindowsPathSync(security, path, kind, options[JUST_CREATED] === true); }
+  let proved;
+  try { proved = protectWindowsPathSync(security, path, kind, options[JUST_CREATED] === true); }
   catch (error) { throw protectFailure(path, error); }
-  if (kind === "directory") rememberPrivateFolder(security, path);
-  else addTo(knownEntries, security, path);
+  rememberId(security, proved.id, proved.passesOn);
 }
 
 function protectWindowsPathSync(security, path, kind, justCreated) {
@@ -939,13 +957,15 @@ function protectWindowsPathSync(security, path, kind, justCreated) {
   const user = currentUserSync(security);
   let [sddl] = security.readSddlSync([path]);
   if (identityOf(path) !== before) throw replaced(path);
-  if (sddlIsOwnerPrivate(sddl, user)) return;
-  const extra = sddlExtraGrantSids(sddl, user);
-  if (!extra?.length || !security.removeGrantsSync) throw notProtected(path);
-  security.removeGrantsSync(path, extra);
-  [sddl] = security.readSddlSync([path]);
-  if (identityOf(path) !== before) throw replaced(path);
-  if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
+  if (!sddlIsOwnerPrivate(sddl, user)) {
+    const extra = sddlExtraGrantSids(sddl, user);
+    if (!extra?.length || !security.removeGrantsSync) throw notProtected(path);
+    security.removeGrantsSync(path, extra);
+    [sddl] = security.readSddlSync([path]);
+    if (identityOf(path) !== before) throw replaced(path);
+    if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
+  }
+  return { id: before, passesOn: kind === "directory" && sddlPassesPrivateEntriesOn(sddl, user) };
 }
 
 /**

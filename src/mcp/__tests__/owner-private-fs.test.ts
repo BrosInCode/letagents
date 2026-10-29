@@ -30,11 +30,13 @@ import {
   parseSddl,
   parseSddlLines,
   parseWhoamiUser,
+  privateEntryCreated,
   parseWhoamiUserSid,
   protectOwnerPrivate,
   protectOwnerPrivateSync,
   sddlExtraGrantSids,
   sddlHasProfileDefaultAccess,
+  sddlPassesPrivateEntriesOn,
   sddlHasPrivateEntries,
   sddlIsOwnerPrivate,
   userSidAliases,
@@ -69,7 +71,7 @@ function fakeSecurity(sddl: Record<string, string | null> = {}, sid = USER) {
   const calls: string[] = [];
   const reads: string[] = [];
   const read = (paths: readonly string[]) => { reads.push(paths.join("|")); return paths.map(path => sddl[path] ?? null); };
-  const protect = (path: string, kind: string) => { calls.push(`protect:${kind}:${path}`); if (!(path in sddl)) sddl[path] = PRIVATE_FILE; };
+  const protect = (path: string, kind: string) => { calls.push(`protect:${kind}:${path}`); if (!(path in sddl)) sddl[path] = kind === "directory" ? PRIVATE_FOLDER : PRIVATE_FILE; };
   const security: WindowsSecurity = {
     async currentUserSid() { return sid; },
     currentUserSidSync() { return sid; },
@@ -434,6 +436,49 @@ test("Windows: a verified folder that is renamed away and replaced is not truste
     writeFileSync(join(folder, "token"), "attacker");
     const before = reads.length;
     assert.equal(await isOwnerPrivate(join(folder, "token"), lstatSync(join(folder, "token")), options), false);
+    assert.ok(reads.length > before);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: a private folder that passes nothing on does not vouch for new entries", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "flat");
+    mkdirSync(folder);
+    // Private and protected, but its entries are not inherited (no OI/CI): a new child would get the creator's default DACL.
+    const { security, calls } = fakeSecurity({ [folder]: `O:${USER}D:P(A;;FA;;;SY)(A;;FA;;;${USER})` });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    assert.equal(await isOwnerPrivate(folder, lstatSync(folder), options), true);
+    writeFileSync(join(folder, "new"), "n");
+    await privateEntryCreated(join(folder, "new"), "file", options);
+    assert.deepEqual(calls, [`protect:file:${join(folder, "new")}`]);
+    assert.equal(sddlPassesPrivateEntriesOn(PRIVATE_FOLDER, USER), true);
+    assert.equal(sddlPassesPrivateEntriesOn(`O:${USER}D:P(A;;FA;;;${USER})`, USER), false);
+    assert.equal(sddlPassesPrivateEntriesOn(`O:${USER}D:P(A;OI;FA;;;${USER})`, USER), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: an object swapped in while its permissions are read is not remembered", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const { security, reads } = fakeSecurity({ [folder]: PRIVATE_FOLDER });
+    let swapped = false;
+    const swapping: WindowsSecurity = {
+      ...security,
+      async readSddl(paths) {
+        const answers = await security.readSddl(paths);
+        // Once: another account replaces the folder after its private DACL was read.
+        if (!swapped) { swapped = true; renameSync(folder, join(root, "gone")); mkdirSync(folder); }
+        return answers;
+      },
+    };
+    const options = { platform: "win32" as const, windowsSecurity: swapping };
+    assert.equal(await isOwnerPrivate(folder, lstatSync(folder), options), false);
+    // The replacement was not cached: the next check reads it again (this fake answers by path).
+    const before = reads.length;
+    await isOwnerPrivate(folder, lstatSync(folder), options);
     assert.ok(reads.length > before);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

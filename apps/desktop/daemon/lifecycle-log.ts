@@ -1,6 +1,6 @@
 import {
   closeSync,
-  existsSync,
+  constants,
   mkdirSync,
   openSync,
   renameSync,
@@ -12,13 +12,21 @@ import { dirname, join } from "node:path";
 import { redactCredentialText } from "./credential-redaction.js";
 import { setRoomLatencyReporter } from "./room-latency-trace.js";
 import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
-import { ownerPrivatePlatform, privateEntryCreatedSync, protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
+import { openNoFollowSync, ownerPrivatePlatform, privateEntryCreatedSync, protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
-/** Windows only: the log does not exist yet, so the open below makes it. */
-function logIsNew(path: string): boolean {
-  return ownerPrivatePlatform() === "win32" && !existsSync(path);
+/**
+ * Open the log for appending. POSIX: open(path, "a") as before. Windows: an
+ * exclusive create first, so "made" is the open's own answer (a dangling link
+ * at the path counts as existing); an existing log is opened without following
+ * a link.
+ */
+function openLog(path: string): { descriptor: number; made: boolean } {
+  if (ownerPrivatePlatform() !== "win32") return { descriptor: openSync(path, "a", 0o600), made: false };
+  try { return { descriptor: openSync(path, "ax", 0o600), made: true }; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  return { descriptor: openNoFollowSync(path, constants.O_WRONLY | constants.O_APPEND, 0o600), made: false };
 }
 
 /**
@@ -55,9 +63,9 @@ export class DaemonLifecycleLog {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      const made = logIsNew(path);
-      this.descriptor = openSync(path, "a", 0o600);
-      protectLog(path, made);
+      const opened = openLog(path);
+      this.descriptor = opened.descriptor;
+      protectLog(path, opened.made);
     } catch {
       this.descriptor = null;
     }
@@ -72,9 +80,9 @@ export class DaemonLifecycleLog {
         closeSync(this.descriptor);
         this.descriptor = null;
         renameSync(this.path, `${this.path}.previous`);
-        const made = logIsNew(this.path);
-        this.descriptor = openSync(this.path, "a", 0o600);
-        protectLog(this.path, made);
+        const opened = openLog(this.path);
+        this.descriptor = opened.descriptor;
+        protectLog(this.path, opened.made);
       }
       const detail = event.detail == null
         ? null

@@ -82,6 +82,8 @@ export declare function sddlExtraGrantSids(sddl: string | null | undefined, sid:
 export declare function sddlHasProfileDefaultAccess(sddl: string | null | undefined, sid: UserIdentity): boolean;
 /** As sddlIsOwnerPrivate, but inheritance may be on: the entries alone are private. */
 export declare function sddlHasPrivateEntries(sddl: string | null | undefined, sid: UserIdentity): boolean;
+/** The DACL has an allow entry for this account that files and folders inherit (OI and CI). */
+export declare function sddlPassesPrivateEntriesOn(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlIsOwnerPrivate(sddl: string | null | undefined, sid: UserIdentity): boolean;
 
 export declare function isOwnedByCurrentUser(path: string, info: StatLike, options?: OwnerPrivateOptions): Promise<boolean>;

@@ -8,6 +8,7 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { symlinkSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -281,6 +282,22 @@ test("Windows: a new lifecycle log inherits its folder; an existing one is prote
     new DaemonLifecycleLog(path);
     assert.deepEqual(fake.protects, [`protect:directory:${dirname(path)}`, `protect:file:${path}`]);
   });
+});
+
+test("Windows: a link at the lifecycle log path is never followed", { skip: posixOnly }, async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const folder = join(root, "logs");
+  await mkdir(folder);
+  const elsewhere = join(root, "elsewhere.jsonl");
+  const path = join(folder, "daemon-lifecycle.jsonl");
+  symlinkSync(elsewhere, path);
+  await asWindows(fake, async () => {
+    const log = new DaemonLifecycleLog(path);
+    log.append({ event: "daemon_starting" } as Parameters<DaemonLifecycleLog["append"]>[0]);
+  });
+  // Neither the open nor the append created the link's target.
+  await assert.rejects(lstat(elsewhere), { code: "ENOENT" });
 });
 
 // ---------------------------------------------------------------- daemon entry point
