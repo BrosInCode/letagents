@@ -175,32 +175,76 @@ process.stdout.once("error", () => socket.destroy());
 `;
 
 /**
- * Windows: the same connector to the wrapper's named pipe. It first sends
- * the turn's proof from the private connector folder; the wrapper admits no
- * client without it (cursorMcpConnectorListenPath).
+ * Windows: the same connector to the wrapper's named pipe. It opens the pipe
+ * the way the supervisor daemon's clients do (shared/daemon-pipe-native.mjs,
+ * whose path is the third argument): through the sealed addon, with
+ * SECURITY_IDENTIFICATION, and only when the process serving the pipe runs as
+ * this user. That process must also be this turn's wrapper (the pid it wrote
+ * to connector.server). Only then does the connector send the turn's proof
+ * from the private connector folder; the wrapper admits no client without it
+ * (cursorMcpConnectorListenPath). Exit codes: 64 bad arguments, 65 no proof
+ * or wrapper pid, 66 the addon cannot load here, 67 the pipe's server is not
+ * this turn's wrapper.
  */
 export const CURSOR_MCP_PIPE_CONNECTOR_SOURCE = String.raw`
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const pipePath = process.argv[1];
-const proofPath = process.argv[2];
+const { pathToFileURL } = require("node:url");
+const [pipePath, proofPath, pipeNativePath] = process.argv.slice(1);
 if (typeof pipePath !== "string" || !/^\\\\[.]\\pipe\\letagents-cursor-mcp-[0-9a-f]{32}$/.test(pipePath)) process.exit(64);
 if (typeof proofPath !== "string" || !path.isAbsolute(proofPath) || path.basename(proofPath) !== "connector.proof") process.exit(64);
+if (typeof pipeNativePath !== "string" || path.basename(pipeNativePath) !== "daemon-pipe-native.mjs"
+  || !(process.platform === "win32" ? /^[A-Za-z]:\\/.test(pipeNativePath) : path.isAbsolute(pipeNativePath))) process.exit(64);
 let proof;
-try { proof = fs.readFileSync(proofPath, "utf8").trim(); } catch { process.exit(65); }
-if (!/^[0-9a-f]{64}$/.test(proof)) process.exit(65);
-const socket = net.createConnection({ path: pipePath });
-socket.setNoDelay(true);
-socket.once("connect", () => {
-  socket.write(proof + "\n");
-  process.stdin.pipe(socket);
-  socket.pipe(process.stdout);
-});
-socket.once("error", () => process.exit(1));
-socket.once("close", () => process.exit(0));
-process.stdin.once("error", () => socket.destroy());
-process.stdout.once("error", () => socket.destroy());
+let serverPid;
+try {
+  proof = fs.readFileSync(proofPath, "utf8").trim();
+  serverPid = Number(fs.readFileSync(path.join(path.dirname(proofPath), "connector.server"), "utf8").trim());
+} catch { process.exit(65); }
+if (!/^[0-9a-f]{64}$/.test(proof) || !Number.isSafeInteger(serverPid) || serverPid <= 0) process.exit(65);
+// Exit once what was written to stdout and stderr is out (a pipe may write
+// asynchronously), and at the latest after two seconds.
+const exitAfterOutput = (code) => {
+  setTimeout(() => process.exit(code), 2000);
+  process.stdout.write("", () => process.stderr.write("", () => process.exit(code)));
+};
+const refuse = (code, message) => {
+  process.stderr.write("LetAgents: Cursor's MCP connector " + message + "\n");
+  exitAfterOutput(code);
+};
+const describe = (error) => (error && error.message ? error.message : String(error));
+function connect(addon) {
+  const deadline = Date.now() + 10000;
+  const attempt = () => {
+    let opened;
+    try {
+      opened = addon.open(pipePath);
+    } catch (error) {
+      if (error && error.code === "EBUSY" && Date.now() < deadline) { setTimeout(attempt, 20); return; }
+      refuse(error && error.code === "ERR_LETAGENTS_DAEMON_UNTRUSTED" ? 67 : 1, "could not open its pipe: " + describe(error));
+      return;
+    }
+    if (!opened || !Number.isInteger(opened.fd) || opened.fd < 0) { refuse(1, "got no descriptor for its pipe."); return; }
+    if (opened.serverPid !== serverPid) {
+      try { fs.closeSync(opened.fd); } catch {}
+      refuse(67, "refused its pipe: process " + opened.serverPid + " serves it, not this turn's wrapper.");
+      return;
+    }
+    const socket = new net.Socket({ fd: opened.fd, readable: true, writable: true });
+    socket.once("error", () => exitAfterOutput(1));
+    socket.once("close", () => exitAfterOutput(0));
+    process.stdin.once("error", () => socket.destroy());
+    process.stdout.once("error", () => socket.destroy());
+    socket.write(proof + "\n");
+    process.stdin.pipe(socket);
+    socket.pipe(process.stdout);
+  };
+  attempt();
+}
+import(pathToFileURL(pipeNativePath).href)
+  .then((native) => native.loadDaemonPipeAddon())
+  .then(connect, (error) => refuse(66, "cannot open its pipe safely on this computer: " + describe(error)));
 `;
 export const SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES = [
   [".cursor", "cli.json"],

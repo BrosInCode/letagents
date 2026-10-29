@@ -9,6 +9,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   currentWindowsAccount,
@@ -16,6 +17,7 @@ import {
   resolveDaemonProofPath,
   windowsPipeName,
 } from "../../../../../../shared/daemon-endpoint.mjs";
+import { findDaemonPipeAddon } from "../../../../../../shared/daemon-pipe-native.mjs";
 import { createPrivateDirSync, privateEntryCreatedSync } from "../../../../../../shared/owner-private-fs.mjs";
 import {
   processTreeHelperPath,
@@ -25,6 +27,7 @@ import {
 } from "../../../../../../shared/process-tree.mjs";
 import { ProviderBatchFileError, providerLaunchCommand, type ProviderLaunchOptions } from "../../../../../../shared/provider-executable.mjs";
 import { DEFAULT_STOP_GRACE_MS } from "../provider-evidence.js";
+import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "./profile-types.js";
 
 /** What the Windows wrapper embeds to start Cursor inside its own process-tree job. */
 export interface CursorWindowsTurnValues {
@@ -47,9 +50,13 @@ export interface CursorWindowsTurnValues {
  * socket path itself, unchanged. Windows: a named pipe whose name binds the
  * turn's private connector path and this account (shared/daemon-endpoint.mjs).
  * libuv creates the first pipe instance exclusively, so a squatted name fails
- * the listen. Node gives the pipe the default DACL, which lets other local
- * accounts connect, so the wrapper admits only a client that first sends the
- * turn's proof (CURSOR_MCP_CONNECTOR_PROOF_FILE, readable only by this account).
+ * the listen and the turn does not start. Node gives the pipe the default
+ * named-pipe DACL, which lets other local accounts connect, so once it listens
+ * the wrapper replaces that DACL with one for this user alone
+ * (WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE), and admits only a client that first
+ * sends the turn's proof (CURSOR_MCP_CONNECTOR_PROOF_FILE, readable only by
+ * this account). The connector sends it only to this turn's wrapper
+ * (CURSOR_MCP_PIPE_CONNECTOR_SOURCE).
  */
 export function cursorMcpConnectorListenPath(
   socketPath: string,
@@ -145,6 +152,38 @@ export const CURSOR_MCP_CONNECTOR_PROOF_FILE = "connector.proof";
 /** The proof file for a connector socket path (`<connector root>\\stdio.sock`). */
 export function cursorMcpConnectorProofPath(socketPath: string): string {
   return join(dirname(socketPath), CURSOR_MCP_CONNECTOR_PROOF_FILE);
+}
+
+/**
+ * Where the wrapper writes its own pid before it listens, beside the proof:
+ * the connector sends the proof only to a pipe this process serves.
+ */
+export const CURSOR_MCP_CONNECTOR_SERVER_FILE = "connector.server";
+
+/**
+ * shared/daemon-pipe-native.mjs, which the connector loads to open its pipe
+ * (the same relative path as this module's import of it, so the same file in
+ * the source tree, the build and the packaged app).
+ */
+const DAEMON_PIPE_NATIVE_MODULE = fileURLToPath(new URL("../../../../../../shared/daemon-pipe-native.mjs", import.meta.url));
+
+/** Cursor's command arguments for the Windows pipe connector of a connector socket path. */
+export function cursorMcpPipeConnectorArgs(socketPath: string, pipeNativeModule = DAEMON_PIPE_NATIVE_MODULE): string[] {
+  return ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, cursorMcpConnectorListenPath(socketPath), cursorMcpConnectorProofPath(socketPath), pipeNativeModule];
+}
+
+/**
+ * The connector opens its pipe only through the sealed daemon pipe addon, as
+ * the daemon's clients do, and never falls back to libuv's connect. Refuse a
+ * turn here, with the reason, when this install has no sealed addon, instead
+ * of a Cursor turn whose MCP connector cannot start.
+ */
+export function assertCursorMcpPipeAddon(find: () => unknown = findDaemonPipeAddon): void {
+  try {
+    find();
+  } catch (error) {
+    throw new Error(`Cursor on Windows needs letagents-daemon-pipe.node to reach its MCP connector safely. Reinstall LetAgents. (${error instanceof Error ? error.message : String(error)})`);
+  }
 }
 
 /**
