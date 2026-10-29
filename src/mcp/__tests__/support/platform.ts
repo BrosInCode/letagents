@@ -27,6 +27,15 @@ export function testDaemonSocketPath(root: string): string {
   return endpoint.connectPath;
 }
 
+/**
+ * Where no fake daemon under `root` listens, and none has run: a missing
+ * socket file on POSIX, the root's pipe with no proof yet on Windows (there
+ * any other path is refused as no pipe of this user's).
+ */
+export function absentDaemonSocketPath(root: string): string {
+  return process.platform === "win32" ? daemonEndpoint(root).connectPath : join(root, "absent.sock");
+}
+
 const gatedServers = new WeakSet<Server>();
 /** Proofs the fake daemon wrote in this process, by path. */
 const fakeProofs = new Map<string, string>();
