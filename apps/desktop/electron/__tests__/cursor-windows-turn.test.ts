@@ -28,7 +28,6 @@ import {
 import {
   cursorMcpAttestationFixtureSource,
   materializeAttestableMcpRuntime,
-  useTestProcessTreeHelper,
   waitForPath,
   withLoopAlive,
   wrapperMcpRuntimeEnv,
@@ -38,8 +37,7 @@ import {
 // from an owner-private file, Cursor starts inside the process-tree helper's
 // job, the MCP connector is a named pipe, and a stop is an IPC request before
 // the tree is ended. The first tests run everywhere; the last ones start real
-// processes and run only on Windows.
-useTestProcessTreeHelper();
+// processes and run only on Windows (the fixture names the CI-built helper).
 
 const launchValues = {
   agentUpstreamEndpoint: "https://api2.cursor.sh",
@@ -61,7 +59,10 @@ test("one decision point names the operating-system sandbox for each platform", 
   assert.equal(cursorOsSandbox("linux"), "unconfined");
 });
 
-test("the macOS wrapper keeps sandbox-exec and has no Windows text", () => {
+test("the macOS wrapper keeps sandbox-exec and has no Windows text", {
+  // The macOS program escapes /tmp for Seatbelt; another host's temporary folder is not a macOS path.
+  skip: process.platform === "win32" ? "builds the macOS program from this host's temporary folder" : false,
+}, () => {
   const source = cursorTurnWrapperSource(launchValues, "darwin");
   assert.match(source, /const nativeCommand = sandboxed \? "\/usr\/bin\/sandbox-exec" : bin;/);
   assert.doesNotMatch(source, /windowsTurn/);

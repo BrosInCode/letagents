@@ -14,6 +14,7 @@ import { getLetAgentsLocalStatePath } from "../../paths.js";
 import { renameSyncWithRetry } from "../../../../../../shared/rename-retry.mjs";
 import { everyOwnedByCurrentUserSync, isOwnedByCurrentUserSync, ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
 import { CURSOR_MCP_CONNECTOR_PARENT, CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "../cursor-provider-constants.js";
+import { cursorOsSandbox } from "../cursor-sandbox-policy.js";
 import { cursorMcpConnectorRootPattern } from "./turn-wrapper-setup.js";
 import { cursorMcpConnectorListenPath } from "./windows-turn.js";
 import {
@@ -472,7 +473,10 @@ export function prepareCursorSupervisedProfile(
     resolve(cursorRuntimeConfigDir, "statsig-cache.json"),
     canonicalizeAuthorityPath(join(cursorRuntimeConfigDir, "statsig-cache.json")),
   ])];
-  const nativeDeniedReadWriteRegexes = [
+  // Seatbelt regexes exist only for sandbox-exec; Windows has no sandbox to
+  // give them to, and its backslash paths cannot be written as one.
+  const seatbeltRegexes = cursorOsSandbox() !== "windows-unsandboxed";
+  const nativeDeniedReadWriteRegexes = !seatbeltRegexes ? [] : [
     ...statsigCachePaths.map((statsigCachePath) =>
       `^${escapeSandboxRegex(statsigCachePath)}[.][0-9]+[.][0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}[.]tmp$`),
     // Defense in depth for --approve-mcps (which auto-approves every MCP
@@ -517,7 +521,7 @@ export function prepareCursorSupervisedProfile(
     ...(options.inspectionOnly || mcpConnectorSocketPath ? [] : options.mcpRuntime!.readRoots),
     ...gitAuthorityRoots.map((gitRoot) => join(gitRoot, "hooks")),
   ].flatMap(sandboxPathVariants))];
-  const nativeDeniedWriteRegexes = [...new Set(gitAuthorityRoots.flatMap((gitRoot) => {
+  const nativeDeniedWriteRegexes = !seatbeltRegexes ? [] : [...new Set(gitAuthorityRoots.flatMap((gitRoot) => {
     const escapedRoot = escapeSandboxRegex(gitRoot);
     return [
       `^${escapedRoot}/modules/.*/config$`,

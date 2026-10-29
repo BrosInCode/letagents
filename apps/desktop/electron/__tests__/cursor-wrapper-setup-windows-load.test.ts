@@ -32,7 +32,7 @@ test("the Cursor wrapper module loads on Windows with a backslash temporary fold
 test("the macOS connector pattern is unchanged", async () => {
   const { cursorMcpConnectorRootPattern } = await import("../main/agents/cursor/turn-wrapper-setup.js");
   assert.equal(
-    cursorMcpConnectorRootPattern("/tmp"),
+    cursorMcpConnectorRootPattern("/tmp", "darwin"),
     "^/tmp/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
   );
 });

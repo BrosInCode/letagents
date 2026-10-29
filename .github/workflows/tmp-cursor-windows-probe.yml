@@ -46,9 +46,10 @@ jobs:
           grep -n "supervisedAgentsOnly =" electron/__tests__/platform.ts
           for file in electron/__tests__/cursor*.test.ts; do
             echo "::group::${file}"
-            node --import tsx --test --test-concurrency=1 --test-timeout=300000 --experimental-test-module-mocks --test-reporter=spec "${file}" || true
+            tap="${RUNNER_TEMP}/probe.tap"
+            node --import tsx --test --test-concurrency=1 --test-timeout=300000 --experimental-test-module-mocks --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap "--test-reporter-destination=${tap}" "${file}" || true
             echo "::endgroup::"
-            node --import tsx --test --test-concurrency=1 --test-timeout=300000 --experimental-test-module-mocks --test-reporter=tap "${file}" 2>/dev/null | grep -E "^(not )?ok [0-9]+ - " | sed "s|^|${file##*/}: |" >> "${RUNNER_TEMP}/probe-summary.txt" || true
+            grep -E "^(not )?ok [0-9]+ - " "${tap}" | sed "s|^|${file##*/}: |" >> "${RUNNER_TEMP}/probe-summary.txt" || true
           done
           echo "===== SUMMARY ====="
           cat "${RUNNER_TEMP}/probe-summary.txt"
