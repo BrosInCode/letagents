@@ -448,11 +448,54 @@ jobs:
         shell: bash
         run: node --import tsx --test apps/desktop/daemon/__tests__/workspace-capture.test.ts apps/desktop/daemon/__tests__/workspace-capture-git-for-windows.test.ts apps/desktop/daemon/__tests__/workspace-change-capture.test.ts apps/desktop/daemon/__tests__/permission-review.test.ts
 
+  # The Windows process-tree helper (apps/desktop/native/win-process-tree):
+  # built with the runner's MSVC, checked against its seal, and proved on a
+  # real tree (a .cmd shim, then node, then a child) that ends whole. It
+  # installs no npm package: the build and the tests use Node and Visual
+  # Studio only. The built helper is kept as an artifact for packaging.
+  process-tree-windows:
+    needs: dependency-audit
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Keep committed line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Build the process-tree helper and check its seal
+        id: helper
+        shell: bash
+        run: node apps/desktop/native/win-process-tree/build.mjs --check
+
+      - name: Test process trees on Windows
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        shell: bash
+        run: node --test --test-timeout=120000 apps/desktop/native/win-process-tree/seal.test.mjs apps/desktop/native/win-process-tree/process-tree.windows.test.mjs
+
+      - name: Keep the built helper
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: letagents-process-tree-x64
+          path: apps/desktop/native/win-process-tree/build/x64/letagents-process-tree.exe
+          if-no-files-found: error
+          retention-days: 14
+
   # The required "build" check. GitHub counts a skipped check as passing, so
   # this gate runs even after a failure or cancellation, and passes only when
   # every job it waits for succeeded.
   build:
-    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows]
+    needs: [dependency-audit, build-checks, desktop-tests, mcp-tests-windows, process-tree-windows]
     if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
