@@ -168,7 +168,9 @@ test("opening a fetched repo room preserves its identity without calculating bra
         const notAProject = "Choose a project folder, not your home folder or the top of the disk.";
         for (const [path, error] of [
           [join(repoPath, "missing-folder"), "No folder exists at that path."],
-          ["relative/project", "Enter the full path to the folder, starting with / or ~/."],
+          ["relative/project", process.platform === "win32"
+            ? "Enter the full path to the folder, starting with a drive letter (C:\\), \\\\ or ~\\."
+            : "Enter the full path to the folder, starting with / or ~/."],
           [filePath, "That path is a file. Enter the folder that contains it."],
           ["   ", "Choose a project folder."],
           ["/", notAProject],

@@ -75,21 +75,32 @@ exit 1
 });
 
 test("parseGitWorktreePorcelain marks the first worktree as the main checkout", () => {
+  // Git for Windows prints drive paths with '/'; the parser gives them back
+  // in the form Node and the folder picker use.
+  const [main, task] = process.platform === "win32"
+    ? [
+      { git: "C:/Users/emmy/Projects/letagents", path: "C:\\Users\\emmy\\Projects\\letagents" },
+      { git: "C:/Users/emmy/Projects/letagents-task-170", path: "C:\\Users\\emmy\\Projects\\letagents-task-170" },
+    ]
+    : [
+      { git: "/Users/emmy/Projects/letagents", path: "/Users/emmy/Projects/letagents" },
+      { git: "/Users/emmy/Projects/letagents-task-170", path: "/Users/emmy/Projects/letagents-task-170" },
+    ];
   const worktrees = parseGitWorktreePorcelain([
-    "worktree /Users/emmy/Projects/letagents",
+    `worktree ${main.git}`,
     "HEAD 1111111111111111111111111111111111111111",
     "branch refs/heads/staging",
     "",
-    "worktree /Users/emmy/Projects/letagents-task-170",
+    `worktree ${task.git}`,
     "HEAD 2222222222222222222222222222222222222222",
     "branch refs/heads/codex/desktop-codex-room-agents",
     "",
-  ].join("\n"), "/Users/emmy/Projects/letagents-task-170");
+  ].join("\n"), task.path);
 
-  assert.equal(worktrees[0]?.path, "/Users/emmy/Projects/letagents");
+  assert.equal(worktrees[0]?.path, main.path);
   assert.equal(worktrees[0]?.isMain, true);
   assert.equal(worktrees[0]?.isCurrent, false);
-  assert.equal(worktrees[1]?.path, "/Users/emmy/Projects/letagents-task-170");
+  assert.equal(worktrees[1]?.path, task.path);
   assert.equal(worktrees[1]?.isMain, false);
   assert.equal(worktrees[1]?.isCurrent, true);
 });
@@ -307,7 +318,7 @@ test("buildRepoStatus exposes local Git room routing for no-remote repositories"
     assert.match(status.roomIdentifier || "", /^git-room:local:[a-f0-9]{16}:branch:/);
     assert.equal(status.changes?.staged, 1);
     assert.equal(status.dirty, true);
-    assert.ok(status.gitHeadPath?.endsWith(".git/HEAD"));
+    assert.ok(status.gitHeadPath?.endsWith(join(".git", "HEAD")), String(status.gitHeadPath));
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
