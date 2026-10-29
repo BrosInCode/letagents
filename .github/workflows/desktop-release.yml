@@ -197,9 +197,128 @@ jobs:
             security delete-keychain "${MACOS_RELEASE_KEYCHAIN}"
           fi
 
-  publish:
-    name: Publish macOS release
+  build-windows:
+    name: Windows x64
+    # After the macOS builds: they run the dependency cooldown and advisory
+    # audit for the shared lockfiles; this job verifies the signatures of the
+    # trees it installs itself, because Windows installs Windows-only optional
+    # packages the macOS runners never see.
     needs: build-macos
+    # windows-2022 rather than windows-latest: the windows-2025 image has no
+    # NSIS, and windows-2022 has NSIS 3.10 preinstalled, so the installer is
+    # built without downloading a compiler.
+    runs-on: windows-2022
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      # The runner's git converts LF to CRLF on checkout; the app ships the
+      # committed bytes, as the macOS build does.
+      - name: Keep committed line endings
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Validate release ref, version, and runner architecture
+        shell: bash
+        env:
+          EXPECTED_ARCH: x64
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          expected_tag="desktop-v${version}"
+          # Manual runs validate candidates without publishing anything.
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" && ( "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${expected_tag}" ) ]]; then
+            echo "Push tag ${expected_tag}, or manually dispatch a candidate build; received ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+          actual_arch=$(node -p "process.arch")
+          if [[ "${actual_arch}" != "${EXPECTED_ARCH}" ]]; then
+            echo "Runner architecture ${actual_arch} does not match matrix architecture ${EXPECTED_ARCH}." >&2
+            exit 1
+          fi
+          echo "DESKTOP_VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit
+
+      - name: Verify dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures
+
+      - name: Install desktop dependencies without lifecycle scripts
+        shell: bash
+        run: node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify desktop dependency signatures
+        run: node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop
+
+      - name: Run verified dependency lifecycle scripts
+        shell: bash
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      # npm's Windows global layout keeps the package under node_modules and
+      # puts only script shims on PATH; the packager bundles the real binary.
+      - name: Install the locked OpenCode runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          opencode_version=$(node -p "require('./apps/desktop/package.json').letagentsRuntime.openCodeVersion")
+          npm install --global --prefix "${RUNNER_TEMP}/opencode" "opencode-ai@${opencode_version}"
+          echo "LETAGENTS_OPENCODE_BIN=${RUNNER_TEMP}/opencode/node_modules/opencode-ai/bin/opencode.exe" >> "${GITHUB_ENV}"
+
+      - name: Build and package the Windows installer
+        env:
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${R2_PUBLIC_BASE_URL}" =~ ^https://[^/]+$ ]]; then
+            echo "R2_PUBLIC_BASE_URL must be an HTTPS origin without a trailing slash." >&2
+            exit 1
+          fi
+          export LETAGENTS_DESKTOP_RELEASE_BASE_URL="${R2_PUBLIC_BASE_URL}/desktop/v${DESKTOP_VERSION}/"
+          export LETAGENTS_DESKTOP_RELEASE_NOTES="LetAgents desktop ${DESKTOP_VERSION}"
+          npm --prefix apps/desktop run package:win
+
+      - name: Install, smoke-check, and uninstall the installer
+        shell: bash
+        run: npm --prefix apps/desktop run smoke:windows-install
+
+      - name: Attest installer provenance
+        if: ${{ github.event.repository.visibility == 'public' || vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            apps/desktop/release/artifacts/*.exe
+
+      - name: Report unavailable provenance attestation
+        if: ${{ github.event.repository.visibility != 'public' && vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION != 'true' }}
+        run: echo "::notice::GitHub artifact attestations are unavailable for this private repository on its current organization plan. Set ENABLE_DESKTOP_PROVENANCE_ATTESTATION=true when the plan supports private-repository attestations."
+
+      - name: Upload release artifacts to this workflow
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-release-win32-x64
+          path: apps/desktop/release/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish desktop release
+    needs: [build-macos, build-windows]
     # A manual run, including one on a tag, must never advance public feeds.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-latest
@@ -225,7 +344,7 @@ jobs:
           fi
           echo "DESKTOP_VERSION=${version}" >> "${GITHUB_ENV}"
 
-      - name: Download both architecture artifacts
+      - name: Download every platform's artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: desktop-release-*
@@ -318,6 +437,7 @@ jobs:
 
             case "${artifact_name}" in
               *.dmg) content_type="application/x-apple-diskimage" ;;
+              *.exe) content_type="application/vnd.microsoft.portable-executable" ;;
               *.zip) content_type="application/zip" ;;
               *.blockmap) content_type="application/octet-stream" ;;
               *.json) content_type="application/json" ;;
@@ -402,10 +522,17 @@ jobs:
           AWS_EC2_METADATA_DISABLED: "true"
         run: |
           set -euo pipefail
-          for arch in arm64 x64; do
-            for feed_spec in \
-              "RELEASES-${arch}.json|RELEASES.json|application/json" \
-              "latest-mac-${arch}.yml|latest-mac.yml|application/yaml"; do
+          # macOS feeds are feeds/arm64 and feeds/x64; Windows has its own
+          # feeds/win32-x64 folder, where NsisUpdater reads latest.yml.
+          for arch in arm64 x64 win32-x64; do
+            case "${arch}" in
+              win32-*) feed_specs=("latest-${arch}.yml|latest.yml|application/yaml") ;;
+              *) feed_specs=(
+                "RELEASES-${arch}.json|RELEASES.json|application/json"
+                "latest-mac-${arch}.yml|latest-mac.yml|application/yaml"
+              ) ;;
+            esac
+            for feed_spec in "${feed_specs[@]}"; do
               IFS='|' read -r source_name public_name content_type <<<"${feed_spec}"
               source_manifest="release-artifacts/${source_name}"
               if [[ ! -s "${source_manifest}" ]]; then

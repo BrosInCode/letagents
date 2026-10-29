@@ -343,3 +343,13 @@ test("desktop update feeds are architecture-specific and never use releases/late
   );
   assert.equal(desktopUpdateFeedBaseUrl("ia32"), null);
 });
+
+test("the Windows update feed has its own folder, apart from the macOS x64 feed", () => {
+  assert.equal(
+    desktopUpdateFeedBaseUrl("x64", "win32"),
+    "https://downloads.letagents.chat/desktop/feeds/win32-x64",
+  );
+  assert.equal(desktopUpdateFeedBaseUrl("arm64", "win32"), null);
+  assert.equal(desktopUpdateFeedBaseUrl("x64", "darwin"), desktopUpdateFeedBaseUrl("x64"));
+  assert.equal(desktopUpdateFeedBaseUrl("x64", "linux"), null);
+});
