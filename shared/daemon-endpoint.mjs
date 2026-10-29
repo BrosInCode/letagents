@@ -288,9 +288,10 @@ const kTransport = Symbol("letagents.daemonTransport");
  * end cannot act as this user, and only when the process serving it runs as
  * this user, before this process writes anything. libuv's own connect has
  * neither property and is never used for this pipe. Every instance busy: try
- * again until `cancelled()`.
+ * again until `cancelled()`; the wait keeps the process alive while the
+ * caller's connection is `referenced()`, as a connecting socket does.
  */
-async function openDaemonPipe(connectPath, cancelled) {
+async function openDaemonPipe(connectPath, cancelled, referenced) {
   const addon = loadDaemonPipeAddon();
   for (;;) {
     let opened;
@@ -298,8 +299,10 @@ async function openDaemonPipe(connectPath, cancelled) {
       opened = addon.open(connectPath);
     } catch (error) {
       if (error?.code !== "EBUSY" || cancelled()) throw error;
-      // The caller's own ref() or unref() decides whether the connection keeps the process alive.
-      await new Promise((resolve) => setTimeout(resolve, PIPE_BUSY_RETRY_MS).unref());
+      await new Promise((resolve) => {
+        const retry = setTimeout(resolve, PIPE_BUSY_RETRY_MS);
+        if (!referenced()) retry.unref();
+      });
       continue;
     }
     // A failed N-API call returns nothing; never wrap a socket without the pipe.
@@ -339,6 +342,9 @@ class DaemonConnection extends Socket {
     super();
     this.connecting = true;
   }
+
+  /** Whether the caller left the connection referenced (it keeps the process alive). */
+  get referenced() { return this.#referenced; }
 
   /** The transport socket, for tests that look at its handle. */
   get [kTransport]() { return this.#transport; }
@@ -471,7 +477,7 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
     if (socket.destroyed) return;
     let transport;
     try {
-      transport = pipe ? await openDaemonPipe(connectPath, () => socket.destroyed) : await openUnixSocket(connectPath);
+      transport = pipe ? await openDaemonPipe(connectPath, () => socket.destroyed, () => socket.referenced) : await openUnixSocket(connectPath);
     } catch (error) {
       socket.destroy(error);
       return;

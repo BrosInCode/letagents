@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -44,8 +45,9 @@ function isFile(filePath) {
  * path is never used), then `<resources>/app/runtime/`, where the packaged
  * app ships it (Electron sets process.resourcesPath in the app and in its
  * ELECTRON_RUN_AS_NODE children), or, for a process that is not the app's
- * (`npx letagents` under Node), the same file in the per-user install
- * folder, then the local build beside its source.
+ * (`npx letagents` under Node), the same file in the folder the installer
+ * recorded (InstallLocation) or else its default per-user folder, then the
+ * local build beside its source.
  *
  * The bytes are hashed, then loaded by path. A process that could replace
  * the file in between could as well replace this module or the app beside
@@ -61,13 +63,32 @@ export function daemonPipeAddonCandidates(options = {}) {
   const arch = (options.arch ?? process.arch) === "arm64" ? "arm64" : "x64";
   const candidates = [];
   if (resourcesPath.trim()) candidates.push(path.win32.join(resourcesPath, "app", "runtime", DAEMON_PIPE_ADDON_NAME));
-  else if (localAppData && /^[A-Za-z]:[\\/]/.test(localAppData)) {
-    candidates.push(path.win32.join(localAppData, "Programs", "LetAgents", "resources", "app", "runtime", DAEMON_PIPE_ADDON_NAME));
+  else {
+    const installed = options.installLocation === undefined ? recordedInstallLocation(env) : options.installLocation;
+    const folder = installed ?? (localAppData ? path.win32.join(localAppData, "Programs", "LetAgents") : null);
+    if (folder && /^[A-Za-z]:[\\/]/.test(folder)) {
+      candidates.push(path.win32.join(folder, "resources", "app", "runtime", DAEMON_PIPE_ADDON_NAME));
+    }
   }
   if (options.includeLocalBuild !== false) {
     candidates.push(fileURLToPath(new URL(`../apps/desktop/native/win-daemon-pipe/build/${arch}/${DAEMON_PIPE_ADDON_NAME}`, import.meta.url)));
   }
   return candidates;
+}
+
+/** The desktop installer's InstallLocation (HKCU, per-user install), or null. Asked once per process. */
+let installLocation;
+function recordedInstallLocation(env) {
+  if (installLocation !== undefined) return installLocation;
+  installLocation = null;
+  if (process.platform !== "win32") return installLocation;
+  try {
+    const reg = path.win32.join(env.SystemRoot || env.SYSTEMROOT || "C:\\Windows", "System32", "reg.exe");
+    const output = execFileSync(reg, ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\chat.letagents.desktop", "/v", "InstallLocation"],
+      { encoding: "utf8", windowsHide: true, timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+    installLocation = /^\s*InstallLocation\s+REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/m.exec(output)?.[1] ?? null;
+  } catch { /* not installed */ }
+  return installLocation;
 }
 
 function addonError(message) {

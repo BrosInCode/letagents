@@ -11,6 +11,8 @@ export interface DaemonPipeAddonOptions {
   arch?: string;
   platform?: NodeJS.Platform;
   includeLocalBuild?: boolean;
+  /** The installer's recorded folder; read from the registry when left out. */
+  installLocation?: string | null;
   seal?: DaemonPipeSeal | null;
   exists?: (path: string) => boolean;
   readFile?: (path: string) => Buffer;
