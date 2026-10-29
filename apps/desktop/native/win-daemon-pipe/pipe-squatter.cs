@@ -5,6 +5,9 @@
 //
 //   pipe-squatter.exe squat <config>   serve as this process's own token
 //   pipe-squatter.exe low <config>     start `squat` at low integrity, wait
+//   pipe-squatter.exe denyonly <config>
+//                                      start `squat` with this user's SID for
+//                                      deny only (CreateRestrictedToken), wait
 //
 // <config> holds four lines: the pipe name, the report path, a file to open
 // while impersonating, and a marker written once the pipe exists.
@@ -55,6 +58,9 @@ public static class PipeSquatter {
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int cls, ref SID_AND_ATTRIBUTES label, int length);
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSidToSidW(string sid, out IntPtr result);
     [DllImport("advapi32.dll")] static extern int GetLengthSid(IntPtr sid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disableCount, SID_AND_ATTRIBUTES[] disable,
+        uint deleteCount, IntPtr delete, uint restrictCount, IntPtr restrict, out IntPtr result);
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, out uint size);
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -124,14 +130,8 @@ public static class PipeSquatter {
         return 0;
     }
 
-    /** Start `squat <config>` with this process's token lowered to low integrity, and wait for it. */
-    static int Low(string configPath) {
-        IntPtr token, primary, sid;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, out token)) return 10;
-        if (!DuplicateTokenEx(token, 0x02000000, IntPtr.Zero, 2, 1, out primary)) return 11;
-        if (!ConvertStringSidToSidW("S-1-16-4096", out sid)) return 12;
-        var label = new SID_AND_ATTRIBUTES { Sid = sid, Attributes = 0x20 };
-        if (!SetTokenInformation(primary, TokenIntegrityLevel, ref label, Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)) + GetLengthSid(sid))) return 13;
+    /** Start `squat <config>` as `primary`, and wait for it. */
+    static int StartAs(IntPtr primary, string configPath) {
         string self = System.Reflection.Assembly.GetExecutingAssembly().Location;
         var startup = new STARTUPINFO { cb = Marshal.SizeOf(typeof(STARTUPINFO)) };
         PROCESS_INFORMATION started;
@@ -146,10 +146,32 @@ public static class PipeSquatter {
         return (int)code;
     }
 
+    /** Start `squat <config>` with this process's token lowered to low integrity. */
+    static int Low(string configPath) {
+        IntPtr token, primary, sid;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, out token)) return 10;
+        if (!DuplicateTokenEx(token, 0x02000000, IntPtr.Zero, 2, 1, out primary)) return 11;
+        if (!ConvertStringSidToSidW("S-1-16-4096", out sid)) return 12;
+        var label = new SID_AND_ATTRIBUTES { Sid = sid, Attributes = 0x20 };
+        if (!SetTokenInformation(primary, TokenIntegrityLevel, ref label, Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)) + GetLengthSid(sid))) return 13;
+        return StartAs(primary, configPath);
+    }
+
+    /** Start `squat <config>` with this user's SID for deny only: same user, same integrity, but it cannot open the user's files. */
+    static int DenyOnly(string configPath) {
+        IntPtr token, restricted, sid;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, out token)) return 10;
+        if (!ConvertStringSidToSidW(WindowsIdentity.GetCurrent().User.Value, out sid)) return 12;
+        var disable = new[] { new SID_AND_ATTRIBUTES { Sid = sid, Attributes = 0 } };
+        if (!CreateRestrictedToken(token, 0, 1, disable, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted)) return 15;
+        return StartAs(restricted, configPath);
+    }
+
     public static int Main(string[] args) {
         if (args.Length != 2) return 64;
         if (args[0] == "squat") return Squat(File.ReadAllLines(args[1]));
         if (args[0] == "low") return Low(args[1]);
+        if (args[0] == "denyonly") return DenyOnly(args[1]);
         return 64;
     }
 }

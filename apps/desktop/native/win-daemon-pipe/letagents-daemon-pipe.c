@@ -18,13 +18,21 @@
  *
  * Before the handle is handed on, so before this process writes a byte, the
  * process that serves the pipe (GetNamedPipeServerProcessId) must run with
- * this process's user SID, in no AppContainer, with no restricted token and
- * at an integrity level no lower than this process's. Anything else is
- * refused and the handle is closed unused.
+ * this process's user SID, enabled (not deny-only), in no AppContainer, with
+ * no restricting SIDs and at an integrity level no lower than this
+ * process's: a process that can read this user's files, as the daemon's
+ * proof file, anyway. Anything else is refused and the handle is closed
+ * unused. (The id names the process that created the instance; were that
+ * process gone and its id reused, SECURITY_IDENTIFICATION and the proof
+ * handshake still hold.)
  *
  * The handle becomes a C runtime descriptor through the host's own
  * uv_open_osfhandle, so libuv (in node.exe or Electron) owns it with the
- * descriptor table it reads, and `new net.Socket({ fd })` wraps it.
+ * descriptor table it reads, and `new net.Socket({ fd })` wraps it. A
+ * descriptor this module must give back is closed through the host's
+ * uv_fs_close. Descriptors 0 to 2 are first filled with NUL where a process
+ * has none (a GUI process may not): libuv treats those as standard streams
+ * and never closes their handle.
  *
  * It links only kernel32, advapi32 and the static C runtime. It has no
  * import library for Node: N-API and uv_open_osfhandle are found in the host
@@ -70,7 +78,10 @@ typedef napi_status (*create_error_fn)(napi_env, napi_value, napi_value, napi_va
 typedef napi_status (*set_named_property_fn)(napi_env, napi_value, const char *, napi_value);
 typedef napi_status (*throw_fn)(napi_env, napi_value);
 typedef napi_status (*create_function_fn)(napi_env, const char *, size_t, napi_callback, void *, napi_value *);
+typedef napi_status (*get_uv_event_loop_fn)(napi_env, void **);
 typedef int (*uv_open_osfhandle_fn)(HANDLE);
+typedef int (*uv_fs_close_fn)(void *, void *, int, void *);
+typedef void (*uv_fs_req_cleanup_fn)(void *);
 
 static struct {
     get_cb_info_fn get_cb_info;
@@ -83,7 +94,10 @@ static struct {
     set_named_property_fn set_named_property;
     throw_fn throw_value;
     create_function_fn create_function;
+    get_uv_event_loop_fn get_uv_event_loop;
     uv_open_osfhandle_fn uv_open_osfhandle;
+    uv_fs_close_fn uv_fs_close;
+    uv_fs_req_cleanup_fn uv_fs_req_cleanup;
 } host;
 
 #define PIPE_PREFIX L"\\\\.\\pipe\\"
@@ -107,9 +121,54 @@ static BOOL resolve_host(void) {
     RESOLVE(set_named_property, set_named_property_fn, "napi_set_named_property");
     RESOLVE(throw_value, throw_fn, "napi_throw");
     RESOLVE(create_function, create_function_fn, "napi_create_function");
+    RESOLVE(get_uv_event_loop, get_uv_event_loop_fn, "napi_get_uv_event_loop");
     RESOLVE(uv_open_osfhandle, uv_open_osfhandle_fn, "uv_open_osfhandle");
+    RESOLVE(uv_fs_close, uv_fs_close_fn, "uv_fs_close");
+    RESOLVE(uv_fs_req_cleanup, uv_fs_req_cleanup_fn, "uv_fs_req_cleanup");
 #undef RESOLVE
     return TRUE;
+}
+
+/*
+ * Close a descriptor of the host's C runtime, and its handle, as libuv does:
+ * a synchronous uv_fs_close. The request is opaque here; uv_fs_t is a few
+ * hundred bytes in libuv 1.x, so 4 KiB of aligned, zeroed space holds it.
+ */
+static void close_descriptor(napi_env env, int fd) {
+    union {
+        BYTE bytes[4096];
+        void *pointer;
+        double number;
+    } request;
+    void *loop = NULL;
+    if (host.get_uv_event_loop(env, &loop) != NAPI_OK || !loop) return;
+    ZeroMemory(&request, sizeof(request));
+    host.uv_fs_close(loop, &request, fd, NULL);
+    host.uv_fs_req_cleanup(&request);
+}
+
+/* Fill descriptors 0 to 2 with NUL where they are free, once per process. */
+static BOOL reserve_standard_descriptors(napi_env env) {
+    static BOOL reserved = FALSE;
+    int attempt;
+    if (reserved) return TRUE;
+    for (attempt = 0; attempt < 4; attempt++) {
+        HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        int fd;
+        if (nul == INVALID_HANDLE_VALUE) return FALSE;
+        fd = host.uv_open_osfhandle(nul);
+        if (fd < 0) {
+            CloseHandle(nul);
+            return FALSE;
+        }
+        if (fd > 2) {
+            /* The lowest free descriptor is above the standard ones: they are taken. */
+            close_descriptor(env, fd);
+            reserved = TRUE;
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 /* Throw an Error with `code` and `message`, and `winerror` when it is not 0. Returns NULL. */
@@ -167,7 +226,10 @@ static BOOL read_token(HANDLE token, token_facts *facts) {
     if (!count || *count == 0) return FALSE;
     facts->integrity = *GetSidSubAuthority(label.label.Label.Sid, (DWORD)(*count - 1));
     if (!GetTokenInformation(token, TokenIsAppContainer, &facts->app_container, sizeof(facts->app_container), &size)) return FALSE;
+    /* FALSE is also the answer on failure; only GetLastError tells them apart. */
+    SetLastError(ERROR_SUCCESS);
     facts->restricted = IsTokenRestricted(token);
+    if (!facts->restricted && GetLastError() != ERROR_SUCCESS) return FALSE;
     return TRUE;
 }
 
@@ -184,10 +246,12 @@ static const char *refuse_server(ULONG pid) {
         refusal = "the token of the process serving the pipe cannot be read, so it is not this user's";
     } else if (!EqualSid(self.user.user.User.Sid, other.user.user.User.Sid)) {
         refusal = "the process serving the pipe runs as another user";
+    } else if (other.user.user.User.Attributes & SE_GROUP_USE_FOR_DENY_ONLY) {
+        refusal = "the process serving the pipe has this user's SID for deny only";
     } else if (other.app_container) {
         refusal = "the process serving the pipe runs in an AppContainer";
     } else if (other.restricted) {
-        refusal = "the process serving the pipe has a restricted token";
+        refusal = "the process serving the pipe has a restricted token (restricting SIDs)";
     } else if (other.integrity < self.integrity) {
         refusal = "the process serving the pipe runs at a lower integrity level";
     }
@@ -206,6 +270,7 @@ static napi_value open_pipe(napi_env env, napi_callback_info info) {
     const char *refusal;
     int fd;
 
+    if (!reserve_standard_descriptors(env)) return fail(env, "EIO", "Descriptors 0 to 2 could not be reserved.", GetLastError());
     if (host.get_cb_info(env, info, &argc, argv, NULL, NULL) != NAPI_OK || argc < 1) {
         return fail(env, "EINVAL", "open(name) needs a pipe name.", 0);
     }
@@ -239,19 +304,21 @@ static napi_value open_pipe(napi_env env, napi_callback_info info) {
         CloseHandle(pipe);
         return fail(env, UNTRUSTED, refusal, 0);
     }
+    /* Everything that can fail before the descriptor exists is done first. */
+    if (host.create_object(env, &result) != NAPI_OK
+        || host.create_uint32(env, (uint32_t)pid, &pid_value) != NAPI_OK
+        || host.set_named_property(env, result, "serverPid", pid_value) != NAPI_OK) {
+        CloseHandle(pipe);
+        return NULL;
+    }
     fd = host.uv_open_osfhandle(pipe);
     if (fd < 0) {
         CloseHandle(pipe);
         return fail(env, "EMFILE", "The pipe handle could not get a file descriptor.", 0);
     }
-    /* From here libuv owns the handle through fd; the caller closes fd on any failure. */
-    if (host.create_object(env, &result) != NAPI_OK
-        || host.create_int32(env, fd, &fd_value) != NAPI_OK
-        || host.set_named_property(env, result, "fd", fd_value) != NAPI_OK
-        || host.create_uint32(env, (uint32_t)pid, &pid_value) != NAPI_OK
-        || host.set_named_property(env, result, "serverPid", pid_value) != NAPI_OK) {
-        /* No JavaScript value holds fd, so nothing else can close it. */
-        CloseHandle(pipe);
+    /* From here the descriptor owns the handle; the caller closes fd on any later failure. */
+    if (host.create_int32(env, fd, &fd_value) != NAPI_OK || host.set_named_property(env, result, "fd", fd_value) != NAPI_OK) {
+        close_descriptor(env, fd);
         return NULL;
     }
     return result;

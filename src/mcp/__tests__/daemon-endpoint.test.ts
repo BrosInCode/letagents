@@ -338,6 +338,31 @@ test("a caller that paused the stream before connect gets it back paused", async
   } finally { await env.cleanup(); }
 });
 
+test("a reply the caller has not read yet survives the daemon closing the connection", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", () => admitted.end("pong\n"));
+    }));
+    const client = env.connect();
+    await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
+    client.pause();
+    const transport = daemonConnectionTransport(client);
+    assert.ok(transport);
+    const transportClosed = new Promise<void>((resolve) => transport.once("close", () => resolve()));
+    client.write("ping\n");
+    await transportClosed;
+    let data = "";
+    client.setEncoding("utf8");
+    client.on("data", (chunk: string) => { data += chunk; });
+    const closed = new Promise<void>((resolve) => client.once("close", () => resolve()));
+    client.resume();
+    await closed;
+    assert.equal(data, "pong\n", "the reply waited for the reader, as on a net.Socket");
+  } finally { await env.cleanup(); }
+});
+
 test("a proof this process made private is used without reading its DACL again", async () => {
   const env = await harness();
   try {

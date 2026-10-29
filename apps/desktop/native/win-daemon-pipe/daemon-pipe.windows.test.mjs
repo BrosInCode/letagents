@@ -53,6 +53,9 @@ before(() => {
   lowFolder = join(folder, "reports");
   mkdirSync(lowFolder);
   execFileSync(join(system32, "icacls.exe"), [lowFolder, "/setintegritylevel", "(OI)(CI)L"], { stdio: "ignore", windowsHide: true });
+  // A squatter with this user's SID for deny only reaches its program and reports through Everyone.
+  execFileSync(join(system32, "icacls.exe"), [folder, "/grant", "*S-1-1-0:(OI)(CI)RX"], { stdio: "ignore", windowsHide: true });
+  execFileSync(join(system32, "icacls.exe"), [lowFolder, "/grant", "*S-1-1-0:(OI)(CI)M"], { stdio: "ignore", windowsHide: true });
 });
 after(() => { if (folder) rmSync(folder, { recursive: true, force: true }); });
 
@@ -82,7 +85,7 @@ async function scene() {
   return { root, endpoint, report, ready, config };
 }
 
-/** Run the squatter as this user ("squat") or at low integrity ("low"). */
+/** Run the squatter as this user ("squat"), at low integrity ("low"), or with this user's SID for deny only ("denyonly"). */
 async function squat(scene, mode) {
   const child = spawn(squatterExe, [mode, scene.config], { stdio: ["ignore", "inherit", "inherit"], windowsHide: true });
   const exited = new Promise((resolve) => child.once("exit", resolve));
@@ -227,6 +230,38 @@ test("a squatter at low integrity is refused before the client writes", { skip }
   assert.match(result.error?.message ?? "", /lower integrity level/);
   assert.equal(seen.bytesRead, 0, "the squatter read nothing");
   if (seen.beforeRead.ok) assert.ok(seen.beforeRead.level <= SecurityIdentification, `impersonation level ${seen.beforeRead.level}`);
+});
+
+test("a squatter with this user's SID for deny only is refused before the client writes", { skip }, async () => {
+  const state = await scene();
+  const squatter = await squat(state, "denyonly");
+  const result = await exchange(connectDaemon(state.endpoint.connectPath, { proofPath: state.endpoint.proofPath }), "secret-request\n");
+  const seen = await report(state);
+  await squatter.exited;
+  assert.equal(result.connected, false);
+  assert.equal(result.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+  assert.match(result.error?.message ?? "", /deny only/);
+  assert.equal(seen.bytesRead, 0, "the squatter read nothing");
+});
+
+test("another spelling of the daemon pipe never reaches libuv", { skip }, async () => {
+  const state = await scene();
+  const proof = await ensureDaemonProof(state.endpoint.proofPath);
+  let connections = 0;
+  const server = createServer((socket) => { connections += 1; acceptDaemonPeer(socket, proof, () => undefined); });
+  try {
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(state.endpoint.listenPath, resolve); });
+    const name = state.endpoint.connectPath.slice("\\\\.\\pipe\\".length);
+    for (const alias of [`//./pipe/${name}`, `\\\\localhost\\pipe\\${name}`, `\\\\?\\pipe\\${name}`]) {
+      const result = await exchange(connectDaemon(alias, { proofPath: state.endpoint.proofPath }), "secret-request\n");
+      assert.equal(result.connected, false, alias);
+      assert.equal(result.error?.code, "EINVAL", `${alias}: ${result.error?.message}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(connections, 0, "the daemon saw no connection from any alias");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("a SYSTEM squatter (SeImpersonatePrivilege) gets nothing it can use, while libuv's connect hands it the user", { skip: systemSkip }, async () => {

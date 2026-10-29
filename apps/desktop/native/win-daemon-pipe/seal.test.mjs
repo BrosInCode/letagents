@@ -47,6 +47,11 @@ test("the app looks for the addon where it ships it, or only where it is told", 
   assert.deepEqual(daemonPipeAddonCandidates({ env: { [DAEMON_PIPE_ADDON_ENV]: configured }, resourcesPath }), [configured],
     "a configured addon is the only candidate");
   assert.deepEqual(daemonPipeAddonCandidates({ env: { [DAEMON_PIPE_ADDON_ENV]: "relative.node" }, resourcesPath }), []);
+  assert.deepEqual(daemonPipeAddonCandidates({ env: { [DAEMON_PIPE_ADDON_ENV]: "\\\\server\\share\\letagents-daemon-pipe.node" }, resourcesPath }), [],
+    "never a network path");
+  // A process that is not the app's (npx letagents under Node) finds the per-user install.
+  const [installed] = daemonPipeAddonCandidates({ env: { LOCALAPPDATA: "C:\\Users\\Owner\\AppData\\Local" }, resourcesPath: "", arch: "x64" });
+  assert.equal(installed, "C:\\Users\\Owner\\AppData\\Local\\Programs\\LetAgents\\resources\\app\\runtime\\letagents-daemon-pipe.node");
 });
 
 test("only the sealed bytes are accepted; other bytes are an error, not a reason to look further", () => {

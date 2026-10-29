@@ -40,19 +40,30 @@ function isFile(filePath) {
 
 /**
  * Where the addon may be, in order: the LETAGENTS_DAEMON_PIPE_ADDON path
- * (alone: a configured addon that is missing is an error to see), then
- * `<resources>/app/runtime/`, where the packaged app ships it (Electron sets
- * process.resourcesPath in the app and in its ELECTRON_RUN_AS_NODE children),
- * then the local build beside its source.
+ * (alone: a configured addon that is missing is an error to see; a network
+ * path is never used), then `<resources>/app/runtime/`, where the packaged
+ * app ships it (Electron sets process.resourcesPath in the app and in its
+ * ELECTRON_RUN_AS_NODE children), or, for a process that is not the app's
+ * (`npx letagents` under Node), the same file in the per-user install
+ * folder, then the local build beside its source.
+ *
+ * The bytes are hashed, then loaded by path. A process that could replace
+ * the file in between could as well replace this module or the app beside
+ * it, so the seal guards against stale or foreign builds, not against a
+ * writer of the install folder.
  */
 export function daemonPipeAddonCandidates(options = {}) {
   const env = options.env ?? process.env;
   const configured = env[DAEMON_PIPE_ADDON_ENV]?.trim();
-  if (configured) return path.win32.isAbsolute(configured) ? [configured] : [];
+  if (configured) return /^[A-Za-z]:[\\/]/.test(configured) ? [configured] : [];
   const resourcesPath = options.resourcesPath ?? (typeof process.resourcesPath === "string" ? process.resourcesPath : "");
+  const localAppData = env.LOCALAPPDATA?.trim();
   const arch = (options.arch ?? process.arch) === "arm64" ? "arm64" : "x64";
   const candidates = [];
   if (resourcesPath.trim()) candidates.push(path.win32.join(resourcesPath, "app", "runtime", DAEMON_PIPE_ADDON_NAME));
+  else if (localAppData && /^[A-Za-z]:[\\/]/.test(localAppData)) {
+    candidates.push(path.win32.join(localAppData, "Programs", "LetAgents", "resources", "app", "runtime", DAEMON_PIPE_ADDON_NAME));
+  }
   if (options.includeLocalBuild !== false) {
     candidates.push(fileURLToPath(new URL(`../apps/desktop/native/win-daemon-pipe/build/${arch}/${DAEMON_PIPE_ADDON_NAME}`, import.meta.url)));
   }

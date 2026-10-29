@@ -298,7 +298,8 @@ async function openDaemonPipe(connectPath, cancelled) {
       opened = addon.open(connectPath);
     } catch (error) {
       if (error?.code !== "EBUSY" || cancelled()) throw error;
-      await new Promise((resolve) => setTimeout(resolve, PIPE_BUSY_RETRY_MS));
+      // The caller's own ref() or unref() decides whether the connection keeps the process alive.
+      await new Promise((resolve) => setTimeout(resolve, PIPE_BUSY_RETRY_MS).unref());
       continue;
     }
     // A failed N-API call returns nothing; never wrap a socket without the pipe.
@@ -349,9 +350,11 @@ class DaemonConnection extends Socket {
     transport.on("error", (error) => this.destroy(error));
     transport.on("end", () => this.#pushEnd());
     transport.once("close", () => {
-      this.#pushEnd();
-      // A consumer reads the end and the stream closes itself; otherwise close now.
-      if (!this.#open || this.readableFlowing !== true) this.destroy();
+      // Before the handshake nothing reached the caller: close now. After it,
+      // as a net.Socket does, the end follows any data not yet read, and the
+      // stream closes itself once the caller read it.
+      if (!this.#open) this.destroy();
+      else this.#pushEnd();
     });
     return true;
   }
@@ -434,9 +437,12 @@ export function daemonConnectionTransport(socket) {
  * daemon that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED; a missing or
  * unsealed addon is ERR_LETAGENTS_DAEMON_PIPE_ADDON. `handshake: true` runs
  * the handshake over a Unix socket too, for tests on hosts without pipes.
+ * On Windows every path takes the addon: one that is not `\\.\pipe\<name>`
+ * (another spelling of a pipe, a remote pipe, a file) is refused there, never
+ * handed to libuv.
  */
 export function connectDaemon(connectPath, { proofPath, handshake = false, handshakeTimeoutMs = 10_000, ...privacy } = {}) {
-  const pipe = isWindowsPipePath(connectPath);
+  const pipe = process.platform === "win32";
   if (!handshake && !pipe) return createConnection(connectPath);
   const socket = new DaemonConnection();
   // An absolute bound on proof, connect and handshake. A caller's own timeout
