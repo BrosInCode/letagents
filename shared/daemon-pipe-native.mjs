@@ -98,7 +98,8 @@ function recordedInstallLocation() {
       { windowsHide: true, timeout: 5_000, stdio: "ignore" });
     installLocation = parseInstallLocation(readFileSync(exported));
   } catch { /* not installed */ }
-  finally { if (folder) rmSync(folder, { recursive: true, force: true }); }
+  // Best effort: a scanner holding the export must not undo what was read.
+  try { if (folder) rmSync(folder, { recursive: true, force: true }); } catch { /* left in the user's temp folder */ }
   return installLocation;
 }
 
