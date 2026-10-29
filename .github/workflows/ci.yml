@@ -438,9 +438,13 @@ jobs:
         shell: bash
         run: npm run test:mcp
 
+      # The build gate above has just built this checkout; the test packs it
+      # without building it again.
       - name: Test packed MCP runtime
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
+        env:
+          LETAGENTS_PACKAGE_TEST_DIST_BUILT: '1'
         run: npm run test:package-runtime
 
       - name: Test the shared modules the MCP server depends on
