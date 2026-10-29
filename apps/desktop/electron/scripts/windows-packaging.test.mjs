@@ -1,0 +1,161 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { win32 } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
+
+import {
+  WINDOWS_EXECUTABLE_NAME,
+  assertWindowsExecutableBytes,
+  createIcoFile,
+  createNsisPayloadInclude,
+  findMakensis,
+  readPngDimensions,
+  resolveWindowsOpenCodeExecutable,
+  windowsFileVersion,
+} from "./windows-packaging.mjs";
+
+const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
+const desktopRoot = resolve(scriptsDirectory, "../..");
+
+function crc32(bytes) {
+  let crc = ~0;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return ~crc >>> 0;
+}
+
+function chunk(type, data) {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([length, body, crc]);
+}
+
+/** A real, decodable RGBA PNG of one colour. */
+function solidPng(size) {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header.writeUInt8(8, 8);
+  header.writeUInt8(6, 9);
+  const rows = Buffer.alloc((size * 4 + 1) * size);
+  for (let row = 0; row < size; row += 1) {
+    for (let column = 0; column < size; column += 1) {
+      rows.writeUInt32BE(0x3366ccff, row * (size * 4 + 1) + 1 + column * 4);
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(rows)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+test("the Windows icon is a PNG-entry .ico that resedit reads back size for size", async () => {
+  const images = [16, 32, 256].map((size) => ({ size, png: solidPng(size) }));
+  const ico = createIcoFile(images);
+  assert.equal(ico.readUInt16LE(2), 1, "type 1 is an icon");
+  assert.equal(ico.readUInt16LE(4), 3);
+  assert.equal(ico.readUInt8(6 + 32), 0, "256 is stored as 0");
+  assert.deepEqual(readPngDimensions(ico.subarray(ico.readUInt32LE(6 + 32 + 12))), { width: 256, height: 256 });
+
+  const ResEdit = await import("resedit");
+  const parsed = ResEdit.Data.IconFile.from(ico);
+  // The directory's one-byte width keeps 0 for 256, as Windows reads it.
+  assert.deepEqual(parsed.icons.map((icon) => icon.width), [16, 32, 0]);
+  assert.deepEqual(parsed.icons.map((icon) => icon.data.isRaw() && Buffer.from(icon.data.bin).equals(images.find(({ size }) => size === (icon.width || 256)).png)), [true, true, true]);
+});
+
+test("the Windows icon refuses entries that are not the size they claim", () => {
+  assert.throws(() => createIcoFile([]), /at least one image/);
+  assert.throws(() => createIcoFile([{ size: 32, png: solidPng(16) }]), /32x32 PNG/);
+  assert.throws(() => createIcoFile([{ size: 512, png: solidPng(512) }]), /at most 256/);
+  assert.throws(() => createIcoFile([{ size: 16, png: Buffer.from("not a png") }]), /must be PNG images/);
+});
+
+test("Windows version metadata uses the four-part form of the desktop version", () => {
+  assert.equal(windowsFileVersion("0.1.130"), "0.1.130.0");
+  assert.throws(() => windowsFileVersion("0.1.130-beta.1"), /numeric x\.y\.z/);
+  assert.throws(() => windowsFileVersion("0.70000.0"), /at most 65535/);
+});
+
+test("the bundled OpenCode is the real opencode.exe behind npm's Windows shim", () => {
+  const prefix = "C:\\Users\\runner\\opencode";
+  const installed = win32.join(prefix, "node_modules", "opencode-ai", "bin", "opencode.exe");
+  const files = new Set([win32.join(prefix, "opencode.cmd"), installed]);
+  const exists = (path) => files.has(path);
+  assert.equal(resolveWindowsOpenCodeExecutable({ env: { PATH: `C:\\Windows;${prefix}` }, exists }), installed);
+  assert.equal(
+    resolveWindowsOpenCodeExecutable({ env: { Path: "C:\\tools" }, exists: (path) => path === "C:\\tools\\opencode.exe" }),
+    "C:\\tools\\opencode.exe",
+  );
+  assert.equal(resolveWindowsOpenCodeExecutable({ requested: installed, exists }), installed);
+  assert.throws(() => resolveWindowsOpenCodeExecutable({ requested: win32.join(prefix, "opencode.cmd") }), /must name opencode\.exe/);
+  assert.throws(() => resolveWindowsOpenCodeExecutable({ env: { PATH: "C:\\Windows" }, exists }), /not found on PATH/);
+  // npm's placeholder (a shell script) is what is left when postinstall did not run.
+  assert.throws(() => assertWindowsExecutableBytes(Buffer.from("echo \"Error: opencode-ai's postinstall"), "opencode.exe"), /not a Windows executable/);
+  assert.doesNotThrow(() => assertWindowsExecutableBytes(Buffer.from([0x4d, 0x5a, 0x90, 0]), "opencode.exe"));
+});
+
+test("makensis comes from LETAGENTS_MAKENSIS, PATH, or the NSIS install folder", () => {
+  const default32 = "C:\\Program Files (x86)\\NSIS\\makensis.exe";
+  assert.equal(findMakensis({ env: { "ProgramFiles(x86)": "C:\\Program Files (x86)", PATH: "" }, exists: (path) => path === default32 }), default32);
+  assert.equal(findMakensis({ env: { PATH: "D:\\nsis" }, exists: (path) => path === "D:\\nsis\\makensis.exe" }), "D:\\nsis\\makensis.exe");
+  assert.equal(findMakensis({ env: { LETAGENTS_MAKENSIS: "E:\\makensis.exe" }, exists: () => true }), "E:\\makensis.exe");
+  assert.throws(() => findMakensis({ env: { LETAGENTS_MAKENSIS: "E:\\missing.exe" }, exists: () => false }), /does not exist/);
+  assert.throws(() => findMakensis({ env: { PATH: "" }, exists: () => false }), /NSIS \(makensis\.exe\) was not found/);
+});
+
+test("the installer removes exactly the packaged top-level entries", () => {
+  const include = createNsisPayloadInclude([
+    { name: "resources", directory: true },
+    { name: WINDOWS_EXECUTABLE_NAME, directory: false },
+    { name: "ffmpeg.dll", directory: false },
+    { name: "locales", directory: true },
+    { name: "shared", directory: true },
+  ]);
+  assert.equal(include, [
+    "; Generated by electron/scripts/package-windows.mjs. Do not edit.",
+    "!macro REMOVE_LETAGENTS_PAYLOAD",
+    '  Delete "$INSTDIR\\ffmpeg.dll"',
+    '  Delete "$INSTDIR\\LetAgents.exe"',
+    '  RMDir /r "$INSTDIR\\locales"',
+    '  RMDir /r "$INSTDIR\\resources"',
+    '  RMDir /r "$INSTDIR\\shared"',
+    "!macroend",
+    "",
+  ].join("\r\n"));
+  assert.throws(() => createNsisPayloadInclude([{ name: "resources", directory: true }]), /must contain LetAgents\.exe/);
+  for (const name of ['bad"name', "$PLUGINSDIR", "..", "Uninstall LetAgents.exe"]) {
+    assert.throws(
+      () => createNsisPayloadInclude([{ name: WINDOWS_EXECUTABLE_NAME, directory: false }, { name, directory: false }]),
+      /Unexpected top-level entry/,
+    );
+  }
+});
+
+test("the NSIS script honours electron-updater's installer flags and stays per-user", async () => {
+  const script = await readFile(join(desktopRoot, "electron", "installer", "windows", "installer.nsi"), "utf8");
+  assert.match(script, /^RequestExecutionLevel user$/m);
+  assert.match(script, /^InstallDir "\$LOCALAPPDATA\\Programs\\\$\{PRODUCT_NAME\}"$/m);
+  assert.match(script, /\$\{GetOptions\} \$R0 "--updated" \$R1/);
+  assert.match(script, /\$\{GetOptions\} \$R0 "--force-run" \$R1/);
+  // Not solid, so unchanged files keep their compressed bytes for the blockmap.
+  assert.match(script, /^SetCompressor lzma$/m);
+  // The cache name and file electron-updater's differential download reads.
+  assert.match(script, /!define UPDATER_CACHE "letagents-desktop-updater"/);
+  assert.match(script, /"\$LOCALAPPDATA\\\$\{UPDATER_CACHE\}\\installer\.exe"/);
+  assert.match(script, /WriteRegStr HKCU "\$\{URL_KEY\}\\shell\\open\\command" "" '"\$INSTDIR\\\$\{EXE_NAME\}" "%1"'/);
+  // The previous payload is removed only from a folder holding a LetAgents install.
+  const guarded = /\$\{If\} \$\{FileExists\} "\$INSTDIR\\\$\{EXE_NAME\}"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/g;
+  assert.equal(script.match(guarded)?.length, 2);
+  assert.doesNotMatch(script, /RMDir \/r "\$INSTDIR"/);
+});

@@ -3,6 +3,8 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { npmInvocation } from "../../../../scripts/npm-command.mjs";
+
 const execFileAsync = promisify(execFile);
 
 /**
@@ -37,14 +39,18 @@ export async function installLockedMcpRuntime({ runtimeSource, destination, env 
   await writeFile(globalConfig, "");
   await cp(join(runtimeSource, "package.json"), join(destination, "package.json"));
   await cp(join(runtimeSource, "package-lock.json"), join(destination, "package-lock.json"));
-  await execFileAsync("npm", [
+  // npm through the repository's resolver: on Windows `npm` is npm.cmd, which
+  // execFile cannot start without a shell.
+  const install = npmInvocation([
     "ci",
     "--omit=dev",
     "--ignore-scripts",
     "--no-audit",
     "--no-fund",
     "--registry=https://registry.npmjs.org/",
-  ], {
+  ], undefined, env);
+  await execFileAsync(install.command, install.args, {
+    ...install.options,
     cwd: destination,
     env: { ...env, NPM_CONFIG_GLOBALCONFIG: globalConfig, NPM_CONFIG_USERCONFIG: userConfig },
     maxBuffer: 8 * 1024 * 1024,
