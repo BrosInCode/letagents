@@ -1,11 +1,10 @@
 import { isLocalRoomApi, roomApiOrigin } from "../../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { createConnection } from "node:net";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { parsePositivePgIntegerScopedId } from "../../../../shared/message-contracts.mjs";
+import { connectDaemon, daemonEndpoint, defaultDaemonStateDir } from "../../../../shared/daemon-endpoint.mjs";
 
 import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
@@ -859,7 +858,7 @@ async function resolveSupervisorCoordinates(
   }
   return {
     ...context,
-    socketPath: options.trustedDaemonSocketPath ?? join(homedir(), ".letagents", "daemon.sock"),
+    socketPath: options.trustedDaemonSocketPath ?? daemonEndpoint(defaultDaemonStateDir()).connectPath,
   };
 }
 
@@ -997,7 +996,7 @@ function supervisorRequest(
 ): Promise<SupervisorResponse> {
   return new Promise((resolve, reject) => {
     const encoded = `${JSON.stringify(request)}\n`;
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let buffer = "";
     let finished = false;
     let writeAttempted = false;

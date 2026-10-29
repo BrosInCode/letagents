@@ -145,6 +145,9 @@ export type DaemonHandoffDiagnostic = {
 
 export interface SupervisorDaemonLifecycleOptions {
   loadApprovalSigner?: typeof loadHostApprovalSigner;
+  /** The daemon state directory (default: the user's LetAgents state root). */
+  stateDir?: string;
+  /** Tests only: connect here instead of the state directory's endpoint. */
   socketPath?: string;
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;

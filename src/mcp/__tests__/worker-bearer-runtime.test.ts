@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { unixSocketOnly } from "./support/platform.js";
+import { listenTestDaemon, testDaemonSocketPath } from "./support/platform.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_API_URL ??= "http://127.0.0.1:39999";
@@ -493,9 +493,9 @@ test("custodial polling borrows authority and cannot fall back to owner or envir
   }
 });
 
-test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", { skip: unixSocketOnly }, async () => {
+test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", async () => {
   const root = mkdtempSync(join(tmpdir(), "custodial-wait-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const phases: string[] = [];
   const requests: any[] = [];
   let rejectRelease = false;
@@ -524,7 +524,7 @@ test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE w
   });
   const originalFetch = globalThis.fetch;
   try {
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    await new Promise<void>((resolve) => listenTestDaemon(server, socketPath, resolve));
     await withAuthEnv({ executionProfile: "supervised_mcp_polling", supervisorRoomId: "room_exact" }, async () => {
       process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET = socketPath;
       process.env.LETAGENTS_SUPERVISOR_PROVIDER = "codex";

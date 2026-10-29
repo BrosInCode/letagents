@@ -1,7 +1,7 @@
 /** Paths, clock and retention settings the supervisor daemon is built with. */
 import type { defaultDaemonPaths } from "../singleton.js";
 
-export type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
+export type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath" | "peerProofPath">>;
 export type RecoveryClock = {
   nowMs?: () => number;
   setTimeout?: typeof setTimeout;

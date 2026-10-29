@@ -259,6 +259,8 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
         requestBarrier: this.controlRequestBarrier,
       }, controlOperations)(request, signal),
       async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); },
+      undefined,
+      { peerProofPath: paths.peerProofPath ?? null },
     );
     this.nowMs = recoveryClock.nowMs ?? Date.now;
   }

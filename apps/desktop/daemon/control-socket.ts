@@ -4,26 +4,90 @@ import { createServer, type Server, type Socket } from "node:net";
 
 import { DAEMON_PROTOCOL_VERSION, type DaemonRequest, type DaemonResponse } from "./types.js";
 import { LOCAL_BOARD_MAX_FRAME_BYTES } from "../../../shared/local-board-owner.mjs";
+import { acceptDaemonPeer, ensureDaemonProof, isWindowsPipePath } from "../../../shared/daemon-endpoint.mjs";
 import { DaemonFenceLostError } from "./singleton.js";
+
+/** Another process holds the daemon's pipe name: refuse to serve beside it. */
+export class DaemonEndpointInUseError extends Error {}
+
+export interface DaemonControlSocketOptions {
+  /**
+   * The client proof (see shared/daemon-endpoint.mjs). Required on a Windows
+   * pipe, where it stands in for the socket file's 0600 mode; no proof is used
+   * on POSIX unless a test sets one.
+   */
+  peerProofPath?: string | null;
+  /** How long a pipe name left by the previous daemon may stay busy after it released the singleton. */
+  pipeReleaseWaitMs?: number;
+}
 
 export type RequestHandler = (request: DaemonRequest, disconnected: AbortSignal) => Promise<unknown> | unknown;
 
 export class DaemonControlSocket {
   private server: Server | null = null;
   private readonly connections = new Set<Socket>();
-  constructor(readonly path: string, private readonly handle: RequestHandler, private readonly onFatal?: (error: Error) => Promise<void> | void, private readonly maxFrameBytes = LOCAL_BOARD_MAX_FRAME_BYTES) {}
+  private readonly pipe: boolean;
+  constructor(readonly path: string, private readonly handle: RequestHandler, private readonly onFatal?: (error: Error) => Promise<void> | void, private readonly maxFrameBytes = LOCAL_BOARD_MAX_FRAME_BYTES, private readonly options: DaemonControlSocketOptions = {}) {
+    this.pipe = isWindowsPipePath(path);
+  }
 
   async start(): Promise<void> {
+    if (this.pipe) {
+      await this.startPipe();
+      return;
+    }
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     await chmod(dirname(this.path), 0o700);
     await unlink(this.path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
-    this.server = createServer((socket) => {
+    this.server = this.createServer(this.options.peerProofPath ? await ensureDaemonProof(this.options.peerProofPath) : null);
+    await new Promise<void>((resolve, reject) => {
+      this.server!.once("error", reject);
+      this.server!.listen(this.path, () => { this.server!.off("error", reject); resolve(); });
+    });
+    await chmod(this.path, 0o600);
+  }
+
+  /**
+   * A pipe has no file to unlink or chmod. The caller holds the singleton, so a
+   * busy name is either the previous daemon's last instance closing after a
+   * handoff or someone else's pipe: wait briefly for the first, then fail
+   * closed rather than serve beside an impostor.
+   */
+  private async startPipe(): Promise<void> {
+    if (!this.options.peerProofPath) throw new Error("A daemon pipe needs a client proof; refusing to listen without one.");
+    const proof = await ensureDaemonProof(this.options.peerProofPath);
+    const deadline = Date.now() + (this.options.pipeReleaseWaitMs ?? 2_000);
+    for (;;) {
+      const server = this.createServer(proof);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(this.path, () => { server.off("error", reject); resolve(); });
+        });
+        this.server = server;
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+        if (Date.now() >= deadline) throw new DaemonEndpointInUseError("Another process holds the supervisor daemon pipe; refusing to start beside it.");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+  }
+
+  private createServer(proof: string | null): Server {
+    return createServer((socket) => {
       this.connections.add(socket);
       socket.once("close", () => this.connections.delete(socket));
       // Requests deliberately outlive their provider socket. A provider may
       // disconnect while the daemon finishes and journals a long tool call;
       // EPIPE is transport loss, not a daemon-fatal execution error.
       socket.on("error", () => undefined);
+      if (proof === null) this.serve(socket);
+      else acceptDaemonPeer(socket, proof, (admitted) => this.serve(admitted));
+    });
+  }
+
+  private serve(socket: Socket): void {
       let buffer = "";
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
@@ -33,12 +97,6 @@ export class DaemonControlSocket {
         buffer = lines.pop() ?? "";
         for (const line of lines) void this.respond(socket, line);
       });
-    });
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once("error", reject);
-      this.server!.listen(this.path, () => { this.server!.off("error", reject); resolve(); });
-    });
-    await chmod(this.path, 0o600);
   }
 
   async stop(): Promise<void> {
@@ -48,6 +106,7 @@ export class DaemonControlSocket {
     for (const socket of this.connections) socket.destroy();
     this.connections.clear();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (this.pipe) return;
     await unlink(this.path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
 

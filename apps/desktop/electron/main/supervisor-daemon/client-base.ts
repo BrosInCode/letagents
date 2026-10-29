@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { createConnection } from "node:net";
+import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../../shared/daemon-maintenance.mjs";
+import { connectDaemon, daemonEndpoint, defaultDaemonStateDir } from "../../../../../shared/daemon-endpoint.mjs";
 import type { DesktopSupervisorDaemonStatus } from "../../ipc-types.js";
 import { desktopRoot } from "../paths.js";
 import { loadHostApprovalSigner, type HostApprovalSigner } from "../host-approval-auth.js";
@@ -30,7 +29,11 @@ import type {
 } from "./types.js";
 
 export abstract class SupervisorDaemonClientBase {
+  /** The daemon's state directory; every local path below derives from it, never from the socket. */
+  readonly stateDir: string;
+  /** Where the daemon is reached: a socket file on POSIX, a named pipe on Windows. */
   readonly socketPath: string;
+  protected readonly peerProofPath: string | null;
   readonly daemonScriptPath: string;
   protected ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
   /**
@@ -56,7 +59,7 @@ export abstract class SupervisorDaemonClientBase {
   protected readonly maintenanceRequests = new Set<() => void>();
   protected maintenanceTarget: DaemonProcessIdentity | null = null;
   protected maintenanceOperation: Promise<void> | null = null;
-  protected get maintenancePath(): string { return daemonMaintenancePath(dirname(this.socketPath)); }
+  protected get maintenancePath(): string { return daemonMaintenancePath(this.stateDir); }
 
   protected assertNotRestarting(): void {
     if (this.maintenanceRequested) throw new Error(DAEMON_MAINTENANCE_MESSAGE);
@@ -105,10 +108,13 @@ export abstract class SupervisorDaemonClientBase {
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.loadApprovalSigner = options.loadApprovalSigner ?? loadHostApprovalSigner;
-    this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
+    this.stateDir = options.stateDir ?? defaultDaemonStateDir();
+    const endpoint = daemonEndpoint(this.stateDir);
+    this.socketPath = options.socketPath ?? endpoint.connectPath;
+    this.peerProofPath = options.socketPath === undefined ? endpoint.proofPath : null;
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
-    this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
-    this.lifecycleLogPath = options.lifecycleLogPath ?? join(dirname(this.socketPath), "daemon-lifecycle.jsonl");
+    this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? this.stateDir;
+    this.lifecycleLogPath = options.lifecycleLogPath ?? join(this.stateDir, "daemon-lifecycle.jsonl");
     this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
       if (signal === "SIGTERM" && options.terminateDaemon) {
         options.terminateDaemon(pid);
@@ -183,7 +189,7 @@ export abstract class SupervisorDaemonClientBase {
     if (!maintenance && this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
-      const socket = createConnection(this.socketPath);
+      const socket = connectDaemon(this.socketPath, { proofPath: this.peerProofPath });
       if (unrefSocket) socket.unref();
       const chunks: string[] = [];
       let settled = false;

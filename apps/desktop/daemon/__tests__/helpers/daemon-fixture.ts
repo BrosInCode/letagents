@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -198,9 +198,18 @@ export function fakeRecoveryClock(startMs = 10_000) {
   };
 }
 
+/**
+ * The daemon endpoint under a test root: `<root>/daemon.sock` on POSIX, a
+ * per-root named pipe with its proof file on Windows.
+ */
+export function testDaemonEndpoint(root: string): { socketPath: string; peerProofPath: string | null } {
+  const endpoint = daemonEndpoint(root);
+  return { socketPath: endpoint.listenPath, peerProofPath: endpoint.proofPath };
+}
+
 export async function daemonRequest(socketPath: string, method: string, params?: unknown, version = DAEMON_PROTOCOL_VERSION): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> {
   return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
+    const client = connectDaemon(socketPath);
     let received = "";
     let settled = false;
     client.setEncoding("utf8");
@@ -288,7 +297,7 @@ export async function observationDaemonFixture(onExecution: NonNullable<Provider
   const env = await fixture();
   const id = "observed-agent";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };

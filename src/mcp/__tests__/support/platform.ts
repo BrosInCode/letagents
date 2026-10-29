@@ -1,23 +1,48 @@
 import assert from "node:assert/strict";
-import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
+import { randomBytes } from "node:crypto";
+import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import type { Server, Socket } from "node:net";
+import { isAbsolute, join, relative } from "node:path";
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+import { acceptDaemonPeer, daemonEndpoint, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
 
 // Platform facts the MCP test suites share. The suites run on Windows in CI;
 // what cannot run there is skipped through these constants, in one place,
 // with the reason beside it.
 
 /**
- * Skip reason for a test that listens on a Unix domain socket. The desktop
- * daemon's control socket is a Unix socket; Windows named pipes are a later
- * tier of the port, and the standalone MCP server never listens itself. On
- * Windows, `listen(<file path>)` fails with EACCES.
+ * Where a fake daemon under `root` listens: `<root>/daemon.sock` on POSIX, the
+ * root's named pipe on Windows (the same endpoint the product computes).
  */
-export const unixSocketOnly = process.platform === "win32"
-  ? "the desktop supervisor bridge uses a Unix socket; Windows named pipes are tier 3"
-  : false;
+export function testDaemonSocketPath(root: string): string {
+  return process.platform === "win32" ? daemonEndpoint(root).connectPath : join(root, "daemon.sock");
+}
+
+const gatedServers = new WeakSet<Server>();
+
+/**
+ * `server.listen(socketPath, callback)` for a fake daemon. On Windows the
+ * product client runs the pipe handshake first, so each connection listener
+ * is put behind the daemon's side of it, with a proof written for the root.
+ */
+export function listenTestDaemon(server: Server, socketPath: string, callback?: () => void): Server {
+  if (process.platform === "win32" && !gatedServers.has(server)) {
+    const proofPath = resolveDaemonProofPath(socketPath);
+    if (!proofPath) throw new Error(`No test state directory owns ${socketPath}; build it with testDaemonSocketPath.`);
+    let proof: string;
+    try { proof = readFileSync(proofPath, "utf8").trim(); }
+    catch { proof = randomBytes(32).toString("hex"); writeFileSync(proofPath, `${proof}\n`, { mode: 0o600 }); }
+    for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
+      server.off("connection", listener);
+      server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));
+    }
+    gatedServers.add(server);
+  }
+  return callback ? server.listen(socketPath, callback) : server.listen(socketPath);
+}
 
 /**
  * Skip reason for a step that sends SIGTERM as a request a handler can answer.

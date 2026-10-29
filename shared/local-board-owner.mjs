@@ -1,8 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { createConnection } from "node:net";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { connectDaemon, daemonEndpoint, defaultDaemonStateDir } from "./daemon-endpoint.mjs";
 
 export const LOCAL_BOARD_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
@@ -42,7 +40,7 @@ export function onLocalBoardChanged(listener) {
 export function requestLocalBoard(method, params, { signal, socketPath, timeoutMs = 30_000 } = {}) {
   return new Promise((resolve, reject) => {
     const id = randomUUID();
-    const socket = createConnection(socketPath ?? process.env.LETAGENTS_BOARD_SOCKET_PATH ?? join(homedir(), ".letagents", "daemon.sock"));
+    const socket = connectDaemon(socketPath ?? process.env.LETAGENTS_BOARD_SOCKET_PATH ?? daemonEndpoint(defaultDaemonStateDir()).connectPath);
     let settled = false;
     let buffer = "";
     const finish = (error, value) => {

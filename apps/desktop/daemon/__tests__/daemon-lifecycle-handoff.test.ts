@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { connectDaemon, daemonEndpoint, isWindowsPipePath } from "../../../../shared/daemon-endpoint.mjs";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -30,6 +30,7 @@ import {
   daemonRequest,
   entry,
   observationDaemonFixture,
+  testDaemonEndpoint,
 } from "./helpers/daemon-fixture.js";
 
 // A handoff teardown or a replacement start awaits only local socket, file and
@@ -189,14 +190,16 @@ test("daemon lifecycle diagnostics retain nested aggregate causes", () => {
 test("control socket rejects protocol mismatch explicitly", async () => {
   const env = await fixture();
   try {
-    const socketPath = join(env.root, "daemon.sock");
-    const socket = new DaemonControlSocket(socketPath, () => ({ healthy: true }));
+    const { socketPath, peerProofPath } = testDaemonEndpoint(env.root);
+    const socket = new DaemonControlSocket(socketPath, () => ({ healthy: true }), undefined, undefined, { peerProofPath });
     await chmod(env.root, 0o755);
     await socket.start();
-    assert.equal((await stat(env.root)).mode & 0o777, 0o700);
-    assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
+    if (!isWindowsPipePath(socketPath)) {
+      assert.equal((await stat(env.root)).mode & 0o777, 0o700);
+      assert.equal((await stat(socketPath)).mode & 0o777, 0o600);
+    }
     const response = await new Promise<string>((resolve, reject) => {
-      const client = createConnection(socketPath);
+      const client = connectDaemon(socketPath);
       let received = "";
       client.setEncoding("utf8");
       client.once("error", reject);
@@ -212,7 +215,7 @@ test("lifecycle handlers advertise support and reject coercible or imprecise coo
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
   };
@@ -331,10 +334,10 @@ test("lifecycle handlers advertise support and reject coercible or imprecise coo
 test("cross-version negotiation is allowed before a generation handoff", async () => {
   const env = await fixture();
   try {
-    const socketPath = join(env.root, "daemon.sock");
+    const { socketPath, peerProofPath } = testDaemonEndpoint(env.root);
     const socket = new DaemonControlSocket(socketPath, (request) => request.method === "daemon.negotiate"
       ? { healthy: true, protocol_version: DAEMON_PROTOCOL_VERSION, generation: 9 }
-      : { ok: true });
+      : { ok: true }, undefined, undefined, { peerProofPath });
     await socket.start();
     const response = await daemonRequest(socketPath, "daemon.negotiate", undefined, DAEMON_PROTOCOL_VERSION + 1);
     assert.equal(response.ok, true);
@@ -347,7 +350,7 @@ test("normal daemon shutdown drains an admitted bounded-effect journal mutation 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "manifest.json"),
     auditPath: join(env.root, "audit.jsonl"),
   };
@@ -978,7 +981,7 @@ test("version handoff releases authority without waiting for wedged callbacks an
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "manifest.json"),
     auditPath: join(env.root, "audit.jsonl"),
   };
@@ -1019,7 +1022,7 @@ test("version handoff releases authority without waiting for wedged callbacks an
 test("handoff observer cleanup failures still release socket, singleton, and SQLite authority", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   const first = new SupervisorDaemon(paths, "darwin");
@@ -1046,7 +1049,8 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
     // Check each authority directly once the failed handoff settles, rather
     // than inferring release from how quickly a replacement daemon starts.
     assert.throws(() => (first as unknown as { singleton: DaemonSingleton }).singleton.currentGeneration, DaemonFenceLostError);
-    await assert.rejects(stat(paths.socketPath), { code: "ENOENT" });
+    if (isWindowsPipePath(paths.socketPath)) await assert.rejects(daemonRequest(paths.socketPath, "daemon.status"), { code: "ENOENT" });
+    else await assert.rejects(stat(paths.socketPath), { code: "ENOENT" });
     const probe = new DatabaseSync(paths.manifestPath);
     try {
       // Without a busy wait, a write lock still held by the failed daemon fails here at once.
@@ -1070,11 +1074,11 @@ test("the daemon entrypoint exits after a completed handoff instead of retaining
   const env = await fixture();
   const child = spawn(process.execPath, ["--import", "tsx", join(process.cwd(), "daemon/main.ts")], {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: env.root },
+    env: { ...process.env, HOME: env.root, USERPROFILE: env.root },
     stdio: "ignore",
   });
   try {
-    const socketPath = join(env.root, ".letagents", "daemon.sock");
+    const socketPath = daemonEndpoint(join(env.root, ".letagents")).connectPath;
     // The entrypoint loads through tsx, which nears 2 s while the other
     // daemon test files start in parallel.
     await eventually(async () => {
@@ -1125,7 +1129,7 @@ test("SIGTERM after authority release uses default process-only termination and 
   `;
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: env.root },
+    env: { ...process.env, HOME: env.root, USERPROFILE: env.root },
     stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
   let providerPid: number | null = null;
@@ -1143,7 +1147,7 @@ test("SIGTERM after authority release uses default process-only termination and 
     // parallel, so the bound only catches a child that never starts.
     const ready = await waitForMessage("ready", 10_000);
     providerPid = Number(ready.providerPid);
-    const socketPath = join(env.root, ".letagents", "daemon.sock");
+    const socketPath = daemonEndpoint(join(env.root, ".letagents")).connectPath;
     assert.equal((await daemonRequest(socketPath, "daemon.prepare_handoff")).ok, true);
     await waitForMessage("authority_released");
     await assert.rejects(daemonRequest(socketPath, "daemon.status"));
@@ -1165,7 +1169,7 @@ test("SIGTERM after authority release uses default process-only termination and 
 test("prepare_handoff fences a mutation admitted before an asynchronous request barrier", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   let releaseMutation!: () => void;
@@ -1205,7 +1209,7 @@ test("prepare_handoff fences a mutation admitted before an asynchronous request 
 
 test("host approval socket operations require the enrolled signer and remain fenced across handoff", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl") };
   const host = generateKeyPairSync("ed25519"); const outsider = generateKeyPairSync("ed25519");
   let enrollments = 0; let fenceRequests = false; let arrivals = 0;
@@ -1266,7 +1270,7 @@ test("host approval socket operations require the enrolled signer and remain fen
 test("credential-only reconnect rejects a missing exact provider without retaining a grant or converging", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   const calls = { spawn: 0, resume: 0, stop: 0, converge: 0 };
@@ -1313,7 +1317,7 @@ test("credential-only reconnect rejects a missing exact provider without retaini
 test("recovery-only authority install retains the grant without touching the dead provider or converging", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   const calls = { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0, delegationSync: 0 };
