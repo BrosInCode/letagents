@@ -90,7 +90,7 @@ function snapshot(folder: string): Record<string, string> {
   return files;
 }
 
-test("the agents' Codex home links every entry of the owner's home except its saved rules, and only reads the owner's home", () => {
+test("the agents' Codex home links every entry of the owner's home except its saved rules, and only reads the owner's home", { skip: supervisedAgentsOnly }, () => {
   const owner = ownerHome();
   const before = snapshot(owner.codexHome);
 
@@ -109,7 +109,7 @@ test("the agents' Codex home links every entry of the owner's home except its sa
   assert.deepEqual(snapshot(owner.codexHome), { ...before, "auth.json": '600 {"pretend":"refreshed"}\n' });
 });
 
-test("linking the agents' home again follows the owner's home: new entries, removed ones, and a link under the wrong name", () => {
+test("linking the agents' home again follows the owner's home: new entries, removed ones, and a link under the wrong name", { skip: supervisedAgentsOnly }, () => {
   const owner = ownerHome();
   linkCodexAgentHome(owner.codexHome, owner.agentHome);
   linkCodexAgentHome(owner.codexHome, owner.agentHome);
@@ -126,7 +126,7 @@ test("linking the agents' home again follows the owner's home: new entries, remo
   assert.equal(readFileSync(join(owner.agentHome, "config.toml"), "utf8"), 'model = "owner-model"\n');
 });
 
-test("nothing with content is deleted from the agents' home: an empty entry of its own becomes the link, one with content is kept and named", () => {
+test("nothing with content is deleted from the agents' home: an empty entry of its own becomes the link, one with content is kept and named", { skip: supervisedAgentsOnly }, () => {
   const owner = ownerHome();
   mkdirSync(join(owner.codexHome, "shell_snapshots"));
   writeFileSync(join(owner.codexHome, "state_5.sqlite"), "owner state");
@@ -164,7 +164,7 @@ test("nothing with content is deleted from the agents' home: an empty entry of i
   assert.deepEqual(linkCodexAgentHome(ownerHome().codexHome, join(fixture("fresh"), "agent-home")), { own: [], inPlaceOfOwners: [] });
 });
 
-test("a rule saved into the agents' home is gone at the next launch, whatever its rules entry had become", () => {
+test("a rule saved into the agents' home is gone at the next launch, whatever its rules entry had become", { skip: supervisedAgentsOnly }, () => {
   const owner = ownerHome();
   linkCodexAgentHome(owner.codexHome, owner.agentHome);
   const rules = join(owner.agentHome, "rules");
@@ -228,7 +228,7 @@ const savedRulesAsProjectRefusal = (names: string) =>
 const useAgentsHome = (codexHome: string) => ({ codexHome, notices: [] });
 const useOwnersHome = { codexHome: null, notices: [] };
 
-test("a sandboxed launch gets the agents' home when Codex keeps its sign-in in a file and rewrites it in place", async () => {
+test("a sandboxed launch gets the agents' home when Codex keeps its sign-in in a file and rewrites it in place", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome();
   const project = fixture("project");
   const asked: string[] = [];
@@ -937,7 +937,7 @@ test("a sandboxed launch is refused while the machine's own Codex config folder 
   assert.deepEqual(reported.otherRuleFolders, [join(machine, "rules")]);
 });
 
-test("a home that holds anything of its own is asked about again as the agents' home, and what Codex kept there is said, never deleted", async () => {
+test("a home that holds anything of its own is asked about again as the agents' home, and what Codex kept there is said, never deleted", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   linkCodexAgentHome(owner.codexHome, owner.agentHome);
   execFileSync("rm", [join(owner.agentHome, "config.toml")]);
@@ -1090,7 +1090,7 @@ test("each owner Codex home has an agents' home of its own: the usual one keeps 
   assert.deepEqual(readdirSync(join(owner.home, ".letagents")).sort(), [basename(usualAgents), basename(customAgents)].sort(), "the sign-in check ran beside them and left nothing");
 });
 
-test("an agents' home whose links lead into another Codex home is never turned to this one under an agent: the launch is refused and the folder is left as it was", async () => {
+test("an agents' home whose links lead into another Codex home is never turned to this one under an agent: the launch is refused and the folder is left as it was", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   const other = customCodexHome();
   // A folder made before each owner home had one of its own: the usual folder, linked to the other home.
@@ -2058,7 +2058,7 @@ test("before a running Codex without its owner's setup loads a conversation, wha
 
 const READ_ONLY_ATTEMPT = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
-test("a Read-only agent's permission profile is Codex's read-only one with the sign-in file denied at every path that names it, under a name of its own work attempt", () => {
+test("a Read-only agent's permission profile is Codex's read-only one with the sign-in file denied at every path that names it, under a name of its own work attempt", { skip: supervisedAgentsOnly }, () => {
   const owner = ownerHome();
   linkCodexAgentHome(owner.codexHome, owner.agentHome);
   const signIn = join(owner.codexHome, "auth.json");

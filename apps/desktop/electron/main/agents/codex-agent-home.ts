@@ -33,7 +33,9 @@ import { shadowProfileEnvironment, windowsSystemEnvironment } from "./windows-ch
 // Windows lets only an administrator, or Developer Mode, make a symbolic
 // link. There the agents' home links a folder with a junction and a file
 // with a hard link (a second name of the same file), which need neither; so
-// the agents' home must be on the owner's home's disk. A hard link stays the
+// the agents' home must be on the owner's home's disk, and a file that is a
+// link in the owner's home is linked as the file it leads to. Codex's SQLite
+// databases are not linked (see WINDOWS_OWN_DATABASE). A hard link stays the
 // owner's file only while both are written in place: a file the owner's side
 // replaces (an editor that saves by rename) leaves the agents' home with the
 // old one, which is kept and reported like any entry of its own. `rules` is
@@ -95,10 +97,10 @@ function resolvedPath(path: string): string {
 /** A path's name as two names are compared: without regard to case, or to how a letter is composed. */
 const foldedPath = (path: string): string => path.normalize("NFC").toLowerCase();
 
-/** Which file a path names, links not followed. Null when nothing is there, or the disk gives no file id. */
-function fileId(path: string): string | null {
+/** Which file a path names, links not followed unless asked. Null when nothing is there, or the disk gives no file id. */
+function fileId(path: string, followLinks = false): string | null {
   try {
-    const entry = lstatSync(path, { bigint: true });
+    const entry = followLinks ? statSync(path, { bigint: true }) : lstatSync(path, { bigint: true });
     return entry.ino === 0n ? null : `${entry.dev}:${entry.ino}`;
   } catch {
     return null;
@@ -114,12 +116,28 @@ function linkFile(target: string, path: string, platform: NodeJS.Platform = proc
   else symlinkSync(target, path);
 }
 
-/** Whether `path` is still the second name `linkFile` made for `target`, and not a file of its own. */
+/**
+ * Whether `path` is still the second name `linkFile` made for `target`, and
+ * not a file of its own. On Windows: the same file as the one `target` leads
+ * to, since a hard link is made to that file and never to a link.
+ */
 function isFileLink(path: string, target: string, platform: NodeJS.Platform = process.platform): boolean {
   if (platform !== "win32") return lstatSync(path).isSymbolicLink();
   const id = fileId(path);
-  return id !== null && id === fileId(target);
+  return id !== null && id === fileId(target, true);
 }
+
+/**
+ * Windows: the files of a Codex home that get no hard link, an SQLite
+ * database and the files SQLite keeps beside it. SQLite finds the journal of
+ * a database by its path, so a database opened by two names (the owner's and
+ * the agents') would have two journals, and writes could be lost. Through a
+ * POSIX link SQLite opens the file the link leads to, so the agents' home
+ * there shares the owner's database. On Windows the agents' Codex keeps a
+ * database of its own; the conversations themselves are in `sessions`, which
+ * is linked.
+ */
+const WINDOWS_OWN_DATABASE = /\.(?:sqlite3?|db)(?:-wal|-shm|-journal)?$/i;
 
 /** The variables a Codex check is run with, besides its own home: what Codex needs to be found and to run. */
 function codexCheckEnvironment(env: NodeJS.ProcessEnv): Record<string, string | undefined> {
@@ -339,11 +357,14 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
         : "It holds only links, so nothing of yours is deleted with it."),
     );
   }
-  const toLink = new Set(readdirSync(owner));
+  const ownDatabase = (name: string) => windows && WINDOWS_OWN_DATABASE.test(name);
+  const toLink = new Set(readdirSync(owner).filter((name) => !ownDatabase(name)));
   toLink.delete("rules");
   const own: string[] = [];
   const inPlaceOfOwners: string[] = [];
   for (const { name, path, entry } of before) {
+    // The agents' own database on Windows: kept as it is, and not an entry in place of the owner's.
+    if (ownDatabase(name) && !entry.isSymbolicLink()) continue;
     if (entry.isSymbolicLink()) {
       if (toLink.has(name) && sameName(target(path), join(owner, name))) toLink.delete(name);
       else unlinkSync(path);
@@ -371,7 +392,7 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
     // Junctions and hard links need no administrator. An entry that leads nowhere has nothing to link.
     const kind = statSync(join(owner, name), { throwIfNoEntry: false });
     if (kind?.isDirectory()) symlinkSync(join(owner, name), join(home, name), "junction");
-    else if (kind) linkSync(join(owner, name), join(home, name));
+    else if (kind) linkSync(realpathSync(join(owner, name)), join(home, name));
   }
   const rules = join(home, "rules");
   if (lstatSync(rules, { throwIfNoEntry: false })?.isDirectory()) protectOwnerPrivateSync(rules, "directory");

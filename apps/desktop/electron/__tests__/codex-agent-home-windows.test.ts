@@ -5,7 +5,7 @@
 // POSIX links.
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -79,4 +79,39 @@ test("Windows: a sign-in file of the agents' own stops the launch; a file the ow
   writeFileSync(join(owner, "auth.json"), "{\"tokens\":\"signed in again\"}");
   appendFileSync(join(agents, "auth.json"), " ");
   assert.throws(() => linkCodexAgentHome(owner, agents), CodexAgentHomeSignInError);
+});
+
+test("Windows: Codex's SQLite databases get no second name, and the agents' own database is neither linked nor reported", { skip: windowsOnly }, (t) => {
+  const { owner, agents, remove } = fixture();
+  t.after(remove);
+  writeFileSync(join(owner, "state_5.sqlite"), "owner database");
+  writeFileSync(join(owner, "state_5.sqlite-wal"), "owner journal");
+  writeFileSync(join(owner, "logs_1.sqlite"), "owner logs");
+  linkCodexAgentHome(owner, agents);
+  assert.deepEqual(readdirSync(agents).sort(), ["auth.json", "config.toml", "rules", "sessions"], "no database is linked");
+  // The agents' Codex makes its own; the next launch keeps it and says nothing about it.
+  writeFileSync(join(agents, "state_5.sqlite"), "agents' database");
+  writeFileSync(join(agents, "state_5.sqlite-shm"), "agents' shared memory");
+  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
+  assert.equal(readFileSync(join(agents, "state_5.sqlite"), "utf8"), "agents' database");
+  assert.equal(readFileSync(join(owner, "state_5.sqlite"), "utf8"), "owner database");
+});
+
+test("Windows: a file that is a link in the owner's home is linked as the file it leads to", { skip: windowsOnly }, (t) => {
+  const { owner, agents, remove } = fixture();
+  t.after(remove);
+  const dotfile = join(owner, "..", "dotfiles-config.toml");
+  writeFileSync(dotfile, "model = \"from dotfiles\"\n");
+  rmSync(join(owner, "config.toml"));
+  try {
+    symlinkSync(dotfile, join(owner, "config.toml"), "file");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("this account may not make a symbolic link"); return; }
+    throw error;
+  }
+  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
+  assert.ok(!lstatSync(join(agents, "config.toml")).isSymbolicLink());
+  assert.ok(sameFile(join(agents, "config.toml"), dotfile), "the agents' name is the file the owner's link leads to");
+  // Linking again keeps it: it is still the owner's file, not one of the agents' own.
+  assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
 });

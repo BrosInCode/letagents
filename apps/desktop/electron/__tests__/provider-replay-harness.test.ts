@@ -729,7 +729,7 @@ test("the leak check leaves the transcript header's own words alone", () => {
   assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame: { params: { token: "opaque-value" } } })), ["credential-key"]);
 });
 
-test("the committed recordings hold no known leak shape and do not change under redaction", { skip: supervisedAgentsOnly }, () => {
+test("the committed recordings hold no known leak shape and do not change under redaction", () => {
   // A machine-independent guard. It cannot know this machine's names; a person's read of a new recording does.
   const context: ReplayRedactionContext = {
     workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: "", username: "",
