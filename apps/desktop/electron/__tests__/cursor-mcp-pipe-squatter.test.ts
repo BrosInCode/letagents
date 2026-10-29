@@ -246,12 +246,20 @@ test("the wrapper's seal limits the pipe to this user, for the instances libuv a
   const opened: number[] = [];
   try {
     await sealConnectorPipe!(state.pipe);
-    // libuv starts a new instance for each accepted one: hold more than it created at listen.
+    // libuv starts a new instance for each accepted one, on its next loop
+    // turn: hold more than it created at listen, waiting while all are busy.
     const addon = loadDaemonPipeAddon();
-    for (let index = 0; index < 6; index += 1) {
-      const pipe = addon.open(state.pipe);
-      assert.equal(pipe.serverPid, process.pid);
+    while (opened.length < 6) {
+      let pipe: { fd: number; serverPid: number };
+      try {
+        pipe = addon.open(state.pipe);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        continue;
+      }
       opened.push(pipe.fd);
+      assert.equal(pipe.serverPid, process.pid);
     }
     // Cursor's connector (this user) still reaches it.
     const { result } = runConnector(state);
@@ -327,7 +335,8 @@ test("a squatter that holds the pipe name first fails the turn closed: Cursor ne
     assert.notDeepEqual(exit, { type: "exit", code: 0, signal: null }, child.stderrTail());
     const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8")) as Record<string, unknown>;
     assert.equal(terminal.type, "not_started", JSON.stringify(terminal));
-    assert.match(String(terminal.error), /EADDRINUSE|address already in use/i);
+    // EADDRINUSE, or EBUSY when the squatter allows only its one instance.
+    assert.match(String(terminal.error), /listen (EADDRINUSE|EBUSY)/);
     assert.equal(existsSync(startedPath), false, "Cursor never started");
     assert.equal(existsSync(squatScene.report), false, "nothing connected to the squatter");
   } finally {
