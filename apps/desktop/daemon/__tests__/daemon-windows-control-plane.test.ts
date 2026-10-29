@@ -180,3 +180,60 @@ test("Windows: the singleton excludes another process until that process exits",
     await env.cleanup();
   }
 });
+
+test("across processes: a daemon starts, a second start is refused, a client connects, and a handoff completes", {
+  // Linux CI models the lock in-process only, so cross-process exclusion is real on macOS and Windows.
+  skip: process.platform !== "darwin" && process.platform !== "win32" ? "the host lock is simulated on this platform" : false,
+}, async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    ...testDaemonEndpoint(env.root),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const mainUrl = pathToFileURL(join(process.cwd(), "daemon/main.ts")).href;
+  const script = `
+    const { SupervisorDaemon } = await import(${JSON.stringify(mainUrl)});
+    const daemon = new SupervisorDaemon(${JSON.stringify(paths)}, "darwin");
+    // This fixture has no Electron signing custodian.
+    await daemon.start({ getHostApprovalPublicKey: async () => null });
+    process.send({ type: "ready" });
+    await daemon.waitForHandoff();
+    process.send({ type: "handed_off" });
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: process.cwd(), stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  let stderr = "";
+  child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+  const message = (type: string, timeoutMs: number) => within(new Promise<void>((resolve, reject) => {
+    const listener = (value: unknown) => { if ((value as { type?: string })?.type === type) { child.off("message", listener); resolve(); } };
+    child.on("message", listener);
+    void exited.then((code) => reject(new Error(`daemon process exited ${code} before ${type}: ${stderr}`)));
+  }), `daemon process ${type}`, timeoutMs);
+  let successor: InstanceType<typeof import("../main.js").SupervisorDaemon> | null = null;
+  try {
+    await message("ready", 30_000);
+    const { SupervisorDaemon } = await import("../main.js");
+    successor = new SupervisorDaemon(paths, "darwin");
+    await assert.rejects(() => successor!.start({ getHostApprovalPublicKey: async () => null }), DaemonAlreadyRunningError,
+      "a second daemon is refused while the first process holds the lock");
+    const status = await daemonRequest(paths.socketPath, "daemon.status");
+    assert.equal(status.ok, true);
+    assert.equal((status.result as { generation: number }).generation, 1);
+    const handedOff = message("handed_off", 15_000);
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    await handedOff;
+    assert.equal(await within(exited, "first daemon exit", 15_000), 0);
+    successor = new SupervisorDaemon(paths, "darwin");
+    await within(successor.start({ getHostApprovalPublicKey: async () => null }), "successor start after handoff", 15_000);
+    assert.equal(((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation, 2);
+  } finally {
+    await successor?.stop().catch(() => undefined);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await env.cleanup();
+  }
+});
