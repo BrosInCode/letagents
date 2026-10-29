@@ -17,9 +17,10 @@ const runNpm = (args, options) => {
   return execFileSync(spawn.command, spawn.args, { ...spawn.options, ...options });
 };
 
-// npm pack and install are slow on a Windows runner (whole test on
-// windows-latest: 96 s and 133 s passes, 150 s past the old limit), so Windows
-// gets more room; macOS and Linux keep the limit that catches a hang early.
+// npm install of the packed tarball is slow on a Windows runner (63-87 s of
+// the test on windows-latest; whole test 96 s and 133 s passes, 120.4 s and
+// 150 s past the old 120 s limit), so Windows gets more room; macOS and Linux
+// keep the limit that catches a hang early.
 const timeout = process.platform === "win32" ? 300_000 : 120_000;
 
 test("the packed MCP CLI reports its contract and active supervised readiness", { timeout }, async (t) => {
@@ -36,6 +37,8 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
     if (process.env.LETAGENTS_PACKAGE_TEST_DIST_BUILT !== "1") {
       runNpm(["run", "build"], { cwd: repoRoot, stdio: "pipe" });
       phaseDone("npm run build");
+    } else {
+      t.diagnostic("npm run build: skipped (LETAGENTS_PACKAGE_TEST_DIST_BUILT=1, dist/ is packed as it is)");
     }
 
     const packOutput = runNpm(
