@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { constants as fsConstants, type BigIntStats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
 import { DEFAULT_LIMITS, type GenerationManifest, MANIFEST_NAME, SupervisedWorkspaceGenerationError, type SupervisedWorkspaceGenerationFailpoint, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type TreeEntry } from "./types.js";
 
 export function fileVersionKey(info: BigIntStats): string {
@@ -123,6 +124,8 @@ export function splitNulBuffer(buffer: Buffer): Buffer[] {
 }
 
 export async function fsyncDirectory(directory: string): Promise<void> {
+  // Windows cannot fsync a folder handle; NTFS journals the rename itself.
+  if (ownerPrivatePlatform() === "win32") return;
   const descriptor = await open(directory, fsConstants.O_RDONLY);
   try { await descriptor.sync(); } finally { await descriptor.close(); }
 }

@@ -18,6 +18,7 @@ import { ApprovalJournalError } from "../execution-approval-journal.js";
 import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../../shared/execution-delegation-decision.mjs";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { assertHostToolScope, hostToolScopeSchema } from "../host-tool-rules.js";
+import { asWindows, fakeWindowsSecurity } from "../../electron/__tests__/helpers/fake-windows-security.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
@@ -1487,6 +1488,28 @@ test("room workspace rules require the same durable attempt, room, account, poli
     f.db.prepare("UPDATE work_attempts SET workspace_remote_url='letagents-ephemeral:forged' WHERE work_attempt_id=?").run(scope.workAttemptId);
     assert.throws(() => assertHostToolScope(f.db, scope, entry));
   } finally { await f.close(); }
+});
+
+test("Windows: room workspace rules require the private DACL on the workspace and its marker", async () => {
+  const fake = fakeWindowsSecurity();
+  await asWindows(fake, async () => {
+    const f = await fixture("claude-code", { hostActorId: () => "host-owner" }, true);
+    try {
+      const [candidate] = await f.broker.list("room");
+      const scope = candidate!.presentation.alwaysAllow!;
+      assert.ok("kind" in scope);
+      const entry = (await f.store.getEntry("agent"))!;
+      // The provisioner gave both the private DACL; mode bits play no part.
+      assertHostToolScope(f.db, scope, entry);
+      const markerPath = join(f.workspace, ".letagents-work-attempt.json");
+      fake.tamper(markerPath);
+      assert.throws(() => assertHostToolScope(f.db, scope, entry));
+      await fake.security.protect(markerPath, "file");
+      assertHostToolScope(f.db, scope, entry);
+      fake.tamper(f.workspace);
+      assert.throws(() => assertHostToolScope(f.db, scope, entry));
+    } finally { await f.close(); }
+  });
 });
 
 test("existing project permission serialization and digest remain unchanged", async () => {

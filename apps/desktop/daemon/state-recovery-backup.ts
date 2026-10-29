@@ -1,8 +1,10 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, rename, unlink } from "node:fs/promises";
+import { lstat, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
+import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const RECEIPT_KEY = "encrypted-state-recovery-backup";
@@ -43,17 +45,16 @@ function quote(name: string): string { return `"${name.replaceAll('"', '""')}"`;
 function backupPath(databasePath: string): string { return `${resolve(databasePath)}.recovery.enc`; }
 
 async function privateDirectory(path: string): Promise<void> {
-  const info = await lstat(dirname(path));
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0
-    || (process.getuid && info.uid !== process.getuid())) throw failure();
+  const directory = dirname(path);
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink() || !await isOwnerPrivate(directory, info)) throw failure();
 }
 
 async function regularFile(path: string, privateOnly = false): Promise<boolean> {
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
-      || (process.getuid && info.uid !== process.getuid())
-      || (privateOnly && (info.mode & 0o077) !== 0)) throw failure();
+      || !await (privateOnly ? isOwnerPrivate(path, info) : isOwnedByCurrentUser(path, info))) throw failure();
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
@@ -62,6 +63,8 @@ async function regularFile(path: string, privateOnly = false): Promise<boolean> 
 }
 
 async function syncDirectory(path: string): Promise<void> {
+  // Windows cannot fsync a folder handle; NTFS journals the rename itself.
+  if (ownerPrivatePlatform() === "win32") return;
   const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { await directory.sync(); } finally { await directory.close(); }
 }
@@ -157,7 +160,7 @@ function parseEnvelope(bytes: Buffer): { header: Header; aad: Buffer; ciphertext
 async function readEnvelope(path: string): Promise<{ bytes: Buffer; header: Header }> {
   await privateDirectory(path);
   if (!await regularFile(path, true)) throw failure();
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await openNoFollow(path, constants.O_RDONLY);
   try {
     const bytes = await file.readFile();
     return { bytes, header: parseEnvelope(bytes).header };
@@ -291,8 +294,12 @@ export async function prepareStateRecoveryBackup(
     if (aad.length > HEADER_LIMIT) throw failure();
     const cipher = createCipheriv("aes-256-gcm", key, Buffer.from(header.nonce, "base64"));
     cipher.setAAD(aad);
-    const file = await open(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    const file = await openNoFollow(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
     ownedCandidate = true;
+    // Windows has no mode bits: the empty file gets its private DACL before any ciphertext.
+    if (ownerPrivatePlatform() === "win32") {
+      try { await protectOwnerPrivate(candidate, "file"); } catch (error) { await file.close(); throw error; }
+    }
     const hash = createHash("sha256");
     const write = async (bytes: Buffer): Promise<void> => {
       hash.update(bytes);
@@ -314,7 +321,7 @@ export async function prepareStateRecoveryBackup(
     verified.close();
     failureCode = "snapshot_refused";
     await regularFile(path, true);
-    await rename(candidate, path);
+    await renameWithRetryAsync(candidate, path);
     ownedCandidate = false;
     await syncDirectory(path);
     const result = Object.freeze({ ...header, path, sha256: hash.digest("hex") });

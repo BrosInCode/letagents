@@ -46,10 +46,28 @@ export function configureDesktopSmokeEnvironment(): void {
   electronApp().setPath("userData", smokeUserDataPath);
   process.env.LETAGENTS_STATE_PATH ||= join(smokeUserDataPath, "letagents-state.json");
   process.once("exit", () => {
-    if (smokeUserDataPath) {
-      rmSync(smokeUserDataPath, { recursive: true, force: true });
-    }
+    if (smokeUserDataPath) removeDesktopSmokeUserData(smokeUserDataPath);
   });
+}
+
+/**
+ * Best effort. On Windows, Chromium's helper processes may still hold files
+ * in the smoke userData folder while the app exits, and rmSync fails with
+ * EPERM or EBUSY. rmSync retries those a bounded number of times; a failure
+ * after that is logged and left, because an exception thrown here would keep
+ * the process open behind Electron's main-process error dialog instead of
+ * exiting with the smoke result.
+ */
+export function removeDesktopSmokeUserData(
+  path: string,
+  remove: typeof rmSync = rmSync,
+  log: (message: string) => void = (message) => console.warn(message),
+): void {
+  try {
+    remove(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    log(`LETAGENTS_DESKTOP_SMOKE cleanup left ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export function seedDesktopSmokeState(): void {
