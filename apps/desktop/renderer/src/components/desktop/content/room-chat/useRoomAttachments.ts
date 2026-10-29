@@ -69,9 +69,15 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     if (!roomIdentifier || !pendingDrafts.length) return;
     pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
     try {
-      const staged = await stage(roomIdentifier);
-      // A room switch cleared the drafts; the server expires uploads nobody sends.
+      const staged = (await stage(roomIdentifier)).map((attachment, index) => ({
+        ...attachment,
+        // A picked image keeps the preview it showed while uploading; a blob: preview ends with its chip.
+        previewDataUrl: attachment.previewDataUrl
+          ?? (pendingDrafts[index]?.previewDataUrl?.startsWith("data:") ? pendingDrafts[index]!.previewDataUrl : null),
+      }));
       if (options.roomIdentifier.value === roomIdentifier) attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+      // The room changed while these uploaded: nobody can send them, so let them go.
+      else for (const attachment of staged) void desktopIpc.room.discardAttachment(roomIdentifier, attachment.uploadId).catch(() => undefined);
     } catch (error) {
       if (options.roomIdentifier.value === roomIdentifier) attachmentProblem.value = attachmentProblemFromError(error, failedFileName);
     } finally {
@@ -86,9 +92,14 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     attaching.value = true;
     attachmentProblem.value = null;
     lastAttempt = { kind: "pick" };
+    if (availableSlots() <= 0) {
+      attaching.value = false;
+      attachmentProblem.value = { kind: "too-many", max: maxAttachments };
+      return;
+    }
     let chosen: DesktopChosenAttachment[];
     try {
-      chosen = await desktopIpc.room.chooseAttachments();
+      chosen = await desktopIpc.room.chooseAttachments(availableSlots());
     } catch (error) {
       attachmentProblem.value = attachmentProblemFromError(error);
       return;

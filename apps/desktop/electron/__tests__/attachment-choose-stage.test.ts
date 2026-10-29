@@ -48,6 +48,11 @@ test("choosing files reads them without uploading; staging uploads them all at o
 
   const staged = await stageChosenDesktopAttachments("room_1", chosen.map((file) => file.token));
   assert.deepEqual(staged.map((file) => file.uploadId), ["up-a.png", "up-b.txt"], "results keep the chosen order");
+  assert.deepEqual(staged.map((file) => file.previewDataUrl), [null, null], "previews cross IPC once, at choose time");
   assert.equal(mostAtOnce, 2, "both uploads start together");
   await assert.rejects(stageChosenDesktopAttachments("room_1", [chosen[0]!.token]), /Choose them again/);
+
+  // Only as many files as the composer has room for are read.
+  assert.deepEqual((await chooseDesktopAttachmentFiles(1)).map((file) => file.fileName), ["a.png"]);
+  assert.deepEqual(await chooseDesktopAttachmentFiles(0), []);
 });

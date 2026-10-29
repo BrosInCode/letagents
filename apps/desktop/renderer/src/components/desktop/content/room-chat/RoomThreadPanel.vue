@@ -97,6 +97,7 @@
         v-model="draft"
         rows="1"
         :disabled="!roomIdentifier"
+        :readonly="sendAfterUpload !== null"
         :placeholder="composerPlaceholder"
         :aria-label="composerPlaceholder"
         role="combobox"

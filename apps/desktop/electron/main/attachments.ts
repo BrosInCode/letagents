@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
-import { assertMessageAttachmentFits } from "../../../../shared/message-attachments.mjs";
+import { assertMessageAttachmentFits, MESSAGE_ATTACHMENT_LIMITS } from "../../../../shared/message-attachments.mjs";
 import type {
   DesktopChosenAttachment,
   DesktopDroppedAttachmentContent,
@@ -59,7 +59,8 @@ const chosenAttachments = new Map<string, AttachmentFile>();
 // A choice the composer never stages (room switched, window closed) is dropped.
 const CHOSEN_ATTACHMENT_TTL_MS = 10 * 60_000;
 
-export async function chooseDesktopAttachmentFiles(): Promise<DesktopChosenAttachment[]> {
+/** `limit` is how many files the composer still has room for; files past it are never read. */
+export async function chooseDesktopAttachmentFiles(limit: number = MESSAGE_ATTACHMENT_LIMITS.maxFiles): Promise<DesktopChosenAttachment[]> {
   focusMainWindow();
   const parent = getMainWindow();
   const options: Electron.OpenDialogOptions = {
@@ -72,13 +73,15 @@ export async function chooseDesktopAttachmentFiles(): Promise<DesktopChosenAttac
   const result = await (parent && !parent.isDestroyed()
     ? dialog.showOpenDialog(parent, options)
     : dialog.showOpenDialog(options));
-  if (result.canceled || result.filePaths.length === 0) return [];
+  const cap = Math.max(0, Math.min(Math.floor(Number(limit) || 0), MESSAGE_ATTACHMENT_LIMITS.maxFiles));
+  const filePaths = result.canceled ? [] : result.filePaths.slice(0, cap);
+  if (filePaths.length === 0) return [];
 
   // Refuse an oversized pick before any file is read.
-  for (const filePath of result.filePaths) {
+  for (const filePath of filePaths) {
     assertMessageAttachmentFits(basename(filePath), (await stat(filePath)).size);
   }
-  const files = await Promise.all(result.filePaths.map(async (filePath) =>
+  const files = await Promise.all(filePaths.map(async (filePath) =>
     attachmentFile({ fileName: basename(filePath), bytes: await readFile(filePath) })));
   return files.map((file) => {
     const token = randomUUID();
@@ -98,7 +101,9 @@ export async function stageChosenDesktopAttachments(
   for (const token of tokens) chosenAttachments.delete(token);
   if (files.some((file) => !file)) throw new Error("The chosen files are no longer available. Choose them again.");
   const store = await resolveAttachmentStore(roomIdentifier);
-  return stageAll(store, (files as AttachmentFile[]).map((file) => async () => file));
+  const staged = await stageAll(store, (files as AttachmentFile[]).map((file) => async () => file));
+  // The composer already has each image's preview from the choose step.
+  return staged.map((attachment) => ({ ...attachment, previewDataUrl: null }));
 }
 
 export async function stageDroppedDesktopAttachmentContents(

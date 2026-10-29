@@ -284,7 +284,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:room:choose-attachments",
-    async (): Promise<DesktopChosenAttachment[]> => chooseDesktopAttachmentFiles(),
+    async (_event, limit: unknown): Promise<DesktopChosenAttachment[]> =>
+      chooseDesktopAttachmentFiles(typeof limit === "number" ? limit : undefined),
   );
   targetIpcMain.handle(
     "desktop:room:stage-chosen-attachments",

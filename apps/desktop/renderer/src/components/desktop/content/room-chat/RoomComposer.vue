@@ -165,6 +165,7 @@
           aria-controls="desktop-mention-listbox"
           :aria-activedescendant="suggestionsOpen ? `desktop-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
           :disabled="roomLoading || !roomIdentifier"
+          :readonly="sendAfterUpload !== null"
           data-testid="desktop-composer-input"
           @input="handleDraftInput"
           @keydown="handleComposerKey"

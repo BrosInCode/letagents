@@ -19,7 +19,7 @@ import {
 
 /** What Electron hands the renderer when a main-process handler throws. */
 const ipcError = (message: string) =>
-  new Error(`Error invoking remote method 'desktop:room:pick-attachments': Error: ${message}`);
+  new Error(`Error invoking remote method 'desktop:room:choose-attachments': Error: ${message}`);
 
 test("known attach failures map to plain words, and no raw IPC text survives", () => {
   assert.deepEqual(attachmentProblemFromError(ipcError("design-review.mov is larger than 25 MB.")),
@@ -204,7 +204,8 @@ test("a chosen or dropped file shows as a chip before its upload finishes", asyn
 
     finishChosen(undefined);
     await picking;
-    assert.deepEqual(attachments.attachmentDrafts.value.map((draft: { uploadId: string }) => draft.uploadId), ["up-t1"]);
+    assert.deepEqual(attachments.attachmentDrafts.value.map((draft: { uploadId: string; previewDataUrl: string | null }) => [draft.uploadId, draft.previewDataUrl]),
+      [["up-t1", "data:image/png;base64,AAA"]], "the picked image keeps its preview after upload");
     assert.deepEqual(attachments.pendingAttachmentDrafts.value.map((draft: { fileName: string }) => draft.fileName), ["notes.txt"]);
     await settle();
     finishDropped(undefined);
