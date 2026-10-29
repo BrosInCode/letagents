@@ -1312,14 +1312,21 @@ windowsTest("the agent's .gitignore cannot hide a junction that replaces a track
       writeFileSync(join(repo, "src", "lib", "a.txt"), "tracked\n");
       git(repo, ["add", "."]);
       git(repo, ["commit", "-qm", "tracked folder"]);
+      const refused = (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "UNSUPPORTED_GIT_TREE_ENTRY";
       const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "hidden-junction" });
       writeFileSync(join(handle.liveWorkspace, ".gitignore"), "src/\nnode_modules/\n");
       rmSync(join(handle.liveWorkspace, "src", "lib"), { recursive: true });
       symlinkSync(outside, join(handle.liveWorkspace, "src", "lib"), "junction");
-      await assert.rejects(
-        handle.retireAndReconcile(),
-        (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "UNSUPPORTED_GIT_TREE_ENTRY",
-      );
+      await assert.rejects(handle.retireAndReconcile(), refused);
+
+      // A case-only rename names the same tracked folder on NTFS.
+      const renamed = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "hidden-junction-case" });
+      renameSync(join(renamed.liveWorkspace, "src"), join(renamed.liveWorkspace, "src-case"));
+      renameSync(join(renamed.liveWorkspace, "src-case"), join(renamed.liveWorkspace, "SRC"));
+      writeFileSync(join(renamed.liveWorkspace, ".gitignore"), "SRC/\nnode_modules/\n");
+      rmSync(join(renamed.liveWorkspace, "SRC", "lib"), { recursive: true });
+      symlinkSync(outside, join(renamed.liveWorkspace, "SRC", "lib"), "junction");
+      await assert.rejects(renamed.retireAndReconcile(), refused);
       assert.equal(readFileSync(join(repo, "src", "lib", "a.txt"), "utf8"), "tracked\n");
       assert.equal(readFileSync(join(outside, "a.txt"), "utf8"), "outside\n");
     });
@@ -1403,6 +1410,13 @@ windowsTest("partial clones are refused before anything is made", async () => {
     git(dirname(repo), ["clone", "-q", "--filter=blob:none", pathToFileURL(repo).href, partial]);
     const refused = (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "PARTIAL_CLONE_UNSUPPORTED";
     await assert.rejects(assertSupervisedWorkspaceGenerationSupported(await realpathForTest(partial)), refused);
+
+    // A bare promisor key (true to Git), as a hand edit can leave it.
+    const config = join(repo, ".git", "config");
+    const original = readFileSync(config, "utf8");
+    writeFileSync(config, `${original}[remote "hand"]\n\tpromisor\n`);
+    await assert.rejects(assertSupervisedWorkspaceGenerationSupported(repo), refused);
+    writeFileSync(config, original);
 
     // The older marker alone, as Git before 2.32 or a hand edit leaves it.
     git(repo, ["config", "core.repositoryformatversion", "1"]);

@@ -151,7 +151,9 @@ export async function assertWindowsRetiredTree(manifest: GenerationManifest, ret
     .filter((entry) => entry.purpose === "dependency" && entry.generationPath !== null)
     .map((entry) => safeRelative(manifest.liveSourceRoot, entry.generationPath!)));
   const authorityRoot = join(manifest.generationRoot, AUTHORITY_NAME);
-  const trackedFiles = new Set(await treePaths(authorityRoot, manifest.baselineTreeOid!, manifest.limits));
+  // Folded: NTFS ignores case, so "SRC" reaches the tracked "src".
+  const fold = (path: string) => path.normalize("NFC").toLowerCase();
+  const trackedFiles = new Set((await treePaths(authorityRoot, manifest.baselineTreeOid!, manifest.limits)).map(fold));
   const trackedFolders = new Set([...trackedFiles].flatMap(ancestorPaths));
   let level = [""];
   let visited = 0;
@@ -178,11 +180,11 @@ export async function assertWindowsRetiredTree(manifest: GenerationManifest, ret
       ...folders.map((folder) => `${gitRelativePath(folder)}/`),
     ], manifest.limits);
     const exported = links.find((link) => !ignored.has(gitRelativePath(link))
-      || trackedFiles.has(link) || trackedFolders.has(link));
+      || trackedFiles.has(fold(link)) || trackedFolders.has(fold(link)));
     if (exported !== undefined) {
       throw generationError(`Symlink, junction, or unsupported tree entry denied at ${JSON.stringify(exported)}.`, "UNSUPPORTED_GIT_TREE_ENTRY");
     }
-    level = folders.filter((folder) => !ignored.has(`${gitRelativePath(folder)}/`) || trackedFolders.has(folder));
+    level = folders.filter((folder) => !ignored.has(`${gitRelativePath(folder)}/`) || trackedFolders.has(fold(folder)));
   }
 }
 

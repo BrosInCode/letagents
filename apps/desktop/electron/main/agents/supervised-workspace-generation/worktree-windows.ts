@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, readFile, statfs, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { isOwnerPrivate, openNoFollow, privateEntryCreated, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
 import { BASELINE_FILES_NAME, type GenerationManifest, PROVIDER_GIT_NAME, type RegularFileInfo, STAGING_NAME, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport } from "./types.js";
@@ -77,7 +77,8 @@ export async function assertWindowsFullClone(support: SupervisedWorkspaceGenerat
     });
   const partial = configured.split("\n").filter(Boolean).some((line) => {
     const [key, ...value] = line.split(" ");
-    return !key!.endsWith(".promisor") || /^(?:true|yes|on|1)$/i.test(value.join(" "));
+    // A bare `promisor` (no value) is true to Git.
+    return !key!.endsWith(".promisor") || !/^(?:false|no|off|0)$/i.test(value.join(" "));
   });
   if (partial) {
     throw generationError("Partial clones (a promisor remote) are not supported by Windows workspace generations.", "PARTIAL_CLONE_UNSUPPORTED");
@@ -201,7 +202,13 @@ export async function releaseReadOnlyInstalls(manifest: GenerationManifest): Pro
       const mode = intent && sameTarget(intent) ? intent.mode : Number(targetInfo.mode) & 0o7777;
       if ((mode & 0o222) !== 0) continue;
       if (!intent) {
-        await writeFile(intentPath, JSON.stringify({ dev: String(targetInfo.dev), ino: String(targetInfo.ino), mode }), { flag: "w" });
+        const record = await open(intentPath, "w");
+        try {
+          await record.writeFile(JSON.stringify({ dev: String(targetInfo.dev), ino: String(targetInfo.ino), mode }));
+          await record.sync();
+        } finally {
+          await record.close();
+        }
       }
       await chmod(artifact, mode | 0o222);
       await unlink(artifact);
