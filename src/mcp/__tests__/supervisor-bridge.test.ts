@@ -24,7 +24,7 @@ import {
   resolveCurrentSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
 } from "../server/runtime/supervisor-bridge.js";
-import { listenTestDaemon, testDaemonSocketPath } from "./support/platform.js";
+import { absentDaemonSocketPath, listenTestDaemon, testDaemonSocketPath } from "./support/platform.js";
 
 const session: StoredAgentSessionState = {
   session_id: "agent_session_exact",
@@ -471,7 +471,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
       const startedAt = Date.now();
       await assert.rejects(() => operation({ toolName: "send_thread_message", input: { text: "once" },
         mcpRequestId: "request_budget", mutation: true }, {
-        ...supervisedEnv(join(root, "absent.sock")), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        ...supervisedEnv(absentDaemonSocketPath(root)), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
       }, { requestTimeoutMs: 150 }), /ENOENT|Timed out communicating/);
       assert.ok(Date.now() - startedAt >= 125, "does not fail on the first missing socket");
       assert.ok(Date.now() - startedAt < 1_000, "does not wait indefinitely");

@@ -19,7 +19,7 @@ test("manual release builds never publish, even when dispatched on a release tag
   const workflow = parse(await source(join(repositoryRoot, ".github/workflows/desktop-release.yml")));
   assert.equal(workflow.jobs.publish.if, "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')");
   assert.deepEqual(workflow.jobs.publish.needs, ["build-macos", "build-windows"]);
-  assert.deepEqual(workflow.jobs["build-windows"].needs, ["build-macos", "build-process-tree-windows"]);
+  assert.deepEqual(workflow.jobs["build-windows"].needs, ["build-macos", "build-native-windows"]);
   for (const job of ["build-macos", "build-windows"]) {
     assert.equal(workflow.jobs[job].permissions.contents, "read");
     assert.doesNotMatch(workflow.jobs[job].steps.map(step => step.run ?? "").join("\n"), /aws s3|gh release|npm publish/);
@@ -43,15 +43,21 @@ test("the Windows release job installs, smoke-checks and uploads the installer w
   assert.match(job.steps[packageStep].run, /npm --prefix apps\/desktop run package:win/);
   assert.equal(job.steps[uploadStep].with.name, "desktop-release-win32-x64");
   assert.doesNotMatch(JSON.stringify(job), /secrets\./, "Windows builds are unsigned and need no secrets");
-  // The sealed helper comes from a windows-latest job (the toolchain its seal
-  // names), built with --strict, and the packager checks it against the seal.
-  const helperJob = workflow.jobs["build-process-tree-windows"];
-  assert.equal(helperJob["runs-on"], "windows-latest");
-  assert.equal(helperJob.permissions.contents, "read");
-  assert.ok(helperJob.steps.some(step => step.run === "node apps/desktop/native/win-process-tree/build.mjs --arch x64 --check --strict"));
-  const download = steps.indexOf("Download the sealed process-tree helper");
-  assert.ok(download >= 0 && download < packageStep, "the sealed helper is downloaded before packaging");
+  // The sealed helper and daemon pipe addon come from a windows-latest job
+  // (the toolchain their seals name) that installs no package, built with
+  // --strict, and the packager checks each against its seal.
+  const nativeJob = workflow.jobs["build-native-windows"];
+  assert.equal(nativeJob["runs-on"], "windows-latest");
+  assert.deepEqual(nativeJob.permissions, { contents: "read" });
+  assert.doesNotMatch(nativeJob.steps.map(step => step.run ?? "").join("\n"), /\bnpm\b|\bnpx\b/);
+  assert.ok(nativeJob.steps.some(step => step.run === "node apps/desktop/native/win-process-tree/build.mjs --arch x64 --check --strict"));
+  assert.ok(nativeJob.steps.some(step => step.run === "node apps/desktop/native/win-daemon-pipe/build.mjs --arch x64 --check --strict"));
+  for (const name of ["Download the sealed process-tree helper", "Download the sealed daemon pipe addon"]) {
+    const download = steps.indexOf(name);
+    assert.ok(download >= 0 && download < packageStep, `${name} before packaging`);
+  }
   assert.match(job.steps[packageStep].run, /LETAGENTS_PROCESS_TREE_HELPER_BUILD="\$\{RUNNER_TEMP\}\/process-tree\/letagents-process-tree\.exe"/);
+  assert.match(job.steps[packageStep].run, /LETAGENTS_DAEMON_PIPE_ADDON_BUILD="\$\{RUNNER_TEMP\}\/daemon-pipe\/letagents-daemon-pipe\.node"/);
   const openCode = job.steps.find(step => step.name === "Install the locked OpenCode runtime").run;
   assert.match(openCode, /LETAGENTS_OPENCODE_BIN=\$\{RUNNER_TEMP\}\/opencode\/node_modules\/opencode-ai\/bin\/opencode\.exe/);
 });
