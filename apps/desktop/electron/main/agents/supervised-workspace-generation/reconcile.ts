@@ -151,10 +151,8 @@ export async function assertWindowsRetiredTree(manifest: GenerationManifest, ret
     .filter((entry) => entry.purpose === "dependency" && entry.generationPath !== null)
     .map((entry) => safeRelative(manifest.liveSourceRoot, entry.generationPath!)));
   const authorityRoot = join(manifest.generationRoot, AUTHORITY_NAME);
-  // Folded: NTFS ignores case, so "SRC" reaches the tracked "src". NTFS
-  // compares upper-cased names ("ı" and "ſ" upper-case to "I" and "S"), so
-  // fold through upper case; an extra match (ß, ss) only refuses more.
-  const fold = (path: string) => path.normalize("NFC").toUpperCase().toLowerCase();
+  // Folded: NTFS ignores case, so "SRC" reaches the tracked "src".
+  const fold = (path: string) => path.normalize("NFC").toLowerCase();
   const trackedFiles = new Set((await treePaths(authorityRoot, manifest.baselineTreeOid!, manifest.limits)).map(fold));
   const trackedFolders = new Set([...trackedFiles].flatMap(ancestorPaths));
   let level = [""];
