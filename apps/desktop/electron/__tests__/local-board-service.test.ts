@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { supervisedAgentTest as test, supervisedAgentsOnly } from "./platform.js";
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
@@ -30,8 +30,10 @@ const makeSocket = () => new DaemonControlSocket(socketPath, async (request: { m
 });
 let socket = makeSocket();
 await owned(() => store.getLocalTaskDatabase());
-await socket.start();
-test.after(async () => { await socket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+// The board socket is a Unix socket served by the supervisor daemon; Windows named
+// pipes are tier 3, so on Windows it is not started and every test here skips.
+if (!supervisedAgentsOnly) await socket.start();
+test.after(async () => { if (!supervisedAgentsOnly) await socket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const mutate = (operation: string, args: unknown[], extra: Record<string, unknown> = {}) => requestLocalBoard(
   "mutate", { domain: "desktop", operation, args, databasePath: env.localChatDbPath, ...extra });

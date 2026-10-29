@@ -5,6 +5,7 @@ import test from "node:test";
 import type { DesktopAgentProvider } from "../ipc-types.js";
 import { missingExternalRuntimePreflight } from "../main/agents/external-runtime-preflight.js";
 import { cachedProbe, clearProbeCache, probeKey } from "../main/agents/provider-probe-cache.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 // Each case below writes its own fake CLI; no case may inherit a probe answer
 // that an earlier case memoised.
@@ -43,7 +44,7 @@ test("missing external runtime preflight fails closed when the registry has no i
   assert.match(result.detail || "", /missing both an install command and an installation guide/i);
 });
 
-test("Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", async (t) => {
+test("Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", { skip: supervisedAgentsOnly }, async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   let environmentCurrent = true;
   const compare = t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => environmentCurrent);
@@ -81,7 +82,7 @@ test("Codex supplies its own connection and setup refresh explicitly reconciles 
   assert.equal(refresh.mock.callCount(), 1, "explicit refresh compares the daemon even when Electron PATH is unchanged");
 });
 
-test("Codex preflight reuses its CLI probes inside the window; Check again and a setup action re-run them", async (t) => {
+test("Codex preflight reuses its CLI probes inside the window; Check again and a setup action re-run them", { skip: supervisedAgentsOnly }, async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   let duringEnvironmentRefresh: (() => Promise<unknown>) | null = null;
