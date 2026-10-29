@@ -248,6 +248,34 @@ test("a client refuses an exposed proof before it connects", { skip: process.pla
   } finally { await env.cleanup(); }
 });
 
+test("a proof that becomes exposed is refused at once, despite the cache", { skip: process.platform === "win32" && "POSIX mode bits" }, async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
+      admitted.setEncoding("utf8");
+      admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
+    }));
+    assert.equal((await exchange(env.connect(), "ping\n")).data, "pong:ping\n");
+    await chmod(env.proofPath, 0o644);
+    const refused = await exchange(env.connect(), "ping\n");
+    assert.equal(refused.error?.code, "ERR_LETAGENTS_DAEMON_UNTRUSTED");
+  } finally { await env.cleanup(); }
+});
+
+test("unref() on a daemon connection still applies after the deferred connect", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, () => undefined));
+    const client = env.connect();
+    client.on("data", () => undefined);
+    client.unref();
+    await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
+    const handle = (client as unknown as { _handle: { hasRef?: () => boolean } | null })._handle;
+    assert.equal(handle?.hasRef?.(), false, "the pipe handle does not keep the process alive");
+    client.destroy();
+  } finally { await env.cleanup(); }
+});
+
 test("a client whose proof file is missing fails like an absent daemon", async () => {
   const env = await harness();
   try {

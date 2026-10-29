@@ -187,13 +187,14 @@ const privateProofs = new Map();
  * for only the account and SYSTEM). An exposed proof could let another
  * account squat the pipe and answer the handshake, so it is refused, never
  * used. A Windows check reads the DACL through PowerShell, so a positive
- * answer is kept for five minutes per file identity (a replaced proof is a
- * new file and is checked again).
+ * answer is kept for five minutes per file identity (a replaced proof, or one
+ * whose permissions changed, is checked again).
  */
 async function readClientProof(path, options) {
   if (!path) throw untrusted("no LetAgents state directory of this user owns this pipe");
   const info = await lstat(path);
-  const identity = `${path}\0${info.ino}\0${info.mtimeMs}\0${info.size}`;
+  // ctime changes with the mode or the DACL, so a loosened proof is checked again.
+  const identity = `${path}\0${info.ino}\0${info.mtimeMs}\0${info.ctimeMs}\0${info.size}`;
   if (!((privateProofs.get(identity) ?? 0) > Date.now())) {
     if (!info.isFile() || !await isOwnerPrivate(path, info, options)) throw untrusted("the proof file is not private to this account");
     privateProofs.set(identity, Date.now() + PRIVATE_PROOF_CACHE_MS);
@@ -209,7 +210,9 @@ async function readClientProof(path, options) {
  * "ready") fire only after both sides proved themselves, and the daemon's
  * handshake line never reaches the caller's "data" listeners. A missing proof
  * file reads as ENOENT (no daemon has run here); an exposed proof or a daemon
- * that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED. `handshake: true` runs it over a Unix
+ * that fails its proof is ERR_LETAGENTS_DAEMON_UNTRUSTED. As with every
+ * caller today, attach a "data" listener before "connect": the handshake reads
+ * the daemon's line in flowing mode, and without one it ends at the deadline. `handshake: true` runs it over a Unix
  * socket too, for tests on hosts without pipes.
  */
 export function connectDaemon(connectPath, { proofPath, handshake = false, handshakeTimeoutMs = 10_000, ...privacy } = {}) {
@@ -218,10 +221,16 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
   // readClientProof); until then the daemon sees nothing from this client.
   const socket = new Socket();
   let proof = null;
-  void readClientProof(proofPath ?? resolveDaemonProofPath(connectPath), privacy).then((value) => {
+  // unref() on a socket without a handle waits for "connect", which the
+  // handshake holds; apply it again once connect() made the handle.
+  const unref = socket.unref;
+  let unrefRequested = false;
+  socket.unref = function unrefAfterConnect() { unrefRequested = true; return unref.call(this); };
+  void Promise.resolve().then(() => readClientProof(proofPath ?? resolveDaemonProofPath(connectPath), privacy)).then((value) => {
     if (socket.destroyed) return;
     proof = value;
     socket.connect(connectPath);
+    if (unrefRequested) unref.call(socket);
   }, (error) => {
     // A missing or briefly locked proof (no daemon yet; an antivirus scan is a
     // sharing violation, EBUSY) reads as an absent daemon, which callers retry.
