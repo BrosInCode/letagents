@@ -37,6 +37,8 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
     if (process.env.LETAGENTS_PACKAGE_TEST_DIST_BUILT !== "1") {
       runNpm(["run", "build"], { cwd: repoRoot, stdio: "pipe" });
       phaseDone("npm run build");
+    } else {
+      t.diagnostic("npm run build: skipped (LETAGENTS_PACKAGE_TEST_DIST_BUILT=1, dist/ is packed as it is)");
     }
 
     const packOutput = runNpm(
