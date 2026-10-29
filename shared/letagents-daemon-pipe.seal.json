@@ -1,0 +1,6 @@
+{
+  "file": "letagents-daemon-pipe.node",
+  "source": "apps/desktop/native/win-daemon-pipe/letagents-daemon-pipe.c",
+  "sourceSha256": "f736cb4f1f00afed80e2639cbc4211479a9850098fb0bfc7a70b6034221df307",
+  "builds": {}
+}

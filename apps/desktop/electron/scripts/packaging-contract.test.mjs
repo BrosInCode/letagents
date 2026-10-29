@@ -19,7 +19,13 @@ test("manual release builds never publish, even when dispatched on a release tag
   const workflow = parse(await source(join(repositoryRoot, ".github/workflows/desktop-release.yml")));
   assert.equal(workflow.jobs.publish.if, "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')");
   assert.deepEqual(workflow.jobs.publish.needs, ["build-macos", "build-windows"]);
-  assert.equal(workflow.jobs["build-windows"].needs, "build-macos");
+  assert.deepEqual(workflow.jobs["build-windows"].needs, ["build-macos", "build-daemon-pipe-windows"]);
+  // The sealed daemon pipe addon is built on the seal's compiler and installs nothing.
+  const addon = workflow.jobs["build-daemon-pipe-windows"];
+  assert.equal(addon["runs-on"], "windows-latest");
+  assert.deepEqual(addon.permissions, { contents: "read" });
+  assert.ok(addon.steps.some(step => step.run === "node apps/desktop/native/win-daemon-pipe/build.mjs --arch x64 --check --strict"));
+  assert.doesNotMatch(addon.steps.map(step => step.run ?? "").join("\n"), /\bnpm\b|\bnpx\b/);
   for (const job of ["build-macos", "build-windows"]) {
     assert.equal(workflow.jobs[job].permissions.contents, "read");
     assert.doesNotMatch(workflow.jobs[job].steps.map(step => step.run ?? "").join("\n"), /aws s3|gh release|npm publish/);

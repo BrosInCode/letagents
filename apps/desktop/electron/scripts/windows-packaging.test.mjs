@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { win32 } from "node:path";
 import { dirname, join, resolve } from "node:path";
@@ -7,13 +9,16 @@ import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
 import {
+  DAEMON_PIPE_ADDON_APP_PATH,
   WINDOWS_EXECUTABLE_NAME,
   assertWindowsExecutableBytes,
+  buildDaemonPipeAddon,
   createIcoFile,
   createNsisPayloadInclude,
   findMakensis,
   readPngDimensions,
   resolveWindowsOpenCodeExecutable,
+  stageDaemonPipeAddon,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
 
@@ -170,4 +175,31 @@ test("the NSIS script honours electron-updater's installer flags and stays per-u
   for (const removal of ['DeleteRegKey HKCU "${UNINSTALL_KEY}"', 'DeleteRegKey HKCU "${URL_KEY}"', 'RMDir /r "$LOCALAPPDATA\\${UPDATER_CACHE}"', 'Delete "$SMPROGRAMS\\${PRODUCT_NAME}.lnk"']) {
     assert.ok(registeredOnly.includes(removal), removal);
   }
+});
+
+test("the installer ships only the sealed daemon pipe addon, where the app looks for it", async () => {
+  assert.equal(DAEMON_PIPE_ADDON_APP_PATH, "runtime/letagents-daemon-pipe.node");
+  const folder = await mkdtemp(join(tmpdir(), "letagents-daemon-pipe-stage-"));
+  try {
+    const addon = join(folder, "built.node");
+    const bytes = Buffer.from([0x4d, 0x5a, 0x90, 0, 1, 2, 3]);
+    await writeFile(addon, bytes);
+    const seal = { builds: { x64: { sha256: createHash("sha256").update(bytes).digest("hex") } } };
+    const destination = join(folder, "app", ...DAEMON_PIPE_ADDON_APP_PATH.split("/"));
+    assert.deepEqual(await stageDaemonPipeAddon({ addon, destination, arch: "x64", seal }), { sha256: seal.builds.x64.sha256, bytes: bytes.length });
+    assert.deepEqual(await readFile(destination), bytes);
+    await rm(destination);
+    await assert.rejects(() => stageDaemonPipeAddon({ addon, destination, arch: "x64", seal: { builds: { x64: { sha256: "0".repeat(64) } } } }), /not the sealed/);
+    await assert.rejects(() => stageDaemonPipeAddon({ addon, destination, arch: "x64", seal: { builds: {} } }), /No x64 build/);
+    await writeFile(addon, "not a DLL");
+    await assert.rejects(() => stageDaemonPipeAddon({ addon, destination, arch: "x64", seal }), /not a Windows executable/);
+    await assert.rejects(() => readFile(destination), { code: "ENOENT" }, "nothing is written for refused bytes");
+  } finally { await rm(folder, { recursive: true, force: true }); }
+  // A prebuilt addon from the release job is used as given; otherwise build.mjs runs strict.
+  assert.equal(buildDaemonPipeAddon({ arch: "x64", env: { LETAGENTS_DAEMON_PIPE_ADDON_BUILD: "D:\\a\\addon.node" } }), "D:\\a\\addon.node");
+  const calls = [];
+  const built = buildDaemonPipeAddon({ arch: "x64", env: {}, run: (command, args) => { calls.push(args.slice(1)); return { status: 0 }; } });
+  assert.deepEqual(calls, [["--arch", "x64", "--check", "--strict"]]);
+  assert.match(built, /win-daemon-pipe[\\/]build[\\/]x64[\\/]letagents-daemon-pipe\.node$/);
+  assert.throws(() => buildDaemonPipeAddon({ arch: "x64", env: {}, run: () => ({ status: 1 }) }), /--strict failed/);
 });

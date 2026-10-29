@@ -1,17 +1,26 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import { sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
 import { desktopAssetNames } from "./release-metadata.mjs";
-import { WINDOWS_APP_USER_MODEL_ID, WINDOWS_EXECUTABLE_NAME, WINDOWS_UNINSTALLER_NAME } from "./windows-packaging.mjs";
+import {
+  DAEMON_PIPE_ADDON_APP_PATH,
+  WINDOWS_APP_USER_MODEL_ID,
+  WINDOWS_EXECUTABLE_NAME,
+  WINDOWS_UNINSTALLER_NAME,
+} from "./windows-packaging.mjs";
 
 // Installs the built Windows installer silently for the current user, runs
 // the installed app's smoke check (LETAGENTS_DESKTOP_SMOKE_CHECK=1 loads the
 // real window against seeded local state and exits 0 when it renders), then
-// updates the running app the way electron-updater does, and uninstalls it
+// checks that the installed app loads its sealed daemon pipe addon and
+// reaches a daemon through it, updates the running app the way
+// electron-updater does, and uninstalls it
 // and checks that the install folder and registration are gone.
 // For CI runners: it installs into the runner user's own profile.
 
@@ -94,6 +103,49 @@ assert(existsSync(executable), `The installer did not write ${executable}.`);
 assert(existsSync(join(installDirectory, WINDOWS_UNINSTALLER_NAME)), "The installer did not write its uninstaller.");
 assert(existsSync(join(installDirectory, "resources", "app", "runtime", "opencode.exe")), "The install has no bundled opencode.exe.");
 assert(existsSync(join(installDirectory, "shared", "message-contracts.mjs")), "The install has no shared contracts.");
+
+// The daemon pipe addon: the sealed bytes, at the path the app looks in, and
+// loaded by the installed app (as node) to reach a daemon over a real pipe.
+const installedAddon = join(installDirectory, "resources", "app", ...DAEMON_PIPE_ADDON_APP_PATH.split("/"));
+assert(existsSync(installedAddon), `The install has no ${DAEMON_PIPE_ADDON_APP_PATH}.`);
+const installedAddonSha256 = createHash("sha256").update(readFileSync(installedAddon)).digest("hex");
+assert(
+  installedAddonSha256 === sealedDaemonPipeAddonSha256("x64"),
+  `The installed daemon pipe addon is ${installedAddonSha256}; the seal names ${sealedDaemonPipeAddonSha256("x64")}.`,
+);
+const pipeProbe = run(executable, ["-e", [
+  "(async () => {",
+  "  const { mkdtempSync, rmSync } = require('node:fs');",
+  "  const net = require('node:net');",
+  "  const os = require('node:os');",
+  "  const path = require('node:path');",
+  "  const install = process.argv[process.argv.length - 1];",
+  "  const load = (name) => import(require('node:url').pathToFileURL(path.join(install, 'shared', name)).href);",
+  "  const endpoint = await load('daemon-endpoint.mjs');",
+  "  const native = await load('daemon-pipe-native.mjs');",
+  "  const root = mkdtempSync(path.join(os.tmpdir(), 'letagents-pipe-smoke-'));",
+  "  const { connectPath, listenPath, proofPath } = endpoint.daemonEndpoint(root);",
+  "  const proof = await endpoint.ensureDaemonProof(proofPath);",
+  "  const server = net.createServer((socket) => endpoint.acceptDaemonPeer(socket, proof, (admitted) => {",
+  "    admitted.setEncoding('utf8'); admitted.on('data', (chunk) => admitted.end('pong:' + chunk));",
+  "  }));",
+  "  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(listenPath, resolve); });",
+  "  const reply = await new Promise((resolve, reject) => {",
+  "    const socket = endpoint.connectDaemon(connectPath, { proofPath });",
+  "    let data = ''; socket.setEncoding('utf8');",
+  "    socket.once('connect', () => socket.write('smoke\\n'));",
+  "    socket.on('data', (chunk) => { data += chunk; });",
+  "    socket.once('error', reject);",
+  "    socket.once('close', () => resolve(data));",
+  "  });",
+  "  await new Promise((resolve) => server.close(resolve));",
+  "  rmSync(root, { recursive: true, force: true });",
+  "  console.log('LETAGENTS_DAEMON_PIPE_PROBE ' + JSON.stringify({ addon: native.loadDaemonPipeAddon().path, reply }));",
+  "})().catch((error) => { console.error(error); process.exit(1); });",
+].join("\n"), installDirectory], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 2 * 60_000 });
+assert(pipeProbe.status === 0, `The installed daemon pipe probe exited with ${pipeProbe.status}.`);
+const pipe = JSON.parse(/LETAGENTS_DAEMON_PIPE_PROBE (.+)/.exec(pipeProbe.stdout)?.[1] ?? "null");
+assert(pipe?.addon === installedAddon && pipe.reply === "pong:smoke\n", `The installed app did not reach a daemon through its addon: ${JSON.stringify(pipe)}.`);
 const updaterConfig = JSON.parse(readFileSync(join(installDirectory, "resources", "app-update.yml"), "utf8"));
 assert(updaterConfig.url === "https://downloads.letagents.chat/desktop/feeds/win32-x64/", `Unexpected update feed ${updaterConfig.url}.`);
 assert(!("publisherName" in updaterConfig), "Unsigned builds must not ask the updater for a publisher signature.");

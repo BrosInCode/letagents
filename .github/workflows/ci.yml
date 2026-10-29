@@ -425,6 +425,13 @@ jobs:
         shell: bash
         run: npm run build
 
+      # Every daemon pipe client opens the pipe through the sealed addon
+      # (shared/daemon-pipe-native.mjs finds this local build).
+      - name: Build the daemon pipe addon
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: node apps/desktop/native/win-daemon-pipe/build.mjs --check
+
       # Each suite below runs once the build passed, whether or not an earlier
       # suite failed, so one run reports every failure. The job still fails
       # when any step fails.
@@ -594,10 +601,17 @@ jobs:
               npm --prefix apps/desktop run test:packaging || status=1
               ;;
             daemon)
+              # Every daemon pipe client opens the pipe through the sealed
+              # addon (shared/daemon-pipe-native.mjs finds the local build).
+              # Its own tests run here, where Electron is installed, with a
+              # squatter that takes the pipe name first.
+              node apps/desktop/native/win-daemon-pipe/build.mjs --check || status=1
+              node --test --test-timeout=300000 apps/desktop/native/win-daemon-pipe/seal.test.mjs apps/desktop/native/win-daemon-pipe/daemon-pipe.windows.test.mjs || status=1
               npm --prefix apps/desktop run test:daemon || status=1
               ;;
             "electron "*)
               shard="${SUITE#electron }"
+              node apps/desktop/native/win-daemon-pipe/build.mjs --check || status=1
               # Cursor's Windows tests start Cursor inside the process-tree
               # helper's job. Build it outside its default path, so only the
               # tests that name it (LETAGENTS_TEST_PROCESS_TREE_HELPER) use it.

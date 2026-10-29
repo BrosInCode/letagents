@@ -2,9 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+
+import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
@@ -12,7 +13,8 @@ const executable = join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
 const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
-const socketPath = join(home, ".letagents", "daemon.sock");
+// macOS: <home>/.letagents/daemon.sock; connectDaemon is createConnection there.
+const socketPath = daemonEndpoint(join(home, ".letagents")).connectPath;
 const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
 
 async function assertPackagedDaemonExecutorSeal() {
@@ -33,7 +35,7 @@ async function assertPackagedDaemonExecutorSeal() {
 function request(method, params) {
   return new Promise((resolveRequest, reject) => {
     const id = randomUUID();
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let buffer = "";
     socket.setEncoding("utf8");
     socket.setTimeout(5_000, () => { socket.destroy(); reject(new Error(`timeout: ${method}`)); });

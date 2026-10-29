@@ -18,13 +18,16 @@ import {
   createDesktopUpdaterConfig,
 } from "./release-metadata.mjs";
 import {
+  DAEMON_PIPE_ADDON_APP_PATH,
   WINDOWS_EXECUTABLE_NAME,
   assertWindowsExecutableBytes,
   brandWindowsExecutable,
+  buildDaemonPipeAddon,
   createIcoFile,
   readWindowsExecutableVersion,
   renderWindowsIconPngs,
   resolveWindowsOpenCodeExecutable,
+  stageDaemonPipeAddon,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
 
@@ -238,6 +241,16 @@ const bundledOpenCode = windows ? "opencode.exe" : "opencode";
 await mkdir(join(app, "runtime"), { recursive: true });
 await cp(openCodePath, join(app, "runtime", bundledOpenCode));
 await chmod(join(app, "runtime", bundledOpenCode), 0o755);
+// Every Windows client of the supervisor daemon opens its pipe through the
+// sealed addon; a build that is not the sealed one fails here, as the app
+// would refuse it at run time.
+if (windows) {
+  await stageDaemonPipeAddon({
+    addon: buildDaemonPipeAddon({ arch: desktopArch }),
+    destination: join(app, DAEMON_PIPE_ADDON_APP_PATH),
+    arch: desktopArch,
+  });
+}
 
 const requiredAppFiles = [
   "dist-electron/main.js",
@@ -349,6 +362,12 @@ const required = [
   ...(windows ? [WINDOWS_EXECUTABLE_NAME, "resources/letagents.ico"] : []).map((relative) => ({
     absolutePath: join(bundle, relative),
     manifestPath: relative,
+  })),
+  // The daemon pipe addon, and the modules and seal that check and load it.
+  ...(windows ? [{ absolutePath: join(app, DAEMON_PIPE_ADDON_APP_PATH), manifestPath: DAEMON_PIPE_ADDON_APP_PATH }] : []),
+  ...(windows ? ["shared/daemon-endpoint.mjs", "shared/daemon-pipe-native.mjs", "shared/letagents-daemon-pipe.seal.json"] : []).map((relative) => ({
+    absolutePath: join(contents, relative),
+    manifestPath: bundlePath(join(contents, relative)),
   })),
   ...[
     "shared/agent-branch.mjs",

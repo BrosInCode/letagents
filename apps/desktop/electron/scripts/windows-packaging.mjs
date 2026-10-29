@@ -1,11 +1,16 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { DAEMON_PIPE_ADDON_NAME, sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
+
 const execFileAsync = promisify(execFile);
+const daemonPipeSource = fileURLToPath(new URL("../../native/win-daemon-pipe/", import.meta.url));
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** Sizes Windows picks from for the taskbar, Start menu, Explorer and Alt+Tab. */
@@ -249,4 +254,47 @@ export async function listPayloadEntries(directory) {
     name: entry.name,
     directory: entry.isDirectory(),
   }));
+}
+
+/** Where shared/daemon-pipe-native.mjs looks for the daemon pipe addon in the packaged app, under resources/app. */
+export const DAEMON_PIPE_ADDON_APP_PATH = `runtime/${DAEMON_PIPE_ADDON_NAME}`;
+
+/**
+ * The daemon pipe addon to ship: LETAGENTS_DAEMON_PIPE_ADDON_BUILD when set
+ * (an addon another job built with build.mjs on the sealed compiler), else a
+ * build here with `build.mjs --arch <arch> --check --strict`, which fails
+ * unless this machine built the sealed bytes.
+ */
+export function buildDaemonPipeAddon({ arch, env = process.env, run = spawnSync } = {}) {
+  const prebuilt = env.LETAGENTS_DAEMON_PIPE_ADDON_BUILD?.trim();
+  if (prebuilt) return prebuilt;
+  const built = run(process.execPath, [join(daemonPipeSource, "build.mjs"), "--arch", arch, "--check", "--strict"], { stdio: "inherit" });
+  if (built.status !== 0) {
+    throw new Error(`win-daemon-pipe/build.mjs --arch ${arch} --check --strict failed (exit ${built.status ?? built.signal ?? built.error?.message}).`);
+  }
+  return join(daemonPipeSource, "build", arch, DAEMON_PIPE_ADDON_NAME);
+}
+
+/**
+ * Write the addon into the app only when its bytes are the sealed build for
+ * `arch` (shared/letagents-daemon-pipe.seal.json, read by the same function
+ * the app uses before it loads the addon). Any other bytes fail the build:
+ * the app would refuse them, and no daemon client could connect. The
+ * checked bytes are the ones written.
+ */
+export async function stageDaemonPipeAddon({ addon, destination, arch, seal }) {
+  const bytes = await readFile(addon);
+  assertWindowsExecutableBytes(bytes, addon);
+  const expected = seal === undefined ? sealedDaemonPipeAddonSha256(arch) : sealedDaemonPipeAddonSha256(arch, seal);
+  if (!expected) throw new Error(`No ${arch} build of ${DAEMON_PIPE_ADDON_NAME} is sealed in shared/letagents-daemon-pipe.seal.json.`);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== expected) {
+    throw new Error(
+      `${addon} (sha256 ${sha256}) is not the sealed ${DAEMON_PIPE_ADDON_NAME} (${expected}), so the app would refuse it. `
+        + "Build it with the MSVC and SDK the seal names, or reseal shared/letagents-daemon-pipe.seal.json.",
+    );
+  }
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, bytes);
+  return { sha256, bytes: bytes.length };
 }
