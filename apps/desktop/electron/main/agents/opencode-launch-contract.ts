@@ -3,6 +3,7 @@ import { link, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promi
 import { join } from "node:path";
 
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
+import { daemonStateDirEnvironment, environmentValue, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 export const OPEN_MODEL_OPENCODE_PROVIDER_ID = "letagents-open-model";
 export const OPENCODE_SERVER_USERNAME = "opencode";
@@ -246,6 +247,7 @@ export function supervisedOpenCodeMcpEnvironment(
     LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
     LETAGENTS_SUPERVISOR_ENTRY_ID: request.supervisorEntryId || "",
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: request.supervisorSocketPath || "",
+    ...daemonStateDirEnvironment(request.supervisorSocketPath),
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: request.workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID:
       request.supervisorExecutionGenerationId || "",
@@ -353,10 +355,13 @@ export function minimalOpenCodeEnvironment(
   source: NodeJS.ProcessEnv,
   extra: Record<string, string>,
   commitEnvironment: Record<string, string> = {},
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
+  // Windows: what any program there needs to start and reach the network.
+  const environment: NodeJS.ProcessEnv = windowsSystemEnvironment(source, platform);
   for (const key of INHERITED_ENVIRONMENT_KEYS) {
-    if (source[key] !== undefined) environment[key] = source[key];
+    const value = environmentValue(source, key, platform);
+    if (value !== undefined) environment[key] = value;
   }
   return {
     ...environment,

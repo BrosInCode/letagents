@@ -3,7 +3,9 @@ import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { codexLaunchCommand } from "./codex-executable.mjs";
+import { providerLaunchCommand } from "./provider-executable.mjs";
+
+export { resolveWindowsCommand } from "./provider-executable.mjs";
 
 // Process trees and process birth identity, one implementation for every
 // platform. On POSIX each function does exactly what the daemon has always
@@ -152,44 +154,29 @@ export function parseWindowsCommandLine(line) {
 }
 
 /**
- * The absolute program a Windows spawn of `command` runs, or null. A bare
- * name is looked up on PATH only, never in the working directory (the
- * user's repository); a name without an extension gets .com, .exe, .cmd,
- * then .bat, as cmd.exe would try them.
- */
-export function resolveWindowsCommand(command, options = {}) {
-  const env = options.env ?? process.env;
-  const exists = options.exists ?? isFile;
-  const { win32 } = path;
-  const names = (base) => (win32.extname(base) ? [base] : [".com", ".exe", ".cmd", ".bat"].map((extension) => base + extension));
-  if (win32.isAbsolute(command)) return names(command).find(exists) ?? null;
-  if (/[\\/]/.test(command)) return names(win32.resolve(options.cwd ?? process.cwd(), command)).find(exists) ?? null;
-  for (const entry of (env.PATH ?? env.Path ?? "").split(";").map((value) => value.trim()).filter(Boolean)) {
-    if (!win32.isAbsolute(entry)) continue;
-    const found = names(win32.join(entry, command)).find(exists);
-    if (found) return found;
-  }
-  return null;
-}
-
-/**
  * `spawn` for a program whose whole process tree must end together. POSIX:
  * exactly `spawn(command, args, options)`; a caller that wants a process
  * group passes `detached: true` as before. Windows: the program runs inside
  * the helper's job (a .cmd/.bat as `codexLaunchCommand` starts it), and the
  * returned child is the helper. Without the helper, the program is spawned
- * directly as before, and only it can be ended.
+ * directly as before, and only it can be ended. A shim whose script runs on
+ * this Electron gets ELECTRON_RUN_AS_NODE=1 (see providerLaunchCommand).
  */
 export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
   const platform = treeOptions.platform ?? process.platform;
   const spawnProcess = treeOptions.spawn ?? spawn;
   if (platform !== "win32") return spawnProcess(command, args, spawnOptions);
   const env = treeOptions.env ?? spawnOptions.env ?? process.env;
-  const resolved = resolveWindowsCommand(command, { env, cwd: spawnOptions.cwd, exists: treeOptions.exists });
-  const launch = codexLaunchCommand(resolved ?? command, args, { ...treeOptions.launchOptions, platform, env });
+  const launch = providerLaunchCommand(command, args, {
+    platform, env, cwd: spawnOptions.cwd, exists: treeOptions.exists, launchOptions: treeOptions.launchOptions, electron: treeOptions.electron,
+  });
+  const resolved = launch.resolved;
   const helper = treeOptions.helperPath === undefined ? processTreeHelperPath({ platform, env: treeOptions.helperEnv }) : treeOptions.helperPath;
+  // An npm shim's script on this Electron needs ELECTRON_RUN_AS_NODE; the helper passes its environment on.
+  const childEnv = launch.envAdditions ? { ...(spawnOptions.env ?? process.env), ...launch.envAdditions } : spawnOptions.env;
   const direct = {
     ...spawnOptions,
+    ...(childEnv ? { env: childEnv } : {}),
     windowsHide: true,
     ...(launch.argv0 ? { argv0: launch.argv0 } : {}),
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
@@ -200,7 +187,7 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
     ? [launch.argv0 ?? quoteWindowsArgument(launch.file), ...launch.args].join(" ")
     : windowsCommandLine(launch.file, launch.args);
   const { argv0: _argv0, windowsVerbatimArguments: _verbatim, ...helperOptions } = spawnOptions;
-  return remember(spawnProcess(helper, ["spawn", launch.file, commandLine], { ...helperOptions, windowsHide: true }), helper);
+  return remember(spawnProcess(helper, ["spawn", launch.file, commandLine], { ...helperOptions, ...(childEnv ? { env: childEnv } : {}), windowsHide: true }), helper);
 }
 
 /** Windows: keep a spawned child findable by pid until it exits; `helper` null for a direct child. */

@@ -1,4 +1,5 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { execProviderFile } from "../../../../../shared/provider-executable.mjs";
 
 import type {
   DesktopAgentProvider,
@@ -102,7 +103,7 @@ async function execFileWithTimeout(
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
     const env = options.env || process.env;
-    const child = execFile(
+    const child = execProviderFile(
       command,
       args,
       {

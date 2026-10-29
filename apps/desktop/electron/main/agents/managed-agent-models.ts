@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execProviderFile } from "../../../../../shared/provider-executable.mjs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -520,7 +520,7 @@ function execFileWithTimeout(
   options: ExecOptions = {},
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const child = execFile(
+    const child = execProviderFile(
       command,
       args,
       {

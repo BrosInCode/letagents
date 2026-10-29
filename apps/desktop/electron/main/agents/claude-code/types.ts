@@ -22,6 +22,12 @@ export interface ClaudeCliChild {
   endInput(): void;
   /** Mark teardown as intentional so the stdio close does not read as control loss. */
   markIntentionalClose(): void;
+  /**
+   * Windows, which has no SIGTERM: stop the CLI's whole tree through
+   * terminateTree. Graceful closes its input and waits `graceMs` before the
+   * tree is ended. Only the child this process spawned has it.
+   */
+  terminate?(options: { graceful: boolean; graceMs: number }): Promise<boolean>;
 }
 
 export interface ClaudeCodeProviderAdapterDependencies {

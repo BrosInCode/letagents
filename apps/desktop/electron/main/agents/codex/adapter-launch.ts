@@ -9,6 +9,7 @@ import { buildCodexDevMcpEntryOverrides } from "../codex-dev-mcp-entry.js";
 import type { LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "../provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "../rental-child-environment.js";
+import { daemonStateDirEnvironment } from "../windows-child-environment.js";
 import { buildCodexStartPrompt, DEFAULT_CODEX_STOP_PHRASE, looksLikeInviteCode, makeCodexStopToken } from "../codex-start-prompt.js";
 import type { ProviderContinuationRef, ProviderSpawnRequest } from "../provider-adapter.js";
 import { errorMessage, observeFencedExit, terminateFreshLaunch } from "../provider-evidence.js";
@@ -113,6 +114,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
       ? {
           LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
+          ...daemonStateDirEnvironment(req.supervisorSocketPath),
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
           LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: req.supervisorExecutionGenerationId,
           LETAGENTS_SUPERVISOR_PROVIDER: "codex",
