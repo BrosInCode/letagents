@@ -1,10 +1,12 @@
 // Slice of the Cursor turn wrapper program (see turn-launcher.ts):
 // the wrapper-hosted MCP connector, credential and runtime-data purges, and
 // authority retirement.
-// The slices concatenate in order into one script run with `node -e`; keep
-// each slice's text exactly as the wrapper needs it.
+// The slices concatenate in order into one script run with `node -e` (on
+// Windows from an owner-private file); keep each slice's text exactly as the
+// wrapper needs it. Windows-only text is chosen by `platform`.
 
-export function cursorWrapperMcpSource(): string {
+export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platform): string {
+  const windows = platform === "win32";
   return String.raw`async function closeMcpConnector() {
   if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
   mcpCapabilityDeadline = null;
@@ -143,7 +145,10 @@ function purgeTurnRuntimeDataRoot() {
   if (!restrictRemoteAuthority) return true;
   const root = process.env.CURSOR_DATA_DIR;
   if (typeof root !== "string"
-    || !/^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/.test(root)) {
+    || ${windows
+    ? String.raw`path.dirname(root) !== windowsTurn.temporaryRoot
+    || !/^letagents-cursor-data-[A-Za-z0-9]{6}$/.test(path.basename(root))) {`
+    : String.raw`!/^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/.test(root)) {`}
     throw new Error("unexpected Cursor turn data root");
   }
   let stat;
@@ -168,6 +173,8 @@ function validatedMcpRuntimeEnv(value) {
     "LETAGENTS_SUPERVISOR_AGENT_SESSION_ID", "LETAGENTS_SUPERVISOR_ROOM_ID",
     "LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME", "LETAGENTS_SUPERVISED_BOUNDED_TURNS",
     "LETAGENTS_EXECUTION_PROFILE", "LETAGENTS_PERMISSION_PROFILE_ID",
+    // Windows: the daemon's state folder, where the MCP runtime finds the pipe's proof.
+    ...(windows ? ["LETAGENTS_SUPERVISOR_DAEMON_STATE_DIR"] : []),
   ])});
   const result = {};
   const entries = Object.entries(value);
@@ -333,16 +340,30 @@ function startMcpConnector() {
       reject(error);
     };
     const connectorRoot = path.dirname(mcpConnectorSocketPath);
+${windows ? String.raw`    // Windows: the socket path names the turn; the wrapper listens on its pipe.
     if (!mcpConnectorRootPattern.test(connectorRoot)
+      || mcpConnectorSocketPath !== path.join(connectorRoot, "stdio.sock")
+      || mcpConnectorSocketPath.includes("\0")
+      || !/^\\\\[.]\\pipe\\letagents-cursor-mcp-[0-9a-f]{32}$/.test(windowsTurn.connectorListenPath)
+      || !path.isAbsolute(mcpRuntimeEntryPath)
+      || !path.isAbsolute(mcpRuntimeCwd)) {` : String.raw`    if (!mcpConnectorRootPattern.test(connectorRoot)
       || mcpConnectorSocketPath !== connectorRoot + "/stdio.sock"
       || mcpConnectorSocketPath.includes("\0")
       || Buffer.byteLength(mcpConnectorSocketPath, "utf8") > 100
       || !mcpRuntimeEntryPath.startsWith("/")
-      || !mcpRuntimeCwd.startsWith("/")) {
+      || !mcpRuntimeCwd.startsWith("/")) {`}
       failStart(new Error("invalid MCP connector boundary"));
       return;
     }
-    const expectedRuntimePaths = {
+    const expectedRuntimePaths = ${windows ? String.raw`{
+      HOME: path.join(connectorRoot, "home"),
+      XDG_CONFIG_HOME: path.join(connectorRoot, "config"),
+      XDG_DATA_HOME: path.join(connectorRoot, "data"),
+      XDG_CACHE_HOME: path.join(connectorRoot, "cache"),
+      CURSOR_CONFIG_DIR: path.join(connectorRoot, "config", "cursor"),
+      CURSOR_DATA_DIR: path.join(connectorRoot, "data", "cursor"),
+      NODE_COMPILE_CACHE: path.join(connectorRoot, "cache", "node-compile-cache"),
+    };` : String.raw`{
       HOME: connectorRoot + "/home",
       XDG_CONFIG_HOME: connectorRoot + "/config",
       XDG_DATA_HOME: connectorRoot + "/data",
@@ -350,13 +371,18 @@ function startMcpConnector() {
       CURSOR_CONFIG_DIR: connectorRoot + "/config/cursor",
       CURSOR_DATA_DIR: connectorRoot + "/data/cursor",
       NODE_COMPILE_CACHE: connectorRoot + "/cache/node-compile-cache",
-    };
+    };`}
     if (Object.entries(expectedRuntimePaths).some(([key, value]) => mcpRuntimeEnv[key] !== value)) {
       failStart(new Error("MCP runtime state escaped its private connector root"));
       return;
     }
     try {
-      mkdirSync(connectorRoot, { mode: 0o700 });
+${windows ? String.raw`      // Windows: main created this folder private (inheritable DACL) before
+      // the wrapper started; the folders below inherit that DACL.
+      const connectorRootStat = lstatSync(connectorRoot);
+      if (!connectorRootStat.isDirectory() || connectorRootStat.isSymbolicLink()) {
+        throw new Error("redirected MCP connector root");
+      }` : String.raw`      mkdirSync(connectorRoot, { mode: 0o700 });`}
       for (const directory of [
         expectedRuntimePaths.HOME,
         expectedRuntimePaths.XDG_CONFIG_HOME,
@@ -373,7 +399,15 @@ function startMcpConnector() {
     }
     const runtime = spawn(process.execPath, [mcpRuntimeEntryPath], {
       cwd: mcpRuntimeCwd,
-      env: mcpRuntimeEnv,
+      env: ${windows ? String.raw`{
+        // Windows programs need these system variables (Winsock reads SystemRoot);
+        // the validated runtime environment decides everything else.
+        ...Object.fromEntries(["SystemRoot", "windir", "SystemDrive", "TEMP", "TMP", "PATHEXT"]
+          .filter((key) => typeof process.env[key] === "string")
+          .map((key) => [key, process.env[key]])),
+        ...mcpRuntimeEnv,
+      },
+      windowsHide: true,` : "mcpRuntimeEnv,"}
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
@@ -440,7 +474,7 @@ function startMcpConnector() {
           failStart(new Error("Cursor MCP connector startup was cancelled."));
         }
       });
-      server.listen(mcpConnectorSocketPath, async () => {
+      server.listen(${windows ? "windowsTurn.connectorListenPath" : "mcpConnectorSocketPath"}, async () => {
         await waitAtTestStartupBarrier("mcp_listen");
         if (finalizing || authorityRetiring) {
           try { server.close(); } catch {}
@@ -448,9 +482,10 @@ function startMcpConnector() {
           return;
         }
         server.removeListener("error", failStart);
-        try { chmodSync(mcpConnectorSocketPath, 0o600); }
+${windows ? String.raw`        // A named pipe has no file mode; see cursorMcpConnectorListenPath.
+` : String.raw`        try { chmodSync(mcpConnectorSocketPath, 0o600); }
         catch (error) { void closeMcpConnector(); failStart(error); return; }
-        mcpCapabilityDeadline = setTimeout(() => {
+`}        mcpCapabilityDeadline = setTimeout(() => {
           failMcpCapabilityAttestation("Cursor never connected the attested MCP runtime before model authority.");
         }, mcpCapabilityTimeoutMs);
         settled = true;

@@ -1,3 +1,6 @@
+import { rmSync } from "node:fs";
+import { dirname } from "node:path";
+
 import { spawnTree } from "../../../../../../shared/process-tree.mjs";
 
 import type { ProviderProcessExit } from "../provider-evidence.js";
@@ -8,9 +11,11 @@ import {
 } from "../cursor-provider-constants.js";
 import { safeCursorTerminalErrorDetail } from "../cursor-provider-evidence.js";
 import {
+  cursorOsSandbox,
   cursorSandboxDelegatingExecutablePaths,
   cursorSandboxPathVariants,
   cursorSandboxRuntimeReadSubpaths,
+  cursorTemporaryRoot,
   escapeCursorSandboxRegex,
   isExactCursorLoopbackTestOrigin,
   prepareCursorResumeOwnershipLock,
@@ -19,8 +24,17 @@ import {
 } from "../cursor-sandbox-policy.js";
 import { cursorWrapperMcpSource } from "./turn-wrapper-mcp.js";
 import { cursorWrapperProxySource } from "./turn-wrapper-proxies.js";
-import { cursorWrapperSetupSource } from "./turn-wrapper-setup.js";
+import { cursorWrapperSetupSource, type CursorWrapperLaunchValues } from "./turn-wrapper-setup.js";
 import { cursorWrapperStartSource } from "./turn-wrapper-start.js";
+import {
+  cursorMcpConnectorListenPath,
+  cursorWindowsNativeLaunch,
+  cursorWrapperProgramBootstrap,
+  prepareCursorWindowsConnectorRoot,
+  rememberCursorWrapperForStop,
+  writeCursorWrapperProgram,
+  type CursorWindowsTurnValues,
+} from "./windows-turn.js";
 
 export interface CursorCliChild {
   pid: number | null;
@@ -41,6 +55,18 @@ export interface CursorCliChild {
   ownsDescendantReaping?: boolean;
   /** Production wrappers require their remote-authority journal before a live result is trusted. */
   requiresDurableTerminalEvidence?: boolean;
+}
+
+/**
+ * The wrapper program: the cursor/turn-wrapper-*.ts slices, joined in order.
+ * `platform` picks the Windows-only text; the macOS program does not change.
+ */
+export function cursorTurnWrapperSource(
+  values: CursorWrapperLaunchValues,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return String.raw`
+${cursorWrapperSetupSource(values, platform)}${cursorWrapperMcpSource(platform)}${cursorWrapperProxySource()}${cursorWrapperStartSource(cursorOsSandbox(platform))}`;
 }
 
 /**
@@ -104,6 +130,9 @@ export function defaultLaunchTurn(input: {
     stage: "mcp_listen" | "authority_listen" | "agent_listen";
   };
 }): CursorCliChild {
+  // Windows: no operating-system sandbox, so none of the sandbox lists below
+  // reach the wrapper there (see cursorOsSandbox).
+  const windows = cursorOsSandbox() === "windows-unsandboxed";
   const deniedDelegatingExecutablePaths = cursorSandboxDelegatingExecutablePaths();
   const deniedReadPaths = validateCursorSandboxPaths(input.deniedReadPaths);
   const deniedReadSubpaths = validateCursorSandboxPaths(input.deniedReadSubpaths);
@@ -118,7 +147,7 @@ export function defaultLaunchTurn(input: {
   const allowedReadSubpaths = input.allowedReadSubpaths?.length
     ? validateCursorSandboxPaths([
       ...input.allowedReadSubpaths,
-      ...cursorSandboxRuntimeReadSubpaths(input.cursorBin, input.cwd, input.env ?? process.env),
+      ...(windows ? [] : cursorSandboxRuntimeReadSubpaths(input.cursorBin, input.cwd, input.env ?? process.env)),
     ])
     : [];
   const allowedNetworkUnixSockets = validateCursorSandboxPaths(
@@ -127,7 +156,7 @@ export function defaultLaunchTurn(input: {
   const allowedInternalUnixSocketRoots = validateCursorSandboxPaths(
     (input.allowedInternalUnixSocketRoots ?? []).flatMap(cursorSandboxPathVariants),
   );
-  if (input.statePath) {
+  if (input.statePath && !windows) {
     const streamPaths = validateCursorSandboxPaths(
       cursorSandboxPathVariants(input.statePath),
     );
@@ -189,7 +218,7 @@ export function defaultLaunchTurn(input: {
     || !input.mcpRuntimeEnv)) {
     throw new Error("Supervised Cursor requires a wrapper-owned MCP connector boundary.");
   }
-  if (restrictRemoteAuthority
+  if (restrictRemoteAuthority && !windows
     && (allowedWriteSubpaths.length === 0 || allowedReadSubpaths.length === 0)) {
     throw new Error("Supervised Cursor requires non-empty read and write sandbox allow-lists.");
   }
@@ -211,7 +240,7 @@ export function defaultLaunchTurn(input: {
       || !input.args.includes(`--resume=${input.nativeResumeSessionId}`)) {
       throw new Error("Cursor ownership access must match the exact supervised resume session.");
     }
-    if (process.platform === "darwin") {
+    if (cursorOsSandbox() === "macos-sandbox-exec") {
       const lock = prepareCursorResumeOwnershipLock(input.nativeResumeSessionId);
       allowedReadSubpaths.push(...cursorSandboxPathVariants(lock));
       allowedWriteSubpaths.push(...cursorSandboxPathVariants(lock));
@@ -222,48 +251,86 @@ export function defaultLaunchTurn(input: {
   // before any model/tool side effect. It also mirrors the exact stream and a
   // terminal record to an owner-private file for restart/handoff recovery.
   // The program text lives in the cursor/turn-wrapper-*.ts slices, joined in order.
-const wrapperSource = String.raw`
-${cursorWrapperSetupSource({ agentUpstreamEndpoint, controlPlaneUpstreamEndpoint, deniedDelegatingExecutablePaths })}${cursorWrapperMcpSource()}${cursorWrapperProxySource()}${cursorWrapperStartSource()}`;
-  const child = spawnTree(process.execPath, [
-    "-e",
-    wrapperSource,
-    input.cursorBin,
-    input.statePath ?? "",
-    input.workspaceGenerationManifestPath ?? "",
-    JSON.stringify(deniedReadPaths),
-    JSON.stringify(deniedReadSubpaths),
-    JSON.stringify(deniedReadMetadataPaths),
-    JSON.stringify(deniedReadWriteRegexes),
-    JSON.stringify(deniedWriteRegexes),
-    JSON.stringify(deniedWritePaths),
-    JSON.stringify(deniedWriteStructuralPaths),
-    JSON.stringify(deniedWriteSubpaths),
-    JSON.stringify(deniedExecSubpaths),
-    JSON.stringify(allowedWriteSubpaths),
-    JSON.stringify(allowedReadSubpaths),
-    JSON.stringify(allowedNetworkUnixSockets),
-    JSON.stringify(allowedInternalUnixSocketRoots),
-    input.mcpConnectorSocketPath ?? "",
-    input.mcpRuntimeEntryPath ?? "",
-    input.mcpRuntimeCwd ?? "",
-    testStartupBarrier?.path ?? "",
-    testStartupBarrier?.stage ?? "",
-    String(mcpCapabilityTimeoutMs),
-    restrictRemoteAuthority ? "1" : "0",
-    input.fullAccess === true ? "1" : "0",
-    ...input.args,
-  ], {
-    cwd: input.cwd,
-    // The prompt travels as a positional argument; cursor-agent has no stdin
-    // channel (matrix row). Its own process group so group signalling reaps
-    // any descendants (on Windows the process-tree helper's job).
-    stdio: ["ignore", "pipe", "pipe", "ipc"],
-    detached: process.platform !== "win32",
-    env: {
-      ...(input.env ?? cursorCliEnv()),
-      ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
-    },
-  });
+  // Windows: it is longer than the 32,767-character command-line limit, so
+  // it runs from an owner-private file with the same process.argv.
+  let windowsTurn: CursorWindowsTurnValues | undefined;
+  let windowsConnectorRoot: string | null = null;
+  let wrapperProgram: ReturnType<typeof writeCursorWrapperProgram> | null = null;
+  let child: ReturnType<typeof spawnTree>;
+  try {
+    if (windows) {
+      const connectorListenPath = restrictRemoteAuthority && input.mcpConnectorSocketPath
+        ? cursorMcpConnectorListenPath(input.mcpConnectorSocketPath)
+        : "";
+      windowsTurn = {
+        ...cursorWindowsNativeLaunch(input.cursorBin, input.args, { env: input.env ?? process.env, cwd: input.cwd }),
+        connectorListenPath,
+        temporaryRoot: cursorTemporaryRoot(),
+      };
+      if (connectorListenPath) {
+        windowsConnectorRoot = dirname(input.mcpConnectorSocketPath!);
+        prepareCursorWindowsConnectorRoot(windowsConnectorRoot);
+      }
+    }
+    const wrapperSource = cursorTurnWrapperSource({
+      agentUpstreamEndpoint,
+      controlPlaneUpstreamEndpoint,
+      deniedDelegatingExecutablePaths,
+      ...(windowsTurn ? { windows: windowsTurn } : {}),
+    });
+    if (windows) wrapperProgram = writeCursorWrapperProgram(wrapperSource);
+    const sandboxList = (paths: string[]): string => (windows ? "[]" : JSON.stringify(paths));
+    child = spawnTree(process.execPath, [
+      "-e",
+      wrapperProgram ? cursorWrapperProgramBootstrap(wrapperProgram.path) : wrapperSource,
+      input.cursorBin,
+      input.statePath ?? "",
+      input.workspaceGenerationManifestPath ?? "",
+      sandboxList(deniedReadPaths),
+      sandboxList(deniedReadSubpaths),
+      sandboxList(deniedReadMetadataPaths),
+      sandboxList(deniedReadWriteRegexes),
+      sandboxList(deniedWriteRegexes),
+      sandboxList(deniedWritePaths),
+      sandboxList(deniedWriteStructuralPaths),
+      sandboxList(deniedWriteSubpaths),
+      sandboxList(deniedExecSubpaths),
+      sandboxList(allowedWriteSubpaths),
+      sandboxList(allowedReadSubpaths),
+      sandboxList(allowedNetworkUnixSockets),
+      sandboxList(allowedInternalUnixSocketRoots),
+      input.mcpConnectorSocketPath ?? "",
+      input.mcpRuntimeEntryPath ?? "",
+      input.mcpRuntimeCwd ?? "",
+      testStartupBarrier?.path ?? "",
+      testStartupBarrier?.stage ?? "",
+      String(mcpCapabilityTimeoutMs),
+      restrictRemoteAuthority ? "1" : "0",
+      input.fullAccess === true ? "1" : "0",
+      ...input.args,
+    ], {
+      cwd: input.cwd,
+      // The prompt travels as a positional argument; cursor-agent has no stdin
+      // channel (matrix row). Its own process group so group signalling reaps
+      // any descendants (on Windows the process-tree helper's job).
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+      detached: process.platform !== "win32",
+      env: {
+        ...(input.env ?? cursorCliEnv()),
+        ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+      },
+    });
+  } catch (error) {
+    wrapperProgram?.remove();
+    if (windowsConnectorRoot) rmSync(windowsConnectorRoot, { recursive: true, force: true });
+    throw error;
+  }
+  if (wrapperProgram) {
+    const program = wrapperProgram;
+    child.once("close", () => { try { program.remove(); } catch { /* a private temporary file */ } });
+    child.once("error", () => { try { program.remove(); } catch { /* a private temporary file */ } });
+  }
+  if (windows) rememberCursorWrapperForStop(child);
 
   const lineListeners = new Set<(line: string) => void>();
   const stderrChunks: string[] = [];
@@ -387,7 +454,7 @@ ${cursorWrapperSetupSource({ agentUpstreamEndpoint, controlPlaneUpstreamEndpoint
       return safeCursorTerminalErrorDetail(wrapperTerminalError);
     },
     prepared,
-    ownsDescendantReaping: process.platform !== "win32",
+    ownsDescendantReaping: !windows,
     requiresDurableTerminalEvidence: Boolean(input.statePath && restrictRemoteAuthority),
     release() {
       if (released) return;

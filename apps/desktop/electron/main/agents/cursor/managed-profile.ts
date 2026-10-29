@@ -9,11 +9,13 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
 import { renameSyncWithRetry } from "../../../../../../shared/rename-retry.mjs";
 import { everyOwnedByCurrentUserSync, isOwnedByCurrentUserSync, ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
-import { CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "../cursor-provider-constants.js";
+import { CURSOR_MCP_CONNECTOR_PARENT, CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "../cursor-provider-constants.js";
+import { cursorMcpConnectorRootPattern } from "./turn-wrapper-setup.js";
+import { cursorMcpConnectorListenPath } from "./windows-turn.js";
 import {
   applyAttestedCursorPersonalIdentity,
   assertCursorAuthIsNotTeamManaged,
@@ -46,6 +48,7 @@ import {
   CURSOR_AGENT_STATE_AUTH_KEYS,
   CURSOR_CLI_AUTH_KEYS,
   CURSOR_MCP_INSPECTION_PROBE_SOURCE,
+  CURSOR_MCP_PIPE_CONNECTOR_SOURCE,
   CURSOR_MCP_SOCKET_CONNECTOR_SOURCE,
   DARWIN_CURSOR_ENTERPRISE_HOOK_PATH,
   MAX_CURSOR_PROFILE_ENTRIES,
@@ -247,8 +250,7 @@ export function prepareCursorSupervisedProfile(
   const supervisorMcpEnv = supervisedCursorMcpEnvironment(options.supervisorMcpEnv);
   const mcpConnectorSocketPath = normalizePath(options.mcpConnectorSocketPath);
   if (options.mcpConnectorSocketPath !== undefined
-    && (!mcpConnectorSocketPath
-      || !/^\/tmp\/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/stdio[.]sock$/.test(mcpConnectorSocketPath))) {
+    && (!mcpConnectorSocketPath || !isCursorMcpConnectorSocketPath(mcpConnectorSocketPath))) {
     throw new Error("Supervised Cursor's MCP connector socket is outside its exact one-turn private namespace.");
   }
 
@@ -385,7 +387,10 @@ export function prepareCursorSupervisedProfile(
     : mcpConnectorSocketPath
       ? {
         command: process.execPath,
-        args: ["-e", CURSOR_MCP_SOCKET_CONNECTOR_SOURCE, mcpConnectorSocketPath],
+        // Windows: the wrapper listens on a named pipe for this socket path.
+        args: process.platform === "win32"
+          ? ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, cursorMcpConnectorListenPath(mcpConnectorSocketPath)]
+          : ["-e", CURSOR_MCP_SOCKET_CONNECTOR_SOURCE, mcpConnectorSocketPath],
         env: { ELECTRON_RUN_AS_NODE: "1" },
       }
     : {
@@ -578,4 +583,13 @@ export function prepareCursorSupervisedProfile(
       ...(mcpConnectorSocketPath ? { mcpRuntimeEnv: mcpRuntimeBaseEnv } : {}),
     }),
   };
+}
+
+/** The exact one-turn connector path supervised-turn-preparation makes: `<parent>/letagents-cursor-mcp-<uuid>/stdio.sock`. */
+function isCursorMcpConnectorSocketPath(path: string): boolean {
+  if (process.platform !== "win32") {
+    return /^\/tmp\/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/stdio[.]sock$/.test(path);
+  }
+  return basename(path) === "stdio.sock"
+    && new RegExp(cursorMcpConnectorRootPattern(CURSOR_MCP_CONNECTOR_PARENT, "win32")).test(dirname(path));
 }

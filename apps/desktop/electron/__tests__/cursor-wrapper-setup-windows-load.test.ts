@@ -17,8 +17,12 @@ test("the Cursor wrapper module loads on Windows with a backslash temporary fold
     assert.equal(constants.CURSOR_MCP_CONNECTOR_PARENT, windowsTemp);
     const setup = await import("../main/agents/cursor/turn-wrapper-setup.js");
     assert.equal(typeof setup.cursorWrapperSetupSource, "function");
-    // Building the pattern for a Windows parent is still refused, at the call, with the explicit error.
-    assert.throws(() => setup.cursorMcpConnectorRootPattern(windowsTemp), /unsupported characters/);
+    // On Windows the pattern is built for the backslash temporary folder at the call.
+    const pattern = new RegExp(setup.cursorMcpConnectorRootPattern(windowsTemp));
+    assert.equal(pattern.test(`${windowsTemp}\\letagents-cursor-mcp-01234567-89ab-cdef-0123-456789abcdef`), true);
+    assert.equal(pattern.test(`${windowsTemp}\\other-01234567-89ab-cdef-0123-456789abcdef`), false);
+    // The macOS sandbox escape still refuses that parent.
+    assert.throws(() => setup.cursorMcpConnectorRootPattern(windowsTemp, "darwin"), /unsupported characters/);
   } finally {
     Object.defineProperty(process, "platform", platform);
     mock.restoreAll();

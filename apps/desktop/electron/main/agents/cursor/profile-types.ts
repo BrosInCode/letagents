@@ -174,6 +174,23 @@ process.stdin.once("error", () => socket.destroy());
 process.stdout.once("error", () => socket.destroy());
 `;
 
+/** Windows: the same connector to the wrapper's named pipe (cursorMcpConnectorListenPath). */
+export const CURSOR_MCP_PIPE_CONNECTOR_SOURCE = String.raw`
+const net = require("node:net");
+const pipePath = process.argv[1];
+if (typeof pipePath !== "string" || !/^\\\\[.]\\pipe\\letagents-cursor-mcp-[0-9a-f]{32}$/.test(pipePath)) process.exit(64);
+const socket = net.createConnection({ path: pipePath });
+socket.setNoDelay(true);
+socket.once("connect", () => {
+  process.stdin.pipe(socket);
+  socket.pipe(process.stdout);
+});
+socket.once("error", () => process.exit(1));
+socket.once("close", () => process.exit(0));
+process.stdin.once("error", () => socket.destroy());
+process.stdout.once("error", () => socket.destroy());
+`;
+
 export const SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES = [
   [".cursor", "cli.json"],
   [".cursor", "cli-config.json"],

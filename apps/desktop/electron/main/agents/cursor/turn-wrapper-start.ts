@@ -1,10 +1,15 @@
 // Slice of the Cursor turn wrapper program (see turn-launcher.ts):
 // native start, not-started evidence, and the wrapper's IPC and signal
 // handlers.
-// The slices concatenate in order into one script run with `node -e`; keep
-// each slice's text exactly as the wrapper needs it.
+// The slices concatenate in order into one script run with `node -e` (on
+// Windows from an owner-private file); keep each slice's text exactly as the
+// wrapper needs it. The operating-system sandbox comes from cursorOsSandbox:
+// sandbox-exec on macOS; on Windows Cursor runs without one.
 
-export function cursorWrapperStartSource(): string {
+import type { CursorOsSandbox } from "../cursor-sandbox-policy.js";
+
+export function cursorWrapperStartSource(sandbox: CursorOsSandbox = "macos-sandbox-exec"): string {
+  const windows = sandbox === "windows-unsandboxed";
   return String.raw`async function start() {
   if (started || finalizing || authorityRetiring) return;
   started = true;
@@ -25,7 +30,12 @@ export function cursorWrapperStartSource(): string {
   // Wrapper-only: packaged Electron needs this to execute the inline Node
   // wrapper, but an Electron-backed Cursor binary must never inherit it.
   delete nativeEnv.ELECTRON_RUN_AS_NODE;
-  const sandboxed = !fullAccess && process.platform === "darwin"
+${windows ? String.raw`  // windows-unsandboxed: no operating-system sandbox (owner decision). The
+  // room's folder, profile, proxies and MCP connection still bound the turn.
+  const sandboxed = false;
+  // Cursor starts inside letagents-process-tree.exe's own job (windowsTurn).
+  const nativeCommand = windowsTurn.helper;
+` : String.raw`  const sandboxed = !fullAccess && process.platform === "darwin"
     && (restrictRemoteAuthority
       || deniedReadPaths.length > 0
       || deniedReadSubpaths.length > 0
@@ -38,7 +48,7 @@ export function cursorWrapperStartSource(): string {
       || allowedWriteSubpaths.length > 0
       || allowedReadSubpaths.length > 0);
   const nativeCommand = sandboxed ? "/usr/bin/sandbox-exec" : bin;
-  const cursorArgs = authorityProxyPort === null || agentProxyPort === null
+`}  const cursorArgs = authorityProxyPort === null || agentProxyPort === null
     ? args
     : [
       "--endpoint", "http://127.0.0.1:" + authorityProxyPort,
@@ -196,15 +206,16 @@ export function cursorWrapperStartSource(): string {
       bin,
       ...cursorArgs,
     ]
-    : cursorArgs;
+    : ${windows ? `["spawn", windowsTurn.application, windowsNativeCommandLine(cursorArgs)]` : "cursorArgs"};
   if (finalizing || authorityRetiring) return;
   native = spawn(nativeCommand, nativeArgs, {
     cwd: process.cwd(), env: nativeEnv, stdio: ["ignore", "pipe", "pipe"],
     // The durable wrapper is already a detached group leader. Keep native
     // Cursor and its descendants in that exact, still-live group so a reaped
     // native PID can never be mistaken for later group authority.
-    detached: false,
-  });
+    detached: false,${windows ? " windowsHide: true," : ""}
+  });${windows ? String.raw`
+  nativeHelperBirth = readNativeHelperBirth(native.pid);` : ""}
   native.stdout.on("data", (chunk) => {
     if (statePath && stateFd !== null && persistedBytes < maxPersistedBytes) {
       try {
