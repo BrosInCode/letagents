@@ -52,7 +52,7 @@ test("Cursor native launch, identity, and sandbox authority remain bounded domai
   }
 
   assert.match(launcherSource, /const wrapperSource = String\.raw/);
-  assert.equal(matches(launcherSource, /spawn\(process\.execPath/g).length, 2);
+  assert.equal(matches(launcherSource, /spawn(?:Tree)?\(process\.execPath/g).length, 2);
   assert.match(identitySource, /runCursorSandboxedInspection/);
   assert.match(identitySource, /\/aiserver\.v1\.DashboardService\/GetMe/);
   assert.match(sandboxSource, /export function validateCursorSandboxPaths/);
