@@ -38,7 +38,15 @@ test("desktop startup creates the window without awaiting login-shell discovery"
   );
 });
 
-test("desktop PATH hydration imports login-shell CLI locations without rewriting process inputs", async () => {
+// The login-shell branch builds home folders with the host's path module, so
+// a simulated macOS or Linux home (/Users/ada) only gives a POSIX PATH on a
+// POSIX host. Each host tests the branch it runs: the Windows branch is
+// tested below on Windows. (The app never asks for another platform's PATH.)
+const posixHostOnly = process.platform === "win32"
+  ? "simulates a macOS/Linux login shell; the host path module is Windows"
+  : false;
+
+test("desktop PATH hydration imports login-shell CLI locations without rewriting process inputs", { skip: posixHostOnly }, async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = {
     PATH: "/usr/bin:/bin",
@@ -66,7 +74,7 @@ test("desktop PATH hydration imports login-shell CLI locations without rewriting
   assert.equal(desktopRuntimeEnvironment(env).PATH, result.environment.PATH);
 });
 
-test("desktop PATH hydration preserves the active NVM runtime ahead of stale global CLIs", async () => {
+test("desktop PATH hydration preserves the active NVM runtime ahead of stale global CLIs", { skip: posixHostOnly }, async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = {
     PATH: "/usr/local/bin:/Users/ada/.nvm/versions/node/v22/bin:/usr/bin",
@@ -89,7 +97,7 @@ test("desktop PATH hydration preserves the active NVM runtime ahead of stale glo
   );
 });
 
-test("desktop PATH hydration is non-fatal when shell discovery fails", async () => {
+test("desktop PATH hydration is non-fatal when shell discovery fails", { skip: posixHostOnly }, async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin" };
 
@@ -107,6 +115,47 @@ test("desktop PATH hydration is non-fatal when shell discovery fails", async () 
     "/home/ada/.local/bin:/home/ada/.volta/bin:/home/ada/.bun/bin:/usr/local/bin:/usr/bin:/bin",
   );
   assert.equal(env.PATH, "/usr/bin:/bin");
+});
+
+test("Windows PATH hydration reads Machine and User PATH from PowerShell and adds per-user CLI folders", {
+  skip: process.platform === "win32" ? false : "the Windows branch builds folders with the host path module",
+}, async () => {
+  resetDesktopShellEnvironmentForTests();
+  const env: NodeJS.ProcessEnv = {
+    PATH: "C:\\Windows\\System32",
+    APPDATA: "C:\\Users\\Ada\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local",
+  };
+  const calls: string[] = [];
+
+  const result = await hydrateDesktopShellEnvironment({
+    env,
+    platform: "win32",
+    homeDirectory: "C:\\Users\\Ada",
+    runCommand: async (command, args) => {
+      calls.push(command);
+      assert.ok(args.includes("-NoProfile"));
+      // PowerShell 7 is not installed: Windows PowerShell answers instead.
+      if (command === "pwsh.exe") throw new Error("spawn pwsh.exe ENOENT");
+      return "__LETAGENTS_PATH_START__\r\nC:\\Program Files\\Git\\cmd;c:\\windows\\system32\r\n__LETAGENTS_PATH_END__\r\n";
+    },
+  });
+
+  assert.deepEqual(calls, ["pwsh.exe", "powershell.exe"]);
+  assert.equal(
+    result.environment.PATH,
+    [
+      "C:\\Program Files\\Git\\cmd",
+      "c:\\windows\\system32",
+      "C:\\Users\\Ada\\AppData\\Roaming\\npm",
+      "C:\\Users\\Ada\\AppData\\Local\\Programs\\nodejs",
+      "C:\\Users\\Ada\\AppData\\Local\\Volta\\bin",
+      "C:\\Users\\Ada\\.local\\bin",
+      "C:\\Users\\Ada\\.bun\\bin",
+      "C:\\Users\\Ada\\scoop\\shims",
+    ].join(";"),
+  );
+  assert.equal(env.PATH, "C:\\Windows\\System32");
 });
 
 test("Windows PATH merging is case-insensitive and uses semicolons", () => {

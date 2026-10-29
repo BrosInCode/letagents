@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import type { DesktopNotificationTarget } from "../ipc-types.js";
@@ -12,6 +12,7 @@ import {
   MAX_NOTIFICATION_TARGETS,
   type NotificationHistoryEntry,
 } from "../main/notification-state.js";
+import { assertOwnerPrivateFile } from "./harness.js";
 
 function target(index: number): DesktopNotificationTarget {
   return {
@@ -46,7 +47,7 @@ test("desktop notification state persists privately and survives a restart", asy
     assert.equal(restored.installationId, "installation-fixed");
     assert.equal(restored.deviceToken, "a".repeat(64));
     assert.deepEqual(restored.targets, [target(1)]);
-    assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(statePath, dirname(statePath));
     assert.doesNotMatch(await readFile(statePath, "utf8"), /undefined/);
   });
 });

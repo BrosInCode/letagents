@@ -49,7 +49,9 @@ test("ensureRepoWorktree creates a worktree and reports created ownership", asyn
 
     const reusedMain = await ensureRepoWorktree({ repoRoot, branch: "main", baseBranch: "main" });
     assert.equal(reusedMain.created, false);
-    assert.equal(realpathSync(reusedMain.worktreePath), realpathSync(repoRoot));
+    // Git prints the long folder name; on Windows only the native realpath
+    // expands an 8.3 short name such as RUNNER~1 in the temp path.
+    assert.equal(realpathSync.native(reusedMain.worktreePath), realpathSync.native(repoRoot));
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
@@ -99,7 +101,7 @@ test("ensureRepoWorktree keeps colliding sanitized branch names apart", async ()
     const slashed = await ensureRepoWorktree({ repoRoot, branch: "feature/foo", baseBranch: "main" });
     const dashed = await ensureRepoWorktree({ repoRoot, branch: "feature-foo", baseBranch: "main" });
 
-    assert.notEqual(realpathSync(dashed.worktreePath), realpathSync(slashed.worktreePath));
+    assert.notEqual(realpathSync.native(dashed.worktreePath), realpathSync.native(slashed.worktreePath));
     assert.equal(currentBranch(slashed.worktreePath), "feature/foo");
     assert.equal(currentBranch(dashed.worktreePath), "feature-foo");
 

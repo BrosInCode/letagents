@@ -168,8 +168,12 @@ test('file opening stays inside the recorded workspace and rejects executable or
     await symlink(join(outside, 'private.ts'), join(root, 'escape.ts'));
     assert.ok(await localWorkspaceFile(root, 'hello.ts'));
     for (const path of ['../private.ts', '/etc/passwd', 'escape.ts', 'missing.ts', 'file.command']) assert.equal(await localWorkspaceFile(root, path), null);
-    await chmod(join(root, 'hello.ts'), 0o755);
-    assert.equal(await localWorkspaceFile(root, 'hello.ts'), null);
+    // An executable file is refused. Windows has no execute bit (chmod only
+    // sets read-only, and stat never reports 0o111), so this is POSIX only.
+    if (process.platform !== 'win32') {
+      await chmod(join(root, 'hello.ts'), 0o755);
+      assert.equal(await localWorkspaceFile(root, 'hello.ts'), null);
+    }
     for (const path of ['../file.ts', 'a/../file.ts', 'a\\file.ts', 'file.ts\u0000', '/file.ts']) assert.equal(safeWorkspaceFilePath(path), false);
   } finally { await rm(root, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
@@ -193,7 +197,12 @@ test('workspace links require an exact receipt and a verified published file; ha
 });
 
 
-test('workspace link decoration memoizes the editor per extension and bundle; opening always verifies again', async (t) => {
+// Simulates macOS Launch Services and codesign (process.platform is set to
+// darwin below): an editor must be a POSIX absolute `.app` path, which a
+// Windows temp folder (C:\...) can never be. Windows uses its own editor rule.
+test('workspace link decoration memoizes the editor per extension and bundle; opening always verifies again', {
+  skip: process.platform === 'win32' ? 'simulates macOS Launch Services; editor bundles need POSIX paths' : false,
+}, async (t) => {
   const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
   const { DatabaseSync } = await import('node:sqlite');
   const { tmpdir } = await import('node:os');

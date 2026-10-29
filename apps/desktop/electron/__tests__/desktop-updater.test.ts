@@ -12,6 +12,7 @@ import {
   versionFromReleaseName,
 } from "../main/desktop-updater.js";
 import { DesktopUpdateDiagnosticLog } from "../main/update-diagnostics.js";
+import { assertOwnerPrivateFile } from "./harness.js";
 
 function controller(overrides: Partial<ConstructorParameters<typeof DesktopUpdaterController>[0]> = {}) {
   const events: string[] = [];
@@ -215,9 +216,12 @@ test("desktop updater diagnostics are private, redacted, bounded, and best effor
       assert.doesNotMatch(contents, /secret|signature/i);
       assert.match(contents, /https:\/\/downloads\.letagents\.chat\//);
       assert.match(contents, /\[REDACTED\]/);
-      assert.equal((await stat(file)).mode & 0o777, 0o600);
+      assertOwnerPrivateFile(file, root);
     }
-    assert.equal((await stat(join(root, "private"))).mode & 0o777, 0o700);
+    const folder = await stat(join(root, "private"));
+    assert.ok(folder.isDirectory());
+    // Windows keeps no POSIX mode; there the per-user profile ACL protects it.
+    if (process.platform !== "win32") assert.equal(folder.mode & 0o777, 0o700);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

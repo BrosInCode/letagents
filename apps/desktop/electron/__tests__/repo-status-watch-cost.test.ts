@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 
 import "./isolated-home.js";
-import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
+import { observeGitSpawns } from "./harness.js";
 import { refreshRepoStatus } from "../repo-status.js";
 import {
   configureRepoStatusWatchForTest,
@@ -37,23 +37,11 @@ async function settled(withinMs = 5_000): Promise<void> {
   }
 }
 
-async function countGitSpawns(directory: string): Promise<{ count: () => number; restore: () => void }> {
-  const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
-  const bin = join(directory, "bin");
-  const log = join(directory, "git-spawns.log");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(log, "");
-  writeFileSync(join(bin, "git"), `#!/bin/sh\necho "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(realGit)} "$@"\n`);
-  chmodSync(join(bin, "git"), 0o755);
-  resetDesktopShellEnvironmentForTests();
-  await startDesktopShellEnvironmentHydration({
-    env: { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` },
-    runCommand: async () => `__LETAGENTS_PATH_START__\n${bin}\n__LETAGENTS_PATH_END__\n`,
-  });
-  return {
-    count: () => readFileSync(log, "utf8").split("\n").filter(Boolean).length,
-    restore: resetDesktopShellEnvironmentForTests,
-  };
+/** Count the Git processes the watcher starts; returns a reader for the count. */
+function countGitSpawns(): { count: () => number; restore: () => void } {
+  let spawns = 0;
+  const restore = observeGitSpawns(() => { spawns += 1; });
+  return { count: () => spawns, restore };
 }
 
 function initRepo(root: string): void {
@@ -74,7 +62,7 @@ test("the reconciliation tick is one git status unless repository metadata chang
     emitToMainWindow: () => undefined,
     getMainWindow: () => visibleWindow(),
   });
-  const git = await countGitSpawns(temporary);
+  const git = countGitSpawns();
   try {
     await startRepoStatusWatch(root);
     await settled();
