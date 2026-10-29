@@ -1,10 +1,12 @@
 import electron from "electron";
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
 import { assertMessageAttachmentFits } from "../../../../shared/message-attachments.mjs";
 import type {
+  DesktopChosenAttachment,
   DesktopDroppedAttachmentContent,
   DesktopStagedAttachment,
 } from "../ipc-types.js";
@@ -16,7 +18,7 @@ import {
   readLocalAttachmentBytes,
 } from "./attachments/local-store.js";
 import type { RoomMessageAttachmentPayload } from "./attachments/mappers.js";
-import { attachmentFile, type AttachmentFile, type AttachmentStore } from "./attachments/store.js";
+import { attachmentFile, stagedAttachment, type AttachmentFile, type AttachmentStore } from "./attachments/store.js";
 import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,
@@ -49,10 +51,15 @@ export async function resolveAttachmentStore(roomIdentifier: string): Promise<At
     : createCloudAttachmentStore(cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier));
 }
 
-export async function pickAndStageDesktopAttachments(
-  roomIdentifier: string,
-): Promise<DesktopStagedAttachment[]> {
-  const store = await resolveAttachmentStore(roomIdentifier);
+/**
+ * Files chosen in the picker, held in main until the composer stages them.
+ * The composer shows a chip as soon as the picker closes; the upload runs after.
+ */
+const chosenAttachments = new Map<string, AttachmentFile>();
+// A choice the composer never stages (room switched, window closed) is dropped.
+const CHOSEN_ATTACHMENT_TTL_MS = 10 * 60_000;
+
+export async function chooseDesktopAttachmentFiles(): Promise<DesktopChosenAttachment[]> {
   focusMainWindow();
   const parent = getMainWindow();
   const options: Electron.OpenDialogOptions = {
@@ -67,12 +74,31 @@ export async function pickAndStageDesktopAttachments(
     : dialog.showOpenDialog(options));
   if (result.canceled || result.filePaths.length === 0) return [];
 
-  // Refuse an oversized pick before any file is read or staged.
+  // Refuse an oversized pick before any file is read.
   for (const filePath of result.filePaths) {
     assertMessageAttachmentFits(basename(filePath), (await stat(filePath)).size);
   }
-  return stageAll(store, result.filePaths.map((filePath) => async () =>
+  const files = await Promise.all(result.filePaths.map(async (filePath) =>
     attachmentFile({ fileName: basename(filePath), bytes: await readFile(filePath) })));
+  return files.map((file) => {
+    const token = randomUUID();
+    chosenAttachments.set(token, file);
+    setTimeout(() => chosenAttachments.delete(token), CHOSEN_ATTACHMENT_TTL_MS).unref?.();
+    const { uploadId: _unused, ...shown } = stagedAttachment(file, token);
+    return { token, ...shown };
+  });
+}
+
+/** Upload files chosen by chooseDesktopAttachmentFiles. Each token stages once. */
+export async function stageChosenDesktopAttachments(
+  roomIdentifier: string,
+  tokens: string[],
+): Promise<DesktopStagedAttachment[]> {
+  const files = tokens.map((token) => chosenAttachments.get(token));
+  for (const token of tokens) chosenAttachments.delete(token);
+  if (files.some((file) => !file)) throw new Error("The chosen files are no longer available. Choose them again.");
+  const store = await resolveAttachmentStore(roomIdentifier);
+  return stageAll(store, (files as AttachmentFile[]).map((file) => async () => file));
 }
 
 export async function stageDroppedDesktopAttachmentContents(
@@ -87,14 +113,18 @@ export async function stageDroppedDesktopAttachmentContents(
   })));
 }
 
-/** Stage every file or none: a failure discards the files this call already staged. */
+/**
+ * Stage every file or none, all at once: each upload is two round trips, so
+ * one after another made a four-file message wait for eight. A failure
+ * discards the files this call staged.
+ */
 async function stageAll(store: AttachmentStore, files: Array<() => Promise<AttachmentFile>>): Promise<DesktopStagedAttachment[]> {
-  const staged: DesktopStagedAttachment[] = [];
-  try {
-    for (const file of files) staged.push(await store.stage(await file()));
-  } catch (error) {
+  const results = await Promise.allSettled(files.map(async (file) => store.stage(await file())));
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  const staged = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  if (failed) {
     await Promise.all(staged.map((attachment) => store.discard(attachment.uploadId).catch(() => undefined)));
-    throw error;
+    throw failed.reason;
   }
   return staged;
 }

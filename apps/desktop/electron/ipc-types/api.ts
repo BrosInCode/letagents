@@ -117,6 +117,7 @@ import type {
   DesktopRoomStreamEvent,
   DesktopSendRoomMessageResult,
   DesktopStagedAttachment,
+  DesktopChosenAttachment,
 } from "./room.js";
 import type { DesktopMcpInstallManyResult, DesktopMcpInstallResult, DesktopMcpInstallState, DesktopMcpInstallTargetId } from "./setup.js";
 import type {
@@ -230,7 +231,9 @@ export interface DesktopApi {
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;
     markThreadRead: (roomIdentifier: string, threadRootId: string, messageId?: string | null) => Promise<DesktopRoomThreadReadResult>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
-    pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
+    /** Open the file picker. Returns the chosen files without uploading them. */
+    chooseAttachments: () => Promise<DesktopChosenAttachment[]>;
+    stageChosenAttachments: (roomIdentifier: string, tokens: string[]) => Promise<DesktopStagedAttachment[]>;
     stageDroppedAttachmentContents?: (
       roomIdentifier: string,
       files: DesktopDroppedAttachmentContent[]

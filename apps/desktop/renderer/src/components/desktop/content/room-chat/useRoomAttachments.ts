@@ -1,6 +1,6 @@
 import { ref, watch, type Ref } from "vue";
 import type {
-  DesktopDroppedAttachmentContent,
+  DesktopChosenAttachment,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
@@ -10,6 +10,7 @@ import { desktopIpc } from "../../../../ipc/index.js";
 import {
   hasDraggedFiles,
   readDroppedAttachmentContent,
+  releasePendingPreview,
   toPendingAttachmentDraft,
 } from "./attachment-utils";
 import { MESSAGE_ATTACHMENT_LIMITS } from "../../../../../../../../shared/message-attachments.mjs";
@@ -27,8 +28,9 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
   const pendingAttachmentDrafts = ref<PendingAttachmentDraft[]>([]);
   // Each problem is a new object, so the same problem twice shows twice.
   const attachmentProblem = ref<AttachmentProblem | null>(null);
-  // The attempt that failed, for "Try again": the picker, or the same dropped files.
+  // The last attempt, for "Try again": the picker, or the same dropped files.
   let lastAttempt: { kind: "pick" } | { kind: "drop"; files: File[] } | null = null;
+  // True while the file picker is open. Uploads show as pending chips instead.
   const attaching = ref(false);
   const isDraggingAttachment = ref(false);
   let attachmentDragDepth = 0;
@@ -42,80 +44,91 @@ export function useRoomAttachments(options: RoomAttachmentsOptions) {
     attachmentDragDepth = 0;
   });
 
+  function availableSlots(): number {
+    return Math.max(0, maxAttachments - attachmentDrafts.value.length - pendingAttachmentDrafts.value.length);
+  }
+
+  /** Keep what fits in the free slots; say so when some files do not fit. */
+  function takeWhatFits<T>(files: T[]): T[] {
+    const slots = availableSlots();
+    if (files.length > slots) attachmentProblem.value = { kind: "too-many", max: maxAttachments };
+    return files.slice(0, slots);
+  }
+
+  /**
+   * Show the chips now and upload behind them. A chip appears the moment a file
+   * is chosen, pasted or dropped; it becomes a sendable attachment when its
+   * upload finishes. Several batches can upload at the same time.
+   */
+  async function uploadBehindChips(
+    pendingDrafts: PendingAttachmentDraft[],
+    stage: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>,
+    failedFileName: string | null,
+  ): Promise<void> {
+    const roomIdentifier = options.roomIdentifier.value;
+    if (!roomIdentifier || !pendingDrafts.length) return;
+    pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
+    try {
+      const staged = await stage(roomIdentifier);
+      // A room switch cleared the drafts; the server expires uploads nobody sends.
+      if (options.roomIdentifier.value === roomIdentifier) attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+    } catch (error) {
+      if (options.roomIdentifier.value === roomIdentifier) attachmentProblem.value = attachmentProblemFromError(error, failedFileName);
+    } finally {
+      const pendingIds = new Set(pendingDrafts.map((attachment) => attachment.localId));
+      pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.filter((attachment) => !pendingIds.has(attachment.localId));
+      for (const draft of pendingDrafts) releasePendingPreview(draft);
+    }
+  }
+
   async function pickAttachments(): Promise<void> {
     if (attaching.value || !options.roomIdentifier.value) return;
     attaching.value = true;
     attachmentProblem.value = null;
     lastAttempt = { kind: "pick" };
+    let chosen: DesktopChosenAttachment[];
     try {
-      const staged = await desktopIpc.room.pickAttachments(options.roomIdentifier.value);
-      attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+      chosen = await desktopIpc.room.chooseAttachments();
     } catch (error) {
       attachmentProblem.value = attachmentProblemFromError(error);
+      return;
     } finally {
       attaching.value = false;
     }
+    const accepted = takeWhatFits(chosen);
+    await uploadBehindChips(
+      accepted.map(({ token, fileName, mimeType, sizeBytes, previewDataUrl }) => ({ localId: token, fileName, mimeType, sizeBytes, previewDataUrl })),
+      (roomIdentifier) => desktopIpc.room.stageChosenAttachments(roomIdentifier, accepted.map((file) => file.token)),
+      accepted.length === 1 ? accepted[0]!.fileName : null,
+    );
   }
 
   async function stageDroppedAttachments(files: File[]): Promise<void> {
     if (files.length === 0) return;
-    if (attaching.value) {
-      attachmentProblem.value = { kind: "busy" };
-      return;
-    }
     if (!options.roomIdentifier.value) {
       attachmentProblem.value = { kind: "no-room" };
       return;
     }
     attachmentProblem.value = null;
-    const availableSlots = Math.max(0, maxAttachments - attachmentDrafts.value.length - pendingAttachmentDrafts.value.length);
-    if (availableSlots <= 0) {
+    if (availableSlots() <= 0) {
       attachmentProblem.value = { kind: "too-many", max: maxAttachments };
       return;
     }
-    const acceptedFiles = files.slice(0, availableSlots);
-    if (files.length > availableSlots) {
-      attachmentProblem.value = { kind: "too-many", max: maxAttachments };
-    }
-    const validFiles = acceptedFiles.filter((file) => {
+    const validFiles = takeWhatFits(files).filter((file) => {
       if (file.size <= maxAttachmentBytes) return true;
       attachmentProblem.value = { kind: "too-large", fileName: file.name || null, limit: formatBytes(maxAttachmentBytes) };
       return false;
     });
     if (!validFiles.length) return;
-
-    const pendingDrafts = validFiles.map(toPendingAttachmentDraft);
-    pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
-    attaching.value = true;
     lastAttempt = { kind: "drop", files: validFiles };
-    try {
+    await uploadBehindChips(validFiles.map(toPendingAttachmentDraft), async (roomIdentifier) => {
       const stageDroppedAttachmentContents = desktopIpc.room.stageDroppedAttachmentContents;
       if (!stageDroppedAttachmentContents) {
         throw new Error("Restart LetAgents Desktop to enable drag and drop attachments.");
       }
-      const droppedFiles: DesktopDroppedAttachmentContent[] = [];
-      for (const file of validFiles) {
-        droppedFiles.push(await readDroppedAttachmentContent(file));
-      }
-      pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.map((attachment) => {
-        const draftIndex = pendingDrafts.findIndex((draft) => draft.localId === attachment.localId);
-        if (draftIndex < 0) return attachment;
-        const droppedFile = droppedFiles[draftIndex];
-        if (!droppedFile?.contentBase64 || !droppedFile.mimeType.startsWith("image/")) return attachment;
-        return {
-          ...attachment,
-          previewDataUrl: `data:${droppedFile.mimeType};base64,${droppedFile.contentBase64}`,
-        };
-      });
-      const staged = await stageDroppedAttachmentContents(options.roomIdentifier.value, droppedFiles);
-      attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
-    } catch (error) {
-      attachmentProblem.value = attachmentProblemFromError(error, validFiles.length === 1 ? validFiles[0]!.name || null : null);
-    } finally {
-      const pendingIds = new Set(pendingDrafts.map((attachment) => attachment.localId));
-      pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.filter((attachment) => !pendingIds.has(attachment.localId));
-      attaching.value = false;
-    }
+      const droppedFiles = await Promise.all(validFiles.map(readDroppedAttachmentContent));
+      return stageDroppedAttachmentContents(roomIdentifier, droppedFiles);
+    }, validFiles.length === 1 ? validFiles[0]!.name || null : null);
   }
 
   /** "Try again": repeat the attempt that failed, with the same files. */

@@ -410,8 +410,19 @@ const composerPlaceholder = computed(() =>
   props.roomIdentifier ? `Reply to ${displayName(props.parent)}...` : "Open a room to reply"
 );
 const canSend = computed(() =>
-  Boolean(props.roomIdentifier && !props.sending && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0))
+  Boolean(props.roomIdentifier && !props.sending
+    && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0))
 );
+// Enter while files upload sends the reply once they finish, with them; the
+// composer does the same. A failed or removed upload cancels it.
+const sendAfterUpload = ref<number | null>(null);
+watch(() => props.pendingAttachmentDrafts.length, (pending) => {
+  const expected = sendAfterUpload.value;
+  if (expected === null || pending > 0) return;
+  sendAfterUpload.value = null;
+  if (props.attachmentDrafts.length >= expected) submitThreadReply();
+});
+watch(() => [props.roomIdentifier, props.parent.id], () => { sendAfterUpload.value = null; });
 const mentionOpen = computed(() => mentionQuery.value !== null && mentionCandidates.value.length > 0);
 const mentionCandidates = computed(() => {
   return roomMentionCandidates(props.participants, mentionQuery.value);
@@ -540,6 +551,10 @@ function handleAttachmentDrop(event: DragEvent): void {
 }
 
 function submitThreadReply(): void {
+  if (props.pendingAttachmentDrafts.length && props.roomIdentifier && !props.sending) {
+    sendAfterUpload.value = props.attachmentDrafts.length + props.pendingAttachmentDrafts.length;
+    return;
+  }
   const text = draft.value.trim();
   if ((!text && !selectedGif.value && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
   const submittedGif = selectedGif.value;

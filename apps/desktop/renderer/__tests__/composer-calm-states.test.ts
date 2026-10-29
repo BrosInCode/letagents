@@ -47,7 +47,6 @@ test("each attach problem is one calm line with at most one action", () => {
   assert.equal(attachmentProblemText({ kind: "failed", fileName: null }), "Couldn't attach the file.");
   assert.equal(attachmentProblemText({ kind: "too-large", fileName: null, limit: "25 MB" }), "Couldn't attach the file · it's over 25 MB.");
   assert.equal(attachmentProblemText({ kind: "too-many", max: 4 }), "You can attach up to 4 files to one message.");
-  assert.equal(attachmentProblemNotice({ kind: "busy" }).action, undefined);
   assert.equal(attachmentProblemText(null), null);
 });
 
@@ -119,7 +118,7 @@ test("a failed attach becomes a problem, and Try again repeats the same dropped 
   const staged: string[][] = [];
   let fail = true;
   Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: { letagentsDesktop: { room: {
-    pickAttachments: async () => { throw ipcError("huge.mov is larger than 25 MB."); },
+    chooseAttachments: async () => { throw ipcError("huge.mov is larger than 25 MB."); },
     stageDroppedAttachmentContents: async (_room: string, files: Array<{ fileName: string }>) => {
       staged.push(files.map(file => file.fileName));
       if (fail) throw ipcError("socket hang up");
@@ -153,6 +152,65 @@ test("a failed attach becomes a problem, and Try again repeats the same dropped 
     assert.deepEqual(staged, [["notes.txt"], ["notes.txt"]], "Try again sends the same file");
     assert.equal(attachments.attachmentProblem.value, null);
     assert.equal(attachments.attachmentDrafts.value.length, 1);
+  } finally {
+    scope.stop();
+    await vite.close();
+    if (original) Object.defineProperty(globalThis, "window", original); else Reflect.deleteProperty(globalThis, "window");
+    if (originalReader) Object.defineProperty(globalThis, "FileReader", originalReader); else Reflect.deleteProperty(globalThis, "FileReader");
+  }
+});
+
+test("a chosen or dropped file shows as a chip before its upload finishes", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  const original = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let finishChosen: (value: unknown) => void = () => undefined;
+  let finishDropped: (value: unknown) => void = () => undefined;
+  Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: { letagentsDesktop: { room: {
+    chooseAttachments: async () => [{ token: "t1", fileName: "shot.png", mimeType: "image/png", sizeBytes: 3, previewDataUrl: "data:image/png;base64,AAA" }],
+    stageChosenAttachments: (_room: string, tokens: string[]) => new Promise(resolve => {
+      finishChosen = () => resolve(tokens.map(token => ({ uploadId: `up-${token}`, fileName: "shot.png", mimeType: "image/png", sizeBytes: 3, previewDataUrl: null })));
+    }),
+    stageDroppedAttachmentContents: (_room: string, files: Array<{ fileName: string }>) => new Promise(resolve => {
+      finishDropped = () => resolve(files.map(file => ({ uploadId: `up-${file.fileName}`, fileName: file.fileName, mimeType: "text/plain", sizeBytes: 5, previewDataUrl: null })));
+    }),
+  } } } });
+  const originalReader = Object.getOwnPropertyDescriptor(globalThis, "FileReader");
+  Object.defineProperty(globalThis, "FileReader", { configurable: true, writable: true, value: class extends EventTarget {
+    result: string | null = null;
+    error = null;
+    readAsDataURL(file: Blob) {
+      void file.arrayBuffer().then(bytes => {
+        this.result = `data:${file.type};base64,${Buffer.from(bytes).toString("base64")}`;
+        this.dispatchEvent(new Event("load"));
+      });
+    }
+  } });
+  const scope = effectScope();
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    const { useRoomAttachments } = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/useRoomAttachments.ts");
+    const attachments = scope.run(() => useRoomAttachments({ roomIdentifier: ref("room-a"), discardAttachment: () => undefined }))!;
+
+    const picking = attachments.pickAttachments();
+    await settle();
+    assert.equal(attachments.attaching.value, false, "the picker is closed; the upload does not block more files");
+    assert.deepEqual(attachments.pendingAttachmentDrafts.value.map((draft: { fileName: string; previewDataUrl: string | null }) => [draft.fileName, draft.previewDataUrl]),
+      [["shot.png", "data:image/png;base64,AAA"]], "the picked image shows with its preview while it uploads");
+
+    // A drop while the pick still uploads is accepted and shows at once.
+    const dropping = attachments.stageDroppedAttachments([new File(["hello"], "notes.txt", { type: "text/plain" })]);
+    assert.deepEqual(attachments.pendingAttachmentDrafts.value.map((draft: { fileName: string }) => draft.fileName), ["shot.png", "notes.txt"]);
+    assert.equal(attachments.attachmentProblem.value, null);
+
+    finishChosen(undefined);
+    await picking;
+    assert.deepEqual(attachments.attachmentDrafts.value.map((draft: { uploadId: string }) => draft.uploadId), ["up-t1"]);
+    assert.deepEqual(attachments.pendingAttachmentDrafts.value.map((draft: { fileName: string }) => draft.fileName), ["notes.txt"]);
+    await settle();
+    finishDropped(undefined);
+    await dropping;
+    assert.deepEqual(attachments.attachmentDrafts.value.map((draft: { uploadId: string }) => draft.uploadId), ["up-t1", "up-notes.txt"]);
+    assert.equal(attachments.pendingAttachmentDrafts.value.length, 0);
   } finally {
     scope.stop();
     await vite.close();
