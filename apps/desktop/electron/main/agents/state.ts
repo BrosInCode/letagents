@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -14,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 import { getLetAgentsLocalStatePath } from "../paths.js";
+import { protectOwnerPrivateSync } from "../../../../../shared/owner-private-fs.mjs";
 
 const STATE_LOCK_WAIT_MS = 25;
 const STATE_LOCK_TIMEOUT_MS = 2_000;
@@ -171,7 +171,7 @@ function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState)
     closeSync(tempFd);
     tempFd = null;
     renameSync(tempPath, statePath);
-    chmodSync(statePath, 0o600);
+    protectOwnerPrivateSync(statePath, "file");
   } finally {
     if (tempFd !== null) {
       closeSync(tempFd);

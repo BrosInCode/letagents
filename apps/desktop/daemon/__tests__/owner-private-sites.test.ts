@@ -21,7 +21,7 @@ import { isDaemonEntryPoint } from "../entry-point.js";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { RoomTurnAttachmentStager } from "../room-turn-attachments.js";
 import { decryptStateRecoveryBackup, prepareStateRecoveryBackup } from "../state-recovery-backup.js";
-import { asWindows, fakeWindowsSecurity } from "./helpers/fake-windows-security.js";
+import { asWindows, fakeWindowsSecurity } from "../../electron/__tests__/helpers/fake-windows-security.js";
 
 const posixOnly = process.platform === "win32" ? "POSIX modes" : false;
 const windowsOnly = process.platform === "win32" ? false : "needs real Windows ACLs";

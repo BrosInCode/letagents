@@ -353,11 +353,14 @@ export function assertOwnerPrivateSync(path, options = {}) {
 /** POSIX: chmod 0700/0600. Windows: a protected DACL for this account and SYSTEM. */
 export async function protectOwnerPrivate(path, kind, options = {}) {
   if (!isWindows(options)) return chmod(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
+  // A missing path fails with ENOENT, as chmod does, so callers that skip a missing file still can.
+  await lstat(path);
   await windowsSecurity(options).protect(path, kind);
 }
 
 export function protectOwnerPrivateSync(path, kind, options = {}) {
   if (!isWindows(options)) return chmodSync(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
+  lstatSync(path);
   windowsSecurity(options).protectSync(path, kind);
 }
 

@@ -1,7 +1,7 @@
 import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { roomApiOrigin, isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
+import { link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { cursorLaneRetirementSchema, type CursorLaneRetirement } from "./runtime-recovery-journal.js";
@@ -15,6 +15,7 @@ import {
   RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY,
   WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL,
 } from "./worker-binding-retention.js";
+import { protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -815,7 +816,7 @@ export class WorkerBindingStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
     }
-    await chmod(backup, 0o600);
+    await protectOwnerPrivate(backup, "file");
     if (isRedactedLegacyBackup(raw, expectedChecksum)) return true;
     // Builds before the SQLite credential-custody hardening retained the
     // exact imported v1 JSON as their migration backup. Its checksum is the
@@ -856,7 +857,7 @@ export class WorkerBindingStore {
         throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
       }
       await rename(temporary, backup);
-      await chmod(backup, 0o600);
+      await protectOwnerPrivate(backup, "file");
       await this.syncDirectory(dirname(backup));
       const converted = await this.readOwnerOnly(backup);
       if (converted === undefined || !isRedactedLegacyBackup(converted, expectedChecksum)) {
@@ -895,9 +896,9 @@ export class WorkerBindingStore {
 
   private async readOwnerOnly(path: string): Promise<string | undefined> {
     try {
-      await chmod(path, 0o600);
+      await protectOwnerPrivate(path, "file");
       const raw = await readFile(path, "utf8");
-      await chmod(path, 0o600);
+      await protectOwnerPrivate(path, "file");
       return raw;
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -916,7 +917,7 @@ export class WorkerBindingStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
-    await chmod(holding, 0o600);
+    await protectOwnerPrivate(holding, "file");
     await this.syncDirectory(dirname(holding));
     return holding;
   }
@@ -957,7 +958,7 @@ export class WorkerBindingStore {
     const evidence = await this.collectClaimedEvidence(true);
     const expectedPrefix = /\.corrupt\.([0-9a-f]{16})$/.exec(quarantine)?.[1];
     for (const claimed of evidence) await this.moveClaimedToQuarantine(claimed, quarantine, expectedPrefix);
-    await chmod(quarantine, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    await protectOwnerPrivate(quarantine, "file").catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
 
   private async collectClaimedEvidence(includePublic: boolean): Promise<string[]> {
@@ -1004,7 +1005,7 @@ export class WorkerBindingStore {
       // link(2) is no-replace: a concurrent B remains at source and A stays
       // claimed for later recovery instead of being silently overwritten.
       await link(claimed, this.legacyJsonPath);
-      await chmod(this.legacyJsonPath, 0o600);
+      await protectOwnerPrivate(this.legacyJsonPath, "file");
       await unlink(claimed);
       await this.syncDirectory(dirname(claimed));
     } catch (error: unknown) {
@@ -1020,7 +1021,7 @@ export class WorkerBindingStore {
         // hard-link + unlink is an exclusive move: no pre-existing artifact
         // is overwritten, even under simultaneous openers.
         await link(path, destination);
-        await chmod(destination, 0o600);
+        await protectOwnerPrivate(destination, "file");
         await unlink(path);
         await this.syncDirectory(dirname(destination));
         return destination;
@@ -1032,7 +1033,7 @@ export class WorkerBindingStore {
   }
 
   private async chmodIfPresent(path: string): Promise<void> {
-    await chmod(path, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    await protectOwnerPrivate(path, "file").catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
   private async syncDirectory(path: string): Promise<void> {
     const handle = await open(path, "r");
@@ -1070,7 +1071,7 @@ export class WorkerBindingStore {
     const adopted = `${this.legacyJsonPath}.claimed.recovered.${randomUUID()}`;
     try { await rename(claimed, adopted); }
     catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("Legacy worker binding orphan claim disappeared during recovery."); throw error; }
-    await chmod(adopted, 0o600);
+    await protectOwnerPrivate(adopted, "file");
     await this.syncDirectory(dirname(adopted));
     return adopted;
   }

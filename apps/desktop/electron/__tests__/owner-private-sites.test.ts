@@ -19,7 +19,7 @@ import {
 import { readRegularFileNoFollow, writePrivateFileAtomic } from "../main/agents/cursor/profile-filesystem.js";
 import { relocateCursorConversationNamespace } from "../main/agents/cursor/managed-profile.js";
 import { gitEmptyHome, gitTemporaryRoot } from "../main/agents/supervised-workspace-generation/git.js";
-import { asWindows, fakeWindowsSecurity } from "../../daemon/__tests__/helpers/fake-windows-security.js";
+import { asWindows, fakeWindowsSecurity } from "./helpers/fake-windows-security.js";
 import type { ProviderRoomTurnRequest } from "../main/agents/provider-adapter.js";
 
 const posixOnly = process.platform === "win32" ? "POSIX modes" : false;

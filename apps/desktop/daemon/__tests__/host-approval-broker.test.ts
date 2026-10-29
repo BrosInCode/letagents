@@ -18,7 +18,7 @@ import { ApprovalJournalError } from "../execution-approval-journal.js";
 import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../../shared/execution-delegation-decision.mjs";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { assertHostToolScope, hostToolScopeSchema } from "../host-tool-rules.js";
-import { asWindows, fakeWindowsSecurity } from "./helpers/fake-windows-security.js";
+import { asWindows, fakeWindowsSecurity } from "../../electron/__tests__/helpers/fake-windows-security.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
