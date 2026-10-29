@@ -6,6 +6,8 @@ import {
   WINDOWS_APP_USER_MODEL_ID,
   applyWindowsAppUserModelId,
   showWindowsSmokeNotification,
+  startWindowsSmokeNotification,
+  windowsSmokeNotificationSettled,
 } from "../main/windows-app-identity.js";
 
 function fakeApp(isPackaged: boolean) {
@@ -54,4 +56,10 @@ test("the smoke notification reports what Windows did with it and never throws",
     assert.equal(await showWindowsSmokeNotification(fakeNotificationClass(behaviour), (line) => lines.push(line), 20), expected);
     assert.deepEqual(lines, [logged]);
   }
+});
+
+test("the smoke toast runs only in a Windows smoke check, and the smoke exit can always wait for it", async () => {
+  assert.equal(startWindowsSmokeNotification("darwin", { LETAGENTS_DESKTOP_SMOKE_CHECK: "1" }), null);
+  assert.equal(startWindowsSmokeNotification("win32", {}), null);
+  assert.equal(await windowsSmokeNotificationSettled(), undefined);
 });

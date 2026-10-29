@@ -104,7 +104,9 @@ assert(
   "The installer did not keep itself for the next differential update.",
 );
 // Windows shows the app's toasts only when the process's AppUserModelID
-// (set by the app at startup) matches its Start menu shortcut's.
+// (set by the app at startup) matches its Start menu shortcut's. These shell
+// reads are the proof that it will display them; the smoke toast below shows
+// only that Windows accepted one.
 const appIds = shellAppIds([startMenuShortcut, desktopShortcut]);
 assert(
   appIds.shortcuts.length === 2 && appIds.shortcuts.every((id) => id === WINDOWS_APP_USER_MODEL_ID),
@@ -156,6 +158,12 @@ assert(update.status === 0, `The update installer exited with ${update.status}.`
 await waitFor("the updated app to start again", () => [...runningAppIds()].some((id) => !before.has(id)));
 assert(!existsSync(desktopShortcut), "The update created the deleted desktop shortcut again.");
 assert(registryValue(uninstallKey, "InstallLocation")?.includes(installDirectory), "The update moved the install.");
+// The update created the Start menu shortcut again; it must carry the ID too.
+const updatedAppIds = shellAppIds([startMenuShortcut]);
+assert(
+  updatedAppIds.shortcuts.length === 1 && updatedAppIds.shortcuts[0] === WINDOWS_APP_USER_MODEL_ID,
+  `After the update the Start menu shortcut carries ${JSON.stringify(updatedAppIds.shortcuts)}; expected ${WINDOWS_APP_USER_MODEL_ID}.`,
+);
 spawnSync("taskkill", ["/F", "/IM", WINDOWS_EXECUTABLE_NAME], { stdio: "inherit" });
 await waitFor("the updated app to stop", () => runningAppIds().size === 0);
 

@@ -155,7 +155,10 @@ FunctionEnd
           System::Call 'SHLWAPI::SHStrDupW(w "${APP_ID}",*p.r5)i.r4'
           ${If} $4 = 0
             System::Call '*${SYSSTRUCT_PROPERTYKEY}(${PKEY_AppUserModel_ID})p.r3'
-            System::Call '*${SYSSTRUCT_PROPVARIANT}(${VT_LPWSTR},,p r5)p.r6'
+            ; The whole PROPVARIANT, then its fields: giving the third field a
+            ; pointer type in one call would shrink the block to 12 bytes on x86.
+            System::Call '*(&i${SYSSIZEOF_PROPVARIANT})p.r6'
+            System::Call '*$6(&i2 ${VT_LPWSTR},&i6,p r5)'
             ${IPropertyStore::SetValue} $2 '($3,$6)'
             ${IPropertyStore::Commit} $2 ""
             ; Frees the SHStrDupW copy too.

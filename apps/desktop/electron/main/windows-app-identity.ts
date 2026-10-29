@@ -26,19 +26,42 @@ export function applyWindowsAppUserModelId(
   return id;
 }
 
+type SmokeNotificationOutcome = "shown" | "failed" | "timeout";
+let smokeNotification: Promise<SmokeNotificationOutcome> | null = null;
+
 /**
- * Smoke check only: shows one toast and logs whether Windows accepted it, so
- * a CI run of the installed app shows that its ID reaches the notification
- * system. Resolves with the outcome; it never throws.
+ * Smoke check on Windows only (LETAGENTS_DESKTOP_SMOKE_CHECK=1): shows one
+ * toast. Electron is loaded here, not imported at the top, so this module
+ * loads anywhere without it.
+ */
+export function startWindowsSmokeNotification(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<SmokeNotificationOutcome> | null {
+  if (platform !== "win32" || env.LETAGENTS_DESKTOP_SMOKE_CHECK !== "1") return null;
+  smokeNotification ??= import("electron").then(({ Notification }) => showWindowsSmokeNotification(Notification));
+  return smokeNotification;
+}
+
+/** The smoke check waits for the toast's outcome before it exits, at most the toast's own timeout. */
+export function windowsSmokeNotificationSettled(): Promise<unknown> {
+  return smokeNotification ?? Promise.resolve();
+}
+
+/**
+ * Shows one toast and logs whether Windows accepted it ("shown" is
+ * ToastNotifier.Show succeeding). It does not prove that Windows displayed
+ * it: the shortcut's AppUserModelID, which the install smoke test reads back,
+ * is what makes Windows display it. Resolves with the outcome; never throws.
  */
 export function showWindowsSmokeNotification(
   NotificationClass: new (options: NotificationConstructorOptions) => ElectronNotification,
   log: (message: string) => void = (message) => console.log(message),
   timeoutMs = 10_000,
-): Promise<"shown" | "failed" | "timeout"> {
+): Promise<SmokeNotificationOutcome> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (outcome: "shown" | "failed" | "timeout", detail = "") => {
+    const finish = (outcome: SmokeNotificationOutcome, detail = "") => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);

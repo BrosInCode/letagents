@@ -224,6 +224,8 @@ test("the installer's shortcuts and the app's process share one AppUserModelID",
     assert.ok(tagged > created && installer.slice(created, tagged).split("\n").length <= 2, `${shortcut} gets the AppUserModelID`);
   }
   assert.match(installer, /\$\{IPropertyStore::SetValue\} \$2 '\(\$3,\$6\)'/);
+  // The PROPVARIANT block is allocated whole before its fields are written.
+  assert.match(installer, /System::Call '\*\(&i\$\{SYSSIZEOF_PROPVARIANT\}\)p\.r6'\s+System::Call '\*\$6\(&i2 \$\{VT_LPWSTR\},&i6,p r5\)'/);
   assert.match(installer, /PKEY_AppUserModel_ID/);
   // The app sets it before notifications are prepared and any window opens.
   const applied = main.indexOf("applyWindowsAppUserModelId(app);");
