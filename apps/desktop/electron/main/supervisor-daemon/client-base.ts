@@ -21,7 +21,7 @@ import {
   TURN_CONTROL_REQUEST_TIMEOUT_MS,
 } from "./constants.js";
 import { isConnectionUnavailable, SupervisorDaemonProtocolMismatchError, SupervisorDaemonRequestTimeoutError } from "./errors.js";
-import { defaultInspectDaemonProcess } from "./process-identity.js";
+import { defaultInspectDaemonProcess, signalDaemonProcess } from "./process-identity.js";
 import type {
   DaemonHandoffDiagnostic,
   DaemonIdentityInspection,
@@ -74,7 +74,8 @@ export abstract class SupervisorDaemonClientBase {
   protected readonly spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   protected readonly daemonWorkingDirectory: string;
   protected readonly lifecycleLogPath: string;
-  protected readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+  /** `identity`: the retired daemon's recorded kernelStartTime; Windows signals only with it. */
+  protected readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL", identity?: string) => void;
   protected readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
   protected readonly reportHandoffDiagnostic: (diagnostic: DaemonHandoffDiagnostic) => void;
   protected readonly naturalExitTimeoutMs: number;
@@ -117,12 +118,12 @@ export abstract class SupervisorDaemonClientBase {
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? this.stateDir;
     this.lifecycleLogPath = options.lifecycleLogPath ?? join(this.stateDir, "daemon-lifecycle.jsonl");
-    this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
+    this.signalDaemon = options.signalDaemon ?? ((pid, signal, identity) => {
       if (signal === "SIGTERM" && options.terminateDaemon) {
         options.terminateDaemon(pid);
         return;
       }
-      process.kill(pid, signal);
+      signalDaemonProcess(pid, signal, identity);
     });
     this.inspectDaemonProcess = options.inspectDaemonProcess ?? defaultInspectDaemonProcess;
     this.reportHandoffDiagnostic = options.reportHandoffDiagnostic ?? ((diagnostic) => {

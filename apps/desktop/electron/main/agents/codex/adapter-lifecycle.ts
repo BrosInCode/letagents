@@ -4,7 +4,8 @@ import { nativeExecutionId } from "../provider-execution-observer.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../../../../shared/execution-protocol.js";
 import { synthesizeTerminalPayload, sameProviderConnectionIdentity, type ProviderActivityEvent, type ProviderContinuationRef, type ProviderHandle, type ProviderStopOptions, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderStreamEvent, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { DEFAULT_STOP_GRACE_MS, delay, sameProcessBirthIdentity } from "../provider-evidence.js";
-import { CODEX_ACCESS_LEVEL_OPTIONS, PS_BIRTH_EVIDENCE, normalizeLaunchPolicy } from "./launch-contract.js";
+import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
+import { CODEX_ACCESS_LEVEL_OPTIONS, normalizeLaunchPolicy } from "./launch-contract.js";
 import { CodexAdapterTurns } from "./adapter-turns.js";
 import { CodexRoomTurnObservationDetachedError, isMethodNotFound } from "./room-tools.js";
 import { type CodexThreadResult, assertCodexReadOnlyApplied, assertCodexReviewerApplied, assertCodexThreadDirectory, codexEffortMismatchNotice, codexEffortNoticeSaidOnce, codexThreadAccess, codexThreadConfig, codexThreadEffort, isMissingContinuation } from "./thread-access.js";
@@ -191,7 +192,7 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
     if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
       || connection?.kind !== "codex_app_server" || !connection.url?.trim()
       || !Number.isSafeInteger(connection.pid) || connection.pid! <= 0
-      || typeof connection.processIdentity !== "string" || !PS_BIRTH_EVIDENCE.test(connection.processIdentity.trim())
+      || !isBirthEvidence(connection.processIdentity)
       || !Number.isFinite(graceMs) || graceMs < 0) {
       throw new Error("Codex exact-reference stop requires an exact continuation and process birth.");
     }
@@ -201,7 +202,7 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
       const current = this.deps.getProcessIdentity(pid);
       if (current === null) return true;
       // Unequal malformed ps output is uncertainty, not PID-reuse evidence.
-      if (typeof current !== "string" || !PS_BIRTH_EVIDENCE.test(current.trim())) {
+      if (!isBirthEvidence(current)) {
         throw new Error("Codex exact-reference stop is ambiguous because process birth cannot be verified.");
       }
       return !sameProcessBirthIdentity(current, birth);
@@ -231,12 +232,12 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
         await delay(Math.min(25, deadline - Date.now()));
       }
     };
-    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM");
+    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM", birth);
     if (await awaitAbsence()) return terminal();
     if (!force) {
       // Never escalate into a reused PID, nor accept a cached protocol error.
       if (isGone()) return terminal();
-      this.deps.signalProcess(pid, "SIGKILL");
+      this.deps.signalProcess(pid, "SIGKILL", birth);
       if (await awaitAbsence()) return terminal();
     }
     throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
@@ -284,11 +285,11 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
     handle.invalidatePermissions();
     const exitPromise = this.requireExitPromise(handle);
     if (options.force) {
-      this.deps.signalProcess(pid, "SIGKILL");
+      this.deps.signalProcess(pid, "SIGKILL", processIdentity);
       return exitPromise;
     }
 
-    this.deps.signalProcess(pid, "SIGTERM");
+    this.deps.signalProcess(pid, "SIGTERM", processIdentity);
     const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
     const graceful = await Promise.race([
       exitPromise.then((payload) => ({ payload })),
@@ -298,7 +299,7 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
 
     // A PID observed before the grace period may now belong to another child.
     assertProcessIdentity();
-    this.deps.signalProcess(pid, "SIGKILL");
+    this.deps.signalProcess(pid, "SIGKILL", processIdentity);
     return exitPromise;
   }
 

@@ -2,7 +2,8 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, parse } from "node:path";
 
-import { spawnCodex, terminateCodexProcessTree } from "./codex-executable.mjs";
+import { terminateCodexProcessTree } from "./codex-executable.mjs";
+import { isProcessTree, signalTree, spawnTree } from "./process-tree.mjs";
 
 // A Codex app-server that LetAgents launches works for a room, not as the
 // owner, yet it shares the owner's CODEX_HOME so Codex sign-in keeps working.
@@ -114,17 +115,20 @@ export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TI
     // timeout must stop both: run it in its own process group (execFile ignores
     // `detached`, so spawn) and stop the whole group.
     const group = process.platform !== "win32";
-    // spawnCodex runs a Windows codex.cmd through its node script and hides the console window.
-    const child = spawnCodex(codexBin, args, {
+    // spawnTree runs a Windows codex.cmd through its node script, hides the console window and, with
+    // the desktop's process-tree helper, holds the whole tree in one job.
+    const child = spawnTree(codexBin, args, {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: group,
     });
     const stop = () => {
-      try { if (group && child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ }
-      // On Windows the child is a shim wrapper; taskkill ends the native Codex below it too.
-      terminateCodexProcessTree(child.pid, { child });
+      if (group) { if (child.pid) signalTree(child.pid, "SIGKILL", { groupOnly: true }); }
+      // On Windows the child is a shim wrapper: its job ends the native Codex below it too, and without
+      // the helper taskkill does.
+      else if (isProcessTree(child)) signalTree(child.pid, "SIGKILL", { child });
+      else terminateCodexProcessTree(child.pid, { child });
       child.kill("SIGKILL");
     };
     let stdout = "";
