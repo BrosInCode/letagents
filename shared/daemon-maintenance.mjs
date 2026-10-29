@@ -1,10 +1,10 @@
 import { constants } from "node:fs";
-import { link, lstat, open, rm, unlink } from "node:fs/promises";
+import { link, lstat, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { letagentsHome } from "./letagents-home.mjs";
 import {
-  createPrivateDir, createPrivateStagingFolder, hasProfileDefaultAccess, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform,
+  createPrivateDir, hasProfileDefaultAccess, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated,
   protectOwnerPrivate, syncDirectory as syncFolder,
 } from "./owner-private-fs.mjs";
 
@@ -55,7 +55,7 @@ async function ensurePrivateParent(path) {
   if (!info.isDirectory() || info.isSymbolicLink()) throw unsafe();
   if (await isOwnerPrivate(folder, info)) return;
   if (!await hasProfileDefaultAccess(folder, info)) throw unsafe();
-  await protectOwnerPrivate(folder, "directory");
+  await protectOwnerPrivate(folder, "directory", { force: true });
 }
 
 /** Only ENOENT means normal operation. Corruption or an unsafe path must fail closed. */
@@ -84,32 +84,26 @@ async function publishHold(path) {
   const existing = await readDaemonMaintenance(path);
   if (existing) { await syncDirectory(path); return existing; }
   await createPrivateDir(dirname(path), { recursive: true });
+  // Windows: the record is written only into a verified private folder, so it
+  // inherits the private entries at creation; the hard link shares them.
+  if (ownerPrivatePlatform() === "win32") await ensurePrivateParent(path);
   const value = { version: 1, id: randomUUID(), createdAt: new Date().toISOString() };
-  // Windows has no mode bits: the record is made inside a private staging
-  // folder, so it is private from birth, and gets its own DACL before it is
-  // written. The hard link shares that DACL.
-  const staging = ownerPrivatePlatform() === "win32" ? await createPrivateStagingFolder(path) : null;
-  const temporary = staging ? join(staging, "record") : `${path}.${value.id}.tmp`;
+  const temporary = `${path}.${value.id}.tmp`;
+  const file = await open(temporary, "wx", 0o600);
   try {
-    const file = await open(temporary, "wx", 0o600);
-    try {
-      if (staging) await protectOwnerPrivate(temporary, "file");
-      await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
-      await file.sync();
-      try { await link(temporary, path); }
-      catch (error) { if (error.code !== "EEXIST") throw error; }
-      await syncDirectory(path);
-      const published = await readDaemonMaintenance(path);
-      if (!published) throw new Error("Service maintenance record disappeared before commit.");
-      return published;
-    } finally {
-      await file.close();
-      // Windows: the staging folder removal below also cleans up; a busy file must not undo a published hold.
-      if (staging) await unlink(temporary).catch(() => undefined);
-      else await unlink(temporary);
-    }
+    await privateEntryCreated(temporary, "file");
+    await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+    await file.sync();
+    try { await link(temporary, path); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+    await syncDirectory(path);
+    const published = await readDaemonMaintenance(path);
+    if (!published) throw new Error("Service maintenance record disappeared before commit.");
+    return published;
   } finally {
-    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    await file.close();
+    // Windows: a busy temporary file (a scanner holding it) must not undo a published hold.
+    await unlink(temporary).catch((error) => { if (ownerPrivatePlatform() !== "win32") throw error; });
   }
 }
 
@@ -149,7 +143,7 @@ export async function withDaemonMaintenanceOperation(operation, path = daemonMai
     // (it holds no data); one another account owns is refused.
     if (ownerPrivatePlatform() === "win32" && stat.isFile() && !await isOwnerPrivate(lockPath, stat)
       && await isOwnedByCurrentUser(lockPath, stat)) {
-      await protectOwnerPrivate(lockPath, "file");
+      await protectOwnerPrivate(lockPath, "file", { force: true });
       stat = await lock.stat();
     }
     if (!stat.isFile() || !await isOwnerPrivate(lockPath, stat)) {
@@ -174,7 +168,7 @@ async function createWindowsLock(lockPath) {
   let created;
   try { created = await open(lockPath, "wx", 0o600); }
   catch (error) { if (error.code === "EEXIST") return; throw error; }
-  try { await protectOwnerPrivate(lockPath, "file"); } finally { await created.close(); }
+  try { await privateEntryCreated(lockPath, "file"); } finally { await created.close(); }
 }
 export const createDaemonMaintenance = (path = daemonMaintenancePath()) => withDaemonMaintenanceOperation(owner => owner.create(), path);
 export const clearDaemonMaintenance = (id, path = daemonMaintenancePath()) => withDaemonMaintenanceOperation(owner => owner.clear(id), path);

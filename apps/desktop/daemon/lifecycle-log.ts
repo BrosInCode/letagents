@@ -1,5 +1,6 @@
 import {
   closeSync,
+  constants,
   mkdirSync,
   openSync,
   renameSync,
@@ -11,9 +12,32 @@ import { dirname, join } from "node:path";
 import { redactCredentialText } from "./credential-redaction.js";
 import { setRoomLatencyReporter } from "./room-latency-trace.js";
 import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
-import { protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
+import { openNoFollowSync, ownerPrivatePlatform, privateEntryCreatedSync, protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
+
+/**
+ * Open the log for appending. POSIX: open(path, "a") as before. Windows: an
+ * exclusive create first, so "made" is the open's own answer (a dangling link
+ * at the path counts as existing); an existing log is opened without following
+ * a link.
+ */
+function openLog(path: string): { descriptor: number; made: boolean } {
+  if (ownerPrivatePlatform() !== "win32") return { descriptor: openSync(path, "a", 0o600), made: false };
+  try { return { descriptor: openSync(path, "ax", 0o600), made: true }; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  return { descriptor: openNoFollowSync(path, constants.O_WRONLY | constants.O_APPEND, 0o600), made: false };
+}
+
+/**
+ * Make the log private. POSIX: chmod 0600 as before. Windows: a log the open
+ * just made inherits its verified private folder (no tool runs at daemon
+ * start); an existing one is protected.
+ */
+function protectLog(path: string, made: boolean): void {
+  if (made) privateEntryCreatedSync(path, "file");
+  else protectOwnerPrivateSync(path, "file");
+}
 
 export type DaemonLifecycleEvent = {
   event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency"
@@ -39,8 +63,9 @@ export class DaemonLifecycleLog {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      this.descriptor = openSync(path, "a", 0o600);
-      protectOwnerPrivateSync(path, "file");
+      const opened = openLog(path);
+      this.descriptor = opened.descriptor;
+      protectLog(path, opened.made);
     } catch {
       this.descriptor = null;
     }
@@ -55,8 +80,9 @@ export class DaemonLifecycleLog {
         closeSync(this.descriptor);
         this.descriptor = null;
         renameSync(this.path, `${this.path}.previous`);
-        this.descriptor = openSync(this.path, "a", 0o600);
-        protectOwnerPrivateSync(this.path, "file");
+        const opened = openLog(this.path);
+        this.descriptor = opened.descriptor;
+        protectLog(this.path, opened.made);
       }
       const detail = event.detail == null
         ? null

@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
-import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -296,10 +296,8 @@ export async function prepareStateRecoveryBackup(
     cipher.setAAD(aad);
     const file = await openNoFollow(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
     ownedCandidate = true;
-    // Windows has no mode bits: the empty file gets its private DACL before any ciphertext.
-    if (ownerPrivatePlatform() === "win32") {
-      try { await protectOwnerPrivate(candidate, "file"); } catch (error) { await file.close(); throw error; }
-    }
+    // Windows has no mode bits: the empty file is private (by its verified folder, or its own DACL) before any ciphertext.
+    try { await privateEntryCreated(candidate, "file"); } catch (error) { await file.close(); throw error; }
     const hash = createHash("sha256");
     const write = async (bytes: Buffer): Promise<void> => {
       hash.update(bytes);

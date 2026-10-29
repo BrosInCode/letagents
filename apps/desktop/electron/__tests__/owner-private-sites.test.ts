@@ -40,7 +40,7 @@ function storage() {
 
 // ---------------------------------------------------------------- host approval signing key
 
-test("Windows: the approval signing key and its folder get the private DACL; a tampered one is refused", async (t) => {
+test("Windows: the approval signing key's folder gets the private DACL, the key inherits it, and a tampered folder is refused", async (t) => {
   const root = await scratch(t);
   const fake = fakeWindowsSecurity();
   const path = join(root, "host-approval", "signing-key.sealed");
@@ -49,9 +49,8 @@ test("Windows: the approval signing key and its folder get the private DACL; a t
     assert.equal(fake.isProtected(dirname(path)), true);
     assert.equal(fake.isProtected(path), true);
     assert.equal((await loadHostApprovalSigner(path, storage())).publicKey, signer.publicKey);
-    fake.tamper(path);
-    await assert.rejects(loadHostApprovalSigner(path, storage()), /Host approval signing is unavailable/);
-    await fake.security.protect(path, "file");
+    // The only folder that ran a tool is the key's own; the key file inherits it.
+    assert.deepEqual(fake.protects, [`protect:directory:${dirname(path)}`]);
     fake.tamper(dirname(path));
     await assert.rejects(loadHostApprovalSigner(path, storage()), /Host approval signing is unavailable/);
   });
@@ -114,7 +113,7 @@ test("Windows: Cursor profile files are written private and read without followi
   assert.equal(await readFile(file, "utf8"), "{\"a\":1}");
 });
 
-test("Windows: moving a Cursor conversation reads every owner in one call, and a foreign one stops the move", async (t) => {
+test("Windows: moving a Cursor conversation reads every owner in one call, and a foreign entry or profile stops it", async (t) => {
   const root = await scratch(t);
   const configDir = join(root, "profile", "config");
   const fake = fakeWindowsSecurity();
@@ -132,13 +131,17 @@ test("Windows: moving a Cursor conversation reads every owner in one call, and a
     await writeFile(join(source, "s1", "store.db"), "db");
     reads.length = 0;
     relocateCursorConversationNamespace({ configDir }, workspaceA, workspaceB, "s1");
-    // One read for the three entries of the walk (each folder protect also reads its own result back).
-    assert.deepEqual(reads.filter(count => count > 1), [3]);
+    // The walk's entries were not made through the helper, so their owners are read: once, in one call.
+    assert.deepEqual(reads, [3]);
     const target = join(chats, createHash("md5").update(workspaceB).digest("hex"));
     assert.equal(await readFile(join(target, "s1", "store.db"), "utf8"), "db");
-    // The walk's one read says its first entry has another owner; single-path reads (protect's read-back) are real.
+    // An entry another account owns stops the move.
     fake.security.readSddlSync = paths => paths.length > 1 ? paths.map((_, index) => index === 0 ? null : "x") : readSddlSync(paths);
     assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /unsupported or redirected entries/);
+    fake.security.readSddlSync = readSddlSync;
+    // So does a profile folder another account owns.
+    fake.giveAway(dirname(configDir));
+    assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /belongs to another account/);
   });
 });
 
