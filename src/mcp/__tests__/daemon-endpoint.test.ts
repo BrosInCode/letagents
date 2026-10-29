@@ -317,6 +317,19 @@ test("a caller may attach its data listener only after connect", async () => {
   } finally { await env.cleanup(); }
 });
 
+test("a caller that paused the stream before connect gets it back paused", async () => {
+  const env = await harness();
+  try {
+    await env.listen((socket) => acceptDaemonPeer(socket, env.proof, () => undefined));
+    const client = env.connect();
+    client.pause();
+    client.on("data", () => undefined);
+    await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
+    assert.equal(client.readableFlowing, false);
+    client.destroy();
+  } finally { await env.cleanup(); }
+});
+
 test("a client whose proof file is missing fails like an absent daemon", async () => {
   const env = await harness();
   try {

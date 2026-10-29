@@ -242,6 +242,7 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
   const held = [];
   let open = false;
   let forcedFlow = false;
+  let priorFlowing = null;
   // An absolute bound on connect + handshake. A caller's own timeout may be
   // unlimited (handoff, configuration apply) or reset by trickled bytes; this
   // one is not. It ends once the daemon proved itself or the socket closed.
@@ -261,7 +262,8 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
     clearTimeout(deadline);
     // Hand the stream back as the caller left it: with no consumer yet, a
     // later "data" listener starts the flow as on any fresh socket.
-    if (forcedFlow && socket.listenerCount("data") === 0) {
+    if (forcedFlow && priorFlowing === false) socket.pause();
+    else if (forcedFlow && socket.listenerCount("data") === 0) {
       socket.pause();
       socket.readableFlowing = null;
     }
@@ -287,7 +289,7 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
       socket._read(socket.readableHighWaterMark);
       // The daemon's line arrives as "data" only in flowing mode; flow even if
       // the caller attaches its listener later (it is restored afterwards).
-      if (socket.readableFlowing !== true) { forcedFlow = true; socket.resume(); }
+      if (socket.readableFlowing !== true) { priorFlowing = socket.readableFlowing; forcedFlow = true; socket.resume(); }
       return true;
     }
     if (event === "ready") { held.push([event, args]); return true; }
