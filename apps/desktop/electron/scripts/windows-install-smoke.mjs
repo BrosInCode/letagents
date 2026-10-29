@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { desktopAssetNames } from "./release-metadata.mjs";
-import { WINDOWS_EXECUTABLE_NAME, WINDOWS_UNINSTALLER_NAME } from "./windows-packaging.mjs";
+import { WINDOWS_APP_USER_MODEL_ID, WINDOWS_EXECUTABLE_NAME, WINDOWS_UNINSTALLER_NAME } from "./windows-packaging.mjs";
 
 // Installs the built Windows installer silently for the current user, runs
 // the installed app's smoke check (LETAGENTS_DESKTOP_SMOKE_CHECK=1 loads the
@@ -23,6 +23,7 @@ const executable = join(installDirectory, WINDOWS_EXECUTABLE_NAME);
 const uninstallKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\chat.letagents.desktop";
 const urlKey = "HKCU\\Software\\Classes\\letagents\\shell\\open\\command";
 const desktopShortcut = join(homedir(), "Desktop", "LetAgents.lnk");
+const startMenuShortcut = join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Start Menu", "Programs", "LetAgents.lnk");
 
 if (process.platform !== "win32") throw new Error("The Windows install smoke check must run on Windows.");
 if (!process.env.LOCALAPPDATA) throw new Error("LOCALAPPDATA is not set.");
@@ -45,6 +46,32 @@ function registryValue(key, name) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+/**
+ * What the Windows shell reads from a shortcut as System.AppUserModel.ID,
+ * and the AppID Get-StartApps lists for LetAgents (the ID when the Start
+ * menu shortcut has one, the executable path otherwise).
+ */
+function shellAppIds(shortcuts) {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$shell = New-Object -ComObject Shell.Application",
+    "$ids = foreach ($path in ($env:LETAGENTS_SHORTCUTS -split ';')) {",
+    "  $item = $shell.Namespace([IO.Path]::GetDirectoryName($path)).ParseName([IO.Path]::GetFileName($path))",
+    "  [string]$item.ExtendedProperty('System.AppUserModel.ID')",
+    "}",
+    "$start = @(Get-StartApps | Where-Object { $_.Name -eq 'LetAgents' } | ForEach-Object { $_.AppID })",
+    "[pscustomobject]@{ shortcuts = @($ids); startApps = $start } | ConvertTo-Json -Compress",
+  ].join("\n");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    env: { ...process.env, LETAGENTS_SHORTCUTS: shortcuts.join(";") },
+  });
+  if (result.status !== 0) throw new Error(`Reading the shortcut AppUserModelIDs failed: ${result.stderr}`);
+  console.log(`shell AppUserModelIDs: ${result.stdout.trim()}`);
+  const parsed = JSON.parse(result.stdout);
+  return { shortcuts: [parsed.shortcuts].flat(), startApps: [parsed.startApps ?? []].flat() };
 }
 
 /** Process ids of this user's running LetAgents.exe processes. */
@@ -76,22 +103,42 @@ assert(
   existsSync(join(process.env.LOCALAPPDATA, "letagents-desktop-updater", "installer.exe")),
   "The installer did not keep itself for the next differential update.",
 );
+// Windows shows the app's toasts only when the process's AppUserModelID
+// (set by the app at startup) matches its Start menu shortcut's.
+const appIds = shellAppIds([startMenuShortcut, desktopShortcut]);
+assert(
+  appIds.shortcuts.length === 2 && appIds.shortcuts.every((id) => id === WINDOWS_APP_USER_MODEL_ID),
+  `The shortcuts carry AppUserModelIDs ${JSON.stringify(appIds.shortcuts)}; expected ${WINDOWS_APP_USER_MODEL_ID}.`,
+);
+assert(
+  appIds.startApps.includes(WINDOWS_APP_USER_MODEL_ID),
+  `The Start menu lists LetAgents as ${JSON.stringify(appIds.startApps)}; expected ${WINDOWS_APP_USER_MODEL_ID}.`,
+);
 
-// The app's own output streams straight to this log, so a hang still shows
-// how far it got.
+// The app's own output streams straight to this log as it comes, so a hang
+// still shows how far it got, and is kept to read the notification result.
 console.log(`> ${executable} (LETAGENTS_DESKTOP_SMOKE_CHECK=1)`);
-const smoke = spawnSync(executable, [], {
-  env: { ...process.env, LETAGENTS_DESKTOP_SMOKE_CHECK: "1", LETAGENTS_DESKTOP_SMOKE_DEBUG: "1", ELECTRON_ENABLE_LOGGING: "1" },
-  stdio: "inherit",
-  timeout: 5 * 60_000,
+const smoke = await new Promise((resolvePromise, reject) => {
+  const child = spawn(executable, [], {
+    env: { ...process.env, LETAGENTS_DESKTOP_SMOKE_CHECK: "1", LETAGENTS_DESKTOP_SMOKE_DEBUG: "1", ELECTRON_ENABLE_LOGGING: "1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  const keep = (stream) => (chunk) => { output += chunk; stream.write(chunk); };
+  child.stdout.on("data", keep(process.stdout));
+  child.stderr.on("data", keep(process.stderr));
+  const timer = setTimeout(() => {
+    // Leave nothing running that would hold the install folder.
+    spawnSync("taskkill", ["/F", "/T", "/IM", WINDOWS_EXECUTABLE_NAME], { stdio: "inherit" });
+    reject(new Error("The installed app's smoke check did not finish within 5 minutes."));
+  }, 5 * 60_000);
+  child.once("error", (error) => { clearTimeout(timer); reject(error); });
+  child.once("exit", (status, signal) => { clearTimeout(timer); resolvePromise({ status, signal, output }); });
 });
-if (smoke.error?.code === "ETIMEDOUT") {
-  // Leave nothing running that would hold the install folder.
-  spawnSync("taskkill", ["/F", "/T", "/IM", WINDOWS_EXECUTABLE_NAME], { stdio: "inherit" });
-  throw new Error("The installed app's smoke check did not finish within 5 minutes.");
-}
-if (smoke.error) throw smoke.error;
 assert(smoke.status === 0, `The installed app's smoke check exited with ${smoke.status ?? smoke.signal}.`);
+const notification = /LETAGENTS_DESKTOP_SMOKE_NOTIFICATION (\S+)/.exec(smoke.output)?.[1] ?? "not reported";
+console.log(`Smoke notification from the installed app: ${notification}`);
+assert(notification !== "failed", "Windows refused the installed app's notification.");
 
 // Update the running app as electron-updater does: the installer gets
 // --updated --force-run, must close the app (here it does not quit by

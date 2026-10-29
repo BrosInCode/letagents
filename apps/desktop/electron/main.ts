@@ -1,4 +1,4 @@
-import { app, autoUpdater, protocol } from "electron";
+import { app, autoUpdater, Notification, protocol } from "electron";
 import { join } from "node:path";
 
 import { claimDesktopInstance, registerAskLinks } from "./main/ask-links.js";
@@ -18,11 +18,12 @@ import {
   stopDesktopRoomStream,
 } from "./main/room-stream.js";
 import { supervisedAgentsSupported, supervisorDaemonAllowed } from "./main/platform-capabilities.js";
-import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
+import { configureDesktopSmokeEnvironment, isDesktopSmokeCheck, seedDesktopSmokeState } from "./main/smoke.js";
 import { allowMainWindowQuit, createWindow, focusMainWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
 import { initializeDesktopUpdates, stopDesktopUpdates } from "./main/updates.js";
+import { applyWindowsAppUserModelId, showWindowsSmokeNotification } from "./main/windows-app-identity.js";
 import { stopActiveRentalProviderHostManager } from "./rental/provider-host-manager.js";
 import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
 
@@ -32,6 +33,9 @@ if (claimDesktopInstance()) startDesktopApp();
 else app.exit(0);
 
 function startDesktopApp(): void {
+  // Windows: before any window or notification, so toasts and the taskbar
+  // use the ID the installer wrote on the app's shortcuts.
+  applyWindowsAppUserModelId(app);
   prepareDesktopNotifications();
   registerAskLinks();
 
@@ -100,6 +104,7 @@ function startDesktopApp(): void {
     }
     configureApplicationMenu();
     createWindow();
+    if (isDesktopSmokeCheck() && process.platform === "win32") void showWindowsSmokeNotification(Notification);
     void backgroundStartup;
     initializeDesktopUpdates();
     await initializeDesktopNotifications().catch((error) => {
