@@ -46,6 +46,8 @@ export class FakeClaudeChild implements ClaudeCliChild {
   intentionalClose = false;
   inputEnded = false;
   alive = true;
+  /** Absent, as for every child but the one the default launch spawns; a test of the Windows stop sets it. */
+  terminate?: ClaudeCliChild["terminate"];
   private resolveExited!: (exit: ProviderProcessExit) => void;
   readonly exited: Promise<ProviderProcessExit>;
 
@@ -348,7 +350,7 @@ export async function claudeDaemonFixture(options: {
     let received = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: string) => {
       received += chunk;
       if (!received.includes("\n")) return;
       socket.end();

@@ -17,7 +17,7 @@ import {
   projectKeysRefusal,
   type CodexSettingsInspection,
 } from "./codex-home-harness.js";
-import { createWindowsSecurity, INHERITED_GROUP_SIDS, protectOwnerPrivateSync, SYSTEM_SID, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
+import { createWindowsSecurity, icaclsSetOwnerArguments, INHERITED_GROUP_SIDS, protectOwnerPrivateSync, sddlExtraGrantSids, SYSTEM_SID, windowsSystemTool } from "../../../../../shared/owner-private-fs.mjs";
 import { shadowProfileEnvironment, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 // An owner can save "always allow" command rules in the `rules` folder of
@@ -161,9 +161,16 @@ export function lockRulesFolder(rules: string, platform: NodeJS.Platform = proce
     return;
   }
   rulesFolderSecurity ??= createWindowsSecurity();
-  execFileSync(windowsSystemTool("icacls.exe"), icaclsReadOnlyFolderArguments(rules, rulesFolderSecurity.currentUserSidSync()), {
-    stdio: "ignore", windowsHide: true, timeout: 30_000,
-  });
+  const user = rulesFolderSecurity.currentUserSidSync();
+  const icacls = (args: string[]) => execFileSync(windowsSystemTool("icacls.exe"), args, { stdio: "ignore", windowsHide: true, timeout: 30_000 });
+  // The account owns it, as a private folder: an elevated process's new folder belongs to Administrators.
+  icacls(icaclsSetOwnerArguments(rules, user));
+  icacls(icaclsReadOnlyFolderArguments(rules, user));
+  // A profile can pass on entries that no fixed list names (a logon session's, a domain group's):
+  // read the result back and remove every other allow entry by its SID, as a private folder does.
+  const [sddl] = rulesFolderSecurity.readSddlSync([rules]);
+  const others = sddlExtraGrantSids(sddl, { sid: user, aliases: rulesFolderSecurity.currentUserAliasesSync?.() ?? [] });
+  if (others?.length) rulesFolderSecurity.removeGrantsSync?.(rules, others);
   const probe = join(rules, ".letagents-read-only-check");
   try {
     writeFileSync(probe, "", { flag: "wx" });

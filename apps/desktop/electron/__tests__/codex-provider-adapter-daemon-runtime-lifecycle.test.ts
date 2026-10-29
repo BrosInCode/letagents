@@ -1,6 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
 import {
   ProviderActionPortRouter,

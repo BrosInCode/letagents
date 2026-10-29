@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { codexLaunchCommand } from "./codex-executable.mjs";
+import { codexLaunchCommand, isWindowsBatchExecutable, parseNodeShim } from "./codex-executable.mjs";
 
 // What to start for a provider program (Claude Code, Codex, OpenCode, Cursor)
 // and how, one answer for every launch and every check of one. On POSIX the
@@ -41,14 +41,38 @@ export function resolveWindowsCommand(command, options = {}) {
   return null;
 }
 
+/** The `node <script>` an npm or pnpm shim runs, read as codexLaunchCommand reads it; null for any other batch file. */
+function nodeShimOf(program, execPath, launchOptions = {}) {
+  const readFile = launchOptions.readFile ?? ((filePath) => readFileSync(filePath, "utf8"));
+  let text;
+  try { text = readFile(program); } catch { return null; }
+  return parseNodeShim(program, text, { execPath, exists: launchOptions.exists });
+}
+
+/** A Windows batch file that is not an npm or pnpm shim: only cmd.exe could start it. */
+export class ProviderBatchFileError extends Error {
+  constructor(program) {
+    super(`${path.win32.basename(program)} is a batch file that LetAgents can start only through cmd.exe, `
+      + "which changes quotes, percent signs and line breaks in what it is given. "
+      + "Install the program with npm, or set its LETAGENTS_*_BIN variable to its .exe.");
+    this.name = "ProviderBatchFileError";
+    this.code = "EPROVIDERBATCH";
+  }
+}
+
 /**
  * What to spawn for the provider program `command <args>`.
  *
  * POSIX: `{ file: command, args }`, nothing else. Windows: `resolved` is the
- * program found for `command` (null when none was), and `file`/`args` (with
- * `argv0` and `windowsVerbatimArguments` for a batch file that goes through
- * cmd.exe) are what starts it. `envAdditions` is `{ ELECTRON_RUN_AS_NODE: "1" }`
- * when an npm shim's script runs on this Electron, else null.
+ * program found for `command` (null when none was), and `file`/`args` are
+ * what starts it, with no shell: a native program as it is, an npm or pnpm
+ * shim as the node and script it runs, followed by `args` unchanged.
+ * `envAdditions` is `{ ELECTRON_RUN_AS_NODE: "1" }` when that script runs on
+ * this Electron, else null. A batch file that is no such shim throws
+ * ProviderBatchFileError: cmd.exe would re-read every argument, and a prompt
+ * holds line breaks and quotes. Only `allowCmd: true` (spawnTree's earlier
+ * behaviour for such a file) starts it through cmd.exe, with `argv0` and
+ * `windowsVerbatimArguments`.
  */
 export function providerLaunchCommand(command, args, options = {}) {
   const platform = options.platform ?? process.platform;
@@ -56,7 +80,12 @@ export function providerLaunchCommand(command, args, options = {}) {
   const env = options.env ?? process.env;
   const resolved = resolveWindowsCommand(command, { env, cwd: options.cwd, exists: options.exists });
   const execPath = options.launchOptions?.execPath ?? process.execPath;
-  const launch = codexLaunchCommand(resolved ?? command, args, { ...options.launchOptions, execPath, platform, env });
+  const program = resolved ?? command;
+  // Decided before any argument is quoted for cmd.exe: a shim's script runs with no shell, anything else is refused.
+  if (options.allowCmd !== true && isWindowsBatchExecutable(program, platform) && !nodeShimOf(program, execPath, options.launchOptions)) {
+    throw new ProviderBatchFileError(program);
+  }
+  const launch = codexLaunchCommand(program, args, { ...options.launchOptions, execPath, platform, env });
   const electron = options.electron ?? Boolean(process.versions.electron);
   const runsShimOnElectron = electron && resolved !== null && resolved !== execPath && launch.file === execPath;
   return { ...launch, resolved, envAdditions: runsShimOnElectron ? { ELECTRON_RUN_AS_NODE: "1" } : null };
@@ -65,13 +94,16 @@ export function providerLaunchCommand(command, args, options = {}) {
 /**
  * `execFile` for a provider program, for a version or status check. POSIX:
  * exactly `execFile(command, args, options, callback)`. Windows: the program
- * `providerLaunchCommand` names, with no console window.
+ * `providerLaunchCommand` names, with no console window (a batch file that is
+ * no npm shim through cmd.exe, as spawnTree starts one).
  */
 export function execProviderFile(command, args, options, callback, providerOptions = {}) {
   const platform = providerOptions.platform ?? process.platform;
   const run = providerOptions.execFile ?? execFile;
   if (platform !== "win32") return run(command, args, options, callback);
-  const launch = providerLaunchCommand(command, args, { ...providerOptions, platform, env: options.env, cwd: options.cwd });
+  // A check passes fixed arguments (`--version`, a model listing), so a plain batch file may still go
+  // through cmd.exe here, which refuses any quote or line break; its callers read errors from the callback.
+  const launch = providerLaunchCommand(command, args, { allowCmd: true, ...providerOptions, platform, env: options.env, cwd: options.cwd });
   return run(launch.file, launch.args, {
     ...options,
     ...(launch.envAdditions ? { env: { ...(options.env ?? process.env), ...launch.envAdditions } } : {}),

@@ -7,7 +7,8 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { basename, dirname, join, parse } from "node:path";
 import { createInterface } from "node:readline";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
+import { supervisedAgentsOnly } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 
@@ -282,7 +283,7 @@ test("when the agents' home cannot be used, a sandboxed launch runs with the own
   }
 });
 
-test("a sandboxed launch does not start when Codex cannot be asked, when the agents' home holds a sign-in, or when the project ships command rules", async () => {
+test("a sandboxed launch does not start when Codex cannot be asked, when the agents' home holds a sign-in, or when the project ships command rules", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   await assert.rejects(
     codexHomeForSandboxedLaunch("codex", { env: owner.env }, { inspect: async () => { throw new Error("Codex stopped before it answered\nsecond line"); } }),
@@ -424,7 +425,7 @@ async function waitForExit(launch: { pid: number | null; exited: Promise<unknown
   if (!exited && launch.pid !== null) terminateSpawnedProcess(launch.pid);
 }
 
-test("workspace discovery in the synthetic sign-in check still proves an in-place refresh", async () => {
+test("workspace discovery in the synthetic sign-in check still proves an in-place refresh", { skip: supervisedAgentsOnly }, async () => {
   for (const signIn of ["in-place", "replace", "none"] as const) {
     const parent = fixture("routing-sign-in-check");
     const result = await checkCodexKeepsLinkedSignIn(fakeCodex({ signIn, discoverRouting: true }).bin, { PATH: process.env.PATH }, parent);
@@ -433,7 +434,7 @@ test("workspace discovery in the synthetic sign-in check still proves an in-plac
   }
 });
 
-test("a Codex that writes a new sign-in file over the linked one is found out with a made-up sign-in, before the owner's is linked", async () => {
+test("a Codex that writes a new sign-in file over the linked one is found out with a made-up sign-in, before the owner's is linked", { skip: supervisedAgentsOnly }, async () => {
   const run = { PATH: process.env.PATH };
   const beside = () => fixture("beside-the-agents-home");
   assert.equal(await checkCodexKeepsLinkedSignIn(fakeCodex({ signIn: "in-place" }).bin, run, beside()), true);
@@ -461,7 +462,7 @@ test("a Codex that writes a new sign-in file over the linked one is found out wi
   assert.deepEqual(asked, ["launch-path"]);
 });
 
-test("the sign-in check never runs Codex in a temp folder, nor with anything in its home that the check did not put there", async (t) => {
+test("the sign-in check never runs Codex in a temp folder, nor with anything in its home that the check did not put there", { skip: supervisedAgentsOnly }, async (t) => {
   // An agent at a sandboxed level can write the temp folder. A config it put in the check's home would be obeyed by a Codex with no sandbox.
   const owner = ownerHome();
   const temp = fixture("the-temp-folder");
@@ -503,7 +504,7 @@ test("the sign-in check never runs Codex in a temp folder, nor with anything in 
   assert.equal(changing.calls().length, 3, "a pass is remembered for this Codex binary");
 });
 
-test("a managed launch at a sandboxed access level starts Codex with the agents' home, and at Full access with the owner's", async () => {
+test("a managed launch at a sandboxed access level starts Codex with the agents' home, and at Full access with the owner's", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome();
   const project = fixture("project");
   execFileSync("git", ["init", "-q"], { cwd: project });
@@ -530,7 +531,7 @@ test("a managed launch at a sandboxed access level starts Codex with the agents'
   assert.deepEqual(fullAccess.calls().map((call) => call.codexHome), [owner.codexHome, owner.codexHome, owner.codexHome]);
 });
 
-test("no agent is started with a variable that tells Codex where to send its sign-in tokens, whatever the background service was started with", async () => {
+test("no agent is started with a variable that tells Codex where to send its sign-in tokens, whatever the background service was started with", { skip: supervisedAgentsOnly }, async () => {
   // Codex sends its refresh token to the first address, and the token it gives up to the second.
   assert.deepEqual([...CODEX_TOKEN_SERVICE_OVERRIDES].sort(), ["CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE"]);
   const inherited = { CODEX_REFRESH_TOKEN_URL_OVERRIDE: "http://elsewhere.invalid/token", CODEX_REVOKE_TOKEN_URL_OVERRIDE: "http://elsewhere.invalid/revoke" };
@@ -559,7 +560,7 @@ test("no agent is started with a variable that tells Codex where to send its sig
   assert.deepEqual([rental.CODEX_REFRESH_TOKEN_URL_OVERRIDE, rental.CODEX_REVOKE_TOKEN_URL_OVERRIDE], [undefined, undefined]);
 });
 
-test("a sandboxed launch that cannot get the agents' home does not start Codex while the owner has saved rules", async () => {
+test("a sandboxed launch that cannot get the agents' home does not start Codex while the owner has saved rules", { skip: supervisedAgentsOnly }, async () => {
   const project = fixture("project");
   for (const settings of [{ signIn: "replace" as const }, { store: "keyring" }]) {
     const owner = ownerHome();
@@ -580,7 +581,7 @@ test("a sandboxed launch that cannot get the agents' home does not start Codex w
   }
 });
 
-test("the agents' home is set for a rental and for an agent with its owner's own setup, after their environments are built", async () => {
+test("the agents' home is set for a rental and for an agent with its owner's own setup, after their environments are built", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome();
   const rental = codexAppServerEnvironment({
     env: { ...owner.env, LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1", LETAGENTS_TOKEN: "owner-token-fake" }, codexHome: owner.agentHome,
@@ -898,7 +899,7 @@ test("the installed Codex, started by a managed launch at a sandboxed access lev
   assert.equal(realpathSync(client.reportedCodexHome()!), realpathSync(owner.agentHome));
 });
 
-test("a sandboxed launch is refused while the machine's own Codex config folder holds a command rule", async () => {
+test("a sandboxed launch is refused while the machine's own Codex config folder holds a command rule", { skip: supervisedAgentsOnly }, async () => {
   const machine = fixture("machine-codex");
   mkdirSync(join(machine, "rules"));
   const withFolder = { ...noProject, otherRuleFolders: [join(machine, "rules")] };
@@ -986,7 +987,7 @@ test("a home that holds anything of its own is asked about again as the agents' 
   assert.deepEqual(asked, [pure.codexHome]);
 });
 
-test("a running sandboxed Codex may start or load a conversation only when nothing it would read holds a command rule", async () => {
+test("a running sandboxed Codex may start or load a conversation only when nothing it would read holds a command rule", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   const project = fixture("project");
   const asked: Array<{ cwd: string; codexHome: string | undefined }> = [];
@@ -1047,7 +1048,7 @@ function customCodexHome(): string {
   return codexHome;
 }
 
-test("each owner Codex home has an agents' home of its own: the usual one keeps its name, and a launch for one never changes the links of another", async () => {
+test("each owner Codex home has an agents' home of its own: the usual one keeps its name, and a launch for one never changes the links of another", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome();
   const custom = customCodexHome();
   const usualAgents = join(owner.home, ".letagents", "codex-agent-home");
@@ -1130,7 +1131,7 @@ test("an agents' home whose links lead into another Codex home is never turned t
   assert.equal(readFileSync(join(other, "auth.json"), "utf8"), '{"pretend":"another sign-in"}\n', "the other home's files were only ever linked");
 });
 
-test("a sandboxed Codex is not started, and loads no conversation, in a project that has command rules of its own, whether Codex trusts the project or not", async () => {
+test("a sandboxed Codex is not started, and loads no conversation, in a project that has command rules of its own, whether Codex trusts the project or not", { skip: supervisedAgentsOnly }, async () => {
   const above = fixture("above");
   const project = join(above, "project");
   const cwd = join(project, "packages", "app");
@@ -1217,7 +1218,7 @@ const GIT_KINDS: Array<{ name: string; top: boolean; make(inner: string): void }
   { name: "a .git link to a file", top: true, make: (inner) => { writeFileSync(join(inner, "a-file"), "gitdir: x\n"); symlinkSync(join(inner, "a-file"), join(inner, ".git")); } },
 ];
 
-test("the walk for a project's rule folders stops where Codex stops: an empty .git folder or a dangling .git link is no repository top, and the walk reads on above it", () => {
+test("the walk for a project's rule folders stops where Codex stops: an empty .git folder or a dangling .git link is no repository top, and the walk reads on above it", { skip: supervisedAgentsOnly }, () => {
   for (const kind of GIT_KINDS) {
     const project = nestedProject(kind.make);
     const expected = kind.top ? project.all.slice(0, 3) : project.all;
@@ -1250,7 +1251,7 @@ test("the installed Codex applies exactly the project layers the walk names, for
   }
 });
 
-test("the refusal for a project's rule folder says only what is known: the folder is not empty, it is in the agent's own work folder, and what an allow rule there would do", () => {
+test("the refusal for a project's rule folder says only what is known: the folder is not empty, it is in the agent's own work folder, and what an allow rule there would do", { skip: supervisedAgentsOnly }, () => {
   const project = fixture("project");
   mkdirSync(join(project, ".git"));
   writeFileSync(join(project, ".git", "HEAD"), "ref: refs/heads/main\n");
@@ -1272,7 +1273,7 @@ test("the refusal for a project's rule folder says only what is known: the folde
   assert.equal(projectCommandRulesRefusal(join(owner.home, "work", "here"), undefined, undefined, join(owner.codexHome, "rules")), savedRulesAsProjectRefusal("default.rules"));
 });
 
-test("a rules folder is read no further than its first entries, whatever its size", () => {
+test("a rules folder is read no further than its first entries, whatever its size", { skip: supervisedAgentsOnly }, () => {
   const folder = fixture("many");
   for (let index = 0; index < 40; index += 1) writeFileSync(join(folder, `rule-${index}.rules`), "");
   assert.equal(firstFolderEntries(folder).length, 4);
@@ -1300,7 +1301,7 @@ const writableRootText = (shown: string, touches: string) =>
   + `Take ${shown} out of writable_roots in your Codex config.toml, or give this agent Full access if you accept that.`;
 const AGENTS_HOME = "the Codex home LetAgents keeps for sandboxed agents";
 
-test("a launch whose sandbox lets a command write the project is refused when the Codex config lets it write where Codex reads its settings or rules", async () => {
+test("a launch whose sandbox lets a command write the project is refused when the Codex config lets it write where Codex reads its settings or rules", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   const elsewhere = fixture("elsewhere");
   const launch = (writableRoots: string[], writableSandbox: boolean, more: { cwd?: string; otherRuleFolders?: string[] } = {}) =>
@@ -1404,7 +1405,7 @@ test("a launch whose sandbox lets a command write the project is refused when th
   }
 });
 
-test("a writable folder is refused when it leaves a project layer's .codex folder open to a command, and not when Codex itself keeps that folder", async () => {
+test("a writable folder is refused when it leaves a project layer's .codex folder open to a command, and not when Codex itself keeps that folder", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   // A repository whose work folder is two folders below its top: three project layers.
   const outer = fixture("outer");
@@ -1447,7 +1448,7 @@ test("a writable folder is refused when it leaves a project layer's .codex folde
     { inspect: async () => ({ ...noProject, writableRoots: [outer] }) }), null);
 });
 
-test("the folders the Codex config lets a command write are handed on to be looked at again, and a folder that has become a way into a home is found then", async () => {
+test("the folders the Codex config lets a command write are handed on to be looked at again, and a folder that has become a way into a home is found then", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   const base = fixture("named-folders");
   const named = join(base, "cache");
@@ -1769,7 +1770,7 @@ test("the installed Codex keeps a command from turning a folder it may write int
   assert.match(JSON.stringify(model.requests.at(-1)), /symlinked writable roots are not supported/);
 });
 
-test("one folder is told from another name by name and by what it is on disk, so a disk's top, another spelling and a second path are all found", () => {
+test("one folder is told from another name by name and by what it is on disk, so a disk's top, another spelling and a second path are all found", { skip: supervisedAgentsOnly }, () => {
   const base = fixture("holds");
   mkdirSync(join(base, "a", "b"), { recursive: true });
   mkdirSync(join(base, "ab"));
@@ -1810,7 +1811,7 @@ test("one folder is told from another name by name and by what it is on disk, so
   assert.throws(() => linkCodexAgentHome(ownerInside, join(base, "AGENTS", "OWNER", "inside")), /must be a folder apart/);
 });
 
-test("a project's Codex config may set only what is known to be harmless for a sandboxed agent, and the refusal names the key and the file", async () => {
+test("a project's Codex config may set only what is known to be harmless for a sandboxed agent, and the refusal names the key and the file", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   const repo = fixture("repo");
   mkdirSync(join(repo, ".git"));
@@ -1951,7 +1952,7 @@ test("the installed Codex reports the keys of a trusted project's config, the tw
   assert.equal(projectKeysRefusal(repo, untrusted.projectLayers, { writableSandbox: true }), null);
 });
 
-test("the remembered sign-in check is kept for what Codex says it is, so a Codex that is replaced behind the same command is checked again", async () => {
+test("the remembered sign-in check is kept for what Codex says it is, so a Codex that is replaced behind the same command is checked again", { skip: supervisedAgentsOnly }, async () => {
   const codex = fakeCodex({ signIn: "in-place" });
   const launch = (userAgent: string | null) => codexHomeForSandboxedLaunch(codex.bin, { env: { ...ownerHome({ rules: false }).env, PATH: process.env.PATH } },
     { inspect: async () => ({ ...noProject, userAgent }) });
@@ -1970,7 +1971,7 @@ test("the remembered sign-in check is kept for what Codex says it is, so a Codex
   assert.equal(codex.calls().length, 4);
 });
 
-test("before a running Codex without its owner's setup loads a conversation, what a launch would turn off now is compared with what it was started with", async () => {
+test("before a running Codex without its owner's setup loads a conversation, what a launch would turn off now is compared with what it was started with", { skip: supervisedAgentsOnly }, async () => {
   const owner = ownerHome({ rules: false });
   const project = fixture("project");
   const env = { ...owner.env, PATH: process.env.PATH };
@@ -2096,7 +2097,7 @@ test("a Read-only agent's permission profile is Codex's read-only one with the s
   assert.deepEqual(codexSignInPaths(owner.env, null), [signIn]);
 });
 
-test("the deny check passes only for a Codex that keeps the denied file from a command, at its path and through a link, and still runs a command", async (t) => {
+test("the deny check passes only for a Codex that keeps the denied file from a command, at its path and through a link, and still runs a command", { skip: supervisedAgentsOnly }, async (t) => {
   const temp = fixture("the-temp-folder");
   const previous = process.env.TMPDIR;
   process.env.TMPDIR = temp;
@@ -2144,7 +2145,7 @@ test("the deny check passes only for a Codex that keeps the denied file from a c
   }
 });
 
-test("a Read-only launch is given its profile only when this Codex has shown that it honours a deny, and is refused otherwise: it is never started without the profile", async () => {
+test("a Read-only launch is given its profile only when this Codex has shown that it honours a deny, and is refused otherwise: it is never started without the profile", { skip: supervisedAgentsOnly }, async () => {
   const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
   const asked: Array<string | null> = [];
   const launch = (owner: ReturnType<typeof ownerHome>, honours: boolean, options: { store?: string; readOnly?: boolean } = {}) => codexHomeForSandboxedLaunch("codex", {
@@ -2184,7 +2185,7 @@ test("a Read-only launch is given its profile only when this Codex has shown tha
   assert.deepEqual(asked, []);
 });
 
-test("a managed Read-only launch starts Codex with the profile's overrides last, starts nothing when the deny is not honoured, and checks each Codex once", async () => {
+test("a managed Read-only launch starts Codex with the profile's overrides last, starts nothing when the deny is not honoured, and checks each Codex once", { skip: supervisedAgentsOnly }, async () => {
   const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
   const project = fixture("project");
   execFileSync("git", ["init", "-q"], { cwd: project });
@@ -2231,7 +2232,7 @@ test("a managed Read-only launch starts Codex with the profile's overrides last,
   assert.equal(plain.calls().some((call) => call.args.some((arg) => /^(?:permissions\.|default_permissions=)/.test(arg))), false);
 });
 
-test("the launch starts no Codex for the Read-only policy without the level's profile, whoever asks, and none for a Read-only launch that was given no profile", async () => {
+test("the launch starts no Codex for the Read-only policy without the level's profile, whoever asks, and none for a Read-only launch that was given no profile", { skip: supervisedAgentsOnly }, async () => {
   const project = fixture("project");
   execFileSync("git", ["init", "-q"], { cwd: project });
   const readOnlyPolicy = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };

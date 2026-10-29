@@ -493,7 +493,7 @@ test("a UserPromptSubmit hook that stops the prompt that starts a Claude agent f
   }
 });
 
-test("a Claude agent whose start a UserPromptSubmit hook stops is not started again by itself: the daemon saves the reason and the agent waits for its owner, where a start that the provider's load failed is tried again", { skip: supervisedAgentsOnly }, async () => {
+test("a Claude agent whose start a UserPromptSubmit hook stops is not started again by itself: the daemon saves the reason and the agent waits for its owner, where a start that the provider's load failed is tried again", async () => {
   const launchesAfter = async (cli: Pick<HarnessOptions, "bootstrapMessages" | "bootstrapResultSubtype" | "omitBootstrapResult">, triedAgain = 0) => {
     const agent = await claudeDaemonFixture();
     try {

@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { link, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { renameWithRetryAsync } from "../../../../../shared/rename-retry.mjs";
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { daemonStateDirEnvironment, environmentValue, windowsSystemEnvironment } from "./windows-child-environment.js";
 
@@ -188,11 +189,13 @@ export async function shieldOwnerInstructions(configHome: string): Promise<void>
   const staged = join(directory, `.AGENTS.md.${randomBytes(6).toString("hex")}.shield`);
   try {
     await writeFile(staged, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await rename(staged, target).catch(async (error) => {
+    // Windows refuses a rename over a file that another launch of this runtime is
+    // renaming or reading at that moment (EPERM); the bounded retry waits it out.
+    await renameWithRetryAsync(staged, target).catch(async (error) => {
       // A rename replaces a file or a link, but not a directory.
       if (!existing?.isDirectory()) throw error;
       await rm(target, { recursive: true, force: true });
-      await rename(staged, target);
+      await renameWithRetryAsync(staged, target);
     });
   } finally {
     await unlink(staged).catch(() => undefined);

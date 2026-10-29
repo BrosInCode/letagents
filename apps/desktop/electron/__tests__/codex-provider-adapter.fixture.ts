@@ -807,7 +807,7 @@ export async function codexDaemonFixture(options: {
     let received = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: string) => {
       received += chunk;
       if (!received.includes("\n")) return;
       socket.end();

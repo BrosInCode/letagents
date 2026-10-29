@@ -16,6 +16,13 @@ export interface ProviderLaunchOptions {
   launchOptions?: Omit<CodexLaunchCommandOptions, "platform" | "env">;
   /** Whether this process is Electron (default: `process.versions.electron` is set). */
   electron?: boolean;
+  /** Start a batch file that is no npm shim through cmd.exe instead of throwing ProviderBatchFileError. */
+  allowCmd?: boolean;
+}
+
+export class ProviderBatchFileError extends Error {
+  readonly code: "EPROVIDERBATCH";
+  constructor(program: string);
 }
 
 export interface ProviderLaunchCommand extends CodexLaunchCommand {

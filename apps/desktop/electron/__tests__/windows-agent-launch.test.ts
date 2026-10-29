@@ -1,0 +1,197 @@
+// How Claude Code, Codex and OpenCode are started on Windows: the provider
+// program resolver, the environment allowlist and shadow profile, and the
+// daemon state folder a worker is told. The platform is injected, so every
+// Windows branch runs here on any host; the real-Windows effects (junctions,
+// hard links, the read-only rules folder) are in codex-agent-home-windows.test.ts.
+import "./isolated-home.js";
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import type { ChildProcess, ExecFileOptions, SpawnOptions } from "node:child_process";
+import test from "node:test";
+
+import { execProviderFile, ProviderBatchFileError, providerLaunchCommand } from "../../../../shared/provider-executable.mjs";
+import { spawnTree } from "../../../../shared/process-tree.mjs";
+import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import {
+  daemonStateDirEnvironment,
+  environmentValue,
+  shadowProfileEnvironment,
+  windowsSystemEnvironment,
+} from "../main/agents/windows-child-environment.js";
+import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
+import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
+import { icaclsReadOnlyFolderArguments } from "../main/agents/codex-agent-home.js";
+
+const ELECTRON = "C:\\Program Files\\LetAgents\\LetAgents.exe";
+const SHIM = [
+  "@ECHO off",
+  "GOTO start",
+  ":find_dp0",
+  "SET dp0=%~dp0",
+  "EXIT /b",
+  ":start",
+  "SETLOCAL",
+  "CALL :find_dp0",
+  "",
+  "IF EXIST \"%dp0%\\node.exe\" (",
+  "  SET \"_prog=%dp0%\\node.exe\"",
+  ") ELSE (",
+  "  SET \"_prog=node\"",
+  "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+  ")",
+  "",
+  "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*",
+  "",
+].join("\r\n");
+const windowsEnv = { Path: "C:\\npm;C:\\Windows\\System32", PATHEXT: ".COM;.EXE;.BAT;.CMD", SystemRoot: "C:\\Windows", ComSpec: "C:\\Windows\\System32\\cmd.exe" };
+const shimLaunch = (files: Set<string>, electron: boolean) => providerLaunchCommand("claude", ["--version"], {
+  platform: "win32", env: windowsEnv, exists: (file: string) => files.has(file), electron,
+  launchOptions: { execPath: ELECTRON, readFile: () => SHIM, exists: (file: string) => files.has(file) },
+});
+
+test("POSIX: a provider program is started exactly as named, and its checks run as plain execFile", () => {
+  assert.deepEqual(providerLaunchCommand("claude", ["--version"], { platform: "darwin" }),
+    { file: "claude", args: ["--version"], resolved: "claude", envAdditions: null });
+  const calls: Array<[string, readonly string[], ExecFileOptions]> = [];
+  const options = { timeout: 5, env: { PATH: "/usr/bin" } };
+  execProviderFile("claude", ["--version"], options, () => {}, {
+    platform: "linux",
+    execFile: (file, args, given) => { calls.push([file, args, given]); return new EventEmitter() as ChildProcess; },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]![0], "claude");
+  assert.deepEqual(calls[0]![1], ["--version"]);
+  assert.equal(calls[0]![2], options, "the caller's own options object, unchanged");
+});
+
+test("Windows: an npm shim runs its script on this Electron only with ELECTRON_RUN_AS_NODE, and on a node.exe beside it without", () => {
+  const onElectron = shimLaunch(new Set(["C:\\npm\\claude.cmd"]), true);
+  assert.equal(onElectron.resolved, "C:\\npm\\claude.cmd");
+  assert.equal(onElectron.file, ELECTRON);
+  assert.deepEqual(onElectron.args, ["C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js", "--version"]);
+  assert.deepEqual(onElectron.envAdditions, { ELECTRON_RUN_AS_NODE: "1" });
+
+  const besideNode = shimLaunch(new Set(["C:\\npm\\claude.cmd", "C:\\npm\\node.exe"]), true);
+  assert.equal(besideNode.file, "C:\\npm\\node.exe");
+  assert.equal(besideNode.envAdditions, null);
+
+  // Under plain Node, process.execPath is a real node: nothing to add.
+  assert.equal(shimLaunch(new Set(["C:\\npm\\claude.cmd"]), false).envAdditions, null);
+
+  // A native program is started as it is.
+  const native = providerLaunchCommand("claude", [], { platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\claude.exe", electron: true });
+  assert.deepEqual(native, { file: "C:\\npm\\claude.exe", args: [], resolved: "C:\\npm\\claude.exe", envAdditions: null });
+});
+
+test("Windows: a provider check runs the shim's script with no console window and the Electron variable added", () => {
+  const calls: Array<[string, readonly string[], ExecFileOptions]> = [];
+  execProviderFile("claude", ["--version"], { timeout: 5, env: windowsEnv }, () => {}, {
+    platform: "win32", electron: true, exists: (file) => file === "C:\\npm\\claude.cmd",
+    launchOptions: { execPath: ELECTRON, readFile: () => SHIM, exists: () => false },
+    execFile: (file, args, given) => { calls.push([file, args, given]); return new EventEmitter() as ChildProcess; },
+  });
+  assert.equal(calls[0]![0], ELECTRON);
+  assert.deepEqual(calls[0]![1], ["C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js", "--version"]);
+  assert.equal(calls[0]![2].windowsHide, true);
+  assert.equal(calls[0]![2].timeout, 5);
+  assert.deepEqual(calls[0]![2].env, { ...windowsEnv, ELECTRON_RUN_AS_NODE: "1" });
+});
+
+test("Windows: spawnTree gives the Electron variable to the shim's script, through the helper and without it", () => {
+  const calls: Array<{ command: string; options: SpawnOptions }> = [];
+  const spawn = (command: string, _args: readonly string[], options: SpawnOptions) => {
+    calls.push({ command, options });
+    return Object.assign(new EventEmitter(), { pid: undefined }) as unknown as ChildProcess;
+  };
+  const treeOptions = {
+    platform: "win32" as const, electron: true, spawn, exists: (file: string) => file === "C:\\npm\\claude.cmd",
+    launchOptions: { execPath: ELECTRON, readFile: () => SHIM, exists: () => false },
+  };
+  spawnTree("claude", ["-p"], { env: windowsEnv }, { ...treeOptions, helperPath: "C:\\helper.exe" });
+  spawnTree("claude", ["-p"], { env: windowsEnv }, { ...treeOptions, helperPath: null });
+  assert.equal(calls[0]!.command, "C:\\helper.exe");
+  assert.equal(calls[1]!.command, ELECTRON);
+  for (const call of calls) assert.deepEqual(call.options.env, { ...windowsEnv, ELECTRON_RUN_AS_NODE: "1" });
+  // A program that is no shim keeps the caller's environment object.
+  calls.length = 0;
+  spawnTree("claude", [], { env: windowsEnv }, { ...treeOptions, exists: (file: string) => file === "C:\\npm\\claude.exe", helperPath: null });
+  assert.equal(calls[0]!.options.env, windowsEnv);
+});
+
+test("the Windows system variables are kept under their usual names, matched without case, and none is added off Windows", () => {
+  const source = { Path: "C:\\bin", systemroot: "C:\\Windows", COMSPEC: "C:\\Windows\\System32\\cmd.exe", TEMP: "C:\\t", LETAGENTS_TOKEN: "secret", USERPROFILE: "C:\\Users\\a" };
+  assert.deepEqual(windowsSystemEnvironment(source, "win32"), {
+    SystemRoot: "C:\\Windows", ComSpec: "C:\\Windows\\System32\\cmd.exe", TEMP: "C:\\t", USERPROFILE: "C:\\Users\\a",
+  });
+  assert.deepEqual(windowsSystemEnvironment(source, "darwin"), {});
+  assert.equal(environmentValue(source, "PATH", "win32"), "C:\\bin");
+  assert.equal(environmentValue(source, "PATH", "linux"), undefined);
+});
+
+test("a shadow profile points every name of the user's home at one folder; POSIX keeps HOME and TMPDIR only", () => {
+  assert.deepEqual(shadowProfileEnvironment("/var/check", "darwin"), { HOME: "/var/check", TMPDIR: "/var/check" });
+  assert.deepEqual(shadowProfileEnvironment("C:\\Users\\a\\.letagents\\check", "win32"), {
+    HOME: "C:\\Users\\a\\.letagents\\check",
+    TMPDIR: "C:\\Users\\a\\.letagents\\check",
+    USERPROFILE: "C:\\Users\\a\\.letagents\\check",
+    HOMEDRIVE: "C:",
+    HOMEPATH: "\\Users\\a\\.letagents\\check",
+    APPDATA: "C:\\Users\\a\\.letagents\\check",
+    LOCALAPPDATA: "C:\\Users\\a\\.letagents\\check",
+    TEMP: "C:\\Users\\a\\.letagents\\check",
+    TMP: "C:\\Users\\a\\.letagents\\check",
+  });
+});
+
+test("an OpenCode runtime and a rental keep what Windows needs, and no token, on Windows only", () => {
+  const source = { Path: "C:\\bin", SystemRoot: "C:\\Windows", APPDATA: "C:\\Users\\a\\AppData\\Roaming", LETAGENTS_TOKEN: "secret", OPENAI_API_KEY: "key" };
+  const openCode = minimalOpenCodeEnvironment(source, {}, {}, "win32");
+  assert.equal(openCode.PATH, "C:\\bin");
+  assert.equal(openCode.SystemRoot, "C:\\Windows");
+  assert.equal(openCode.APPDATA, "C:\\Users\\a\\AppData\\Roaming");
+  assert.equal(openCode.LETAGENTS_TOKEN, undefined);
+  assert.equal(openCode.OPENAI_API_KEY, undefined);
+  const posix = minimalOpenCodeEnvironment(source, {}, {}, "darwin");
+  assert.equal(posix.PATH, undefined, "POSIX reads PATH by its exact name, as before");
+  assert.equal(posix.SystemRoot, undefined);
+
+  assert.deepEqual(rentalIsolatedChildEnvironment(source, "win32"), { Path: "C:\\bin", SystemRoot: "C:\\Windows", APPDATA: "C:\\Users\\a\\AppData\\Roaming" });
+  assert.deepEqual(rentalIsolatedChildEnvironment(source, "linux"), {});
+});
+
+test("Windows: a worker is told the daemon's state folder for the daemon's own pipe, and nothing for anything else", () => {
+  const stateDir = "C:\\Users\\a\\.letagents";
+  const pipe = daemonEndpoint(stateDir, { platform: "win32", account: "a" }).connectPath;
+  assert.deepEqual(daemonStateDirEnvironment(pipe, "win32"), { LETAGENTS_SUPERVISOR_DAEMON_STATE_DIR: stateDir });
+  assert.deepEqual(daemonStateDirEnvironment(pipe, "darwin"), {});
+  assert.deepEqual(daemonStateDirEnvironment("/tmp/daemon.sock", "win32"), {});
+  assert.deepEqual(daemonStateDirEnvironment(undefined, "win32"), {});
+});
+
+test("the read-only rules folder lets the account list and read it, change it back, and save nothing", () => {
+  const sid = "S-1-5-21-1-2-3-1001";
+  const args = icaclsReadOnlyFolderArguments("C:\\Users\\a\\.letagents\\codex-agent-home\\rules", sid);
+  assert.equal(args[0], "C:\\Users\\a\\.letagents\\codex-agent-home\\rules");
+  assert.ok(args.includes("/inheritance:r"));
+  const grants = args.slice(args.indexOf("/grant:r") + 1, -1);
+  assert.deepEqual(grants, [`*${sid}:(OI)(CI)(RD,REA,X,RA,RC,S,WDAC,WO)`, "*S-1-5-18:(OI)(CI)F"]);
+  assert.ok(!/\b(?:W|WD|AD|M|F)\b/.test(grants[0]!.split(":")[1]!.replace(/\(OI\)\(CI\)/, "")), "no right to write or add");
+  assert.throws(() => icaclsReadOnlyFolderArguments("C:\\x", "Everyone"));
+});
+
+test("Windows: a batch file that is no npm shim is refused, never handed to cmd.exe, unless the caller allows it", () => {
+  const batch = (allowCmd?: boolean) => providerLaunchCommand("cursor-agent", ["-p", "line one\nline \"two\""], {
+    platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\cursor-agent.cmd", allowCmd,
+    launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
+  });
+  assert.throws(() => batch(), (error: Error & { code?: string }) => error.code === "EPROVIDERBATCH" && !error.message.includes("line one"));
+  assert.throws(() => batch(false), ProviderBatchFileError);
+  // spawnTree's earlier path for such a file: cmd.exe, which itself refuses a quote or a line break.
+  assert.throws(() => batch(true), /cannot pass an argument with a line break/);
+  const plain = providerLaunchCommand("cursor-agent", ["-p", "hello"], {
+    platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\cursor-agent.cmd", allowCmd: true,
+    launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
+  });
+  assert.equal(plain.windowsVerbatimArguments, true);
+  assert.equal(plain.envAdditions, null);
+});
