@@ -2,8 +2,16 @@ import { setTimeout as delay } from "node:timers/promises";
 import { requestLocalBoard } from "../../../../../shared/local-board-owner.mjs";
 import type { DesktopTaskSummary } from "../../ipc-types.js";
 import { localChatDatabasePath } from "../chat-storage/settings.js";
+import { desktopPlatformCapabilities, SupervisedAgentsUnsupportedError, supervisedAgentsSupported } from "../platform-capabilities.js";
+
+// The board of a local room lives in the supervisor daemon's process.
+function localBoardUnsupportedError(): SupervisedAgentsUnsupportedError {
+  const platform = desktopPlatformCapabilities().platform;
+  return new SupervisedAgentsUnsupportedError(platform, `The board of a room saved only on this computer needs the background service, which is not available on ${platform === "win32" ? "Windows" : platform} yet. Boards of rooms saved on LetAgents work as usual.`);
+}
 
 async function waitForBoardStartup(): Promise<void> {
+  if (!supervisedAgentsSupported()) throw localBoardUnsupportedError();
   const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
   await supervisorDaemonClient.waitForStartup();
 }
@@ -24,6 +32,11 @@ export async function subscribeLocalTasks(
   let revision = -1;
   let retryDelay = 250;
   let reportedFailure = false;
+  if (!supervisedAgentsSupported()) {
+    // Report once and stop: retrying cannot reach a service that never starts.
+    onError(localBoardUnsupportedError());
+    return;
+  }
   while (!signal.aborted) {
     try {
       await waitForBoardStartup();

@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
+import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { Agent } from "undici";
@@ -85,7 +85,7 @@ function desktopUserDataPath(): string {
     return userDataPath;
   }
 
-  const fallbackPath = join(homedir(), ".letagents", "desktop");
+  const fallbackPath = letagentsHomePath("desktop");
   if (!warnedAboutUserDataFallback) {
     console.warn(
       "[desktop-auth] Electron userData path unavailable; storing auth state in ~/.letagents/desktop."

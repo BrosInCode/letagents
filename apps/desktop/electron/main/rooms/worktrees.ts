@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { getMainWorktreeRoot, runGit } from "../git-exec.js";
+import { normalizeGitPath } from "../local-paths.js";
 
 // Worktree provisioning for desktop rooms: prune-before-add, reuse an existing
 // checkout, sibling naming, collision fallback and created-ownership tracking.
@@ -21,12 +22,22 @@ function worktreePathForBranch(repoRoot: string, branch: string): string {
 async function findWorktreeForBranch(repoRoot: string, branch: string): Promise<string | null> {
   const { stdout, code } = await runGit(repoRoot, ["worktree", "list", "--porcelain"]);
   if (code !== 0) return null;
+  return worktreePathForBranchInPorcelain(stdout, branch);
+}
+
+/** The checkout of `branch` in `git worktree list --porcelain` output. */
+export function worktreePathForBranchInPorcelain(
+  stdout: string,
+  branch: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   let currentPath: string | null = null;
   for (const line of stdout.split(/\r?\n/)) {
     const [key, ...rest] = line.split(" ");
     const value = rest.join(" ").trim();
     if (key === "worktree") {
-      currentPath = value;
+      // Git for Windows prints C:/...; hand back the path Node would build.
+      currentPath = normalizeGitPath(value, platform);
     } else if (key === "branch") {
       if (value.replace(/^refs\/heads\//, "") === branch && currentPath) return currentPath;
     }

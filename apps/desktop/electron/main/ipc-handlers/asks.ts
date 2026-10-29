@@ -4,6 +4,7 @@ import { askApi, askErrorMessage } from "../../asks/api.js";
 import { takePendingAskLink } from "../ask-link-inbox.js";
 import { askGiveCoordinator, giftPermissionProfile } from "../../asks/give-coordinator.js";
 import type { DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "../../ipc-types/asks.js";
+import { supervisedAgentsSupported, supervisedAgentsUnsupportedMessage } from "../platform-capabilities.js";
 
 /** Every ask call answers with a value or one sentence to show (spec rule 4). */
 async function result<T>(run: () => Promise<T>): Promise<DesktopAskResult<T>> {
@@ -26,10 +27,16 @@ export function registerDesktopAskIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:asks:decide", (_event, askId: unknown, proposalId: unknown, approve: unknown) =>
     result(() => askApi.decide(text(askId), text(proposalId), approve === true)));
   targetIpcMain.handle("desktop:asks:preview", (_event, token: unknown) => result(() => askApi.preview(text(token))));
-  targetIpcMain.handle("desktop:asks:can-give", (_event, providerId: unknown) => giftPermissionProfile(text(providerId)) !== null);
-  targetIpcMain.handle("desktop:asks:give", (_event, input: DesktopGiveAgentInput) => result(() => askGiveCoordinator.give(input)));
+  // Giving an agent starts it on this computer, which needs supervised agents.
+  // Asking for one and answering "can't right now" work everywhere.
+  const canRunAgents = supervisedAgentsSupported();
+  targetIpcMain.handle("desktop:asks:can-give", (_event, providerId: unknown) =>
+    canRunAgents && giftPermissionProfile(text(providerId)) !== null);
+  targetIpcMain.handle("desktop:asks:give", (_event, input: DesktopGiveAgentInput) => canRunAgents
+    ? result(() => askGiveCoordinator.give(input))
+    : Promise.resolve<DesktopAskResult<never>>({ ok: false, error: supervisedAgentsUnsupportedMessage() }));
   targetIpcMain.handle("desktop:asks:cant-help", (_event, token: unknown) => result(() => askGiveCoordinator.cantHelp(text(token))));
   targetIpcMain.handle("desktop:asks:take-pending-link", () => takePendingAskLink());
   // Resume counting any gift still running from before a restart.
-  askGiveCoordinator.startWatching();
+  if (canRunAgents) askGiveCoordinator.startWatching();
 }

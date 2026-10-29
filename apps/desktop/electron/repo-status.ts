@@ -12,6 +12,7 @@ import type {
   RepoWorktreeEntry,
 } from "./ipc-types.js";
 import { runGitStdout } from "./main/git-exec.js";
+import { normalizeGitPath, sameLocalPath } from "./main/local-paths.js";
 
 export type RepoStatusBuildOptions = {
   signal?: AbortSignal;
@@ -59,7 +60,7 @@ async function getRepoRoot(
 ): Promise<string | null> {
   try {
     const stdout = await runGitInPath(workspaceRoot, ["rev-parse", "--show-toplevel"], options);
-    return stdout.trim() || null;
+    return normalizeGitPath(stdout.trim()) || null;
   } catch (error) {
     throwIfAborted(options);
     const failure = error as { code?: number; stderr?: string };
@@ -172,7 +173,11 @@ async function getRemoteDefaultBranch(
   }
 }
 
-export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string): RepoWorktreeEntry[] {
+export function parseGitWorktreePorcelain(
+  stdout: string,
+  workspaceRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): RepoWorktreeEntry[] {
   const lines = stdout.split(/\r?\n/);
   const entries: RepoWorktreeEntry[] = [];
   let current: Partial<RepoWorktreeEntry> | null = null;
@@ -183,7 +188,7 @@ export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string)
         path: current.path,
         branch: current.branch ?? null,
         head: current.head,
-        isCurrent: current.path === workspaceRoot,
+        isCurrent: sameLocalPath(current.path, workspaceRoot, platform),
         isMain: entries.length === 0,
       });
     }
@@ -200,7 +205,7 @@ export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string)
     const value = rest.join(" ").trim();
     if (key === "worktree") {
       pushCurrent();
-      current = { path: value };
+      current = { path: normalizeGitPath(value, platform) };
     } else if (current && key === "HEAD") {
       current.head = value;
     } else if (current && key === "branch") {

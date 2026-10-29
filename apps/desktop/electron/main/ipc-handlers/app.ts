@@ -33,9 +33,13 @@ import {
   takePendingDesktopNotificationActivation,
 } from "../notifications.js";
 import { apiUrl, workspaceRoot } from "../paths.js";
+import { supervisedAgentsSupported, type DesktopPlatformCapabilities } from "../platform-capabilities.js";
 import { desktopUpdater } from "../updates.js";
 
 const { app } = electron as typeof import("electron");
+
+/** `supervisedAgentsSupported` is false where agents cannot run (Windows today). */
+type DesktopAppInfoWithCapabilities = DesktopAppInfo & Pick<DesktopPlatformCapabilities, "supervisedAgentsSupported">;
 
 const reviewSenders = new Set<number>();
 
@@ -70,10 +74,11 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
   });
   targetIpcMain.handle(
     "desktop:app:get-info",
-    async (): Promise<DesktopAppInfo> => ({
+    async (): Promise<DesktopAppInfoWithCapabilities> => ({
       appName: "LetAgents Desktop",
       appVersion: app.getVersion(),
       platform: process.platform,
+      supervisedAgentsSupported: supervisedAgentsSupported(),
       versions: {
         electron: process.versions.electron,
         chrome: process.versions.chrome,
