@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { ApprovalReference, ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import { launchPolicyForToolRules } from "./provider-configuration.js";
 import type { DaemonManifestEntry } from "./types.js";
+import { isOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
 import { createGitCommand, resolveSourceRepositoryIdentity, normalizeRemote, WORKSPACE_MARKER } from "./workspace-provisioner.js";
 
@@ -118,10 +119,9 @@ function roomWorkspaceIdentity(entry: DaemonManifestEntry, context: HostToolCont
   const directory = lstatSync(context.workspacePath);
   const markerPath = join(canonical, WORKSPACE_MARKER);
   const file = lstatSync(markerPath);
-  if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077)
-    || !file.isFile() || file.isSymbolicLink() || (file.mode & 0o077) || file.size > 16_384
-    || (process.getuid && (directory.uid !== process.getuid() || file.uid !== process.getuid()))
-    || canonical !== context.barePath) return null;
+  if (!directory.isDirectory() || directory.isSymbolicLink() || !file.isFile() || file.isSymbolicLink()
+    || file.size > 16_384 || canonical !== context.barePath
+    || !isOwnerPrivateSync(context.workspacePath, directory) || !isOwnerPrivateSync(markerPath, file)) return null;
   const marker = JSON.parse(readFileSync(markerPath, "utf8"));
   if (!marker || marker.version !== 1 || marker.repo !== context.repo || marker.work_attempt_id !== context.workAttemptId
     || marker.task_id !== context.taskId || marker.remote_url !== context.remoteUrl

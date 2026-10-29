@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { createPrivateDir, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 
 import type { ProviderRoomTurnAttachment, RoomTurnAttachmentOrigin, RoomTurnFileAccess, RoomTurnImageDelivery, RoomTurnImageMimeType } from "./provider-action-port.js";
 import type { RoomTurnFileOutcome } from "./prepared-room-context.js";
@@ -549,10 +551,10 @@ export class RoomTurnAttachmentStager {
     try {
       // The folders on the way must be this user's own plain folders, not links to somewhere else.
       if (!await isOwnedFolder(this.root) || !await isOwnedFolder(cache)) return null;
-      const handle = await open(join(cache, key), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const handle = await openNoFollow(join(cache, key), constants.O_RDONLY | constants.O_NONBLOCK);
       try {
         const stat = await handle.stat();
-        if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return null;
+        if (!stat.isFile() || !await isOwnedByCurrentUser(join(cache, key), stat)) return null;
         // The kept copy is the file itself: one over the space left needs no new download to be refused.
         if (stat.size > maxBytes) return "too_large";
         const bytes = new Uint8Array(await handle.readFile());
@@ -570,7 +572,7 @@ export class RoomTurnAttachmentStager {
       const cache = await this.ownedFolder(join(this.root, FILE_CACHE_FOLDER));
       const temporary = join(cache, `${key}.${randomUUID()}.tmp`);
       await writeExclusive(temporary, bytes);
-      await rename(temporary, join(cache, key)).catch(async () => { await rm(temporary, { force: true }); });
+      await renameWithRetryAsync(temporary, join(cache, key)).catch(async () => { await rm(temporary, { force: true }); });
     } catch { /* Optional. */ }
   }
 
@@ -578,16 +580,18 @@ export class RoomTurnAttachmentStager {
     await this.ownedFolder(this.root);
     const folder = await mkdtemp(join(this.root, STAGED_FOLDER_PREFIX));
     this.active.add(folder);
+    // POSIX mkdtemp makes it 0700; Windows gives it the private DACL.
+    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(folder, "directory");
     return folder;
   }
 
   /** A plain 0700 folder of this user's, made if missing; a link or another user's folder is refused. */
   private async ownedFolder(path: string): Promise<string> {
-    await mkdir(path, { recursive: true, mode: 0o700 });
+    await createPrivateDir(path, { recursive: true });
     const folder = await lstat(path);
     if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error("The staged attachment folder is not a plain folder.");
-    if (typeof process.getuid === "function" && folder.uid !== process.getuid()) throw new Error("The staged attachment folder belongs to another user.");
-    if ((folder.mode & 0o077) !== 0) await chmod(path, 0o700);
+    if (!await isOwnedByCurrentUser(path, folder)) throw new Error("The staged attachment folder belongs to another user.");
+    if (!await isOwnerPrivate(path, folder)) await protectOwnerPrivate(path, "directory");
     return path;
   }
 }
@@ -601,11 +605,13 @@ function fileCacheKey(apiUrl: string, roomId: string, messageId: string, attachm
 
 async function isOwnedFolder(path: string): Promise<boolean> {
   const folder = await lstat(path).catch(() => null);
-  return Boolean(folder?.isDirectory() && !folder.isSymbolicLink()
-    && (typeof process.getuid !== "function" || folder.uid === process.getuid()));
+  return Boolean(folder?.isDirectory() && !folder.isSymbolicLink() && await isOwnedByCurrentUser(path, folder));
 }
 
 async function writeExclusive(path: string, bytes: Uint8Array): Promise<void> {
-  const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(bytes); } finally { await handle.close(); }
+  const handle = await openNoFollow(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  try {
+    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(path, "file");
+    await handle.writeFile(bytes);
+  } finally { await handle.close(); }
 }

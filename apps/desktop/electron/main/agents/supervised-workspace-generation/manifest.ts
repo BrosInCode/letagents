@@ -1,14 +1,16 @@
 /** Writing, loading, validating and cleaning up the generation manifest and its trees. */
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
-import { lstat, mkdir, open, realpath, rename, rm, unlink } from "node:fs/promises";
+import { lstat, mkdir, realpath, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { renameWithRetryAsync } from "../../../../../../shared/rename-retry.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, RETIRED_NAME, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type TreeEntry } from "./types.js";
 import { assertSafeRelativePath, fsyncDirectory, generationDirectoryName, generationError, isErrno, isProtectedPath, manifestPathOf, operationId, projectRelativePath, safeRelative } from "./helpers.js";
 
 export async function atomicWrite(target: string, content: Buffer, mode: number, generationId: string): Promise<void> {
   const temporary = join(dirname(target), `.${basename(target)}.letagents-${generationId}-${randomBytes(8).toString("hex")}.tmp`);
-  const descriptor = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+  const descriptor = await openNoFollow(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
   let closed = false;
   try {
     await descriptor.writeFile(content);
@@ -16,7 +18,7 @@ export async function atomicWrite(target: string, content: Buffer, mode: number,
     await descriptor.sync();
     await descriptor.close();
     closed = true;
-    await rename(temporary, target);
+    await renameWithRetryAsync(temporary, target);
     await fsyncDirectory(dirname(target));
   } catch (error) {
     if (!closed) await descriptor.close().catch(() => undefined);
@@ -50,14 +52,16 @@ export async function persistManifest(manifest: GenerationManifest): Promise<voi
   validateManifest(manifest);
   const destination = manifestPathOf(manifest);
   const temporary = join(manifest.generationRoot, `.${MANIFEST_NAME}.${randomBytes(8).toString("hex")}.tmp`);
-  const descriptor = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+  const descriptor = await openNoFollow(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
   let closed = false;
   try {
+    // Windows has no mode bits: the empty file gets its private DACL before the manifest is written.
+    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(temporary, "file");
     await descriptor.writeFile(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     await descriptor.sync();
     await descriptor.close();
     closed = true;
-    await rename(temporary, destination);
+    await renameWithRetryAsync(temporary, destination);
     await fsyncDirectory(manifest.generationRoot);
   } catch (error) {
     if (!closed) await descriptor.close().catch(() => undefined);
@@ -68,10 +72,10 @@ export async function persistManifest(manifest: GenerationManifest): Promise<voi
 
 export async function loadManifest(manifestPath: string): Promise<GenerationManifest> {
   const resolvedPath = resolve(manifestPath);
-  const descriptor = await open(resolvedPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  const descriptor = await openNoFollow(resolvedPath, fsConstants.O_RDONLY);
   try {
     const info = await descriptor.stat();
-    if (!info.isFile() || info.size > 8 * 1024 * 1024 || (info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()) {
+    if (!info.isFile() || info.size > 8 * 1024 * 1024 || !await isOwnerPrivate(resolvedPath, info)) {
       throw generationError("Manifest is not a bounded owner-private regular file.", "INVALID_MANIFEST");
     }
     const parsed: unknown = normalizeManifestVersion(JSON.parse(await descriptor.readFile("utf8")));
@@ -79,7 +83,7 @@ export async function loadManifest(manifestPath: string): Promise<GenerationMani
     validateManifest(parsed);
     if (manifestPathOf(parsed) !== resolvedPath) throw generationError("Manifest path does not match its generation root.", "INVALID_MANIFEST");
     const rootInfo = await lstat(parsed.generationRoot);
-    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || (rootInfo.mode & 0o077) !== 0 || rootInfo.uid !== process.getuid?.()) {
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || !await isOwnerPrivate(parsed.generationRoot, rootInfo)) {
       throw generationError("Generation root is not an owner-private real directory.", "INVALID_MANIFEST");
     }
     if (await realpath(parsed.sourceRoot) !== parsed.sourceRoot || await realpath(parsed.realWorkspace) !== parsed.realWorkspace) {

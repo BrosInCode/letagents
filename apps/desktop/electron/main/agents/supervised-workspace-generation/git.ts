@@ -1,20 +1,40 @@
 /** Running git and other processes for the source authority and the private clone, git control files and file clones. */
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { createPrivateDirSync, nullDevice, openNoFollow, ownerPrivatePlatform } from "../../../../../../shared/owner-private-fs.mjs";
 import type { SourceGitAuthority } from "./types.js";
 import { fileVersionKey, generationError, limitError } from "./helpers.js";
+
+/** POSIX keeps /tmp. Windows has no /tmp: its per-user temporary folder stands in. */
+export function gitTemporaryRoot(): string {
+  return ownerPrivatePlatform() === "win32" ? tmpdir() : "/tmp";
+}
+
+/**
+ * POSIX keeps /var/empty. Windows has no such folder (a bare "/var/empty" is
+ * a folder at the root of the current drive, which any local user may make),
+ * so an empty folder private to this account stands in.
+ */
+export function gitEmptyHome(): string {
+  if (ownerPrivatePlatform() !== "win32") return "/var/empty";
+  const home = join(tmpdir(), "letagents-git-empty-home");
+  try { createPrivateDirSync(home); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  return home;
+}
 
 // Git honors a large ambient control surface (GIT_DIR, GIT_WORK_TREE,
 // GIT_INDEX_FILE, object alternates, injected config pairs, and helpers).
 // Never inherit it into trusted generation/reconciliation commands.
 export const GIT_ENV: NodeJS.ProcessEnv = {
   PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-  TMPDIR: "/tmp",
-  HOME: "/var/empty",
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_SYSTEM: "/dev/null",
+  TMPDIR: gitTemporaryRoot(),
+  HOME: gitEmptyHome(),
+  GIT_CONFIG_GLOBAL: nullDevice(),
+  GIT_CONFIG_SYSTEM: nullDevice(),
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_OPTIONAL_LOCKS: "0",
   GIT_TERMINAL_PROMPT: "0",
@@ -30,8 +50,8 @@ export const GIT_ENV: NodeJS.ProcessEnv = {
 export function sourceGitEnvironment(): NodeJS.ProcessEnv {
   return {
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-    TMPDIR: "/tmp",
-    HOME: process.env.HOME || "/var/empty",
+    TMPDIR: gitTemporaryRoot(),
+    HOME: process.env.HOME || gitEmptyHome(),
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     GIT_ASKPASS: "/usr/bin/false",
@@ -43,7 +63,7 @@ export function sourceGitEnvironment(): NodeJS.ProcessEnv {
 }
 
 export async function readStableGitControlFile(path: string): Promise<string> {
-  const descriptor = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch((error) => {
+  const descriptor = await openNoFollow(path, fsConstants.O_RDONLY).catch((error) => {
     throw generationError(
       `A Git control file is unavailable or redirected: ${error instanceof Error ? error.message : String(error)}`,
       "REDIRECTED_GIT_ROOT",
@@ -161,7 +181,7 @@ export async function sourceAuthorityExitCode(authority: SourceGitAuthority, arg
 
 export function gitArgs(args: string[]): string[] {
   return [
-    "-c", "core.hooksPath=/dev/null",
+    "-c", `core.hooksPath=${nullDevice()}`,
     "-c", "core.fsmonitor=false",
     // The physical namespace is authoritative for reconciliation. Do not let a
     // case-insensitive/precomposed index silently collapse a provider rename.
