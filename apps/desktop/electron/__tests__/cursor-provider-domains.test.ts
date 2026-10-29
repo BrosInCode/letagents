@@ -30,7 +30,7 @@ const adapterModuleSources = [
 const identitySource = read("../main/agents/cursor-identity.ts");
 // The launcher composes its wrapper program from ordered cursor/ slices.
 const launcherSource = [
-  "turn-launcher", "turn-wrapper-setup", "turn-wrapper-mcp", "turn-wrapper-proxies", "turn-wrapper-start",
+  "turn-launcher", "turn-wrapper-setup", "turn-wrapper-mcp", "turn-wrapper-proxies", "turn-wrapper-start", "windows-turn",
 ].map((name) => read(`../main/agents/cursor/${name}.ts`)).join("\n");
 const sandboxSource = read("../main/agents/cursor-sandbox-policy.ts");
 
@@ -51,7 +51,7 @@ test("Cursor native launch, identity, and sandbox authority remain bounded domai
     assert.doesNotMatch(source, /function validateCursorSandboxPaths/);
   }
 
-  assert.match(launcherSource, /const wrapperSource = String\.raw/);
+  assert.match(launcherSource, /export function cursorTurnWrapperSource\(/);
   assert.equal(matches(launcherSource, /spawn(?:Tree)?\(process\.execPath/g).length, 2);
   assert.match(identitySource, /runCursorSandboxedInspection/);
   assert.match(identitySource, /\/aiserver\.v1\.DashboardService\/GetMe/);

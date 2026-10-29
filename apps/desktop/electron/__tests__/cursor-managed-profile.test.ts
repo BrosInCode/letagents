@@ -15,7 +15,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
+
+import { supervisedAgentsOnly } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
@@ -423,7 +425,7 @@ test("supervised Cursor refuses project MCP servers before creating its private 
   assert.equal(existsSync(profileRoot), false);
 });
 
-test("supervised Cursor rejects Cursor authority configs inherited from the Git root to a nested workspace", () => {
+test("supervised Cursor rejects Cursor authority configs inherited from the Git root to a nested workspace", { skip: supervisedAgentsOnly }, () => {
   const sourceHome = join(tempDir, "source-home-supervised-parent-authority");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   const repository = join(tempDir, "workspace-supervised-parent-authority");
@@ -461,7 +463,7 @@ test("supervised Cursor rejects Cursor authority configs inherited from the Git 
   unlinkSync(join(repository, ".cursor", "settings.json"));
 });
 
-test("supervised Cursor isolates inherited Claude settings without rejecting the workspace", () => {
+test("supervised Cursor isolates inherited Claude settings without rejecting the workspace", { skip: supervisedAgentsOnly }, () => {
   const sourceHome = join(tempDir, "source-home-supervised-parent-claude-settings");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   const repository = join(tempDir, "workspace-supervised-parent-claude-settings");
@@ -512,7 +514,7 @@ test("supervised Cursor isolates inherited Claude settings without rejecting the
   }, "preparing Cursor leaves Claude's local settings untouched");
 });
 
-test("supervised Cursor accepts a validated Git submodule workspace", () => {
+test("supervised Cursor accepts a validated Git submodule workspace", { skip: supervisedAgentsOnly }, () => {
   const sourceHome = join(tempDir, "source-home-supervised-submodule");
   const childRepository = join(tempDir, "source-supervised-submodule");
   const superproject = join(tempDir, "workspace-supervised-superproject");
@@ -624,7 +626,7 @@ test("supervised Cursor rejects unsupported MCP child environment keys", () => {
   }), /Unsupported supervised Cursor MCP environment key/);
 });
 
-test("supervised Cursor rejects workspace permission config and copies global state as auth-only", () => {
+test("supervised Cursor rejects workspace permission config and copies global state as auth-only", { skip: supervisedAgentsOnly }, () => {
   const sourceHome = join(tempDir, "source-home-supervised-authority");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   writeFileSync(join(sourceHome, ".cursor", "cli-config.json"), JSON.stringify({
@@ -737,7 +739,7 @@ test("supervised Cursor fails closed for team-managed login identities", () => {
   }), /Team-managed Cursor accounts are not supported/);
 });
 
-test("a fenced live personal identity replaces stale team metadata and binds the continuation", () => {
+test("a fenced live personal identity replaces stale team metadata and binds the continuation", { skip: supervisedAgentsOnly }, () => {
   const sourceHome = join(tempDir, "source-home-supervised-live-identity");
   const workspace = join(tempDir, "workspace-supervised-live-identity");
   const profileRoot = join(tempDir, "supervised-profile-live-identity");
