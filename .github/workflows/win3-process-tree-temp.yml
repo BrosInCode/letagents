@@ -77,11 +77,9 @@ jobs:
           echo "Loaded $((total - failed)) of ${total} electron test files."
           exit $(( failed > 0 ))
 
-      - name: Electron suite on Windows (for the record)
+      - name: This PR's desktop tests on Windows
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         shell: bash
         run: |
           cd apps/desktop
-          npm run test:electron > "${RUNNER_TEMP}/electron.log" 2>&1 || true
-          grep -E '^# (tests|pass|fail|skipped|cancelled)' "${RUNNER_TEMP}/electron.log"
-          grep -E '^not ok' "${RUNNER_TEMP}/electron.log" | head -300 || true
+          node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks electron/__tests__/process-tree.test.ts daemon/__tests__/process-identity-platforms.test.ts electron/__tests__/cursor-provider-domains.test.ts electron/__tests__/cursor-wrapper-setup-windows-load.test.ts
