@@ -1122,3 +1122,5 @@ TEST_DB_URL=<disposable-test-database> node --import tsx --test --test-concurren
   confidence; the switch off; the metrics.
 - `tracker-jev-routes.test.ts`: only a person in the app decides a link; the draft route needs the switch and never
   saves.
+
+<!-- QA 2026-10-29: connector rule test for SCRUM-1; this PR is closed after the test. -->
