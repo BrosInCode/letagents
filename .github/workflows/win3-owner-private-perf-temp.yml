@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [before, after, after-daemon-suite]
+        side: [before, after, before-daemon-suite, after-daemon-suite]
     env:
       LETAGENTS_API_URL: http://127.0.0.1:9
     steps:
@@ -38,7 +38,7 @@ jobs:
       - name: Pick the side and merge the desktop Windows CI fixes (#1791)
         shell: bash
         run: |
-          if [ "${{ matrix.side }}" = "before" ]; then git checkout -q origin/staging; fi
+          case "${{ matrix.side }}" in before*) git checkout -q origin/staging ;; esac
           git log --oneline -1
           git fetch -q origin claude/win2-desktop-ci-a8fb64
           git -c user.email=ci@example.invalid -c user.name=ci merge -q --no-edit FETCH_HEAD
@@ -59,7 +59,7 @@ jobs:
           npm exec --prefix apps/desktop -- install-electron
 
       - name: Time the slow files
-        if: ${{ matrix.side != 'after-daemon-suite' }}
+        if: ${{ matrix.side == 'before' || matrix.side == 'after' }}
         shell: bash
         working-directory: apps/desktop
         run: |
@@ -93,14 +93,14 @@ jobs:
           exit 0
 
       - name: Daemon suite
-        if: ${{ matrix.side == 'after-daemon-suite' }}
+        if: ${{ matrix.side == 'before-daemon-suite' || matrix.side == 'after-daemon-suite' }}
         shell: bash
         run: |
           set +e
           start=$(date +%s)
           npm --prefix apps/desktop run test:daemon > "${RUNNER_TEMP}/daemon.log" 2>&1; code=$?
           end=$(date +%s)
-          echo "TIMING daemon suite: $((end - start)) s, exit ${code}"
+          echo "TIMING ${{ matrix.side }}: $((end - start)) s, exit ${code}"
           grep -E "^# (tests|pass|fail|skipped|duration_ms) " "${RUNNER_TEMP}/daemon.log" | tail -6
           grep -E -A40 "^not ok" "${RUNNER_TEMP}/daemon.log" | head -200
           exit "${code}"

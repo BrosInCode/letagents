@@ -756,16 +756,31 @@ test("real Windows: costs: one protect, one cold check, and many writes in a pri
     started = performance.now();
     await assertOwnerPrivate(file);
     const coldCheckMs = performance.now() - started;
+    // Count every tool the helper starts during the writes: none may start.
+    const real = createWindowsSecurity();
+    let tools = 0;
+    const counted = new Proxy(real, {
+      get(target, name, receiver) {
+        const value = Reflect.get(target, name, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (!/^currentUser/.test(String(name))) tools += 1;
+          return value.apply(target, args);
+        };
+      },
+    });
+    const options = { windowsSecurity: counted as WindowsSecurity };
+    await assertOwnerPrivate(folder, { ...options, kind: "directory" });
+    tools = 0;
     started = performance.now();
     for (let index = 0; index < 100; index += 1) {
-      await writePrivateFileAtomically(join(folder, `w${index % 5}.json`), String(index));
-      await protectOwnerPrivate(join(folder, `w${index % 5}.json`), "file");
-      await assertOwnerPrivate(join(folder, `w${index % 5}.json`));
+      await writePrivateFileAtomically(join(folder, `w${index % 5}.json`), String(index), options);
+      await protectOwnerPrivate(join(folder, `w${index % 5}.json`), "file", options);
+      await assertOwnerPrivate(join(folder, `w${index % 5}.json`), options);
     }
     const hundredMs = performance.now() - started;
-    console.log(`owner-private costs: protect folder ${Math.round(protectMs)} ms, cold check ${Math.round(coldCheckMs)} ms, 100 x (write + protect + check) in a private folder ${Math.round(hundredMs)} ms`);
+    console.log(`owner-private costs: protect folder ${Math.round(protectMs)} ms, cold check ${Math.round(coldCheckMs)} ms, 100 x (write + protect + check) in a private folder ${Math.round(hundredMs)} ms, tools started ${tools}`);
     assert.ok(protectMs < 15_000 && coldCheckMs < 15_000);
-    // No tool runs per write: 100 rounds stay far below one PowerShell start each.
-    assert.ok(hundredMs < 5_000, `100 private writes took ${Math.round(hundredMs)} ms`);
+    assert.equal(tools, 0);
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
