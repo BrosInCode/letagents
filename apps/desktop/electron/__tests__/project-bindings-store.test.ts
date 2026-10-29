@@ -31,7 +31,9 @@ const execFileAsync = promisify(execFile);
 // its temp folder.
 function removeTemporary(temporary: string): void {
   resetProjectBindingsStoreCachesForTest();
-  rmSync(temporary, { recursive: true, force: true });
+  // Windows can hold a folder for a moment after the child process that used
+  // it exited (EBUSY); rmSync retries only such errors.
+  rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 // The store canonicalizes folders with the native realpath. On Windows only
