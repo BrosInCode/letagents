@@ -17,11 +17,27 @@ const runNpm = (args, options) => {
   return execFileSync(spawn.command, spawn.args, { ...spawn.options, ...options });
 };
 
-test("the packed MCP CLI reports its contract and active supervised readiness", { timeout: 120_000 }, async () => {
+// npm install of the packed tarball is slow on a Windows runner (63-87 s of
+// the test on windows-latest; whole test 96 s and 133 s passes, 120.4 s and
+// 150 s past the old 120 s limit), so Windows gets more room; macOS and Linux
+// keep the limit that catches a hang early.
+const timeout = process.platform === "win32" ? 300_000 : 120_000;
+
+test("the packed MCP CLI reports its contract and active supervised readiness", { timeout }, async (t) => {
   const tempRoot = mkdtempSync(join(tmpdir(), "letagents-package-runtime-"));
+  let phaseStarted = Date.now();
+  const phaseDone = (phase) => {
+    t.diagnostic(`${phase}: ${Date.now() - phaseStarted} ms`);
+    phaseStarted = Date.now();
+  };
 
   try {
-    runNpm(["run", "build"], { cwd: repoRoot, stdio: "pipe" });
+    // A CI step that has just built this checkout says so, and the build is
+    // not run twice; anywhere else the test builds what it packs.
+    if (process.env.LETAGENTS_PACKAGE_TEST_DIST_BUILT !== "1") {
+      runNpm(["run", "build"], { cwd: repoRoot, stdio: "pipe" });
+      phaseDone("npm run build");
+    }
 
     const packOutput = runNpm(
       ["pack", "--json", "--ignore-scripts", "--pack-destination", tempRoot],
@@ -33,10 +49,12 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
     mkdirSync(installRoot);
     writeFileSync(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
 
+    phaseDone("npm pack");
     runNpm(
       ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
       { cwd: installRoot, stdio: "pipe" },
     );
+    phaseDone("npm install of the tarball");
 
     const packageRoot = join(installRoot, "node_modules", "letagents");
     const runtimeDependency = join(packageRoot, "dist", "api", "board-intent-payloads.js");
@@ -69,6 +87,7 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
     assert.equal(prepared.summary.contribution.changes.additions, 1);
     assert.equal(existsSync(join(directory, 'review')), true);
     assert.equal(git('diff', '--cached'), '', 'capture must not modify the real index');
+    phaseDone("workspace capture through the installed worker");
     const entry = join(packageRoot, "dist", "mcp", "server.js");
     for (const apiUrl of ["http://127.0.0.1:9", "letagents-local://rooms"]) for (const provider of ["cursor", "codex"]) {
       const contract = JSON.parse(execFileSync(
@@ -222,6 +241,7 @@ test("the packed MCP CLI reports its contract and active supervised readiness", 
         server.kill("SIGTERM");
         await exited;
       }
+      phaseDone(`installed server for ${provider} against ${apiUrl}`);
     }
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
