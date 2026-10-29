@@ -19,8 +19,13 @@ import {
 } from "../agents/providers.js";
 import { buildDiagnosticsSnapshot, buildWorkerSnapshots } from "../rooms.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
+import { gateSupervisedAgentIpc } from "./supervised-agent-gate.js";
 
-export function registerDesktopWorkerIpcHandlers(targetIpcMain: IpcMain): void {
+export function registerDesktopWorkerIpcHandlers(ipcMain: IpcMain): void {
+  // Agent providers need supervised agents; the worker and diagnostics views do not.
+  const targetIpcMain = gateSupervisedAgentIpc(ipcMain, {
+    passThrough: ["desktop:workers:list", "desktop:diagnostics:get-snapshot"],
+  });
   targetIpcMain.handle(
     "desktop:workers:list",
     async (): Promise<WorkerSnapshot[]> => buildWorkerSnapshots(),

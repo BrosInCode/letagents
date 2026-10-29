@@ -19,6 +19,11 @@ export async function openDesktopCredentialStorage(options: {
   shell?: CredentialStorageShell;
 } = {}): Promise<void> {
   const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    // Electron protects secrets with Windows data protection (DPAPI), which is
+    // tied to the signed-in Windows account; no separate app holds them.
+    throw new Error("Windows protects saved credentials with your Windows account on this PC, so there is no credential app to open. Sign out of Windows and sign in again, then check again.");
+  }
   if (platform !== "darwin") {
     throw new Error("Credential-storage recovery is only available on macOS.");
   }
