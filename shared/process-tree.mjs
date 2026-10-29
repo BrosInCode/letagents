@@ -120,17 +120,13 @@ export function sealedProcessTreeHelperSha256(arch = process.arch, seal = proces
   return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
 }
 
-/** sha256 of a file, read again only when its size, time or file id changed; null when unreadable. */
-const helperDigests = new Map();
+/**
+ * sha256 of a file, null when unreadable. Read on every use (the helper is
+ * small): size, time and file id can all be kept by an edit in place.
+ */
 function fileSha256(filePath) {
   try {
-    const info = statSync(filePath);
-    const stamp = `${info.size}:${info.mtimeMs}:${info.ino}`;
-    const known = helperDigests.get(filePath);
-    if (known?.stamp === stamp) return known.sha256;
-    const sha256 = createHash("sha256").update(readFileSync(filePath)).digest("hex");
-    helperDigests.set(filePath, { stamp, sha256 });
-    return sha256;
+    return createHash("sha256").update(readFileSync(filePath)).digest("hex");
   } catch {
     return null;
   }

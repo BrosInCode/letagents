@@ -13,12 +13,14 @@
  *       exact <command-line>, suspended, put it in the job, then resume it.
  *       The child inherits this helper's standard handles and C runtime
  *       descriptors (so a Node IPC channel passes through) and its current
- *       directory and environment. When the child exits, the rest of the job
- *       is ended and this helper exits with the child's exit code once the
- *       job is empty. If the job still holds processes <wait-ms> (default
- *       5000) after it was ended, they are reported unkillable: this helper
- *       exits with 0xE04C5401 instead of the child's code. If this helper is
- *       killed, its job handle closes and Windows ends the job. Exit 120:
+ *       directory and environment. When the child exits, or when a `kill`
+ *       ends the job (it signals this helper's "ended" event), the rest of
+ *       the job is ended and this helper exits with the child's exit code
+ *       once the job is empty. If the job still holds processes <wait-ms>
+ *       (default 5000) after that, even the child itself, they are reported
+ *       unkillable: this helper exits with 0xE04C5401 instead of the child's
+ *       code. If this helper is killed, its job handle closes and Windows
+ *       ends the job. Exit 120:
  *       usage; 121: job setup failed; 122: the child could not be started
  *       (the reason is on stderr).
  *
@@ -115,6 +117,12 @@ static void job_name(wchar_t *name, size_t size, DWORD pid, u64 creation) {
   _snwprintf_s(name, size, _TRUNCATE, L"Local\\letagents-process-tree-%lu-%llu", (unsigned long)pid, creation);
 }
 
+/* The event a kill signals once it has ended that helper's job, so the
+   helper bounds its wait even while its own child has not exited. */
+static void ended_event_name(wchar_t *name, size_t size, DWORD pid, u64 creation) {
+  _snwprintf_s(name, size, _TRUNCATE, L"Local\\letagents-process-tree-%lu-%llu-ended", (unsigned long)pid, creation);
+}
+
 static DWORD job_active_processes(HANDLE job) {
   JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
   ZeroMemory(&accounting, sizeof accounting);
@@ -146,8 +154,8 @@ static int drain_job(HANDLE job, HANDLE port, DWORD timeout_ms) {
 
 static int run_spawn(const wchar_t *application, const wchar_t *command_line, DWORD wait_ms) {
   FILETIME creation, exit_time, kernel, user;
-  wchar_t name[96];
-  HANDLE job, port;
+  wchar_t name[96], event_name[112];
+  HANDLE job, port, ended, waits[2];
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
   JOBOBJECT_ASSOCIATE_COMPLETION_PORT association;
   STARTUPINFOW own, startup;
@@ -174,6 +182,14 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
     /* Someone else made a job with this helper's name: it is not ours. */
     fail_message("a job with this helper's name already exists", ERROR_ALREADY_EXISTS);
+    return EXIT_FAILED;
+  }
+  ended_event_name(event_name, sizeof event_name / sizeof event_name[0], GetCurrentProcessId(), filetime_value(creation));
+  SetLastError(ERROR_SUCCESS);
+  ended = CreateEventW(NULL, TRUE, FALSE, event_name);
+  if (!ended || GetLastError() == ERROR_ALREADY_EXISTS) {
+    /* As for the job: an event with this helper's name that it did not make is not its own. */
+    fail_message("cannot create this helper's ended event", ended ? ERROR_ALREADY_EXISTS : GetLastError());
     return EXIT_FAILED;
   }
   ZeroMemory(&limits, sizeof limits);
@@ -240,8 +256,11 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
     return EXIT_FAILED;
   }
   CloseHandle(child.hThread);
-  WaitForSingleObject(child.hProcess, INFINITE);
-  if (!GetExitCodeProcess(child.hProcess, &exit_code)) exit_code = 1;
+  /* Until the child exits, or a kill ended the job: a child that termination
+     cannot finish never exits, and the bounded wait below must still run. */
+  waits[0] = child.hProcess;
+  waits[1] = ended;
+  WaitForMultipleObjects(2, waits, FALSE, INFINITE);
   /* What the child left behind ends with it, and the helper exits with the
      child's code only once the job is empty: that exit means the whole tree
      is gone. Termination is asynchronous (a process can wait on pending
@@ -263,6 +282,8 @@ static int run_spawn(const wchar_t *application, const wchar_t *command_line, DW
       return (int)EXIT_SPAWN_UNKILLABLE;
     }
   }
+  /* The job is empty, so the child (in it) has exited and its code is final. */
+  if (!GetExitCodeProcess(child.hProcess, &exit_code)) exit_code = 1;
   return (int)exit_code;
 }
 
@@ -292,8 +313,8 @@ static int open_identified_process(DWORD pid, u64 creation, DWORD access, HANDLE
 }
 
 static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
-  wchar_t name[96];
-  HANDLE job, process = NULL;
+  wchar_t name[96], event_name[112];
+  HANDLE job, ended, process = NULL;
   int result;
   /* Hold the exact process first: nothing is ended unless <pid> still has that
      creation time, and while the handle is held the pid cannot be reused. */
@@ -316,6 +337,13 @@ static int run_kill(DWORD pid, u64 creation, DWORD wait_ms) {
       CloseHandle(process);
       fail_message("cannot end the job", error);
       return error == ERROR_ACCESS_DENIED ? EXIT_DENIED : EXIT_FAILED;
+    }
+    /* Tell the helper its job was ended, so its own wait is bounded too. */
+    ended_event_name(event_name, sizeof event_name / sizeof event_name[0], pid, creation);
+    ended = OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name);
+    if (ended) {
+      SetEvent(ended);
+      CloseHandle(ended);
     }
     /* Bounded: processes still in the job after wait_ms are unkillable. */
     result = drain_job(job, NULL, wait_ms) ? 0 : EXIT_UNKILLABLE;

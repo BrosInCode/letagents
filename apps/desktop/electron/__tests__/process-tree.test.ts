@@ -4,7 +4,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import test from "node:test";
 
@@ -352,6 +354,25 @@ test("Windows: a helper found on disk is used only when its bytes are the sealed
   const committed = JSON.parse(readFileSync(new URL("../../../../shared/letagents-process-tree.seal.json", import.meta.url), "utf8"));
   assert.equal(sealedProcessTreeHelperSha256("x64"), committed.builds.x64.sha256);
   assert.match(String(sealedProcessTreeHelperSha256("x64")), /^[0-9a-f]{64}$/);
+});
+
+test("Windows: the helper's bytes are read again on every use, so an edit in place is refused", () => {
+  const folder = mkdtempSync(join(tmpdir(), "letagents-helper-seal-"));
+  try {
+    const file = join(folder, "letagents-process-tree.exe");
+    writeFileSync(file, SEALED_BYTES);
+    const options = { platform: "win32" as const, env: { LETAGENTS_PROCESS_TREE_HELPER: file }, arch: "x64", seal: SEAL };
+    assert.equal(processTreeHelperPath(options), file);
+    // Same size, same file, its time put back: still not the sealed bytes.
+    const { atime, mtime } = statSync(file);
+    const edited = Buffer.from(SEALED_BYTES);
+    edited[edited.length - 1] ^= 1;
+    writeFileSync(file, edited);
+    utimesSync(file, atime, mtime);
+    assert.equal(processTreeHelperPath(options), null);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 });
 
 test("Windows: a tree still there when the helper's bounded wait ran out is unkillable, not ended and not an error", () => {
