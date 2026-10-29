@@ -8,6 +8,7 @@ import {
   installedCodexExecutablePath,
   resolveCodexExecutable,
 } from "../main/agents/codex-executable.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 async function executable(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -15,7 +16,7 @@ async function executable(path: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
-test("Codex resolution falls back to the official standalone install outside PATH", async () => {
+test("Codex resolution falls back to the official standalone install outside PATH", { skip: supervisedAgentsOnly }, async () => {
   const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-home-"));
   const installed = join(homeDirectory, ".local", "bin", "codex");
   await executable(installed);
@@ -27,7 +28,7 @@ test("Codex resolution falls back to the official standalone install outside PAT
   }), installed);
 });
 
-test("Codex resolution preserves an existing PATH installation", async () => {
+test("Codex resolution preserves an existing PATH installation", { skip: supervisedAgentsOnly }, async () => {
   const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-home-"));
   const pathDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-path-"));
   const pathCodex = join(pathDirectory, "codex");
@@ -41,7 +42,7 @@ test("Codex resolution preserves an existing PATH installation", async () => {
   }), pathCodex);
 });
 
-test("Codex resolution honors explicit executable and install directory overrides", async () => {
+test("Codex resolution honors explicit executable and install directory overrides", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-override-"));
   const configured = join(root, "custom-codex");
   const installDirectory = join(root, "installed");

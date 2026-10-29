@@ -18,6 +18,8 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { npmInvocation } from "../../../../scripts/npm-command.mjs";
+
 export const LEFTOVER_EXIT_STATUS = 3;
 export const USAGE_EXIT_STATUS = 2;
 /** npm writes its own cache and logs below HOME when the command starts with `npm`. */
@@ -62,10 +64,15 @@ export function parseArguments(argv) {
 
 function run(command, home) {
   return new Promise((resolve) => {
-    const child = spawn(command[0], command.slice(1), {
+    // No shell: on Windows one would split an argument at its spaces and
+    // line breaks. `npm` goes through npm's own script, as npm.cmd would.
+    const invocation = command[0] === "npm"
+      ? npmInvocation(command.slice(1))
+      : { command: command[0], args: command.slice(1), options: {} };
+    const child = spawn(invocation.command, invocation.args, {
+      ...invocation.options,
       stdio: "inherit",
       env: { ...process.env, HOME: home, USERPROFILE: home },
-      shell: process.platform === "win32",
     });
     const forward = (signal) => () => child.kill(signal);
     const handlers = ["SIGINT", "SIGTERM"].map((signal) => [signal, forward(signal)]);

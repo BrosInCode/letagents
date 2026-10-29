@@ -23,6 +23,7 @@ import {
   turnOf,
   scratchCodexHome,
 } from "./codex-provider-adapter.fixture.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 test("managed launch receipt freezes the exact generated tool policy and is never invented on attach", async () => {
   const harness = createHarness();
@@ -505,7 +506,7 @@ test("the managed launch contract is version 2 or later, so a Codex started befo
   assert.ok(CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION >= 2);
 });
 
-test("a sandboxed Codex takes no turn and loads no conversation in a project that has command rules of its own, at launch, when found running, and at every turn", async (t) => {
+test("a sandboxed Codex takes no turn and loads no conversation in a project that has command rules of its own, at launch, when found running, and at every turn", { skip: supervisedAgentsOnly }, async (t) => {
   const project = await mkdtemp(join(tmpdir(), "letagents-codex-adapter-project-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const top = await realpath(project);

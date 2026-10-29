@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 import {
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,

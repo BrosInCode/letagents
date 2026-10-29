@@ -564,7 +564,9 @@ test("repo status watch observes another linked worktree switching branches", as
       cwd: mainRoot,
       stdio: "ignore",
     });
-    canonicalLinkedRoot = realpathSync(linkedRoot);
+    // Git lists a worktree by its long folder name; on Windows only the native
+    // realpath expands an 8.3 short name such as RUNNER~1 in the temp path.
+    canonicalLinkedRoot = realpathSync.native(linkedRoot);
     await startRepoStatusWatch(mainRoot);
 
     execFileSync("git", ["checkout", "feature/other"], { cwd: linkedRoot, stdio: "ignore" });
@@ -624,7 +626,9 @@ test("repo status watch installs metadata watchers for a linked worktree added l
       cwd: mainRoot,
       stdio: "ignore",
     });
-    canonicalLinkedRoot = realpathSync(linkedRoot);
+    // Git lists a worktree by its long folder name; on Windows only the native
+    // realpath expands an 8.3 short name such as RUNNER~1 in the temp path.
+    canonicalLinkedRoot = realpathSync.native(linkedRoot);
     let timeout: NodeJS.Timeout | null = null;
     try {
       await Promise.race([

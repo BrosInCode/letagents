@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import "./isolated-home.js";
-import { resetDesktopShellEnvironmentForTests, startDesktopShellEnvironmentHydration } from "../main/desktop-shell-environment.js";
+import { observeGitSpawns } from "./harness.js";
 import {
   bindProjectRoot,
   listProjectBindings,
@@ -27,13 +27,8 @@ function hostedRepo(temporary: string, name = "repo"): string {
 
 const hostedContext = { roomIdentifier: "github.com/acme/widgets", gitRoom: null };
 
-async function useGitPath(bin: string): Promise<void> {
-  resetDesktopShellEnvironmentForTests();
-  await startDesktopShellEnvironmentHydration({
-    env: { PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` },
-    runCommand: async () => `__LETAGENTS_PATH_START__\n${bin}\n__LETAGENTS_PATH_END__\n`,
-  });
-}
+/** A path as Git config reads it: a backslash there starts an escape. */
+const gitConfigPath = (path: string): string => path.replaceAll("\\", "/");
 
 test("a different volume behind the same device number fails closed once the memo expires", async (t) => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-volume-"));
@@ -184,14 +179,14 @@ async function originSwapFailsClosed(
 test("an include on the same line as another section cannot keep a stale origin", async () => {
   await originSwapFailsClosed("same-line include", (temporary, root) => {
     writeFileSync(join(temporary, "inc"), goodOrigin);
-    execFileSync("sh", ["-c", `printf '[core] [include] path = ${join(temporary, "inc")}\\n' >> .git/config`], { cwd: root });
+    appendFileSync(join(root, ".git", "config"), `[core] [include] path = ${gitConfigPath(join(temporary, "inc"))}\n`);
   }, (temporary) => writeFileSync(join(temporary, "inc"), evilOrigin));
 });
 
 test("an indented include cannot keep a stale origin", async () => {
   await originSwapFailsClosed("indented include", (temporary, root) => {
     writeFileSync(join(temporary, "inc"), goodOrigin);
-    execFileSync("sh", ["-c", `printf '\\t[include]\\n\\tpath = ${join(temporary, "inc")}\\n' >> .git/config`], { cwd: root });
+    appendFileSync(join(root, ".git", "config"), `\t[include]\n\tpath = ${gitConfigPath(join(temporary, "inc"))}\n`);
   }, (temporary) => writeFileSync(join(temporary, "inc"), evilOrigin));
 });
 
@@ -244,21 +239,18 @@ test("an origin that flips back during validation is never stored in the memo", 
   mkdirSync(root);
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
   const inc = join(temporary, "inc");
-  const flag = join(temporary, "flag");
-  const bin = join(temporary, "bin");
-  mkdirSync(bin);
-  const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
+  let armed = false;
   // A racing writer: right after the first `remote get-url` of an armed
-  // pass (the pre-read), it switches the included origin back to good.
-  writeFileSync(join(bin, "git"), [
-    "#!/bin/sh",
-    `${JSON.stringify(realGit)} "$@"`,
-    "rc=$?",
-    `if [ "$1 $2" = "remote get-url" ] && [ -f ${JSON.stringify(flag)} ]; then rm -f ${JSON.stringify(flag)}; cp ${JSON.stringify(`${inc}.good`)} ${JSON.stringify(inc)}; fi`,
-    "exit $rc",
-    "",
-  ].join("\n"));
-  chmodSync(join(bin, "git"), 0o755);
+  // pass (the pre-read) exits, before the store sees its answer, it switches
+  // the included origin back to good.
+  const stopObserving = observeGitSpawns(({ args, child }) => {
+    if (args[0] !== "remote" || args[1] !== "get-url") return;
+    child.once("exit", () => {
+      if (!armed) return;
+      armed = false;
+      copyFileSync(`${inc}.good`, inc);
+    });
+  });
   const storeOptions = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
   resetProjectBindingsStoreCachesForTest();
   const counts = projectBindingValidationCountsForTest;
@@ -266,13 +258,12 @@ test("an origin that flips back during validation is never stored in the memo", 
     writeFileSync(`${inc}.good`, goodOrigin);
     writeFileSync(inc, goodOrigin);
     // Same-line include: the memo is allowed, so only the origin check guards it.
-    execFileSync("sh", ["-c", `printf '[core] [include] path = ${inc}\\n' >> .git/config`], { cwd: root });
-    await useGitPath(bin);
+    appendFileSync(join(root, ".git", "config"), `[core] [include] path = ${gitConfigPath(inc)}\n`);
     await bindProjectRoot({ context: hostedContext, rootPath: root, source: "git_remote" }, storeOptions);
     assert.equal((await listProjectBindings(storeOptions)).length, 1);
 
     writeFileSync(inc, evilOrigin);
-    writeFileSync(flag, "");
+    armed = true;
     // Pre-read sees evil (memo miss); validation then sees good and passes.
     assert.equal((await listProjectBindings(storeOptions)).length, 1, "the armed pass validated the good origin");
     writeFileSync(inc, evilOrigin);
@@ -280,7 +271,7 @@ test("an origin that flips back during validation is never stored in the memo", 
     assert.deepEqual(await listProjectBindings(storeOptions), [], "the evil origin is never served from the memo");
     assert.equal(counts.memo - memo, 0, "no memo hit");
   } finally {
-    resetDesktopShellEnvironmentForTests();
+    stopObserving();
     resetProjectBindingsStoreCachesForTest();
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -368,23 +359,11 @@ test("a failed ROLLBACK discards the shared store connection", async () => {
   }
 });
 
-/** Put a counting `git` first on PATH; returns a reader for the spawn count. */
-async function countGitSpawns(directory: string): Promise<{ count: () => number; restore: () => void }> {
-  const realGit = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
-  const bin = join(directory, "bin");
-  const log = join(directory, "git-spawns.log");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(log, "");
-  writeFileSync(
-    join(bin, "git"),
-    `#!/bin/sh\necho "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(realGit)} "$@"\n`,
-  );
-  chmodSync(join(bin, "git"), 0o755);
-  await useGitPath(bin);
-  return {
-    count: () => readFileSync(log, "utf8").split("\n").filter(Boolean).length,
-    restore: resetDesktopShellEnvironmentForTests,
-  };
+/** Count the Git processes the store starts; returns a reader for the count. */
+function countGitSpawns(): { count: () => number; restore: () => void } {
+  let spawns = 0;
+  const restore = observeGitSpawns(() => { spawns += 1; });
+  return { count: () => spawns, restore };
 }
 
 test("validated bindings are reused until the folder, Git metadata, or stored row changes", async (t) => {
@@ -403,7 +382,7 @@ test("validated bindings are reused until the folder, Git metadata, or stored ro
     },
   };
   resetProjectBindingsStoreCachesForTest();
-  const git = await countGitSpawns(temporary);
+  const git = countGitSpawns();
   try {
     const binding = await bindProjectRoot({
       context: { roomIdentifier: "github.com/acme/widgets", gitRoom: null },
@@ -465,11 +444,18 @@ test("validated bindings are reused until the folder, Git metadata, or stored ro
     assert.equal((await listProjectBindings(storeOptions)).length, 1);
     assert.equal(counts.full - full, 1, "a changed row re-validates");
 
-    // The store file is replaced: the long-lived connection reopens it.
-    rmSync(storePath, { force: true });
-    rmSync(`${storePath}-wal`, { force: true });
-    rmSync(`${storePath}-shm`, { force: true });
-    assert.deepEqual(await listProjectBindings(storeOptions), [], "a deleted store is reopened, not served stale");
+    if (process.platform === "win32") {
+      // Windows refuses to delete a file that is open, so the long-lived
+      // connection keeps its store in place and keeps serving the same row.
+      assert.throws(() => rmSync(storePath, { force: true }), { code: /^(EBUSY|EPERM)$/ });
+      assert.equal((await listProjectBindings(storeOptions)).length, 1, "the open store cannot be swapped out");
+    } else {
+      // The store file is replaced: the long-lived connection reopens it.
+      rmSync(storePath, { force: true });
+      rmSync(`${storePath}-wal`, { force: true });
+      rmSync(`${storePath}-shm`, { force: true });
+      assert.deepEqual(await listProjectBindings(storeOptions), [], "a deleted store is reopened, not served stale");
+    }
   } finally {
     git.restore();
     resetProjectBindingsStoreCachesForTest();

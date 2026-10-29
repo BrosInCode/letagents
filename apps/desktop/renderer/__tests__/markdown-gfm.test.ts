@@ -166,7 +166,10 @@ test("a list indented one level deeper on every line renders quickly and stays a
   const html = block(value);
   const usage = process.cpuUsage(started);
   const elapsed = (usage.user + usage.system) / 1000;
-  assert.ok(elapsed < 100, `rendering used ${elapsed.toFixed(1)} ms of CPU time`);
+  // Windows counts process CPU time in clock ticks (about 15.6 ms) and its
+  // CI runners are slower; a quadratic parse of this input takes seconds.
+  const budget = process.platform === "win32" ? 200 : 100;
+  assert.ok(elapsed < budget, `rendering used ${elapsed.toFixed(1)} ms of CPU time`);
   assert.match(html, /^<ul><li>item 0<ul><li>item 1/);
   assert.match(html, /item 799/);
 });

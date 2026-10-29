@@ -21,8 +21,9 @@ import {
   fixture,
   seedTerminalExecution,
 } from "./helpers/manifest-store-sqlite-fixture.js";
+import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
-test("provider birth collisions cannot relabel frozen lifecycle authority", async () => {
+test("provider birth collisions cannot relabel frozen lifecycle authority", { skip: supervisedAgentsOnly }, async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   const connection = {

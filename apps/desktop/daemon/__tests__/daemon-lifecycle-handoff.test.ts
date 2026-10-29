@@ -5,6 +5,8 @@ import { chmod, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs
 import { isOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 import { connectDaemon, daemonEndpoint, isWindowsPipePath } from "../../../../shared/daemon-endpoint.mjs";
 import { join } from "node:path";
+// The control plane (named pipe, singleton, handoff) runs on Windows: this
+// file runs there too; its POSIX-signal and macOS-entrypoint tests skip themselves.
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { AuditLog } from "../audit-log.js";

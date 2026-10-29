@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, parse } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -13,8 +13,26 @@ const env = createElectronTestEnv({
   extraEnvFiles: { LETAGENTS_PROJECT_BINDINGS_PATH: "bindings.sqlite" },
 });
 
+// The app reads folders by their native real path; on Windows only that one
+// expands an 8.3 short name such as RUNNER~1 in the temp path.
+const canonicalPath = (path: string): string => realpathSync.native(path);
+
+// os.homedir() reads HOME on POSIX and USERPROFILE on Windows: move both.
+type SavedHome = { HOME: string | undefined; USERPROFILE: string | undefined };
+const saveHome = (): SavedHome => ({ HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE });
+function setHome(path: string): void {
+  process.env.HOME = path;
+  process.env.USERPROFILE = path;
+}
+function restoreHome(saved: SavedHome): void {
+  for (const key of ["HOME", "USERPROFILE"] as const) {
+    if (saved[key] === undefined) delete process.env[key];
+    else process.env[key] = saved[key];
+  }
+}
+
 test("opening a fetched repo room preserves its identity without calculating branch statistics", async (t) => {
-  const repoPath = realpathSync(env.tempDir);
+  const repoPath = canonicalPath(env.tempDir);
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repoPath, stdio: "ignore" });
   git("init", "-b", "main");
   git("remote", "add", "origin", "https://github.com/example/project.git");
@@ -98,10 +116,10 @@ test("opening a fetched repo room preserves its identity without calculating bra
     await t.test("a new project room refuses the home folder, also through a home-level repository", async () => {
       const nested = join(repoPath, "code", "notes");
       mkdirSync(nested, { recursive: true });
-      const previousHome = process.env.HOME;
+      const previousHome = saveHome();
       try {
         // A home folder that is itself a Git repository (dotfiles).
-        process.env.HOME = repoPath;
+        setHome(repoPath);
         const notAProject = "Choose a project folder, not your home folder or the top of the disk.";
         assert.equal((await openRepoRoomFromPath(repoPath, { newProjectRoom: true })).error, notAProject);
         // ~/code/notes is inside it, so the room would be the home folder.
@@ -113,7 +131,7 @@ test("opening a fetched repo room preserves its identity without calculating bra
         mkdirSync(plainHome);
         symlinkSync(plainHome, homeLink);
         try {
-          process.env.HOME = plainHome;
+          setHome(plainHome);
           assert.equal((await openRepoRoomFromPath(homeLink, { newProjectRoom: true })).error, notAProject);
           if (process.platform === "darwin") {
             assert.equal((await openRepoRoomFromPath(plainHome.toUpperCase(), { newProjectRoom: true })).error, notAProject);
@@ -121,7 +139,7 @@ test("opening a fetched repo room preserves its identity without calculating bra
         } finally {
           rmSync(homeLink, { force: true });
           rmSync(plainHome, { recursive: true, force: true });
-          process.env.HOME = repoPath;
+          setHome(repoPath);
         }
 
         // A room already bound to the home folder keeps reopening exactly as before.
@@ -131,29 +149,42 @@ test("opening a fetched repo room preserves its identity without calculating bra
         assert.equal((await openRepoRoomFromPath("~/code/notes")).repoPath, repoPath);
       } finally {
         rmSync(join(repoPath, "code"), { recursive: true, force: true });
-        if (previousHome === undefined) delete process.env.HOME;
-        else process.env.HOME = previousHome;
+        restoreHome(previousHome);
       }
     });
     await t.test("a typed path is checked before any room is created or folder bound", async () => {
       const filePath = join(repoPath, "tracked.txt");
       const locked = join(repoPath, "..", `${basename(repoPath)}-locked`);
       mkdirSync(locked);
-      chmodSync(locked, 0o000);
-      const previousHome = process.env.HOME;
+      // POSIX: a folder with mode 000 cannot be searched. Windows ignores the
+      // mode (chmod only sets read-only) and lets every user bypass traverse
+      // checks, so that row runs only where the mode is enforced.
+      const permissionEnforced = process.platform !== "win32";
+      if (permissionEnforced) chmodSync(locked, 0o000);
+      const previousHome = saveHome();
       fetchedSnapshot = undefined;
       try {
-        process.env.HOME = join(repoPath, "..");
+        setHome(join(repoPath, ".."));
         const notAProject = "Choose a project folder, not your home folder or the top of the disk.";
+        // On Windows a full path starts with a drive or a network share: the
+        // top of the disk is the drive root, and "/" is not a full path.
+        const windows = process.platform === "win32";
+        const fullPathHint = windows
+          ? "Enter the full path to the folder, starting with a drive letter (C:\\), \\\\ or ~\\."
+          : "Enter the full path to the folder, starting with / or ~/.";
         for (const [path, error] of [
           [join(repoPath, "missing-folder"), "No folder exists at that path."],
-          ["relative/project", "Enter the full path to the folder, starting with / or ~/."],
+          ["relative/project", fullPathHint],
           [filePath, "That path is a file. Enter the folder that contains it."],
           ["   ", "Choose a project folder."],
-          ["/", notAProject],
+          ...(windows
+            ? [[parse(repoPath).root, notAProject], ["/", fullPathHint]] as const
+            : [["/", notAProject]] as const),
           ["~", notAProject],
           ["~/", notAProject],
-          [join(locked, "project"), "LetAgents doesn’t have permission to open that folder."],
+          ...(permissionEnforced
+            ? [[join(locked, "project"), "LetAgents doesn’t have permission to open that folder."] as const]
+            : []),
         ] as const) {
           const rejected = await openRepoRoomFromPath(path, { newProjectRoom: true });
           assert.equal(rejected.error, error, path);
@@ -161,23 +192,21 @@ test("opening a fetched repo room preserves its identity without calculating bra
           assert.equal(rejected.projectBinding, null);
         }
       } finally {
-        chmodSync(locked, 0o700);
+        if (permissionEnforced) chmodSync(locked, 0o700);
         rmSync(locked, { recursive: true, force: true });
-        if (previousHome === undefined) delete process.env.HOME;
-        else process.env.HOME = previousHome;
+        restoreHome(previousHome);
       }
       // The local-store mock throws on any room creation, so reaching here
       // also proves no local room was made for the missing folder.
       assert.equal(fetchedSnapshot, undefined);
 
       try {
-        process.env.HOME = join(repoPath, "..");
+        setHome(join(repoPath, ".."));
         const opened = await openRepoRoomFromPath(`~/${basename(repoPath)}`, { newProjectRoom: true });
         assert.equal(opened.error, null);
         assert.equal(opened.repoPath, repoPath);
       } finally {
-        if (previousHome === undefined) delete process.env.HOME;
-        else process.env.HOME = previousHome;
+        restoreHome(previousHome);
       }
     });
     await t.test("native folder cancellation is parented and releases the picker for retry", async () => {
@@ -240,7 +269,7 @@ test("opening a fetched repo room preserves its identity without calculating bra
     await t.test("reconnecting a published local project keeps its original room and never publishes chat", async () => {
       const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
       const { bindProjectRoot } = await import("../main/project-bindings-store.js");
-      const parent = realpathSync(mkdtempSync(join(tmpdir(), "letagents-connect-published-")));
+      const parent = canonicalPath(mkdtempSync(join(tmpdir(), "letagents-connect-published-")));
       const localPath = join(parent, "Scene Finder");
       const unrelatedPath = join(parent, "Other project");
       for (const path of [localPath, unrelatedPath]) {
@@ -289,7 +318,7 @@ test("opening a fetched repo room preserves its identity without calculating bra
       }
     });
     await t.test("new projects create an empty named local folder without overwriting existing data", async () => {
-      const parent = realpathSync(mkdtempSync(join(tmpdir(), "letagents-new-project-")));
+      const parent = canonicalPath(mkdtempSync(join(tmpdir(), "letagents-new-project-")));
       allowLocalCreation = true;
       try {
         const created = await createProjectRoom(parent, "  My project  ");

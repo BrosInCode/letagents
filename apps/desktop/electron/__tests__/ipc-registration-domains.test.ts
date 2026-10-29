@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
+import { supervisedAgentsOnly } from "./platform.js";
 
 const mainSource = readFileSync(
   fileURLToPath(new URL("../main/ipc.ts", import.meta.url)),
@@ -279,7 +280,7 @@ test("rental IPC domain delegates to the existing rental capability registrar", 
   );
 });
 
-test("rental registration defers recovery and host startup to one explicit application start", async () => {
+test("rental registration defers recovery and host startup to one explicit application start", { skip: supervisedAgentsOnly }, async () => {
   const calls: string[] = [];
   const unexpected = () => { throw new Error("registration performed a lifecycle operation"); };
   const mocks = [
@@ -329,7 +330,7 @@ test("application registers startup preparation before rental recovery without d
   let backgroundDone!: () => void;
   const reconciled = new Promise<void>((resolve) => { backgroundDone = resolve; });
   const mockApp = { once: (_name: string, handler: () => Promise<void>) => { ready = handler; },
-    on() {}, setName() {}, isPackaged: true };
+    on() {}, setName() {}, setAppUserModelId() {}, isPackaged: true };
   const previousSmoke = process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
   delete process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
   const mocks = [
@@ -490,7 +491,7 @@ test("host approval sender accepts only the live trusted main frame", async () =
   } finally { for (const stub of mocks.reverse()) stub.restore(); }
 });
 
-test("auth/setup IPC wakes grant recovery only from authorization and reports native storage availability", async () => {
+test("auth/setup IPC wakes grant recovery only from authorization and reports native storage availability", { skip: supervisedAgentsOnly }, async () => {
   let authorized: () => void = () => { throw new Error("authorized callback was not registered"); };
   let invalidated: () => void = () => { throw new Error("invalidated callback was not registered"); };
   let recoveryWakes = 0;

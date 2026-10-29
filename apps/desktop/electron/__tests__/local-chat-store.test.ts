@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, realpath, rename } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -1655,7 +1655,7 @@ async function localGitPublishFixture(branch = "feature/local-history") {
   await setRoomStorageMode(room.roomIdentifier, "local");
   const { bindProjectRoot } = await import("../main/project-bindings-store.js");
   await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier, gitRoom: room.gitRoom }, rootPath: root, source: "local_git" });
-  const slug = root.split("/").at(-1)!;
+  const slug = basename(root);
   const repository = `github.com/example/${slug.toLowerCase()}`;
   const hostedGit: DesktopGitRoomInfo = { ...room.gitRoom!, provider: "github", host: "github.com",
     repository: { id: slug, fullName: `example/${slug.toLowerCase()}`, owner: "example", name: slug.toLowerCase() },
@@ -1750,7 +1750,7 @@ test("a project created as a plain folder publishes to its new repository rather
   await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier }, rootPath: root, source: "local_folder" });
   await execFileAsync("git", ["-C", root, "init", "-b", "main"]);
   await assert.rejects(syncDesktopLocalChatRoom(room.roomIdentifier), /Add this project's GitHub origin/);
-  const repository = `github.com/example/${root.split("/").at(-1)!.toLowerCase()}`;
+  const repository = `github.com/example/${basename(root).toLowerCase()}`;
   await execFileAsync("git", ["-C", root, "remote", "add", "origin", `https://${repository}.git`]);
   const gitRoom: DesktopGitRoomInfo = { provider: "github", host: "github.com", repository: { id: "new-folder", fullName: repository.slice(11), owner: "example", name: "new-folder" },
     ref: { type: "default_branch", name: "main", defaultBranch: "main", baseRef: "main", headRef: null, headRepository: null }, visibility: "private", accessMode: "private", isDefault: true, source: "github" };

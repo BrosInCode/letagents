@@ -20,8 +20,9 @@ import {
   ingest,
   recordExecution,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
-test("daemon socket restores and skips only exact pre-turn authority without replacing the provider", async () => {
+test("daemon socket restores and skips only exact pre-turn authority without replacing the provider", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-restore-socket-"));
   let daemon: SupervisorDaemon | null = null;
   try {
@@ -680,7 +681,7 @@ test("startup recovery retries exactly once when wrapper evidence proves native 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-for (const admitted of [false, true]) test(`persistent undispatched wrapper failures are bounded (turn admitted: ${admitted})`, async () => {
+for (const admitted of [false, true]) test(`persistent undispatched wrapper failures are bounded (turn admitted: ${admitted})`, { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-not-dispatched-cap-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));

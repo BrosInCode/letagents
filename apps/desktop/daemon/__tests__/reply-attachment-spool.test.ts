@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { MESSAGE_ATTACHMENT_LIMITS, validRecordedReplyAttachments } from "../../../../shared/message-attachments.mjs";
 import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
+import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "letagents-reply-spool-"));
@@ -63,7 +64,10 @@ test("the spool refuses files outside the workspace, through symlinks or hard li
       await mkdir(join(env.workspace, folder), { recursive: true });
       await writeFile(join(env.workspace, folder, "settings.json"), "{\"token\":\"secret\"}");
     }
-    execFileSync("mkfifo", [join(env.workspace, "shots", "pipe.png")]);
+    // A named pipe in a folder is POSIX only: Windows keeps its pipes under \\.\pipe\, never in a workspace
+    // (Git Bash's mkfifo makes a file only its own programs see). The "shots" folder row covers "not a regular file" there.
+    const fifo = process.platform !== "win32";
+    if (fifo) execFileSync("mkfifo", [join(env.workspace, "shots", "pipe.png")]);
     await writeFile(join(env.workspace, "empty.txt"), "");
     const refusals: Array<[string, RegExp]> = [
       [outside, /outside your workspace/],
@@ -78,7 +82,7 @@ test("the spool refuses files outside the workspace, through symlinks or hard li
       [".mcp.json", /credentials/], ["prod.tfvars", /credentials/], ["my-service-account.json", /credentials/],
       [".letagents-supervisor-context.json", /credentials/],
       [".cursor/settings.json", /credentials/], [".vscode/settings.json", /credentials/], [".Git/settings.json", /credentials/],
-      ["shots/pipe.png", /not a regular file/],
+      ...(fifo ? [["shots/pipe.png", /not a regular file/] as [string, RegExp]] : []),
       ["shots", /not a regular file/],
       ["empty.txt", /empty/],
       ["missing.png", /does not exist/],
@@ -134,7 +138,7 @@ test("a refused call keeps nothing it copied, and a new choice keeps only its ow
   } finally { await env.cleanup(); }
 });
 
-test("an existing spool copy is trusted only as a regular file the daemon wrote", async () => {
+test("an existing spool copy is trusted only as a regular file the daemon wrote", { skip: supervisedAgentsOnly }, async () => {
   const env = await setup();
   try {
     const recorded = await env.spool.snapshot(env.input(["notes.md"], "planted"));

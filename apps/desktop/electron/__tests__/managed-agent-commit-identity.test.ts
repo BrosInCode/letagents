@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv, installTestSecretStorage, testEncryptedToken } from "./harness.js";
+import { supervisedAgentsOnly } from "./platform.js";
 
 installTestSecretStorage();
 const env = createElectronTestEnv({
@@ -166,7 +167,7 @@ test("only a global identity in a GitHub repository is replaced", async () => {
   assert.deepEqual(await identityFor(gitRepo(unset), unset), {}, "no email configured at all");
 });
 
-test("an email from a conditional include is kept; an unconditional include is the global identity", async () => {
+test("an email from a conditional include is kept; an unconditional include is the global identity", { skip: supervisedAgentsOnly }, async () => {
   const work = realpathSync(fixture("work"));
   const included = join(fixture("included"), "work.gitconfig");
   writeFileSync(included, "[user]\n\temail = work@example.invalid\n");
@@ -229,7 +230,7 @@ test("GitHub remotes are recognised by host", () => {
   }
 });
 
-test("any author or committer setting from a repository, worktree or conditional include is kept", async () => {
+test("any author or committer setting from a repository, worktree or conditional include is kept", { skip: supervisedAgentsOnly }, async () => {
   const { gitEnv } = gitHome();
   for (const key of ["user.name", "author.email", "author.name", "committer.email", "committer.name"]) {
     const repo = gitRepo(gitEnv);

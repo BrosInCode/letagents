@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { basename, dirname, join, parse } from "node:path";
 import { createInterface } from "node:readline";
-import test from "node:test";
+import { supervisedAgentTest as test } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 

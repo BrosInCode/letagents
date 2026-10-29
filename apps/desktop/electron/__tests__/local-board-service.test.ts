@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+// Every test here runs the board socket only, which the daemon control plane
+// serves on Windows too (a named pipe), so none skips there.
 import test from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
