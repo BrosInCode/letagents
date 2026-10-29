@@ -588,19 +588,22 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
       sid ??= remember(runSync(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));
       return sid;
     },
+    // Only a real answer is kept; after a failure this call has no alias (fail closed) and the next one asks again.
     async currentUserAliases() {
       const user = await this.currentUserSid();
-      if (aliases === null) {
-        try { aliases = sddlOwnerAliases((await this.readSddl([`owner-alias:${user}`]))[0], user); } catch { aliases = []; }
-      }
-      return aliases;
+      if (aliases !== null) return aliases;
+      let answer = null;
+      try { [answer] = await this.readSddl([`owner-alias:${user}`]); } catch { /* not answered */ }
+      if (typeof answer === "string" && answer.startsWith("O:")) aliases = sddlOwnerAliases(answer, user);
+      return aliases ?? [];
     },
     currentUserAliasesSync() {
       const user = this.currentUserSidSync();
-      if (aliases === null) {
-        try { aliases = sddlOwnerAliases(this.readSddlSync([`owner-alias:${user}`])[0], user); } catch { aliases = []; }
-      }
-      return aliases;
+      if (aliases !== null) return aliases;
+      let answer = null;
+      try { [answer] = this.readSddlSync([`owner-alias:${user}`]); } catch { /* not answered */ }
+      if (typeof answer === "string" && answer.startsWith("O:")) aliases = sddlOwnerAliases(answer, user);
+      return aliases ?? [];
     },
     async readSddl(paths) {
       if (server?.usable && paths.length) {

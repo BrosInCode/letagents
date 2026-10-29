@@ -858,6 +858,15 @@ test("Windows: without COMPUTERNAME, the user's SDDL aliases come from how Windo
   const full = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", COMPUTERNAME: "fv-az1-2" }, runSync });
   assert.deepEqual(full.currentUserAliasesSync!(), ["LA"]);
   assert.equal(asked.length, 1);
+  // A failed answer is not kept: that call has no alias, and the next one asks again.
+  let failing = true;
+  const flaky = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, runSync: (file, args, options) => {
+    if (file.endsWith("powershell.exe") && failing) return "error:";
+    return runSync(file, args, options);
+  } });
+  assert.deepEqual(flaky.currentUserAliasesSync!(), []);
+  failing = false;
+  assert.deepEqual(flaky.currentUserAliasesSync!(), ["LA"]);
   assert.deepEqual(sddlOwnerAliases("O:S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001"), []);
   assert.deepEqual(sddlOwnerAliases(null, "S-1-5-21-1-2-3-1001"), [], "no answer: no alias (a file it owns reads as not private)");
   assert.deepEqual(sddlOwnerAliases("O:LA;x", "S-1-5-21-1-2-3-500"), []);
