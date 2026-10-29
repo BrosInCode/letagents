@@ -2,7 +2,7 @@
 // POSIX keeps its mode/uid rules; on Windows (an injected platform with a fake
 // ACL backend) the private DACL decides, and POSIX-only literals are replaced.
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -19,6 +19,10 @@ import {
 import { readRegularFileNoFollow, writePrivateFileAtomic } from "../main/agents/cursor/profile-filesystem.js";
 import { relocateCursorConversationNamespace } from "../main/agents/cursor/managed-profile.js";
 import { gitEmptyHome, gitTemporaryRoot } from "../main/agents/supervised-workspace-generation/git.js";
+import { readAgentLocalState, readAgentLocalStateSnapshot, saveAgentSession, type StoredAgentSessionState } from "../main/agents/state.js";
+import { loadLocalSupervisorKey } from "../main/rooms/local-supervision-authority.js";
+import { readRuntimeControl, writeRuntimeControl } from "../main/agents/open-model/runtime-launch.js";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 import { asWindows, fakeWindowsSecurity } from "./helpers/fake-windows-security.js";
 import type { ProviderRoomTurnRequest } from "../main/agents/provider-adapter.js";
 
@@ -179,4 +183,89 @@ test("the trusted git environment keeps /tmp and /var/empty on POSIX and uses pr
     t.after(() => rm(another, { recursive: true, force: true }));
     assert.notEqual(another, home);
   });
+});
+
+// ---------------------------------------------------------------- high-value secrets read back from disk
+
+test("Windows: the desktop reads the shared state file (worker tokens) only while its own DACL is private", async (t) => {
+  const root = await scratch(t);
+  const folder = join(root, ".letagents");
+  await mkdir(folder);
+  const file = join(folder, "mcp-state.json");
+  const session = { session_id: "s1", session_token: "worker-token", room_id: "r", session_kind: "worker" } as StoredAgentSessionState;
+  await writeFile(file, JSON.stringify({ agent_sessions: { s1: session } }));
+  const saved = process.env.LETAGENTS_STATE_PATH;
+  process.env.LETAGENTS_STATE_PATH = file;
+  t.after(() => { if (saved === undefined) delete process.env.LETAGENTS_STATE_PATH; else process.env.LETAGENTS_STATE_PATH = saved; });
+  const fake = fakeWindowsSecurity();
+  await asWindows(fake, () => {
+    // State an older version left: its folder is made private once, then the file in it is read.
+    assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token");
+    assert.deepEqual(fake.protects, [`protect:directory:${folder}`]);
+    saveAgentSession({ ...session, session_token: "worker-token-2" });
+    assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token-2");
+    assert.deepEqual(fake.protects, [`protect:directory:${folder}`], "writes in the private folder run no tool");
+    // A grant of its own: refused (never read as empty state, so never overwritten), named, not repaired.
+    fake.tamper(file);
+    for (const read of [() => readAgentLocalState(), () => readAgentLocalStateSnapshot(), () => saveAgentSession(session)]) {
+      assert.throws(read, (error: NodeJS.ErrnoException) => error.code === "EOWNERPRIVATE" && error.message.includes(file));
+    }
+    assert.equal(fake.isProtected(file), false);
+    assert.deepEqual(fake.protects, [`protect:directory:${folder}`]);
+  });
+  assert.match(await readFile(file, "utf8"), /worker-token-2/);
+});
+
+test("Windows: the local supervisor key is private from birth, read again unchanged, and refused when exposed or another account's", async (t) => {
+  const root = await scratch(t);
+  const fake = fakeWindowsSecurity();
+  const path = join(root, "local-chat.sqlite.supervisor-key");
+  await asWindows(fake, async () => {
+    const key = await loadLocalSupervisorKey(path);
+    assert.equal(key.length, 32);
+    assert.equal(fake.isProtected(path), true);
+    assert.deepEqual(await loadLocalSupervisorKey(path), key, "an existing key is never replaced");
+    assert.deepEqual(await readdir(root), [basename(path)]);
+    fake.tamper(path);
+    await assert.rejects(loadLocalSupervisorKey(path), (error: NodeJS.ErrnoException) => error.code === "EOWNERPRIVATE" && error.message.includes(path));
+    const planted = join(root, "planted.supervisor-key");
+    await writeFile(planted, Buffer.alloc(32, 7));
+    fake.giveAway(planted);
+    const protects = fake.protects.length;
+    await assert.rejects(loadLocalSupervisorKey(planted), { code: "EOWNERPRIVATE" });
+    assert.equal(fake.protects.length, protects, "another account's key is never taken over");
+  });
+});
+
+test("Windows: the Open Model server password is written with no tool in its private runtime folder and refused when exposed", async (t) => {
+  const root = await scratch(t);
+  const runtime = join(root, "runtime");
+  const path = join(runtime, "server-auth.json");
+  const fake = fakeWindowsSecurity();
+  await asWindows(fake, async () => {
+    await mkdir(runtime);
+    await protectOwnerPrivate(runtime, "directory");
+    const protects = fake.protects.length;
+    await writeRuntimeControl(path, { username: "opencode", password: "p1" });
+    await writeRuntimeControl(path, { username: "opencode", password: "p2" });
+    assert.equal(fake.protects.length, protects, "no icacls per write");
+    assert.equal(fake.isProtected(path), true);
+    assert.equal((await readRuntimeControl(path)).password, "p2");
+    fake.tamper(path);
+    await assert.rejects(readRuntimeControl(path), { code: "EOWNERPRIVATE" });
+  });
+});
+
+test("POSIX: the local supervisor key and the Open Model password keep mode 0600; the shared state file is read as before", { skip: posixOnly }, async (t) => {
+  const root = await scratch(t);
+  const keyPath = join(root, "supervisor-key");
+  const key = await loadLocalSupervisorKey(keyPath);
+  assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
+  assert.deepEqual(await loadLocalSupervisorKey(keyPath), key);
+  const auth = join(root, "server-auth.json");
+  await writeRuntimeControl(auth, { username: "opencode", password: "p" });
+  assert.equal((await stat(auth)).mode & 0o777, 0o600);
+  // POSIX never refused a readable password file here; it still does not.
+  await chmod(auth, 0o644);
+  assert.equal((await readRuntimeControl(auth)).password, "p");
 });

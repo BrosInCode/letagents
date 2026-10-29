@@ -1,7 +1,6 @@
 import { withStateFileLock } from "../../../shared/local-worker-state-fence.mjs";
 import {
   mkdirSync,
-  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -10,6 +9,12 @@ import { randomBytes } from "crypto";
 import { dirname } from "path";
 
 import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
+import {
+  ensurePrivateStateFolderSync,
+  ownerPrivatePlatform,
+  readOwnerPrivateFileSync,
+  writePrivateFileAtomicallySync,
+} from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetry } from "./rename-retry.js";
 import type { LetagentsLocalState } from "./types.js";
 import { currentSessionScope, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
@@ -30,13 +35,18 @@ export type LocalStateSnapshot = {
 };
 
 function readLocalStateSnapshotFromPath(statePath: string): LocalStateSnapshot {
+  // The file holds the owner token and worker tokens. Windows: its folder is
+  // made private (POSIX: nothing), and the file is read only when its own
+  // DACL is private; one that is not is refused, never read as empty state.
+  ensurePrivateStateFolderSync(dirname(statePath));
   try {
-    const raw = readFileSync(statePath, "utf-8");
+    const raw = readOwnerPrivateFileSync(statePath, "utf-8");
     const parsed = JSON.parse(raw) as LetagentsLocalState;
     return typeof parsed === "object" && parsed && !Array.isArray(parsed)
       ? { state: parsed, complete: true }
       : { state: {}, complete: false };
   } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EOWNERPRIVATE") throw error;
     return (error as NodeJS.ErrnoException)?.code === "ENOENT"
       ? { state: {}, complete: true }
       : { state: {}, complete: false };
@@ -68,6 +78,13 @@ export function withLocalStateReadLock<T>(callback: (snapshot: LocalStateSnapsho
 }
 
 function writeLocalStateUnlocked(statePath: string, state: LetagentsLocalState): void {
+  // Windows has no mode bits: in the private folder the new file is private
+  // from its exclusive create, before any token is written in it.
+  if (ownerPrivatePlatform() === "win32") {
+    ensurePrivateStateFolderSync(dirname(statePath));
+    writePrivateFileAtomicallySync(statePath, JSON.stringify(state, null, 2) + "\n", { syncDirectory: false });
+    return;
+  }
   const tempPath = `${statePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
     writeFileSync(tempPath, JSON.stringify(state, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });

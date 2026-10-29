@@ -3,7 +3,6 @@ import {
   existsSync,
   mkdirSync,
   openSync,
-  readFileSync,
   renameSync,
   rmSync,
   statSync,
@@ -13,7 +12,13 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 import { getLetAgentsLocalStatePath } from "../paths.js";
-import { ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../shared/owner-private-fs.mjs";
+import {
+  ensurePrivateStateFolderSync,
+  ownerPrivatePlatform,
+  protectOwnerPrivateSync,
+  readOwnerPrivateFileSync,
+  writePrivateFileAtomicallySync,
+} from "../../../../../shared/owner-private-fs.mjs";
 
 const STATE_LOCK_WAIT_MS = 25;
 const STATE_LOCK_TIMEOUT_MS = 2_000;
@@ -133,11 +138,26 @@ function dropDesktopManagedCodexSessions(state: SharedCodexLiveSessionKeys): voi
   if (Object.keys(currentIds).length === 0) delete state.current_codex_live_session_ids;
 }
 
+/**
+ * The state file holds worker tokens. Windows: its folder is made private
+ * (POSIX: nothing), and the file is read only when its own DACL is private.
+ */
+function readStateFile(statePath: string): string {
+  ensurePrivateStateFolderSync(dirname(statePath));
+  return readOwnerPrivateFileSync(statePath, "utf-8");
+}
+
+/** A file that is not private is refused, never read as empty state (which the next write would replace). */
+function isRefusedStateFile(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException)?.code === "EOWNERPRIVATE";
+}
+
 function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
   if (!existsSync(statePath)) return {};
   try {
-    return parseLocalState(readFileSync(statePath, "utf-8"));
-  } catch {
+    return parseLocalState(readStateFile(statePath));
+  } catch (error) {
+    if (isRefusedStateFile(error)) throw error;
     return {};
   }
 }
@@ -152,8 +172,9 @@ export function readAgentLocalStateSnapshot(): {
   }
 
   try {
-    return { state: parseLocalState(readFileSync(statePath, "utf-8")), complete: true };
-  } catch {
+    return { state: parseLocalState(readStateFile(statePath)), complete: true };
+  } catch (error) {
+    if (isRefusedStateFile(error)) throw error;
     return { state: {}, complete: false };
   }
 }
@@ -166,6 +187,7 @@ function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState)
   // Windows has no mode bits: the shared writer makes the file private before
   // any token is written in it, and before it is published.
   if (ownerPrivatePlatform() === "win32") {
+    ensurePrivateStateFolderSync(dirname(statePath));
     writePrivateFileAtomicallySync(statePath, `${JSON.stringify(state, null, 2)}\n`, { syncDirectory: false });
     return;
   }
