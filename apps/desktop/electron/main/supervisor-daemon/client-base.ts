@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { SupervisedAgentsUnsupportedError, supervisedAgentsSupported } from "../platform-capabilities.js";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../../shared/daemon-maintenance.mjs";
@@ -188,6 +189,8 @@ export abstract class SupervisorDaemonClientBase {
     maintenance = false,
   ): Promise<T> {
     if (!maintenance && this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
+    // No supervisor exists where agents are unsupported: never open its socket.
+    if (!supervisedAgentsSupported()) return Promise.reject(new SupervisedAgentsUnsupportedError());
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
       const socket = connectDaemon(this.socketPath, { proofPath: this.peerProofPath });

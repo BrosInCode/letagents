@@ -42,11 +42,13 @@ import {
   revokeDesktopSupervisorGrant,
 } from "../supervisor-grant.js";
 import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
+import { gateSupervisedAgentIpc } from "./supervised-agent-gate.js";
+import { supervisedAgentsSupported } from "../platform-capabilities.js";
 
 export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): void {
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
-    supervisorGrantCoordinator.scheduleCredentialRecovery();
+    if (supervisedAgentsSupported()) supervisorGrantCoordinator.scheduleCredentialRecovery();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void refreshDesktopNotificationRegistration().catch(() => {});
   });
@@ -91,26 +93,8 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
       return getDesktopAuthStatus();
     },
   );
-  targetIpcMain.handle(
-    "desktop:supervisor-grant:get",
-    async (): Promise<DesktopSupervisorGrantMetadata | null> => getDesktopSupervisorGrantMetadata(),
-  );
-  targetIpcMain.handle(
-    "desktop:supervisor-grant:get-storage-status",
-    async (): Promise<DesktopSecureStorageStatus> => {
-      const status = getDesktopSupervisorGrantStorageStatus();
-      supervisorGrantCoordinator.observeSecureStorageAvailability(status.available);
-      return status;
-    },
-  );
-  targetIpcMain.handle(
-    "desktop:supervisor-grant:provision",
-    async (_event, input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> => provisionDesktopSupervisorGrant(input),
-  );
-  targetIpcMain.handle(
-    "desktop:supervisor-grant:revoke",
-    async (): Promise<void> => revokeDesktopSupervisorGrant(),
-  );
+  // The host grant exists only for supervised agents.
+  registerSupervisorGrantIpcHandlers(gateSupervisedAgentIpc(targetIpcMain));
   targetIpcMain.handle(
     "desktop:setup:get-mcp-install-state",
     async (): Promise<DesktopMcpInstallState> => buildMcpInstallState(),
@@ -134,5 +118,28 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   targetIpcMain.handle(
     "desktop:setup:complete-mcp-onboarding",
     async (): Promise<DesktopMcpInstallState> => completeMcpOnboarding(),
+  );
+}
+
+function registerSupervisorGrantIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:get",
+    async (): Promise<DesktopSupervisorGrantMetadata | null> => getDesktopSupervisorGrantMetadata(),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:get-storage-status",
+    async (): Promise<DesktopSecureStorageStatus> => {
+      const status = getDesktopSupervisorGrantStorageStatus();
+      supervisorGrantCoordinator.observeSecureStorageAvailability(status.available);
+      return status;
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:provision",
+    async (_event, input: DesktopProvisionSupervisorGrantInput): Promise<DesktopSupervisorGrantMetadata> => provisionDesktopSupervisorGrant(input),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:revoke",
+    async (): Promise<void> => revokeDesktopSupervisorGrant(),
   );
 }

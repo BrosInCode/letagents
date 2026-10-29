@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
+import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { apiFetch, DesktopApiError } from "./auth.js";
@@ -125,7 +125,7 @@ function storePath(): string {
     const userData = electron.app?.getPath("userData");
     if (userData) return join(userData, "letagents-supervisor-grant.json");
   } catch { /* Node/test runtime */ }
-  return join(homedir(), ".letagents", "desktop", "letagents-supervisor-grant.json");
+  return letagentsHomePath("desktop", "letagents-supervisor-grant.json");
 }
 
 // Exported for a mockable Keychain-storage test. The raw token is only ever
@@ -188,7 +188,9 @@ function probeDesktopSupervisorGrantStorage(
     available: false,
     detail: platform === "darwin"
       ? "Unlock your macOS login Keychain, then check again."
-      : "Secure credential storage is unavailable. Unlock it, then check again.",
+      : platform === "win32"
+        ? "Windows could not protect data for your account on this PC. Sign out of Windows and sign in again, then check again."
+        : "Secure credential storage is unavailable. Unlock it, then check again.",
     canOpenCredentialStorage: platform === "darwin",
   });
   if (!storage.isEncryptionAvailable()) return unavailable();
