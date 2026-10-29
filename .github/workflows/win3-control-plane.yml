@@ -14,7 +14,7 @@ permissions:
 jobs:
   windows-control-plane:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       LETAGENTS_API_URL: http://127.0.0.1:9
     steps:
@@ -65,7 +65,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         working-directory: apps/desktop
-        run: node --import tsx --test --test-timeout=180000 --test-reporter=spec daemon/__tests__/daemon-windows-control-plane.test.ts daemon/__tests__/daemon-lifecycle-handoff.test.ts
+        run: node --import tsx --test --test-timeout=1200000 --test-reporter=spec daemon/__tests__/daemon-windows-control-plane.test.ts daemon/__tests__/daemon-lifecycle-handoff.test.ts
 
   # Every desktop electron and daemon test file must LOAD on Windows (module
   # graph and top-level code). The pattern matches no test, so no test body

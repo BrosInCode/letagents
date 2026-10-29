@@ -1,4 +1,3 @@
-import { join } from "node:path";
 const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
 import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
 // These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
@@ -11,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
+import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
@@ -99,12 +99,14 @@ const {
   await import("../main/room-stream.js");
 
 const boardService = await import("../main/rooms/local-board-service.js");
-process.env.LETAGENTS_BOARD_SOCKET_PATH = join(env.tempDir, "board.sock");
-const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(env.tempDir);
+process.env.LETAGENTS_BOARD_SOCKET_PATH = boardEndpoint.connectPath;
+const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
   if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
-});
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 await boardSocket.start();
 test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 

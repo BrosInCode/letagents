@@ -8,6 +8,7 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { createElectronTestEnv } from "./harness.js";
+import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 const environment = createElectronTestEnv({ prefix: "local-supervision-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
@@ -19,12 +20,14 @@ const { getStoredAgentSession } = await import("../main/agents/state.js");
 const { prepareLocalSupervisorGrant, revokeLocalSupervisorEntry } = await import("../main/rooms/local-supervision-authority.js");
 const { requestLocalSupervisor, executeLocalSupervisorTool } = await import("../main/rooms/local-supervision-runtime.js");
 const boardService = await import("../main/rooms/local-board-service.js");
-process.env.LETAGENTS_BOARD_SOCKET_PATH = join(environment.tempDir, "board.sock");
-const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(environment.tempDir);
+process.env.LETAGENTS_BOARD_SOCKET_PATH = boardEndpoint.connectPath;
+const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
   if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
-});
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 await boardSocket.start();
 test.beforeEach(() => registerLocalBoardOwner(() => {}));
 test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
