@@ -71,6 +71,17 @@ jobs:
         shell: bash
         run: npm --prefix apps/desktop run smoke:windows-install
 
+      - name: Diagnostic - unpackaged smoke check
+        if: ${{ always() }}
+        shell: bash
+        working-directory: apps/desktop
+        timeout-minutes: 6
+        env:
+          LETAGENTS_DESKTOP_SMOKE_CHECK: "1"
+          LETAGENTS_DESKTOP_SMOKE_DEBUG: "1"
+          ELECTRON_ENABLE_LOGGING: "1"
+        run: npx electron .
+
       - name: Upload probe artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

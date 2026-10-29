@@ -5,6 +5,8 @@ LetAgents desktop ships two macOS artifacts for both Apple Silicon (`arm64`) and
 - `LetAgents-<version>-darwin-<arch>.dmg` is the first-install artifact. Users open it and drag LetAgents to Applications.
 - `LetAgents-<version>-darwin-<arch>.zip` is the application update payload. The updater downloads it; users should not install this file manually.
 
+Each release also ships an unsigned Windows x64 installer; see [Windows](#windows-unsigned-beta) below.
+
 Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, `latest-mac-<arch>.yml`, a ZIP blockmap, and the legacy `RELEASES-<arch>.json`. The workflow publishes the first two discovery formats to each architecture feed: `latest-mac.yml` powers the progress-aware updater, while `RELEASES.json` remains a compatibility bridge for clients released before 0.1.4. Both point to immutable, versioned files on Cloudflare R2, so stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
 
 ## One-time Apple setup
@@ -39,7 +41,7 @@ The token cannot create or delete buckets. Versioned objects are uploaded with o
 
 1. Change `apps/desktop/package.json` to the next numeric `x.y.z` desktop version and merge that change to `staging` through a reviewed PR.
 2. From the exact reviewed commit, create and push the matching tag: `desktop-v<x.y.z>`.
-3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. A final job uploads both architectures to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the two public R2 update feeds.
+3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. The Windows job then builds the installer, installs it on the runner, runs the installed app's smoke check and uninstalls it. A final job uploads every platform to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the three public R2 update feeds.
 4. Download the DMG on a clean Mac and complete the first-install smoke test before announcing the release.
 
 The workflow refuses a tag that does not exactly match the desktop package version or a runner whose CPU does not match its matrix architecture. If either architecture fails signing, notarization, verification, attestation, or artifact generation, it does not publish the release.
@@ -49,6 +51,23 @@ Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record
 ```sh
 gh attestation verify /path/to/LetAgents-<version>-darwin-<arch>.<dmg-or-zip> --repo BrosInCode/letagents
 ```
+
+## Windows (unsigned beta)
+
+The Windows build is one per-user NSIS installer, `LetAgents-<version>-win32-x64-setup.exe`, with its `.blockmap`, `latest-win32-x64.yml`, `desktop-release-win32-x64.json` and SHA-256 files beside the macOS files in the same versioned folder.
+
+- It installs to `%LOCALAPPDATA%\Programs\LetAgents\LetAgents.exe` without administrator rights, adds Start menu and desktop shortcuts, registers `letagents://` links and an **Installed apps** entry. IT teams can allow-list that path. Uninstalling keeps the user's data in `%APPDATA%\LetAgents`, as moving the Mac app to the Trash does.
+- The installer and app are **not code-signed** yet (no certificate is available to the company). SmartScreen shows "Windows protected your PC" on the first run: choose **More info → Run anyway**. The website says so beside the download link.
+- Updates: Windows clients read `https://downloads.letagents.chat/desktop/feeds/win32-x64/latest.yml`, a folder apart from the macOS `x64` feed. The packaged `app-update.yml` has no `publisherName`, so electron-updater does not ask for an Authenticode signature; each download is still checked against the SHA-512 in `latest.yml`, over HTTPS. **Restart & update** runs the next installer with `--updated --force-run`; it waits for the app to quit, replaces the files and starts the app again. The installer keeps a copy of itself in `%LOCALAPPDATA%\letagents-desktop-updater\installer.exe`, which the next update uses with the two blockmaps to download only changed ranges.
+- The release job runs on `windows-2022`, because that image has NSIS 3.10 preinstalled and `windows-latest` (Windows Server 2025) has none. It starts after both macOS jobs, and the publish job waits for it, so a Windows failure holds the whole release, as a failed macOS architecture does.
+- Local build, on Windows with NSIS 3 installed (or `LETAGENTS_MAKENSIS` set to `makensis.exe`) and `LETAGENTS_OPENCODE_BIN` set to the `opencode.exe` of `opencode-ai@<openCodeVersion>`:
+
+```sh
+npm --prefix apps/desktop run package:win
+npm --prefix apps/desktop run smoke:windows-install
+```
+
+When a code-signing certificate is available: sign `LetAgents.exe` and the installer in `package-windows.mjs`, and add `publisherName` to the Windows updater config in `electron/scripts/release-metadata.mjs` in the same release, so that installed apps start to require the signature only once every newer installer has it.
 
 ## Service-owned local board rollout
 

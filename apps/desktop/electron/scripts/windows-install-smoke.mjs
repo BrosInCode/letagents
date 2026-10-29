@@ -59,11 +59,20 @@ assert(
   "The installer did not keep itself for the next differential update.",
 );
 
-const smoke = run(executable, [], {
-  env: { ...process.env, LETAGENTS_DESKTOP_SMOKE_CHECK: "1", ELECTRON_ENABLE_LOGGING: "1" },
+// The app's own output streams straight to this log, so a hang still shows
+// how far it got.
+console.log(`> ${executable} (LETAGENTS_DESKTOP_SMOKE_CHECK=1)`);
+const smoke = spawnSync(executable, [], {
+  env: { ...process.env, LETAGENTS_DESKTOP_SMOKE_CHECK: "1", LETAGENTS_DESKTOP_SMOKE_DEBUG: "1", ELECTRON_ENABLE_LOGGING: "1" },
+  stdio: "inherit",
   timeout: 5 * 60_000,
-  windowsHide: false,
 });
+if (smoke.error?.code === "ETIMEDOUT") {
+  // Leave nothing running that would hold the install folder.
+  spawnSync("taskkill", ["/F", "/T", "/IM", WINDOWS_EXECUTABLE_NAME], { stdio: "inherit" });
+  throw new Error("The installed app's smoke check did not finish within 5 minutes.");
+}
+if (smoke.error) throw smoke.error;
 assert(smoke.status === 0, `The installed app's smoke check exited with ${smoke.status ?? smoke.signal}.`);
 
 // `_?=` runs the uninstaller in place and waits for it (by default it copies

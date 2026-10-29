@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA } from '../src/domain/desktopRelease'
+import { fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA, WINDOWS_SMARTSCREEN_NOTE } from '../src/domain/desktopRelease'
 
 test('Mac beta fallback uses current same-origin download routes', () => {
   assert.deepEqual(MAC_DESKTOP_BETA, {
@@ -12,6 +12,7 @@ test('Mac beta fallback uses current same-origin download routes', () => {
     downloads: {
       arm64: '/downloads/mac/arm64',
       x64: '/downloads/mac/x64',
+      windows: null,
     },
   })
   assert.doesNotMatch(JSON.stringify(MAC_DESKTOP_BETA), /github\.com/)
@@ -48,8 +49,39 @@ test('Mac beta presentation advances from the same-origin current-release manife
     downloads: {
       arm64: 'https://downloads.letagents.chat/desktop/v0.1.5/LetAgents-0.1.5-darwin-arm64.dmg',
       x64: 'https://downloads.letagents.chat/desktop/v0.1.5/LetAgents-0.1.5-darwin-x64.dmg',
+      windows: null,
     },
   })
+})
+
+test('the Windows installer appears beside the DMGs once the current release lists one', async () => {
+  const assets = Object.fromEntries(['arm64', 'x64'].map((architecture) => [architecture, {
+    fileName: `LetAgents-0.1.131-darwin-${architecture}.dmg`,
+    publicUrl: `https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-darwin-${architecture}.dmg`,
+    bytes: 120,
+    sha256: 'a'.repeat(64),
+  }]))
+  const release = await fetchCurrentMacDesktopBeta(async () => new Response(JSON.stringify({
+    schemaVersion: 1,
+    channel: 'beta',
+    version: '0.1.131',
+    checksumsUrl: 'https://downloads.letagents.chat/desktop/v0.1.131/checksums.txt',
+    assets,
+    windows: {
+      x64: {
+        fileName: 'LetAgents-0.1.131-win32-x64-setup.exe',
+        publicUrl: 'https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe',
+        bytes: 160,
+        sha256: 'c'.repeat(64),
+      },
+    },
+  }), { status: 200 }))
+  assert.equal(release.downloads.windows, 'https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe')
+
+  const heroSource = readFileSync(fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url)), 'utf8')
+  assert.match(heroSource, /v-if="macDesktopBeta\.downloads\.windows"/)
+  assert.match(heroSource, /\{\{ WINDOWS_SMARTSCREEN_NOTE \}\}/)
+  assert.equal(WINDOWS_SMARTSCREEN_NOTE, 'Windows may show SmartScreen: More info → Run anyway.')
 })
 
 test('Mac beta presentation rejects a current manifest older than its bundled fallback', async () => {
