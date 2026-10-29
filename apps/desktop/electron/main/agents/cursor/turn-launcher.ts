@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { spawnTree } from "../../../../../../shared/process-tree.mjs";
+import { spawnTree, windowsCommandLine } from "../../../../../../shared/process-tree.mjs";
 
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import {
@@ -27,6 +27,7 @@ import { cursorWrapperProxySource } from "./turn-wrapper-proxies.js";
 import { cursorWrapperSetupSource, type CursorWrapperLaunchValues } from "./turn-wrapper-setup.js";
 import { cursorWrapperStartSource } from "./turn-wrapper-start.js";
 import {
+  assertCursorWindowsCommandLines,
   cursorMcpConnectorListenPath,
   cursorWindowsNativeLaunch,
   cursorWrapperProgramBootstrap,
@@ -280,7 +281,7 @@ export function defaultLaunchTurn(input: {
     });
     if (windows) wrapperProgram = writeCursorWrapperProgram(wrapperSource);
     const sandboxList = (paths: string[]): string => (windows ? "[]" : JSON.stringify(paths));
-    child = spawnTree(process.execPath, [
+    const wrapperArgs = [
       "-e",
       wrapperProgram ? cursorWrapperProgramBootstrap(wrapperProgram.path) : wrapperSource,
       input.cursorBin,
@@ -308,7 +309,9 @@ export function defaultLaunchTurn(input: {
       restrictRemoteAuthority ? "1" : "0",
       input.fullAccess === true ? "1" : "0",
       ...input.args,
-    ], {
+    ];
+    if (windowsTurn) assertCursorWindowsCommandLines(windowsCommandLine(process.execPath, wrapperArgs), windowsTurn);
+    child = spawnTree(process.execPath, wrapperArgs, {
       cwd: input.cwd,
       // The prompt travels as a positional argument; cursor-agent has no stdin
       // channel (matrix row). Its own process group so group signalling reaps

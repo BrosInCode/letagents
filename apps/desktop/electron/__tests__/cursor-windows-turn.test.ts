@@ -20,7 +20,10 @@ import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-
 import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
 import { cursorMcpConnectorRootPattern } from "../main/agents/cursor/turn-wrapper-setup.js";
 import {
+  assertCursorWindowsCommandLines,
   cursorMcpConnectorListenPath,
+  cursorMcpConnectorProofPath,
+  cursorWindowsMcpRuntimeEnv,
   cursorWrapperProgramBootstrap,
   requestCursorWrapperStop,
   writeCursorWrapperProgram,
@@ -76,6 +79,10 @@ test("the Windows wrapper is valid JavaScript, runs Cursor unsandboxed in the he
   assert.match(source, /const nativeCommand = windowsTurn\.helper;/);
   assert.match(source, /\["spawn", windowsTurn\.application, windowsNativeCommandLine\(cursorArgs\)\]/);
   assert.match(source, /server\.listen\(windowsTurn\.connectorListenPath,/);
+  // A pipe client is admitted only after it sends the turn's private proof.
+  assert.match(source, /net\.createServer\(\{ allowHalfOpen: false \}, \(pending\) => windowsProveConnector\(pending, \(socket\) => \{/);
+  // The helper's exit alone is not the reap proof: its job must be gone or empty.
+  assert.match(source, /\["query", String\(native\.pid\), nativeHelperBirth\]/);
   assert.doesNotMatch(source, /chmodSync\(mcpConnectorSocketPath/);
   // The reason it runs from a file: it does not fit a Windows command line.
   assert.ok(source.length > 32_767, `wrapper is ${source.length} characters`);
@@ -95,9 +102,32 @@ test("the Windows connector is a per-turn, per-account named pipe; POSIX keeps t
   assert.equal(pattern.test("C:\\Users\\you\\AppData\\Local\\TempX\\letagents-cursor-mcp-01234567-89ab-cdef-0123-456789abcdef"), false);
 });
 
-test("the pipe connector refuses anything but a LetAgents Cursor pipe", () => {
-  const refused = spawnSync(process.execPath, ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, "/tmp/letagents-cursor-mcp/stdio.sock"], { encoding: "utf8" });
-  assert.equal(refused.status, 64);
+test("the pipe connector refuses anything but a LetAgents Cursor pipe and a readable proof", () => {
+  const pipe = "\\\\.\\pipe\\letagents-cursor-mcp-0123456789abcdef0123456789abcdef";
+  const run = (...args: string[]) => spawnSync(process.execPath, ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, ...args], { encoding: "utf8" }).status;
+  assert.equal(run("/tmp/letagents-cursor-mcp/stdio.sock", "/tmp/connector.proof"), 64);
+  assert.equal(run(pipe), 64);
+  assert.equal(run(pipe, join(tmpdir(), `missing-${randomUUID()}`, "connector.proof")), 65);
+});
+
+test("the MCP runtime's Windows home folders stay in the connector root", () => {
+  const root = "C:\\Users\\you\\AppData\\Local\\Temp\\letagents-cursor-mcp-01234567-89ab-cdef-0123-456789abcdef";
+  assert.deepEqual(cursorWindowsMcpRuntimeEnv(root, undefined, "darwin"), {});
+  const env = cursorWindowsMcpRuntimeEnv(root, undefined, "win32");
+  assert.equal(env.USERPROFILE, join(root, "home"));
+  assert.equal(env.APPDATA, join(root, "home", "AppData", "Roaming"));
+  assert.equal(env.LOCALAPPDATA, join(root, "home", "AppData", "Local"));
+  assert.equal(cursorMcpConnectorProofPath(join(root, "stdio.sock")), join(root, "connector.proof"));
+});
+
+test("a room turn too long for a Windows command line is refused with a reason", () => {
+  const values = { helper: windowsValues.helper, application: windowsValues.application, head: windowsValues.head };
+  assert.doesNotThrow(() => assertCursorWindowsCommandLines("node -e x", { ...values, tail: "\"short\"" }));
+  assert.throws(
+    () => assertCursorWindowsCommandLines("node -e x", { ...values, tail: `"${"\\\"".repeat(12_000)}"` }),
+    /too long for a Windows command line/,
+  );
+  assert.throws(() => assertCursorWindowsCommandLines("x".repeat(40_000), { ...values, tail: "" }), /too long/);
 });
 
 test("the wrapper file runs with the same process.argv as node -e", () => {
@@ -249,14 +279,30 @@ test("Windows: a restricted turn reaches its hosted MCP runtime over the named p
     mcpServers: {
       letagents: {
         command: process.execPath,
-        args: ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, cursorMcpConnectorListenPath(socketPath)],
+        args: ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, cursorMcpConnectorListenPath(socketPath), cursorMcpConnectorProofPath(socketPath)],
         env: { ELECTRON_RUN_AS_NODE: "1" },
       },
     },
   }));
+  const strangerPath = join(root, "stranger.json");
   const cursorBin = fakeCursor(root, `
 ${cursorMcpAttestationFixtureSource}
-attestFixtureMcp().then((connector) => {
+// A client without the proof (another account, say) connects first: the
+// wrapper closes it before any MCP byte flows and still admits Cursor's own.
+function stranger() {
+  return new Promise((resolve) => {
+    const socket = require("node:net").createConnection({ path: ${JSON.stringify(cursorMcpConnectorListenPath(socketPath))} });
+    let received = "";
+    socket.on("connect", () => socket.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\\n"));
+    socket.on("data", (chunk) => { received += chunk; });
+    socket.on("error", () => {});
+    socket.on("close", () => {
+      require("node:fs").writeFileSync(${JSON.stringify(strangerPath)}, JSON.stringify({ received }));
+      resolve();
+    });
+  });
+}
+stranger().then(attestFixtureMcp).then((connector) => {
   detachFixtureMcp(connector);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-windows-mcp" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "windows-mcp-ok", session_id: "sess-windows-mcp" }) + "\\n");
@@ -274,7 +320,7 @@ attestFixtureMcp().then((connector) => {
       mcpConnectorSocketPath: socketPath,
       mcpRuntimeEntryPath: materializeAttestableMcpRuntime(join(root, "attestable-mcp-runtime")),
       mcpRuntimeCwd: root,
-      mcpRuntimeEnv: wrapperMcpRuntimeEnv(connectorRoot, "cursor:windows-pipe"),
+      mcpRuntimeEnv: { ...wrapperMcpRuntimeEnv(connectorRoot, "cursor:windows-pipe"), ...cursorWindowsMcpRuntimeEnv(connectorRoot, undefined) },
       providerAuthorization: "Bearer windows-pipe-provider-proof",
       restrictRemoteAuthority: true,
       testAgentUpstreamEndpoint: "http://127.0.0.1:9",
@@ -287,6 +333,7 @@ attestFixtureMcp().then((connector) => {
     const exit = await withLoopAlive(child.exited);
     assert.deepEqual(exit, { type: "exit", code: 0, signal: null }, child.stderrTail());
     assert.equal(lines.some((line) => line.includes("\"windows-mcp-ok\"")), true);
+    assert.deepEqual(JSON.parse(readFileSync(strangerPath, "utf8")), { received: "" }, "a client without the proof got nothing");
     const terminal = readTerminal(statePath);
     assert.equal(terminal.native_process_group_reaped, true);
     assert.equal(terminal.remote_authority_revoked, true, JSON.stringify(terminal));

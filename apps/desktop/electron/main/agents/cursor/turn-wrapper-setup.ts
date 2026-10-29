@@ -490,6 +490,52 @@ function failMcpCapabilityAttestation(detail) {
 function windowsTurnSource(values: CursorWindowsTurnValues): string {
   return String.raw`const windowsTurn = ${JSON.stringify(values)};
 let nativeHelperBirth = null;
+let windowsConnectorProof = null;
+let windowsConnectorRejections = 0;
+function windowsProveConnector(socket, admit) {
+  // The pipe's default DACL lets other local accounts connect. Only a client
+  // that sends this turn's proof, which only this account can read, is
+  // Cursor's connector; anyone else is closed before any MCP byte flows.
+  if (finalizing || authorityRetiring || mcpConnectorAdmitted || !windowsConnectorProof) { socket.destroy(); return; }
+  let received = Buffer.alloc(0);
+  let settled = false;
+  const refuse = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    socket.destroy();
+    windowsConnectorRejections += 1;
+    if (windowsConnectorRejections > 16) {
+      failMcpCapabilityAttestation("Too many connections without the turn's proof reached Cursor's MCP connector pipe.");
+    }
+  };
+  const timer = setTimeout(refuse, 5000);
+  socket.on("error", refuse);
+  const onData = (chunk) => {
+    if (settled) return;
+    received = Buffer.concat([received, chunk]);
+    const newline = received.indexOf(10);
+    if (newline < 0) {
+      if (received.length > 128) refuse();
+      return;
+    }
+    socket.pause();
+    socket.removeListener("data", onData);
+    const offered = received.subarray(0, newline);
+    const expected = Buffer.from(windowsConnectorProof, "utf8");
+    if (offered.length !== expected.length || !require("node:crypto").timingSafeEqual(offered, expected)) {
+      refuse();
+      return;
+    }
+    settled = true;
+    clearTimeout(timer);
+    socket.removeListener("error", refuse);
+    const rest = received.subarray(newline + 1);
+    if (rest.length) socket.unshift(rest);
+    admit(socket);
+  };
+  socket.on("data", onData);
+}
 function windowsNativeCommandLine(cursorArgs) {
   const added = cursorArgs.slice(0, cursorArgs.length - args.length);
   if (added.some((arg) => typeof arg !== "string" || !/^[A-Za-z0-9_.:/=-]+$/.test(arg))) {
@@ -555,10 +601,11 @@ async function reapNativeGroup() {
 }
 `;
 
-// Windows: native Cursor runs inside letagents-process-tree.exe's job. The
-// helper exits only once that job is empty, so its exit is the proof that
-// every Cursor descendant ended. Ending the job goes through the helper with
-// the helper's recorded birth; it waits until the job is empty.
+// Windows: native Cursor runs inside letagents-process-tree.exe's job, named
+// for the helper's pid and creation time. Ending the job goes through the
+// helper with that recorded birth; it waits until the job is empty. The
+// helper's own exit is not the proof, because a process in Cursor's tree can
+// end the helper itself: the job must be gone, or hold no process.
 const WINDOWS_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(signal) {
   if (!native) return;
   // Ending the helper closes its job, and Windows ends every process in it.
@@ -570,23 +617,38 @@ function endNativeJob() {
     const ended = spawnSync(windowsTurn.helper, ["kill", String(native.pid), nativeHelperBirth], {
       stdio: "ignore", windowsHide: true, timeout: 15000,
     });
-    // 0: the job was ended and is empty; 2: the helper already exited, which it does only once its job is empty.
+    // 0: the job was ended and is empty; 2: no helper with that birth is running.
     return ended.error ? null : ended.status;
   } catch { return null; }
 }
+function nativeJobEmpty() {
+  if (!nativeHelperBirth) return false;
+  try {
+    const query = spawnSync(windowsTurn.helper, ["query", String(native.pid), nativeHelperBirth], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout: 10000,
+    });
+    if (query.error) return false;
+    // 2: the job no longer exists; 0: the count of its live processes follows.
+    if (query.status === 2) return true;
+    return query.status === 0 && String(query.stdout).trim() === "0";
+  } catch { return false; }
+}
 async function reapNativeGroup() {
   if (!native) return true;
-  if (native.exitCode !== null || native.signalCode !== null) return true;
-  const exited = new Promise((resolve) => native.once("exit", resolve));
-  const status = endNativeJob();
-  if (status === 0 || status === 2) {
+  // A helper that could not start (ENOENT, EACCES) started nothing.
+  if (!Number.isSafeInteger(native.pid)) return true;
+  if (native.exitCode === null && native.signalCode === null) {
+    const exited = new Promise((resolve) => { native.once("exit", resolve); native.once("error", resolve); });
+    const status = endNativeJob();
+    if (status !== 0 && status !== 2) signalNativeGroup("SIGKILL");
     await exited;
-    return true;
   }
-  // The job could not be ended through the helper: end the helper, which
-  // closes the job, but report the descendants as unproven.
-  signalNativeGroup("SIGKILL");
-  await exited;
-  return false;
+  // A closed job's processes end shortly after the close; wait a bounded moment.
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    if (nativeJobEmpty()) return true;
+    if (Date.now() >= deadline) return false;
+    await wait(50);
+  }
 }
 `;

@@ -173,8 +173,9 @@ function validatedMcpRuntimeEnv(value) {
     "LETAGENTS_SUPERVISOR_AGENT_SESSION_ID", "LETAGENTS_SUPERVISOR_ROOM_ID",
     "LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME", "LETAGENTS_SUPERVISED_BOUNDED_TURNS",
     "LETAGENTS_EXECUTION_PROFILE", "LETAGENTS_PERMISSION_PROFILE_ID",
-    // Windows: the daemon's state folder, where the MCP runtime finds the pipe's proof.
-    ...(windows ? ["LETAGENTS_SUPERVISOR_DAEMON_STATE_DIR"] : []),
+    // Windows: home folders inside the connector root, and the daemon's state
+    // folder, where the MCP runtime finds the daemon pipe's proof.
+    ...(windows ? ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "LETAGENTS_SUPERVISOR_DAEMON_STATE_DIR"] : []),
   ])});
   const result = {};
   const entries = Object.entries(value);
@@ -363,6 +364,9 @@ ${windows ? String.raw`    // Windows: the socket path names the turn; the wrapp
       CURSOR_CONFIG_DIR: path.join(connectorRoot, "config", "cursor"),
       CURSOR_DATA_DIR: path.join(connectorRoot, "data", "cursor"),
       NODE_COMPILE_CACHE: path.join(connectorRoot, "cache", "node-compile-cache"),
+      USERPROFILE: path.join(connectorRoot, "home"),
+      APPDATA: path.join(connectorRoot, "home", "AppData", "Roaming"),
+      LOCALAPPDATA: path.join(connectorRoot, "home", "AppData", "Local"),
     };` : String.raw`{
       HOME: connectorRoot + "/home",
       XDG_CONFIG_HOME: connectorRoot + "/config",
@@ -382,6 +386,12 @@ ${windows ? String.raw`      // Windows: main created this folder private (inher
       const connectorRootStat = lstatSync(connectorRoot);
       if (!connectorRootStat.isDirectory() || connectorRootStat.isSymbolicLink()) {
         throw new Error("redirected MCP connector root");
+      }
+      // The secret Cursor's pipe connector must send first (windowsProveConnector).
+      windowsConnectorProof = readFileSync(path.join(connectorRoot, "connector.proof"), "utf8").trim();
+      if (!/^[0-9a-f]{64}$/.test(windowsConnectorProof)) throw new Error("invalid MCP connector proof");
+      for (const directory of [expectedRuntimePaths.USERPROFILE, expectedRuntimePaths.APPDATA, expectedRuntimePaths.LOCALAPPDATA]) {
+        mkdirSync(directory, { recursive: true });
       }` : String.raw`      mkdirSync(connectorRoot, { mode: 0o700 });`}
       for (const directory of [
         expectedRuntimePaths.HOME,
@@ -435,7 +445,7 @@ ${windows ? String.raw`      // Windows: main created this folder private (inher
         failMcpCapabilityAttestation("Cursor's live MCP runtime ended before the turn became terminal.");
         if (mcpConnectorSocket) { try { mcpConnectorSocket.destroy(); } catch {} }
       });
-      const server = net.createServer({ allowHalfOpen: false }, (socket) => {
+      const server = net.createServer({ allowHalfOpen: false }, ${windows ? "(pending) => windowsProveConnector(pending, (socket) => {" : "(socket) => {"}
         if (finalizing || authorityRetiring || mcpConnectorAdmitted) { socket.destroy(); return; }
         mcpConnectorAdmitted = true;
         mcpConnectorSocket = socket;
@@ -466,7 +476,7 @@ ${windows ? String.raw`      // Windows: main created this folder private (inher
           failMcpCapabilityAttestation("Cursor's live MCP connector ended before the turn became terminal.");
           try { runtime.stdin.end(); } catch {}
         });
-      });
+      }${windows ? ")" : ""});
       mcpConnectorServer = server;
       server.once("error", failStart);
       server.once("close", () => {

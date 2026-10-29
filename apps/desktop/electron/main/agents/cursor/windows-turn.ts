@@ -5,13 +5,18 @@
 // and a graceful stop over IPC before the process tree is ended.
 
 import type { ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
 
 import { codexLaunchCommand } from "../../../../../../shared/codex-executable.mjs";
-import { currentWindowsAccount, windowsPipeName } from "../../../../../../shared/daemon-endpoint.mjs";
+import {
+  currentWindowsAccount,
+  DAEMON_STATE_DIR_ENV,
+  resolveDaemonProofPath,
+  windowsPipeName,
+} from "../../../../../../shared/daemon-endpoint.mjs";
 import { createPrivateDirSync, privateEntryCreatedSync } from "../../../../../../shared/owner-private-fs.mjs";
 import {
   processTreeHelperPath,
@@ -41,10 +46,10 @@ export interface CursorWindowsTurnValues {
  * Where the wrapper listens for Cursor's one MCP connection. POSIX: the
  * socket path itself, unchanged. Windows: a named pipe whose name binds the
  * turn's private connector path and this account (shared/daemon-endpoint.mjs).
- * The path holds a random UUID, so the name cannot be guessed; libuv creates
- * the first pipe instance exclusively, so a squatted name fails the listen;
- * and the wrapper admits exactly one connection, so a stranger who connects
- * first fails the turn closed instead of reaching the MCP runtime.
+ * libuv creates the first pipe instance exclusively, so a squatted name fails
+ * the listen. Node gives the pipe the default DACL, which lets other local
+ * accounts connect, so the wrapper admits only a client that first sends the
+ * turn's proof (CURSOR_MCP_CONNECTOR_PROOF_FILE, readable only by this account).
  */
 export function cursorMcpConnectorListenPath(
   socketPath: string,
@@ -128,12 +133,69 @@ export function cursorWrapperProgramBootstrap(path: string): string {
   return `require(${JSON.stringify(path)})`;
 }
 
-/** Create the turn's connector folder private before the wrapper fills it; the wrapper only checks it. */
+/** The secret Cursor's pipe connector sends before the wrapper admits it, in the private connector folder. */
+export const CURSOR_MCP_CONNECTOR_PROOF_FILE = "connector.proof";
+
+/** The proof file for a connector socket path (`<connector root>\\stdio.sock`). */
+export function cursorMcpConnectorProofPath(socketPath: string): string {
+  return join(dirname(socketPath), CURSOR_MCP_CONNECTOR_PROOF_FILE);
+}
+
+/**
+ * Create the turn's connector folder private before the wrapper fills it
+ * (the wrapper only checks it), with the connector proof inside. Folders and
+ * files made in it inherit its protected DACL.
+ */
 export function prepareCursorWindowsConnectorRoot(root: string): void {
   createPrivateDirSync(root);
   const stat = lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error("Cursor's MCP connector folder is not a real folder.");
+  }
+  const proof = join(root, CURSOR_MCP_CONNECTOR_PROOF_FILE);
+  writeFileSync(proof, randomBytes(32).toString("hex"), { flag: "wx", mode: 0o600 });
+  privateEntryCreatedSync(proof, "file");
+}
+
+/**
+ * Windows: the hosted MCP runtime finds its home through USERPROFILE and
+ * APPDATA, not HOME, so they point into the turn's connector folder like HOME
+ * does; otherwise it would use the owner's own LetAgents state. With
+ * USERPROFILE moved, the runtime needs the daemon's state folder named to
+ * find the daemon pipe's proof (shared/daemon-endpoint.mjs).
+ */
+export function cursorWindowsMcpRuntimeEnv(
+  connectorRoot: string,
+  daemonConnectPath: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  if (platform !== "win32") return {};
+  const home = join(connectorRoot, "home");
+  const daemonProof = daemonConnectPath ? resolveDaemonProofPath(daemonConnectPath) : null;
+  return {
+    USERPROFILE: home,
+    APPDATA: join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: join(home, "AppData", "Local"),
+    ...(daemonProof ? { [DAEMON_STATE_DIR_ENV]: dirname(daemonProof) } : {}),
+  };
+}
+
+/** Windows' CreateProcess limit, in UTF-16 units, with room for the terminating NUL. */
+const WINDOWS_COMMAND_LINE_LIMIT = 32_766;
+
+/**
+ * Cursor takes the room message only as an argument, and a Windows command
+ * line holds at most 32,767 characters. Refuse a turn whose command lines
+ * would not fit, with a reason, instead of an ENAMETOOLONG from spawn. The
+ * wrapper's own line and the helper's line (the native line quoted once more)
+ * are checked; the wrapper adds at most PROXY_ARGUMENT_ROOM for its proxy flags.
+ */
+export function assertCursorWindowsCommandLines(wrapperLine: string, values: Pick<CursorWindowsTurnValues, "helper" | "application" | "head" | "tail">): void {
+  const PROXY_ARGUMENT_ROOM = 512;
+  const nativeLine = `${values.head} ${"x".repeat(PROXY_ARGUMENT_ROOM)} ${values.tail}`;
+  const helperLine = [values.helper, "spawn", values.application, nativeLine].map(quoteWindowsArgument).join(" ");
+  if (wrapperLine.length > WINDOWS_COMMAND_LINE_LIMIT || helperLine.length > WINDOWS_COMMAND_LINE_LIMIT) {
+    throw new Error("This room turn is too long for a Windows command line, which Cursor needs for its message. Shorten the message or start a new conversation.");
   }
 }
 

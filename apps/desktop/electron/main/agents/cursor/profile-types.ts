@@ -174,14 +174,26 @@ process.stdin.once("error", () => socket.destroy());
 process.stdout.once("error", () => socket.destroy());
 `;
 
-/** Windows: the same connector to the wrapper's named pipe (cursorMcpConnectorListenPath). */
+/**
+ * Windows: the same connector to the wrapper's named pipe. It first sends
+ * the turn's proof from the private connector folder; the wrapper admits no
+ * client without it (cursorMcpConnectorListenPath).
+ */
 export const CURSOR_MCP_PIPE_CONNECTOR_SOURCE = String.raw`
+const fs = require("node:fs");
 const net = require("node:net");
+const path = require("node:path");
 const pipePath = process.argv[1];
+const proofPath = process.argv[2];
 if (typeof pipePath !== "string" || !/^\\\\[.]\\pipe\\letagents-cursor-mcp-[0-9a-f]{32}$/.test(pipePath)) process.exit(64);
+if (typeof proofPath !== "string" || !path.isAbsolute(proofPath) || path.basename(proofPath) !== "connector.proof") process.exit(64);
+let proof;
+try { proof = fs.readFileSync(proofPath, "utf8").trim(); } catch { process.exit(65); }
+if (!/^[0-9a-f]{64}$/.test(proof)) process.exit(65);
 const socket = net.createConnection({ path: pipePath });
 socket.setNoDelay(true);
 socket.once("connect", () => {
+  socket.write(proof + "\n");
   process.stdin.pipe(socket);
   socket.pipe(process.stdout);
 });
@@ -190,7 +202,6 @@ socket.once("close", () => process.exit(0));
 process.stdin.once("error", () => socket.destroy());
 process.stdout.once("error", () => socket.destroy());
 `;
-
 export const SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES = [
   [".cursor", "cli.json"],
   [".cursor", "cli-config.json"],
