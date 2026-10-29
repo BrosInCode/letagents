@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,14 +66,23 @@ test("Git-generated space-path headers retain their patches with and without fil
   const cwd = mkdtempSync(join(tmpdir(), "pr-diff-space-paths-"));
   const files = [file("has space.ts"), file(" has edge spaces.ts "), file("gone file.ts", "removed", 0, 1)];
   try {
-    const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
-    git("init", "--quiet");
-    for (const { path } of files) writeFileSync(join(cwd, path), "old\n");
-    git("add", "--all");
-    writeFileSync(join(cwd, files[0].path), "new\n");
-    writeFileSync(join(cwd, files[1].path), "new\n");
-    unlinkSync(join(cwd, files[2].path));
-    const diff = git("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/");
+    // The trees are built from blobs, not checked-out files: Windows cannot
+    // name a file with a trailing space, and Git for Windows refuses such a
+    // path unless core.protectNTFS is off. The diff is still Git's own.
+    const git = (args: string[], input?: string) =>
+      execFileSync("git", ["-c", "core.protectNTFS=false", ...args], { cwd, encoding: "utf8", input });
+    git(["init", "--quiet"]);
+    const tree = (entries: Array<[path: string, text: string]>) => {
+      git(["read-tree", "--empty"]);
+      for (const [path, text] of entries) {
+        const blob = git(["hash-object", "-w", "--stdin"], text).trim();
+        git(["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`]);
+      }
+      return git(["write-tree"]).trim();
+    };
+    const before = tree(files.map(({ path }) => [path, "old\n"]));
+    const after = tree([[files[0].path, "new\n"], [files[1].path, "new\n"]]);
+    const diff = git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", before, after]);
     assert.ok(diff.includes("+++ b/has space.ts\t\n"), "fixture includes Git's actual tab delimiter");
     assert.ok(diff.includes("--- a/gone file.ts\t\n"), "removed paths use the source header");
     for (const metadata of [files, null]) {
