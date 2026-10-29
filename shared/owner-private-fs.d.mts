@@ -20,6 +20,9 @@ export interface WindowsSecurity {
   currentUserAliasesSync?(): string[];
   protect(path: string, kind: PrivateKind): Promise<void>;
   protectSync(path: string, kind: PrivateKind): void;
+  /** The DACL alone as SDDL ("D:..."), read right after a protect (the default backend uses icacls /save). */
+  readDacl?(path: string): Promise<string>;
+  readDaclSync?(path: string): string;
   /** Remove every allow entry for these SIDs (the default backend has it; a fake may leave it out). */
   removeGrants?(path: string, sids: readonly string[]): Promise<void>;
   removeGrantsSync?(path: string, sids: readonly string[]): void;
@@ -50,6 +53,11 @@ export declare function userSidAliases(user: { sid: string; domain: string | nul
 export type UserIdentity = string | { sid: string; aliases?: readonly string[] };
 export declare function parseSddlLines(output: string, count: number): (string | null)[];
 export declare function icaclsRemoveArguments(path: string, sids: readonly string[]): string[];
+export declare function icaclsSaveArguments(path: string, file: string): string[];
+/** The DACL line of an `icacls /save` file (UTF-16LE or UTF-8). */
+export declare function parseIcaclsSave(bytes: Uint8Array): string;
+/** Forget every folder verified private in this process (tests that change a DACL behind the cache's back). */
+export declare function forgetOwnerPrivateCache(): void;
 export declare function icaclsSetOwnerArguments(path: string, sid: string): string[];
 export declare const INHERITED_GROUP_SIDS: readonly string[];
 export declare function icaclsProtectArguments(path: string, kind: PrivateKind, sid: string): string[];
@@ -63,6 +71,8 @@ export declare function parseSddl(sddl: string | null | undefined): ParsedSddl |
 export declare function sddlIsOwnedBy(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlExtraGrantSids(sddl: string | null | undefined, sid: UserIdentity): string[] | null;
 export declare function sddlHasProfileDefaultAccess(sddl: string | null | undefined, sid: UserIdentity): boolean;
+/** As sddlIsOwnerPrivate, but inheritance may be on: the entries alone are private. */
+export declare function sddlHasPrivateEntries(sddl: string | null | undefined, sid: UserIdentity): boolean;
 export declare function sddlIsOwnerPrivate(sddl: string | null | undefined, sid: UserIdentity): boolean;
 
 export declare function isOwnedByCurrentUser(path: string, info: StatLike, options?: OwnerPrivateOptions): Promise<boolean>;
@@ -76,8 +86,9 @@ export declare function isOwnerPrivateSync(path: string, info: StatLike, options
 export declare function assertOwnerPrivate(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Promise<Stats>;
 export declare function assertOwnerPrivateSync(path: string, options?: OwnerPrivateCheckOptions & { kind?: PrivateKind }): Stats;
 
-export declare function protectOwnerPrivate(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): Promise<void>;
-export declare function protectOwnerPrivateSync(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): void;
+/** `force`: run the full Windows protect even under a verified folder (a repair after a failed check). */
+export declare function protectOwnerPrivate(path: string, kind: PrivateKind, options?: OwnerPrivateOptions & { force?: boolean }): Promise<void>;
+export declare function protectOwnerPrivateSync(path: string, kind: PrivateKind, options?: OwnerPrivateOptions & { force?: boolean }): void;
 export declare function createPrivateDir(path: string, mkdirOptions?: { recursive?: boolean }, options?: OwnerPrivateOptions): Promise<string | undefined>;
 export declare function createPrivateDirSync(path: string, mkdirOptions?: { recursive?: boolean }, options?: OwnerPrivateOptions): string | undefined;
 export declare function syncDirectory(path: string, options?: OwnerPrivateOptions): Promise<void>;

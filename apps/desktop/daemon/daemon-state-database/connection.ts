@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { SCHEMA_VERSION } from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
 import { DaemonStateSchema } from "./schema.js";
-import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { ownerPrivatePlatform, protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 
 function configureDaemonStateConnection(database: DatabaseSync): void {
   database.exec("PRAGMA foreign_keys = ON");
@@ -77,7 +77,12 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
       configureDaemonStateConnection(database);
-      for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await protectOwnerPrivate(candidate, "file"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+      // Windows: the folder was made private before the database opened, so the
+      // database, -wal and -shm files inherit its private entries; no tool may
+      // change the DACL of an open SQLite file.
+      if (ownerPrivatePlatform() !== "win32") {
+        for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await protectOwnerPrivate(candidate, "file"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
+      }
       await initializeSchema(database);
       return database;
     } catch (error) {

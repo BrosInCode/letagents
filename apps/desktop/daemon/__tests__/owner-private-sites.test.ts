@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -51,7 +51,7 @@ const getKey = async () => ({ key: Buffer.from(backupKey), sealedKey: "sealed" }
 
 // ---------------------------------------------------------------- state recovery backup
 
-test("Windows: the recovery snapshot needs a private folder, and its file gets the DACL before any ciphertext", async (t) => {
+test("Windows: the recovery snapshot needs a private folder, and its file inherits that folder's DACL", async (t) => {
   const root = await scratch(t);
   const fake = fakeWindowsSecurity();
   const directory = join(root, "state");
@@ -61,12 +61,15 @@ test("Windows: the recovery snapshot needs a private folder, and its file gets t
     // mkdir alone gives an inherited DACL: refused, as a 0755 folder is on POSIX.
     await assert.rejects(prepareStateRecoveryBackup(database, 18, getKey), { code: "snapshot_refused" });
     await fake.security.protect(directory, "directory");
+    const before = fake.protects.length;
     const backup = await prepareStateRecoveryBackup(database, 18, getKey);
     assert.ok(backup);
-    assert.ok(fake.protects.some(call => call === `protect:file:${database}.recovery.enc.pending`));
+    // The verified folder passes its entries on; no tool runs for the snapshot file.
+    assert.equal(fake.protects.length, before);
     assert.equal(fake.isProtected(`${database}.recovery.enc`), true);
     (await decryptStateRecoveryBackup(`${database}.recovery.enc`, backupKey)).close();
-    fake.tamper(`${database}.recovery.enc`);
+    // A folder that lost its private DACL: the snapshot is refused.
+    fake.tamper(directory);
     await assert.rejects(decryptStateRecoveryBackup(`${database}.recovery.enc`, backupKey), { code: "verify_failed" });
   });
 });
@@ -93,28 +96,23 @@ test("Windows: a maintenance hold is written private and a tampered record is re
   await asWindows(fake, async () => {
     const hold = await createDaemonMaintenance(path);
     assert.deepEqual(await readDaemonMaintenance(path), hold);
-    // Every folder it made, the lock and the record's temporary file got the private DACL.
-    assert.ok(fake.protects.includes(`protect:directory:${join(root, "home")}`));
-    assert.ok(fake.protects.includes(`protect:directory:${join(root, "home", ".letagents")}`));
-    assert.ok(fake.protects.includes(`protect:file:${path}.lock`));
-    // The record was made in a private staging folder beside it, then given its own DACL.
-    const staged = fake.protects.findIndex(call => call.startsWith(`protect:directory:${dirname(path)}${sep}.daemon-maintenance.json.letagents-`));
-    assert.ok(staged >= 0);
-    assert.equal(fake.protects[staged + 1], `protect:file:${join(fake.protects[staged]!.slice("protect:directory:".length), "record")}`);
+    // The first folder it made got the private DACL; the state folder, the lock and the
+    // record inherit it, so no tool ran for them.
+    assert.deepEqual(fake.protects, [`protect:directory:${join(root, "home")}`]);
+    for (const made of [dirname(path), `${path}.lock`, path]) assert.equal(fake.isProtected(made), true, made);
     assert.deepEqual((await readdir(dirname(path))).sort(), ["daemon-maintenance.json", "daemon-maintenance.json.lock"]);
     fake.tamper(path);
     await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
-    // A lock this account owns but has not made private yet is repaired; another account's is refused.
+    // The lock lives in the verified private folder, so its folder vouches for it: inside, only
+    // this account, SYSTEM and Administrators can make or change an entry.
     fake.tamper(`${path}.lock`);
     await withDaemonMaintenanceOperation(async () => undefined, path);
-    assert.equal(fake.isProtected(`${path}.lock`), true);
-    fake.giveAway(`${path}.lock`);
-    await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
     // A record is trusted only in a private folder; an operation repairs this account's own folder.
     // (A second folder: the fake remembers files by inode, which Linux reuses at once after a delete.)
     const second = join(root, "home2", ".letagents", "daemon-maintenance.json");
     const secondHold = await createDaemonMaintenance(second);
-    fake.tamper(dirname(second));
+    // home2 loses its private DACL: .letagents now has a fresh profile folder's access, not private.
+    fake.unprotect(join(root, "home2"));
     await assert.rejects(readDaemonMaintenance(second), /Unsafe service maintenance record/);
     assert.equal((await withDaemonMaintenanceOperation(owner => owner.read(), second))?.id, secondHold.id);
     assert.equal(fake.isProtected(dirname(second)), true);
@@ -230,11 +228,12 @@ test("Windows: a kept file is used only from private cache folders", async (t) =
     const stager = new RoomTurnAttachmentStager(root);
     for (let turn = 0; turn < 2; turn += 1) await (await stager.prepare(input())).release();
     assert.equal(downloads, 1);
-    // The cache folder lost its private DACL: the kept copy is not trusted.
-    const cache = (await readdir(root)).find(name => !name.startsWith("turn-"))!;
-    fake.tamper(join(root, cache));
+    // The attachment folder lost its private DACL: the kept copy is not trusted.
+    fake.tamper(root);
     await (await stager.prepare(input())).release();
     assert.equal(downloads, 2);
+    // Writing the new copy made the folder private again.
+    assert.equal(fake.isProtected(root), true);
   });
 });
 

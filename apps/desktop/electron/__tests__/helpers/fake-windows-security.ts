@@ -5,7 +5,9 @@
 // Linux reuses an inode at once after a delete, so a test must not delete and
 // recreate a path it has marked (tamper, giveAway, share) and expect a fresh file.
 import { lstatSync } from "node:fs";
+import { dirname } from "node:path";
 import {
+  forgetOwnerPrivateCache,
   overrideOwnerPrivatePlatformForTesting,
   type PrivateKind,
   type WindowsSecurity,
@@ -15,18 +17,22 @@ export const FAKE_USER_SID = "S-1-5-21-1004336348-1177238915-682003330-1001";
 const PRIVATE_SDDL = `O:${FAKE_USER_SID}G:${FAKE_USER_SID}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;${FAKE_USER_SID})`;
 const FOREIGN_SDDL = "O:S-1-5-21-1004336348-1177238915-682003330-1002D:PAI(A;;FA;;;S-1-5-21-1004336348-1177238915-682003330-1002)";
 const SHARED_SDDL = `O:${"S-1-5-21-1004336348-1177238915-682003330-1001"}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;S-1-5-21-1004336348-1177238915-682003330-1001)(A;ID;0x1301bf;;;BU)`;
+const INHERITED_PRIVATE_SDDL = `O:${FAKE_USER_SID}G:${FAKE_USER_SID}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${FAKE_USER_SID})`;
 const INHERITED_SDDL = `O:${FAKE_USER_SID}G:${FAKE_USER_SID}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;${FAKE_USER_SID})`;
 
 export type FakeWindowsSecurity = {
   security: WindowsSecurity;
   /** "protect:<kind>:<path>" per icacls call, in order. */
   protects: string[];
-  /** Give a path an extra entry (as `icacls /grant Everyone:R` would). */
+  /** Give a path an extra Users entry (as `icacls /grant Users:R` would); what it holds inherits that. */
   tamper(path: string): void;
+  /** Drop a path's own protected DACL; it inherits from the folder above again. */
+  unprotect(path: string): void;
   /** Make another account the owner (as a file that account made would be). */
   giveAway(path: string): void;
   /** Give the Users group modify access (a folder another account could have changed). */
   share(path: string): void;
+  /** Private: a protected private DACL of its own, or private entries inherited from a protected folder. */
   isProtected(path: string): boolean;
 };
 
@@ -47,7 +53,14 @@ export function fakeWindowsSecurity(): FakeWindowsSecurity {
     if (!id) return null;
     if (foreignFiles.has(id)) return FOREIGN_SDDL;
     if (sharedFiles.has(id)) return SHARED_SDDL;
-    return protectedFiles.has(id) ? PRIVATE_SDDL : INHERITED_SDDL;
+    if (protectedFiles.has(id)) return PRIVATE_SDDL;
+    // As NTFS: an unprotected entry inherits from the nearest folder above it.
+    for (let parent = dirname(path); parent !== dirname(parent); parent = dirname(parent)) {
+      const above = identity(parent);
+      if (!above || foreignFiles.has(above) || sharedFiles.has(above)) return INHERITED_SDDL;
+      if (protectedFiles.has(above)) return INHERITED_PRIVATE_SDDL;
+    }
+    return INHERITED_SDDL;
   };
   const protect = (path: string, kind: PrivateKind) => {
     const id = identity(path);
@@ -67,10 +80,12 @@ export function fakeWindowsSecurity(): FakeWindowsSecurity {
   return {
     security,
     protects,
-    tamper(path) { const id = identity(path); if (id) protectedFiles.delete(id); },
-    share(path) { const id = identity(path); if (id) { protectedFiles.delete(id); sharedFiles.add(id); } },
-    giveAway(path) { const id = identity(path); if (id) { protectedFiles.delete(id); foreignFiles.add(id); } },
-    isProtected(path) { const id = identity(path); return Boolean(id && protectedFiles.has(id)); },
+    // A DACL changed behind the helper's back: its verified folders are forgotten too.
+    tamper(path) { const id = identity(path); if (id) { protectedFiles.delete(id); sharedFiles.add(id); } forgetOwnerPrivateCache(); },
+    unprotect(path) { const id = identity(path); if (id) protectedFiles.delete(id); forgetOwnerPrivateCache(); },
+    share(path) { const id = identity(path); if (id) { protectedFiles.delete(id); sharedFiles.add(id); } forgetOwnerPrivateCache(); },
+    giveAway(path) { const id = identity(path); if (id) { protectedFiles.delete(id); foreignFiles.add(id); } forgetOwnerPrivateCache(); },
+    isProtected(path) { const answer = sddl(path); return answer === PRIVATE_SDDL || answer === INHERITED_PRIVATE_SDDL; },
   };
 }
 

@@ -7,29 +7,33 @@
  * to process.getuid(). These helpers keep that exact rule.
  *
  * Windows has no mode bits (Node reports 0o666 for every file) and no uid
- * (stat.uid is 0). There a private file has:
+ * (stat.uid is 0). There a private folder has:
  *   - an owner that is the current user's SID;
  *   - a protected DACL (inheritance disabled), so a change to a parent
  *     folder's permissions never reaches it;
- *   - allow entries for only the current user and SYSTEM. Deny entries are
- *     accepted, because they only take access away. Administrators get no
- *     entry: an administrator can take ownership of any file anyway, so an
- *     entry adds nothing for them and only widens what other code running
- *     as an administrator could read without asking.
- * A private folder has the same entries, marked to be inherited by the files
- * and folders made inside it, so a file written there is private from birth.
+ *   - allow entries for only the current user and SYSTEM, marked to be
+ *     inherited by everything made inside it. Deny entries are accepted,
+ *     because they only take access away. Administrators get no entry: an
+ *     administrator can take ownership of any file anyway, so an entry adds
+ *     nothing for them and only widens what other code running as an
+ *     administrator could read without asking.
+ * A file or folder made inside a private folder inherits those entries, so it
+ * is private from birth, and nothing runs per file (see "verified folders").
+ * A path outside any private folder is private only with the same entries
+ * and a protected DACL of its own.
  *
  * The Windows facts are read with built-in tools by absolute path:
  * whoami.exe gives the current user's SID; PowerShell's Get-Acl gives each
  * path's security descriptor as SDDL (owner and DACL, written with SIDs, so
  * the answer does not depend on the display language); icacls.exe sets the
  * owner (the current user, also for an elevated administrator) and the
- * protected DACL. icacls is not used to read, because it cannot show the
- * owner. Every answer that cannot be read or parsed counts as "not private".
+ * protected DACL, and its /save form reads the DACL back right after. Every
+ * answer that cannot be read or parsed counts as "not private".
  */
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, unlinkSync, writeSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, rm, unlink } from "node:fs/promises";
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, unlinkSync, writeSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { renameSyncWithRetry, renameWithRetryAsync } from "./rename-retry.mjs";
@@ -57,7 +61,7 @@ let testOverride = null;
  * options, so a caller's Windows branch can run on a macOS or Linux host.
  * Pass null to restore the real ones.
  */
-export function overrideOwnerPrivatePlatformForTesting(value) { testOverride = value; }
+export function overrideOwnerPrivatePlatformForTesting(value) { testOverride = value; forgetOwnerPrivateCache(); }
 /** process.platform, or the test override. Callers branch on this, not on process.platform. */
 export function ownerPrivatePlatform(options) { return options?.platform ?? testOverride?.platform ?? process.platform; }
 const isWindows = (options) => ownerPrivatePlatform(options) === "win32";
@@ -279,7 +283,46 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     removeGrantsSync(path, sids) {
       runSync(tools.icacls, icaclsRemoveArguments(path, sids), { env });
     },
+    // The DACL alone, as SDDL, from `icacls /save` (fast; no owner). Used only
+    // to read back a protect, right after /setowner made this account the owner.
+    async readDacl(path) {
+      const file = aclSaveFile(env);
+      try {
+        await run(tools.icacls, icaclsSaveArguments(path, file), { env });
+        return parseIcaclsSave(await readFile(file));
+      } finally { await rm(file, { force: true }).catch(() => undefined); }
+    },
+    readDaclSync(path) {
+      const file = aclSaveFile(env);
+      try {
+        runSync(tools.icacls, icaclsSaveArguments(path, file), { env });
+        return parseIcaclsSave(readFileSync(file));
+      } finally { try { rmSync(file, { force: true }); } catch { /* best effort */ } }
+    },
   };
+}
+
+function aclSaveFile(env) {
+  return join(env.TEMP || env.TMP || tmpdir(), `letagents-acl-${randomUUID()}.txt`);
+}
+
+export function icaclsSaveArguments(path, file) {
+  if (!isAbsolute(path) && !win32.isAbsolute(path)) throw privateError("A private path must be absolute.");
+  return [path, "/save", file, "/q"];
+}
+
+/**
+ * `icacls <path> /save <file>` writes the object's name on one line and its
+ * DACL as SDDL ("D:...") on the next, in UTF-16LE. The name line may itself
+ * start with a drive ("D:\a\..."), so only a later line is read.
+ */
+export function parseIcaclsSave(bytes) {
+  const buffer = Buffer.from(bytes);
+  const text = buffer[0] === 0xff && buffer[1] === 0xfe ? buffer.subarray(2).toString("utf16le")
+    : buffer.length > 1 && buffer[1] === 0 ? buffer.toString("utf16le") : buffer.toString("utf8");
+  const dacl = text.split(/\r?\n/).slice(1).map(line => line.trim()).find(line => /^D:[A-Z_]*(?:\(.*\))*$/.test(line));
+  if (!dacl) throw privateError("The saved Windows permissions could not be read.");
+  return dacl;
 }
 
 let defaultWindowsSecurity = null;
@@ -363,11 +406,20 @@ export function sddlIsOwnedBy(sddl, sid) {
 
 /** Owner is `sid`; the DACL is protected; every allow entry is for `sid` or SYSTEM. */
 export function sddlIsOwnerPrivate(sddl, sid) {
+  return sddlHasPrivateEntries(sddl, sid) && parseSddl(sddl).dacl.flags.includes("P");
+}
+
+/**
+ * As sddlIsOwnerPrivate, but inheritance may be on: the entries alone are
+ * private. Such an object is private only while its parent is (see
+ * windowsPathIsPrivate).
+ */
+export function sddlHasPrivateEntries(sddl, sid) {
   const parsed = parseSddl(sddl);
   const user = who(sid);
   if (!parsed || !sidIsUser(parsed.owner, user) || !parsed.dacl) return false;
   const { flags, aces } = parsed.dacl;
-  if (flags.includes("NO_ACCESS_CONTROL") || !flags.includes("P")) return false;
+  if (flags.includes("NO_ACCESS_CONTROL")) return false;
   return aces.every(ace => DENY_TYPES.has(ace.type)
     || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ace.sid === "SY" || ace.sid === SYSTEM_SID)));
 }
@@ -432,6 +484,138 @@ function pathIsInfo(path, info) {
   } catch { return false; }
 }
 
+function isDirectoryInfo(info) {
+  return typeof info?.isDirectory === "function" && info.isDirectory();
+}
+
+// ---------------------------------------------------------------- Windows: verified folders
+//
+// Starting icacls or PowerShell costs tens to hundreds of milliseconds, so it
+// must not happen for every file. A private folder (owner: this account; a
+// protected DACL for only this account and SYSTEM, inheritable) passes its
+// entries to every file and folder made in it. Inside it, only this account,
+// SYSTEM and Administrators can make an entry or change one's DACL, and they
+// are the principals a POSIX 0600/0700 check also cannot keep out (this
+// account and root). So once a folder is verified, nothing below it is read
+// again or protected again in this process: a file written there inherits the
+// private entries at creation. A folder is verified by reading it (or by this
+// process protecting it), and the result is kept for the life of the process.
+
+let verifiedFolders = new WeakMap();
+
+/** Forget every verified folder (tests that change a DACL behind the cache's back). */
+export function forgetOwnerPrivateCache() { verifiedFolders = new WeakMap(); }
+
+/** The key of an existing path: its real path (no junctions, long names), lowercased. */
+function folderKey(path) {
+  let real;
+  try { real = realpathSync.native(path); } catch { real = resolve(path); }
+  return real.toLowerCase();
+}
+
+function rememberPrivateFolder(security, path) {
+  let set = verifiedFolders.get(security);
+  if (!set) { set = new Set(); verifiedFolders.set(security, set); }
+  set.add(folderKey(path));
+}
+
+/** Whether `path` (if `self`) or a folder above it was verified private in this process. */
+function insideVerifiedFolder(security, path, self) {
+  const set = verifiedFolders.get(security);
+  if (!set?.size) return false;
+  let current = folderKey(path);
+  if (self && set.has(current)) return true;
+  for (let depth = 0; depth < 256; depth += 1) {
+    const parent = dirname(current);
+    if (parent === current) return false;
+    if (set.has(parent)) return true;
+    current = parent;
+  }
+  return false;
+}
+
+/** `path` and every folder above it, nearest first. */
+function chainOf(path) {
+  const chain = [];
+  for (let current = resolve(path); chain.length < 64; current = dirname(current)) {
+    chain.push(current);
+    if (dirname(current) === current) break;
+  }
+  return chain;
+}
+
+/**
+ * Private when the path's own entries are private and so are those of every
+ * folder above it, up to the first one with a protected DACL (inheritance off).
+ * The folders on the way are remembered as verified.
+ */
+function decideChain(security, chain, answers, user, pathIsFolder) {
+  for (let index = 0; index < chain.length; index += 1) {
+    if (!sddlHasPrivateEntries(answers.get(chain[index]), user)) return false;
+    if (parseSddl(answers.get(chain[index])).dacl.flags.includes("P")) {
+      for (let folder = pathIsFolder ? 0 : 1; folder <= index; folder += 1) rememberPrivateFolder(security, chain[folder]);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function readAll(security, paths) {
+  const unique = [...new Set(paths)];
+  const sddls = await security.readSddl(unique);
+  return new Map(unique.map((path, index) => [path, sddls[index]]));
+}
+
+function readAllSync(security, paths) {
+  const unique = [...new Set(paths)];
+  const sddls = security.readSddlSync(unique);
+  return new Map(unique.map((path, index) => [path, sddls[index]]));
+}
+
+/** Windows: is each entry private? Entries under a verified folder need no read; the rest are read in one call. */
+async function windowsEntriesArePrivate(security, entries) {
+  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
+  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, isDirectoryInfo(entry.info)));
+  if (!pending.length) return true;
+  const chains = pending.map(entry => chainOf(entry.path));
+  const answers = await readAll(security, chains.flat());
+  const user = await currentUser(security);
+  return pending.every((entry, index) => decideChain(security, chains[index], answers, user, isDirectoryInfo(entry.info)))
+    && entries.every(entry => pathIsInfo(entry.path, entry.info));
+}
+
+function windowsEntriesArePrivateSync(security, entries) {
+  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
+  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, isDirectoryInfo(entry.info)));
+  if (!pending.length) return true;
+  const chains = pending.map(entry => chainOf(entry.path));
+  const answers = readAllSync(security, chains.flat());
+  const user = currentUserSync(security);
+  return pending.every((entry, index) => decideChain(security, chains[index], answers, user, isDirectoryInfo(entry.info)))
+    && entries.every(entry => pathIsInfo(entry.path, entry.info));
+}
+
+/** Windows: is each entry owned by this account? Under a verified folder that holds (see above). */
+async function windowsEntriesAreOwned(security, entries) {
+  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
+  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, true));
+  if (!pending.length) return true;
+  const answers = await readAll(security, pending.map(entry => entry.path));
+  const user = await currentUser(security);
+  return pending.every(entry => sddlIsOwnedBy(answers.get(entry.path), user))
+    && entries.every(entry => pathIsInfo(entry.path, entry.info));
+}
+
+function windowsEntriesAreOwnedSync(security, entries) {
+  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
+  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, true));
+  if (!pending.length) return true;
+  const answers = readAllSync(security, pending.map(entry => entry.path));
+  const user = currentUserSync(security);
+  return pending.every(entry => sddlIsOwnedBy(answers.get(entry.path), user))
+    && entries.every(entry => pathIsInfo(entry.path, entry.info));
+}
+
 function posixOwned(info) {
   return info.uid === process.getuid?.();
 }
@@ -442,67 +626,42 @@ function posixPrivate(info, exactMode) {
 
 /**
  * Whether `path` (whose lstat/fstat is `info`) belongs to this account. POSIX
- * reads only `info`; Windows reads the owner SID of `path`.
+ * reads only `info`; Windows reads the owner SID of `path` (nothing to read
+ * under a verified private folder).
  */
 export async function isOwnedByCurrentUser(path, info, options = {}) {
   if (!isWindows(options)) return posixOwned(info);
-  const security = windowsSecurity(options);
-  try {
-    if (!pathIsInfo(path, info)) return false;
-    const [sddl] = await security.readSddl([path]);
-    return pathIsInfo(path, info) && sddlIsOwnedBy(sddl, await currentUser(security));
-  } catch { return false; }
+  try { return await windowsEntriesAreOwned(windowsSecurity(options), [{ path, info }]); } catch { return false; }
 }
 
 export function isOwnedByCurrentUserSync(path, info, options = {}) {
   if (!isWindows(options)) return posixOwned(info);
-  const security = windowsSecurity(options);
-  try {
-    if (!pathIsInfo(path, info)) return false;
-    const [sddl] = security.readSddlSync([path]);
-    return pathIsInfo(path, info) && sddlIsOwnedBy(sddl, currentUserSync(security));
-  } catch { return false; }
+  try { return windowsEntriesAreOwnedSync(windowsSecurity(options), [{ path, info }]); } catch { return false; }
 }
 
 /** Every entry belongs to this account; Windows reads them all in one call. */
 export function everyOwnedByCurrentUserSync(entries, options = {}) {
   if (!isWindows(options)) return entries.every(entry => posixOwned(entry.info));
   if (!entries.length) return true;
-  const security = windowsSecurity(options);
-  try {
-    const user = currentUserSync(security);
-    if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
-    const answers = security.readSddlSync(entries.map(entry => entry.path));
-    return entries.every(entry => pathIsInfo(entry.path, entry.info)) && answers.every(sddl => sddlIsOwnedBy(sddl, user));
-  } catch { return false; }
+  try { return windowsEntriesAreOwnedSync(windowsSecurity(options), entries); } catch { return false; }
 }
 
 /** Every entry is private to this account; Windows reads them all in one call. */
 export function everyOwnerPrivateSync(entries, options = {}) {
   if (!isWindows(options)) return entries.every(entry => posixPrivate(entry.info, options.exactMode));
   if (!entries.length) return true;
-  const security = windowsSecurity(options);
-  try {
-    const user = currentUserSync(security);
-    if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
-    const answers = security.readSddlSync(entries.map(entry => entry.path));
-    return entries.every(entry => pathIsInfo(entry.path, entry.info)) && answers.every(sddl => sddlIsOwnerPrivate(sddl, user));
-  } catch { return false; }
+  try { return windowsEntriesArePrivateSync(windowsSecurity(options), entries); } catch { return false; }
 }
 
 /**
  * Whether `path` is private to this account. POSIX: `info` is this account's
  * and has no group/other bits (or, with `exactMode`, exactly that mode).
- * Windows: the owner, protected DACL and entries described at the top.
+ * Windows: under a folder verified in this process, yes; otherwise one read of
+ * the path and the folders above it decides (see decideChain).
  */
 export async function isOwnerPrivate(path, info, options = {}) {
   if (!isWindows(options)) return posixPrivate(info, options.exactMode);
-  const security = windowsSecurity(options);
-  try {
-    if (!pathIsInfo(path, info)) return false;
-    const [sddl] = await security.readSddl([path]);
-    return pathIsInfo(path, info) && sddlIsOwnerPrivate(sddl, await currentUser(security));
-  } catch { return false; }
+  try { return await windowsEntriesArePrivate(windowsSecurity(options), [{ path, info }]); } catch { return false; }
 }
 
 /** Windows only: see sddlHasProfileDefaultAccess. POSIX answers as isOwnerPrivate. */
@@ -511,6 +670,7 @@ export async function hasProfileDefaultAccess(path, info, options = {}) {
   const security = windowsSecurity(options);
   try {
     if (!pathIsInfo(path, info)) return false;
+    if (insideVerifiedFolder(security, path, true)) return true;
     const [sddl] = await security.readSddl([path]);
     return pathIsInfo(path, info) && sddlHasProfileDefaultAccess(sddl, await currentUser(security));
   } catch { return false; }
@@ -518,12 +678,7 @@ export async function hasProfileDefaultAccess(path, info, options = {}) {
 
 export function isOwnerPrivateSync(path, info, options = {}) {
   if (!isWindows(options)) return posixPrivate(info, options.exactMode);
-  const security = windowsSecurity(options);
-  try {
-    if (!pathIsInfo(path, info)) return false;
-    const [sddl] = security.readSddlSync([path]);
-    return pathIsInfo(path, info) && sddlIsOwnerPrivate(sddl, currentUserSync(security));
-  } catch { return false; }
+  try { return windowsEntriesArePrivateSync(windowsSecurity(options), [{ path, info }]); } catch { return false; }
 }
 
 function kindMatches(info, kind) {
@@ -556,50 +711,69 @@ function notProtected(path) {
 }
 
 /**
- * POSIX: chmod 0700/0600. Windows: a protected DACL for this account and
- * SYSTEM, read back afterwards. An entry the protect call left behind (a
- * domain group a profile inherits, say) is removed by SID; if the result is
- * still not private, this throws, as a failed chmod would.
+ * POSIX: chmod 0700/0600. Windows: under a folder verified private in this
+ * process there is nothing to do (the path inherits the private entries, and
+ * no tool runs on a file that may be open, such as a SQLite database). Else
+ * a protected DACL for this account and SYSTEM, read back afterwards: an
+ * entry the protect call left behind (a domain group a profile inherits, say)
+ * is removed by SID; if the result is still not private, this throws, as a
+ * failed chmod would. A protected folder is then verified for the process.
+ * `force` (a repair after a check found the path not private) always runs it.
  */
 export async function protectOwnerPrivate(path, kind, options = {}) {
   if (!isWindows(options)) return chmod(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   // A missing path fails with ENOENT, as chmod does, so callers that skip a missing file still can.
   // Every later failure is EOWNERPRIVATE: a tool's own ENOENT must never read as "the file is missing".
   await lstat(path);
-  try { await protectWindowsPath(path, kind, options); }
+  const security = windowsSecurity(options);
+  if (!options.force && insideVerifiedFolder(security, path, kind === "directory")) return;
+  try { await protectWindowsPath(security, path, kind); }
   catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
+  if (kind === "directory") rememberPrivateFolder(security, path);
 }
 
-async function protectWindowsPath(path, kind, options) {
-  const security = windowsSecurity(options);
+/** The DACL after a protect; owner is this account (icacls /setowner just succeeded). */
+async function readBack(security, path, user) {
+  if (security.readDacl) return `O:${user.sid}${await security.readDacl(path)}`;
+  return (await security.readSddl([path]))[0];
+}
+
+function readBackSync(security, path, user) {
+  if (security.readDaclSync) return `O:${user.sid}${security.readDaclSync(path)}`;
+  return security.readSddlSync([path])[0];
+}
+
+async function protectWindowsPath(security, path, kind) {
   await security.protect(path, kind);
   const user = await currentUser(security);
-  let [sddl] = await security.readSddl([path]);
+  let sddl = await readBack(security, path, user);
   if (sddlIsOwnerPrivate(sddl, user)) return;
   const extra = sddlExtraGrantSids(sddl, user);
   if (!extra?.length || !security.removeGrants) throw notProtected(path);
   await security.removeGrants(path, extra);
-  [sddl] = await security.readSddl([path]);
+  sddl = await readBack(security, path, user);
   if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
 }
 
 export function protectOwnerPrivateSync(path, kind, options = {}) {
   if (!isWindows(options)) return chmodSync(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   lstatSync(path);
-  try { protectWindowsPathSync(path, kind, options); }
+  const security = windowsSecurity(options);
+  if (!options.force && insideVerifiedFolder(security, path, kind === "directory")) return;
+  try { protectWindowsPathSync(security, path, kind); }
   catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
+  if (kind === "directory") rememberPrivateFolder(security, path);
 }
 
-function protectWindowsPathSync(path, kind, options) {
-  const security = windowsSecurity(options);
+function protectWindowsPathSync(security, path, kind) {
   security.protectSync(path, kind);
   const user = currentUserSync(security);
-  let [sddl] = security.readSddlSync([path]);
+  let sddl = readBackSync(security, path, user);
   if (sddlIsOwnerPrivate(sddl, user)) return;
   const extra = sddlExtraGrantSids(sddl, user);
   if (!extra?.length || !security.removeGrantsSync) throw notProtected(path);
   security.removeGrantsSync(path, extra);
-  [sddl] = security.readSddlSync([path]);
+  sddl = readBackSync(security, path, user);
   if (!sddlIsOwnerPrivate(sddl, user)) throw notProtected(path);
 }
 
@@ -758,21 +932,39 @@ function privateStagingFolderSync(path, options) {
   return folder;
 }
 
+/** Windows: whether the folder `path` is written in is private, so a new file there is private from birth. */
+async function folderIsPrivate(path, options) {
+  const folder = dirname(resolve(path));
+  const info = await lstat(folder).catch(() => null);
+  return Boolean(info?.isDirectory() && !info.isSymbolicLink() && await isOwnerPrivate(folder, info, options));
+}
+
+function folderIsPrivateSync(path, options) {
+  const folder = dirname(resolve(path));
+  let info = null;
+  try { info = lstatSync(folder); } catch { return false; }
+  return info.isDirectory() && !info.isSymbolicLink() && isOwnerPrivateSync(folder, info, options);
+}
+
 /**
  * Write `data` to `path` so a reader sees the old file or the whole new one,
  * never a part: a private temporary file beside it, fsync, rename, then fsync
- * the folder. POSIX creates it 0600 in one step. Windows creates it inside a
- * private staging folder, gives it its own DACL before any byte is written,
- * and renames with the bounded retry.
+ * the folder. POSIX creates it 0600 in one step. On Windows, in a private
+ * folder the temporary file inherits the private entries at creation (no tool
+ * runs); in any other folder it is made inside a new private staging folder
+ * and gets a protected DACL of its own before any byte is written, so it stays
+ * private after the rename out of that folder. Renames have the bounded
+ * retry.
  */
 export async function writePrivateFileAtomically(path, data, options = {}) {
-  const staging = isWindows(options) ? await createPrivateStagingFolder(path, options) : null;
+  const staging = isWindows(options) && !await folderIsPrivate(path, options) ? await createPrivateStagingFolder(path, options) : null;
   const temporary = staging ? join(staging, "data") : join(dirname(path), `.${randomUUID()}.${pathName(path)}.tmp`);
   try {
     const handle = await openNoFollow(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
     let closed = false;
     try {
-      if (staging) await protectOwnerPrivate(temporary, "file", options);
+      // The file leaves the staging folder, so it needs a protected DACL of its own.
+      if (staging) await protectOwnerPrivate(temporary, "file", { ...options, force: true });
       await handle.writeFile(data);
       await handle.sync();
       await handle.close();
@@ -790,13 +982,13 @@ export async function writePrivateFileAtomically(path, data, options = {}) {
 }
 
 export function writePrivateFileAtomicallySync(path, data, options = {}) {
-  const staging = isWindows(options) ? privateStagingFolderSync(path, options) : null;
+  const staging = isWindows(options) && !folderIsPrivateSync(path, options) ? privateStagingFolderSync(path, options) : null;
   const temporary = staging ? join(staging, "data") : join(dirname(path), `.${randomUUID()}.${pathName(path)}.tmp`);
   try {
     const descriptor = openNoFollowSync(temporary, EXCLUSIVE_WRITE, PRIVATE_FILE_MODE, options);
     let closed = false;
     try {
-      if (staging) protectOwnerPrivateSync(temporary, "file", options);
+      if (staging) protectOwnerPrivateSync(temporary, "file", { ...options, force: true });
       const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
       for (let offset = 0; offset < bytes.length;) offset += writeSync(descriptor, bytes, offset, bytes.length - offset);
       fsyncSync(descriptor);

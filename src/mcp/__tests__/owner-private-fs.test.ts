@@ -13,8 +13,11 @@ import {
   createWindowsSecurity,
   everyOwnedByCurrentUserSync,
   everyOwnerPrivateSync,
+  forgetOwnerPrivateCache,
   icaclsProtectArguments,
   icaclsRemoveArguments,
+  icaclsSaveArguments,
+  parseIcaclsSave,
   INHERITED_GROUP_SIDS,
   isOwnedByCurrentUser,
   isOwnerPrivate,
@@ -30,6 +33,7 @@ import {
   protectOwnerPrivateSync,
   sddlExtraGrantSids,
   sddlHasProfileDefaultAccess,
+  sddlHasPrivateEntries,
   sddlIsOwnerPrivate,
   userSidAliases,
   syncDirectory,
@@ -46,6 +50,7 @@ const OTHER = "S-1-5-21-1004336348-1177238915-682003330-1002";
 const PRIVATE_FILE = `O:${USER}G:${USER}D:P(A;;FA;;;SY)(A;;FA;;;${USER})`;
 const PRIVATE_FOLDER = `O:${USER}G:${USER}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;${USER})`;
 const REMOVED = INHERITED_GROUP_SIDS.map(sid => `*${sid}`);
+const INHERITED_PRIVATE = `O:${USER}G:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${USER})`;
 const posixOnly = process.platform === "win32" ? "POSIX modes and uids" : false;
 const windowsOnly = process.platform === "win32" ? false : "needs real Windows ACLs";
 
@@ -145,6 +150,43 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   ]);
 });
 
+test("icacls /save is parsed from UTF-16LE, skipping a name line that starts with a drive", () => {
+  const text = "D:\\a\\letagents\\state\r\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)\r\n";
+  assert.equal(parseIcaclsSave(Buffer.from(text, "utf16le")), "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)");
+  assert.equal(parseIcaclsSave(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")])), "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)");
+  assert.equal(parseIcaclsSave(Buffer.from(text, "utf8")), "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-1-2-3-500)");
+  assert.throws(() => parseIcaclsSave(Buffer.from("D:\\only-a-name\r\n", "utf16le")), { code: "EOWNERPRIVATE" });
+  assert.deepEqual(icaclsSaveArguments("C:\\a", "C:\\t\\acl.txt"), ["C:\\a", "/save", "C:\\t\\acl.txt", "/q"]);
+});
+
+test("Windows: a protect is icacls only (owner, DACL, /save read-back); nothing runs again below it", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const calls: string[][] = [];
+    const runner = (file: string, args: readonly string[]) => {
+      calls.push([file.split("\\").pop()!, ...args.slice(1, 2)]);
+      if (file.endsWith("whoami.exe")) return `"host\\me","${USER}"`;
+      if (args[1] === "/save") writeFileSync(String(args[2]), Buffer.from(`state\r\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;${USER})\r\n`, "utf16le"));
+      return "";
+    };
+    const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows", TEMP: root }, run: async (...args) => runner(...args), runSync: runner });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    await protectOwnerPrivate(folder, "directory", options);
+    assert.deepEqual(calls, [["whoami.exe", "/fo"], ["icacls.exe", "/setowner"], ["icacls.exe", "/inheritance:r"], ["icacls.exe", "/save"]]);
+    // The saved file is removed.
+    assert.deepEqual(readdirSync(root), ["state"]);
+    calls.length = 0;
+    writeFileSync(join(folder, "token"), "t");
+    await protectOwnerPrivate(join(folder, "token"), "file", options);
+    protectOwnerPrivateSync(join(folder, "token"), "file", options);
+    await createPrivateDir(join(folder, "sub"), {}, options);
+    assert.equal(await isOwnerPrivate(join(folder, "token"), lstatSync(join(folder, "token")), options), true);
+    assert.deepEqual(calls, []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("many paths are read in a few PowerShell calls, each under the Windows environment limit", async () => {
   const sizes: number[] = [];
   const security = createWindowsSecurity({
@@ -238,30 +280,58 @@ test("POSIX checks read only the stat: the mode and uid rules are today's", { sk
   assert.deepEqual(calls, []);
 });
 
-test("Windows checks ignore mode bits and read the path's owner and DACL", async () => {
-  const { security, reads } = fakeSecurity({
-    "C:\\state\\private": PRIVATE_FILE,
-    "C:\\state\\open": `O:${USER}D:AI(A;ID;FA;;;BU)`,
-    "C:\\state\\theirs": `O:${OTHER}D:P(A;;FA;;;${USER})`,
-  });
-  const options = { platform: "win32" as const, windowsSecurity: security };
-  // Node reports 0o666 and uid 0 for every Windows file; neither decides.
-  const windowsStat = { mode: 0o100666, uid: 0 };
-  assert.equal(await isOwnerPrivate("C:\\state\\private", windowsStat, options), true);
-  assert.equal(isOwnerPrivateSync("C:\\state\\private", windowsStat, { ...options, exactMode: 0o600 }), true);
-  assert.equal(await isOwnerPrivate("C:\\state\\open", windowsStat, options), false);
-  assert.equal(await isOwnerPrivate("C:\\state\\theirs", windowsStat, options), false);
-  assert.equal(await isOwnerPrivate("C:\\state\\unreadable", windowsStat, options), false);
-  assert.equal(await isOwnedByCurrentUser("C:\\state\\open", windowsStat, options), true);
-  assert.equal(await isOwnedByCurrentUser("C:\\state\\theirs", windowsStat, options), false);
-  assert.equal(everyOwnedByCurrentUserSync([
-    { path: "C:\\state\\private", info: windowsStat }, { path: "C:\\state\\open", info: windowsStat },
-  ], options), true);
-  assert.equal(everyOwnedByCurrentUserSync([
-    { path: "C:\\state\\private", info: windowsStat }, { path: "C:\\state\\theirs", info: windowsStat },
-  ], options), false);
-  // The whole list is one read.
-  assert.equal(reads.at(-1), "C:\\state\\private|C:\\state\\theirs");
+test("Windows checks ignore mode bits and read the path, and the folders above it, in one call", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    for (const name of ["token", "second", "open", "theirs"]) writeFileSync(join(folder, name), "x");
+    const { security, reads } = fakeSecurity({
+      [folder]: PRIVATE_FOLDER,
+      [join(folder, "token")]: INHERITED_PRIVATE,
+      [join(folder, "open")]: `O:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${USER})(A;;FR;;;BU)`,
+      [join(folder, "theirs")]: `O:${OTHER}D:AI(A;ID;FA;;;SY)`,
+    });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    // Node reports 0o666 and uid 0 for every Windows file; neither decides.
+    const windowsStat = { mode: 0o100666, uid: 0 };
+    // A cold check reads the file and every folder above it in one call.
+    assert.equal(await isOwnerPrivate(join(folder, "open"), windowsStat, options), false);
+    assert.equal(reads.length, 1);
+    assert.deepEqual(reads[0]!.split("|").slice(0, 3), [join(folder, "open"), folder, root]);
+    assert.equal(await isOwnerPrivate(join(folder, "theirs"), windowsStat, options), false);
+    // Inherited private entries under a protected private folder: private, and the folder is now verified.
+    assert.equal(await isOwnerPrivate(join(folder, "token"), windowsStat, options), true);
+    const before = reads.length;
+    assert.equal(isOwnerPrivateSync(join(folder, "second"), windowsStat, { ...options, exactMode: 0o600 }), true);
+    assert.equal(await isOwnedByCurrentUser(join(folder, "theirs"), windowsStat, options), true);
+    assert.equal(everyOwnerPrivateSync([{ path: join(folder, "open"), info: windowsStat }], options), true);
+    // Nothing under a verified folder is read again.
+    assert.equal(reads.length, before);
+    // A path outside it still is.
+    writeFileSync(join(root, "outside"), "x");
+    assert.equal(await isOwnerPrivate(join(root, "outside"), windowsStat, options), false);
+    assert.equal(reads.length, before + 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: a chain is private only up to a protected folder, and every level on the way must be private", async () => {
+  const root = scratch();
+  try {
+    const a = join(root, "a");
+    const b = join(a, "b");
+    mkdirSync(b, { recursive: true });
+    writeFileSync(join(b, "f"), "x");
+    const stat = { mode: 0o666, uid: 0 };
+    const check = (map: Record<string, string>) => isOwnerPrivate(join(b, "f"), stat, { platform: "win32", windowsSecurity: fakeSecurity(map).security });
+    assert.equal(await check({ [a]: PRIVATE_FOLDER, [b]: INHERITED_PRIVATE, [join(b, "f")]: INHERITED_PRIVATE }), true);
+    // No protected folder anywhere above: not private.
+    assert.equal(await check({ [a]: INHERITED_PRIVATE, [b]: INHERITED_PRIVATE, [join(b, "f")]: INHERITED_PRIVATE }), false);
+    // A level on the way that grants Users: not private, though a protected folder is above it.
+    assert.equal(await check({ [a]: PRIVATE_FOLDER, [b]: `O:${USER}D:AI(A;ID;FA;;;${USER})(A;;FR;;;BU)`, [join(b, "f")]: INHERITED_PRIVATE }), false);
+    // A file with a protected DACL of its own is private wherever it is.
+    assert.equal(await check({ [join(b, "f")]: PRIVATE_FILE }), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("on Windows a tool failure counts as not private", async () => {
@@ -314,18 +384,16 @@ test("POSIX: private folders are 0700, atomic private files 0600, and assertOwne
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("Windows: each folder mkdir makes gets the private DACL; an existing one is left as it is", async () => {
+test("Windows: only the first folder a mkdir makes is protected; the rest inherit; an existing one is left as it is", async () => {
   const root = scratch();
   try {
     const { security, calls } = fakeSecurity();
     const options = { platform: "win32" as const, windowsSecurity: security };
     await createPrivateDir(join(root, "a", "b", "c"), { recursive: true }, options);
-    // Only the three new folders: never `root` or anything above it (no walk to the drive root).
-    assert.deepEqual(calls, ["a", "a/b", "a/b/c"].map(part => `protect:directory:${join(root, ...part.split("/"))}`));
+    // `a` gets the private DACL; `a/b` and `a/b/c` inherit it. Never `root` or above.
+    assert.deepEqual(calls, [`protect:directory:${join(root, "a")}`]);
     calls.length = 0;
     createPrivateDirSync(join(root, "a", "x", "y"), { recursive: true }, options);
-    assert.deepEqual(calls, ["a/x", "a/x/y"].map(part => `protect:directory:${join(root, ...part.split("/"))}`));
-    calls.length = 0;
     await createPrivateDir(join(root, "a", "b"), { recursive: true }, options);
     assert.deepEqual(calls, []);
     createPrivateDirSync(join(root, "d"), {}, options);
@@ -347,7 +415,7 @@ test("Windows: a folder another process makes during a recursive mkdir is left a
     };
     const made = await createPrivateDir(join(root, "a", "b", "c"), { recursive: true }, { platform: "win32", windowsSecurity: racing });
     assert.equal(made, join(root, "a"));
-    assert.deepEqual(calls, [`protect:directory:${join(root, "a")}`, `protect:directory:${join(root, "a", "b", "c")}`]);
+    assert.deepEqual(calls, [`protect:directory:${join(root, "a")}`]);
     // A file where a folder should be is still an error, as with mkdir.
     writeFileSync(join(root, "file"), "x");
     await assert.rejects(createPrivateDir(join(root, "file", "x"), { recursive: true }, { platform: "win32", windowsSecurity: security }));
@@ -356,12 +424,12 @@ test("Windows: a folder another process makes during a recursive mkdir is left a
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("Windows: an atomic private file is protected before its bytes are written", async () => {
+test("Windows: an atomic private write runs no tool in a private folder, and stages elsewhere", async () => {
   const root = scratch();
   try {
     const target = join(root, "state.json");
     const seen: string[] = [];
-    const { security, calls } = fakeSecurity();
+    const { security, calls, sddl } = fakeSecurity();
     const look = (path: string, kind: string) => { seen.push(kind === "file" ? readFileSync(path, "utf8") : readdirSync(path).join(",")); };
     const recording: WindowsSecurity = {
       ...security,
@@ -369,23 +437,34 @@ test("Windows: an atomic private file is protected before its bytes are written"
       protectSync(path, kind) { look(path, kind); security.protectSync(path, kind); },
     };
     const options = { platform: "win32" as const, windowsSecurity: recording };
+    // `root` is not private: each write makes a staging folder beside the target,
+    // private while still empty; the file made inside it gets a protected DACL of
+    // its own while still empty, so it stays private after the rename out.
     await writePrivateFileAtomically(target, "secret", options);
     writePrivateFileAtomicallySync(target, "secret 2", options);
     assert.equal(readFileSync(target, "utf8"), "secret 2");
-    // Each write: a staging folder beside the target is made private while still
-    // empty, then the file inside it gets its own DACL while still empty.
     assert.deepEqual(seen, ["", "", "", ""]);
     assert.equal(calls.length, 4);
     for (const [index, call] of calls.entries()) {
       const match = /^protect:(directory|file):(.+)$/.exec(call)!;
       assert.equal(match[1], index % 2 ? "file" : "directory");
-      const folder = index % 2 ? dirname(match[2]) : match[2];
+      const folder = index % 2 ? dirname(match[2]!) : match[2]!;
       assert.equal(dirname(folder), root);
       assert.match(basename(folder), /^\.state\.json\.letagents-/);
       if (index % 2) assert.equal(match[2], join(calls[index - 1]!.replace(/^protect:directory:/, ""), "data"));
     }
-    // The staging folders are gone.
     assert.deepEqual(readdirSync(root), ["state.json"]);
+
+    // In a private folder: no tool runs at all; the file inherits at creation.
+    const folder = join(root, "private");
+    mkdirSync(folder);
+    sddl[folder] = PRIVATE_FOLDER;
+    calls.length = 0;
+    await writePrivateFileAtomically(join(folder, "token.json"), "t", options);
+    writePrivateFileAtomicallySync(join(folder, "token.json"), "t2", options);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(readdirSync(folder), ["token.json"]);
+    assert.equal(readFileSync(join(folder, "token.json"), "utf8"), "t2");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -497,12 +576,16 @@ test("only extra allow entries with a known SID can be removed; anything else ne
 });
 
 test("Windows: a batch privacy check reads every path in one call", () => {
-  const { security, reads } = fakeSecurity({ "C:\\a": PRIVATE_FILE, "C:\\b": PRIVATE_FOLDER, "C:\\c": `O:${USER}D:AI(A;ID;FA;;;BU)` });
-  const options = { platform: "win32" as const, windowsSecurity: security };
-  const stat = { mode: 0o666, uid: 0 };
-  assert.equal(everyOwnerPrivateSync([{ path: "C:\\a", info: stat }, { path: "C:\\b", info: stat }], options), true);
-  assert.equal(everyOwnerPrivateSync([{ path: "C:\\a", info: stat }, { path: "C:\\c", info: stat }], options), false);
-  assert.deepEqual(reads, ["C:\\a|C:\\b", "C:\\a|C:\\c"]);
+  const root = scratch();
+  try {
+    for (const name of ["a", "b", "c"]) writeFileSync(join(root, name), "x");
+    const { security, reads } = fakeSecurity({ [join(root, "a")]: PRIVATE_FILE, [join(root, "b")]: PRIVATE_FOLDER, [join(root, "c")]: `O:${USER}D:AI(A;ID;FA;;;BU)` });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    const stat = { mode: 0o666, uid: 0 };
+    assert.equal(everyOwnerPrivateSync([{ path: join(root, "a"), info: stat }, { path: join(root, "b"), info: stat }], options), true);
+    assert.equal(everyOwnerPrivateSync([{ path: join(root, "a"), info: stat }, { path: join(root, "c"), info: stat }], options), false);
+    assert.equal(reads.length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Windows: the built-in Administrator alias is resolved from whoami and the computer name", () => {
@@ -541,10 +624,12 @@ function icacls(...args: string[]): void {
 test("real Windows: private folders and files pass, and every tampered ACL is refused", { skip: windowsOnly }, async () => {
   const root = scratch();
   try {
+    const security = createWindowsSecurity();
     const folder = join(root, "state");
     await createPrivateDir(folder);
-    const [sddl] = await createWindowsSecurity().readSddl([folder]);
+    const [sddl] = await security.readSddl([folder]);
     console.log(`private folder SDDL: ${sddl}`);
+    assert.ok(sddlIsOwnerPrivate(sddl, { sid: await security.currentUserSid(), aliases: await security.currentUserAliases!() }));
     await assertOwnerPrivate(folder, { kind: "directory" });
     const file = join(folder, "token.json");
     await writePrivateFileAtomically(file, "{\"token\":\"t\"}");
@@ -552,32 +637,59 @@ test("real Windows: private folders and files pass, and every tampered ACL is re
     assertOwnerPrivateSync(file, { exactMode: 0o600 });
     assert.equal(await isOwnedByCurrentUser(file, lstatSync(file)), true);
 
-    // A file made inside a private folder inherits only private entries, but
-    // it is not protected until it gets its own DACL.
+    // A plain write inside the private folder inherits only its private entries.
     const child = join(folder, "child.txt");
     writeFileSync(child, "c");
-    assert.equal(await isOwnerPrivate(child, lstatSync(child)), false);
-    await writePrivateFileAtomically(child, "c");
+    const [childSddl] = await security.readSddl([child]);
+    console.log(`inherited file SDDL: ${childSddl}`);
+    assert.ok(sddlHasPrivateEntries(childSddl, { sid: await security.currentUserSid(), aliases: await security.currentUserAliases!() }));
+    assert.equal(await isOwnerPrivate(child, lstatSync(child)), true);
+    // A cold process (no verified folders) reaches the same answer in one read.
+    forgetOwnerPrivateCache();
     assert.equal(await isOwnerPrivate(child, lstatSync(child)), true);
 
-    // Tamper: Everyone may read (S-1-1-0).
+    // Tamper, cold: an explicit Everyone (S-1-1-0) entry on a file.
+    forgetOwnerPrivateCache();
     icacls(file, "/grant", "*S-1-1-0:R");
     await assert.rejects(assertOwnerPrivate(file), { code: "EOWNERPRIVATE" });
-    // Tamper: inheritance switched back on.
-    await writePrivateFileAtomically(file, "{}");
-    await assertOwnerPrivate(file);
-    icacls(file, "/inheritance:e");
-    await assert.rejects(assertOwnerPrivate(file), { code: "EOWNERPRIVATE" });
-    // Tamper: Users (S-1-5-32-545) on the folder, inheritable.
+    // Tamper: Users (S-1-5-32-545) on the folder, inheritable; the folder and what it holds are refused.
+    forgetOwnerPrivateCache();
     icacls(folder, "/grant", "*S-1-5-32-545:(OI)(CI)R");
     await assert.rejects(assertOwnerPrivate(folder, { kind: "directory" }), { code: "EOWNERPRIVATE" });
+    assert.equal(await isOwnerPrivate(child, lstatSync(child)), false);
+    // Tamper: inheritance switched back on for a private folder in the (not private) temp folder.
+    const second = join(root, "second");
+    await createPrivateDir(second);
+    forgetOwnerPrivateCache();
+    icacls(second, "/inheritance:e");
+    await assert.rejects(assertOwnerPrivate(second, { kind: "directory" }), { code: "EOWNERPRIVATE" });
     // A plain file in the temp folder (inherited ACL) is not private.
     const plain = join(root, "plain.txt");
     writeFileSync(plain, "p");
     assert.equal(isOwnerPrivateSync(plain, lstatSync(plain)), false);
   } finally {
+    forgetOwnerPrivateCache();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("real Windows: protecting a folder also narrows what a file already in it inherits", { skip: windowsOnly }, async () => {
+  const root = scratch();
+  try {
+    const security = createWindowsSecurity();
+    const folder = join(root, "existing");
+    mkdirSync(folder);
+    const file = join(folder, "old.json");
+    writeFileSync(file, "{}");
+    const [before] = await security.readSddl([file]);
+    console.log(`before: ${before}`);
+    await protectOwnerPrivate(folder, "directory");
+    const [after] = await security.readSddl([file]);
+    console.log(`after: ${after}`);
+    assert.ok(sddlHasPrivateEntries(after, { sid: await security.currentUserSid(), aliases: await security.currentUserAliases!() }));
+    forgetOwnerPrivateCache();
+    assert.equal(await isOwnerPrivate(file, lstatSync(file)), true);
+  } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("real Windows: a recursive private mkdir never changes a folder that already existed", { skip: windowsOnly }, async () => {
@@ -610,15 +722,30 @@ test("real Windows: openNoFollow refuses a junction and a file symlink target is
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("real Windows: one check takes a bounded time", { skip: windowsOnly }, async () => {
+test("real Windows: costs: one protect, one cold check, and many writes in a private folder", { skip: windowsOnly }, async () => {
   const root = scratch();
   try {
-    const file = join(root, "timed.json");
-    await writePrivateFileAtomically(file, "{}");
-    const started = performance.now();
+    forgetOwnerPrivateCache();
+    const folder = join(root, "timed");
+    let started = performance.now();
+    await createPrivateDir(folder);
+    const protectMs = performance.now() - started;
+    forgetOwnerPrivateCache();
+    const file = join(folder, "timed.json");
+    writeFileSync(file, "{}");
+    started = performance.now();
     await assertOwnerPrivate(file);
-    const elapsed = performance.now() - started;
-    console.log(`owner-private check took ${Math.round(elapsed)} ms`);
-    assert.ok(elapsed < 15_000);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    const coldCheckMs = performance.now() - started;
+    started = performance.now();
+    for (let index = 0; index < 100; index += 1) {
+      await writePrivateFileAtomically(join(folder, `w${index % 5}.json`), String(index));
+      await protectOwnerPrivate(join(folder, `w${index % 5}.json`), "file");
+      await assertOwnerPrivate(join(folder, `w${index % 5}.json`));
+    }
+    const hundredMs = performance.now() - started;
+    console.log(`owner-private costs: protect folder ${Math.round(protectMs)} ms, cold check ${Math.round(coldCheckMs)} ms, 100 x (write + protect + check) in a private folder ${Math.round(hundredMs)} ms`);
+    assert.ok(protectMs < 15_000 && coldCheckMs < 15_000);
+    // No tool runs per write: 100 rounds stay far below one PowerShell start each.
+    assert.ok(hundredMs < 5_000, `100 private writes took ${Math.round(hundredMs)} ms`);
+  } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });

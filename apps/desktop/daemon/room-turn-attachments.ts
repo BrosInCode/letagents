@@ -593,7 +593,7 @@ export class RoomTurnAttachmentStager {
     const folder = await lstat(path);
     if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error("The staged attachment folder is not a plain folder.");
     if (!await isOwnedByCurrentUser(path, folder)) throw new Error("The staged attachment folder belongs to another user.");
-    if (!await isOwnerPrivate(path, folder)) await protectOwnerPrivate(path, "directory");
+    if (!await isOwnerPrivate(path, folder)) await protectOwnerPrivate(path, "directory", { force: true });
     return path;
   }
 }
