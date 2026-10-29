@@ -19,6 +19,7 @@ import {
 import { supervisorEntriesKey } from "../../components/desktop/content/add-agent/supervisor-entries-context";
 import { useSupervisorStateSubscription } from "../../components/desktop/content/room-shell/useSupervisorStateSubscription";
 import { desktopIpc } from "../../ipc/index.js";
+import { supervisedAgentsSupported } from "../../domain/supervised-agents-support";
 import type { RoomShellContextOf } from "./context";
 
 /** Supervisor state: snapshots, retirement events, status negotiation, and the entries refresh. */
@@ -186,6 +187,8 @@ export function useRoomShellSupervisorActions(context: unknown) {
   }
 
   function refreshSupervisorStatus(requiredGeneration = 0): Promise<DesktopSupervisorDaemonStatus | null> {
+    // No daemon runs where this app cannot run agents: nothing to negotiate, and nothing is "unavailable".
+    if (!supervisedAgentsSupported.value) return Promise.resolve(null);
     supervisorStatusRequiredGeneration = Math.max(supervisorStatusRequiredGeneration, requiredGeneration);
     if (supervisorStatusRefreshInFlight) return supervisorStatusRefreshInFlight;
     const requestToken = ++supervisorSyncState.supervisorStatusRequestToken;
@@ -264,6 +267,15 @@ export function useRoomShellSupervisorActions(context: unknown) {
 
   async function performSupervisorEntriesRefresh(): Promise<void> {
     if (!supervisorSyncState.supervisorEntriesRefreshOwnerActive || !props.room.identifier) return;
+    if (!supervisedAgentsSupported.value) {
+      // The room has no agents from this app: an empty, settled list, never a daemon read or an error.
+      if (supervisorEntries.value.length) supervisorEntries.value = [];
+      supervisorEntriesHaveLoaded.value = true;
+      supervisorEntriesUpdatedAt.value = new Date().toISOString();
+      supervisorEntriesState.value = "ready";
+      supervisorEntriesError.value = null;
+      return;
+    }
     const roomIdentifier = props.room.identifier;
     const requestId = ++supervisorSyncState.supervisorEntriesRefreshRequestId;
     const supervisorMutationVersion = supervisorSyncState.supervisorEntriesMutationVersion;
@@ -343,7 +355,7 @@ export function useRoomShellSupervisorActions(context: unknown) {
 
   function scheduleSupervisorEntriesRepair(): void {
     stopSupervisorEntriesRefreshTimer();
-    if (!props.room.identifier || !desktopIpc.supervisor?.listAgents) return;
+    if (!supervisedAgentsSupported.value || !props.room.identifier || !desktopIpc.supervisor?.listAgents) return;
     const delayMs = supervisorStateRepairDelayMs({
       lastRepairAtMs: supervisorSyncState.supervisorStateLastRepairAtMs,
       nowMs: Date.now(),

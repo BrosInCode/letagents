@@ -26,6 +26,7 @@ import { useAgentInspectorObservations } from "../../components/desktop/content/
 import { useAgentInspectorConfigurationApply } from "../../components/desktop/content/room-shell/useAgentInspectorConfigurationApply";
 import type { AgentInspectorRequest, AgentModalTarget } from "../../components/desktop/content/desktop-chat-message/types";
 import { desktopIpc } from "../../ipc/index.js";
+import { supervisedAgentsSupported } from "../../domain/supervised-agents-support";
 import { provideRoomWakeRules, useRoomWakeRules } from "../useRoomWakeRules";
 import type { RoomShellContextOf } from "./context";
 
@@ -156,7 +157,7 @@ export function useRoomShellInspectorActions(context: unknown) {
   function stopAgentInspectorLive(): void {
     agentInspectorRequestState.agentInspectorLiveIdentity = null;
     agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
-    void desktopIpc.supervisor?.watchAgentStream?.(null);
+    if (supervisedAgentsSupported.value) void desktopIpc.supervisor?.watchAgentStream?.(null);
   }
 
   function refreshOpenAgentInspectorRuntimeControl(snapshot: DesktopSupervisorStateSnapshot): void {

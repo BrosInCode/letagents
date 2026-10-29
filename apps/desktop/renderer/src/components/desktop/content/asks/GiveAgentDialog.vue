@@ -1,6 +1,11 @@
 <template>
   <DesktopDialogShell :open="Boolean(token)" panel-class="give-agent-dialog" backdrop-class="desktop-task-modal-backdrop give-agent-backdrop" aria-labelledby="agent-give-title" :show-close="false" :close-disabled="Boolean(busy)" initial-focus="#agent-give-title" test-id="agent-give-dialog" @close="close">
-    <GiveAgentPanel :key="token || ''" v-model:selected="selected" :request="ask" :options="options" :initial-amount="initialAmount" heading-id="agent-give-title" :loading="loading" :unavailable="unavailable?.error" :error="error" :busy="busy" :done="done" :offered="offered" :retry-give="giveFailed" @give="give" @decline="cantHelp" @close="close" @retry="load">
+    <section v-if="!supervisedAgentsSupported" class="give-agent-unavailable" data-testid="agent-give-unavailable">
+      <h3 id="agent-give-title" tabindex="-1">Give an agent</h3>
+      <SupervisedAgentsUnavailableNotice />
+      <button type="button" class="primary-button" @click="close">Close</button>
+    </section>
+    <GiveAgentPanel v-else :key="token || ''" v-model:selected="selected" :request="ask" :options="options" :initial-amount="initialAmount" heading-id="agent-give-title" :loading="loading" :unavailable="unavailable?.error" :error="error" :busy="busy" :done="done" :offered="offered" :retry-give="giveFailed" @give="give" @decline="cantHelp" @close="close" @retry="load">
       <template #close><button type="button" class="give-close" aria-label="Close request" :disabled="Boolean(busy)" @click="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button></template>
     </GiveAgentPanel>
   </DesktopDialogShell>
@@ -13,6 +18,8 @@ import { desktopIpc, desktopBridgeUpgradeMessage } from "../../../../ipc/index.j
 import DesktopDialogShell from "../DesktopDialogShell.vue";
 import { parseCustomAmount } from "./ask-links";
 import GiveAgentPanel from "../../../../../../../../shared/ui/give-agent/GiveAgentPanel.vue";
+import SupervisedAgentsUnavailableNotice from "../SupervisedAgentsUnavailableNotice.vue";
+import { supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
 
 const LAST_AMOUNT_KEY = "letagents-desktop:last-gift-amount";
 const props = defineProps<{ token: string | null }>();
@@ -43,7 +50,8 @@ async function load() {
   const version = ++generation, token = props.token;
   ask.value = null; unavailable.value = null; error.value = null; done.value = null; busy.value = null;
   options.value = []; selected.value = null; offered.value = false; giveFailed.value = false; loading.value = false;
-  if (!token) return;
+  // Where this app cannot run agents there is nothing to give; the dialog only says so.
+  if (!token || !supervisedAgentsSupported.value) return;
   if (!desktopIpc.asks) { error.value = desktopBridgeUpgradeMessage(); return; }
   loading.value = true;
   try {
@@ -107,6 +115,9 @@ function close() { if (!busy.value) emit("close"); }
 </script>
 
 <style>
+.give-agent-unavailable { display: grid; gap: 16px; width: 100%; padding: 24px; border: 1px solid var(--border); border-radius: 17px; background: var(--bg); color: var(--text); }
+.give-agent-unavailable h3 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+.give-agent-unavailable .primary-button { justify-self: end; }
 .desktop-task-modal-backdrop.give-agent-backdrop { grid-template-columns: minmax(0, 1fr); padding: 24px 16px; place-items: center; }
 .give-agent-dialog { width: min(600px, 100%); max-height: calc(100dvh - 48px); display: flex; min-width: 0; min-height: 0; outline: none; box-shadow: 0 32px 100px #0006; border-radius: 17px; }
 @media (max-width:480px) {

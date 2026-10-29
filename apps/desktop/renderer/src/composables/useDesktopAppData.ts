@@ -34,6 +34,7 @@ import {
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
+import { applySupervisedAgentsSupport } from "../domain/supervised-agents-support";
 import { preserveRoomRepoStatistics } from "../domain/repo-status";
 import { desktopIpc } from "../ipc/index.js";
 import {
@@ -337,6 +338,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (!sessionIsCurrent(sessionGeneration)) return;
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
+      applySupervisedAgentsSupport(nextAppInfo);
       options.repoStatus.value = loadedRootRoomContext.openedRoom?.repoStatus
         ? preserveRoomRepoStatistics(options.repoStatus.value, loadedRootRoomContext.repoStatus)
         : loadedRootRoomContext.repoStatus;

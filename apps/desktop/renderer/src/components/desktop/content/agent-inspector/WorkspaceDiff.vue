@@ -51,6 +51,7 @@ import { Check, FileCode, FileDiff, Info } from '@lucide/vue';
 import WorkspaceCode from './WorkspaceCode.vue';
 import type { WorkspaceChangeSummary } from '../../../../../../../../shared/workspace-change-summary.mjs';
 import { createWorkspaceDiffIndex, readWorkspaceDiffPage, type WorkspaceDiffPage, type WorkspaceDiffPageOptions } from '../../../../domain/workspace-diff';
+import { localPathBasename, localPathDirname } from '../../../../domain/local-path';
 const props = defineProps<{
   snapshot: WorkspaceChangeSummary;
   reader?: boolean;
@@ -116,8 +117,8 @@ watch([selectedPath, lineOffset, longLine, textOffset, retryPage, () => props.vi
 }, { immediate: true });
 const diffLines = computed(() => page.value?.lines ?? []);
 const longLines = computed(() => diffLines.value.flatMap((line, index) => line.nextTextOffset === null ? [] : [{ line, offset: lineOffset.value + index }]));
-const basename = (path: string) => path.split('/').at(-1);
-const dirname = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+const basename = (path: string) => localPathBasename(path) || path;
+const dirname = localPathDirname;
 const fileStatus = (status: string) => ({ untracked: 'New file', added: 'Added', modified: 'Modified', deleted: 'Deleted', renamed: 'Renamed', copied: 'Copied', typechange: 'Type changed', unknown: 'Changed' }[status] ?? 'Changed');
 const statusLetter = (status: string) => status === 'untracked' ? 'A' : status === 'unknown' ? '·' : status[0].toUpperCase();
 </script>

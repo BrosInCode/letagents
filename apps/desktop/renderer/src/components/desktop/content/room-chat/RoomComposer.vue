@@ -137,7 +137,7 @@
         :attach-disabled="!canAttach"
         :gif-available="gifAvailable"
         :gif-disabled="roomLoading || sending"
-        :agent-rows="agentHost ? agentRows : null"
+        :agent-rows="agentHost && supervisedAgentsSupported ? agentRows : null"
         @select="handleAddMenuSelect"
         @dismiss="focusInput"
         @agent-menu-opened="agentDraft.refreshProviders()"
@@ -274,6 +274,7 @@ import { useComposerAgentDraft } from "./useComposerAgentDraft";
 import { supervisorEntriesKey } from "../add-agent/supervisor-entries-context";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
+import { supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 import { composerDrafting } from "./composer-event-preview";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";

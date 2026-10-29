@@ -5,6 +5,7 @@ import 'monaco-editor/editor/contrib/find/browser/findController';
 import 'monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching';
 import 'monaco-editor/editor/contrib/clipboard/browser/clipboard';
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker&inline';
+import { localPathBasename } from './local-path';
 
 // A bundled blob worker also works in Electron's packaged file:// renderer.
 globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
@@ -12,7 +13,7 @@ globalThis.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 jsonDefaults.setModeConfiguration({ tokens: true });
 
 export function workspaceLanguage(path: string): string {
-  const name = path.split('/').at(-1)!.toLowerCase();
+  const name = localPathBasename(path).toLowerCase();
   if (name.endsWith('.vue')) return 'html';
   return monaco.languages.getLanguages().find(language =>
     language.filenames?.some(filename => filename.toLowerCase() === name)
