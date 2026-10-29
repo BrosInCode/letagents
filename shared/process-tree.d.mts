@@ -4,6 +4,9 @@ import type { CodexLaunchCommandOptions } from "./codex-executable.mjs";
 
 export const PROCESS_TREE_HELPER_NAME: "letagents-process-tree.exe";
 export const WINDOWS_BIRTH_PREFIX: "win32-ft:";
+/** A helper-held child's exit code when its job still held processes after the helper's bounded wait. */
+export const PROCESS_TREE_UNKILLABLE_EXIT_CODE: 0xE04C5401;
+export const PROCESS_TREE_UNKILLABLE_AFTER_MS: 5000;
 
 type HelperRun = (file: string, args: string[]) => Pick<SpawnSyncReturns<string>, "status" | "stdout" | "error"> | undefined;
 
@@ -14,6 +17,11 @@ export interface ProcessTreeHelperOptions {
   helperEnv?: NodeJS.ProcessEnv;
   /** Replaces the helper's spawnSync, for tests. */
   runHelper?: HelperRun;
+  /**
+   * How long the helper waits for an ended tree to empty before it reports it unkillable
+   * (0 to 600000; default PROCESS_TREE_UNKILLABLE_AFTER_MS).
+   */
+  unkillableAfterMs?: number;
 }
 
 export function isWindowsBirth(identity: unknown): identity is string;
@@ -27,7 +35,15 @@ export function processTreeHelperPath(options?: {
   arch?: string;
   exists?: (filePath: string) => boolean;
   includeLocalBuild?: boolean;
+  /** The seal to check against (default shared/letagents-process-tree.seal.json), for tests. */
+  seal?: { builds?: Record<string, { sha256?: string }> } | null;
+  /** Reads a candidate's bytes for the seal check, for tests. */
+  readFile?: (filePath: string) => Uint8Array;
 }): string | null;
+/** Why the last helper found was not used (its bytes are not the sealed build), or null. */
+export function processTreeHelperRefusal(): string | null;
+/** The sealed sha256 of the helper built for `arch`, or null when no build for it is sealed. */
+export function sealedProcessTreeHelperSha256(arch?: string, seal?: { builds?: Record<string, { sha256?: string }> } | null): string | null;
 export function quoteWindowsArgument(argument: string): string;
 export function windowsCommandLine(file: string, args: readonly string[]): string;
 export function parseWindowsCommandLine(line: string): string[];
@@ -87,11 +103,19 @@ export interface SignalTreeOptions extends ProcessTreeHelperOptions {
 }
 export function isProcessTree(child: ChildProcess | null | undefined): boolean;
 export function signalTree(pid: number, signal: NodeJS.Signals, options?: SignalTreeOptions): boolean;
+/** "unkillable" (Windows): ended, but processes were still there when the helper's bounded wait ran out. */
+export type TreeSignalOutcome = "ended" | "unkillable" | "none";
+export function signalTreeOutcome(pid: number, signal: NodeJS.Signals, options?: SignalTreeOptions): TreeSignalOutcome;
 export function windowsTreeSize(pid: number, identity: string, options?: ProcessTreeHelperOptions): number | undefined;
-export function terminateTree(child: ChildProcess, options?: SignalTreeOptions & {
+export type TerminateTreeOptions = SignalTreeOptions & {
   graceful?: boolean;
   graceMs?: number;
   killWaitMs?: number;
   /** Windows: ask the child to stop (an IPC message or a stdin frame) before the grace period. */
   requestStop?: () => void;
-}): Promise<boolean>;
+};
+/** True when the tree is gone; an unkillable tree is false (see terminateTreeOutcome). */
+export function terminateTree(child: ChildProcess, options?: TerminateTreeOptions): Promise<boolean>;
+/** "unkillable" (Windows): the job was ended but did not empty in the helper's bounded wait; do not wait on it. */
+export type TerminateTreeOutcome = "exited" | "unkillable" | "running";
+export function terminateTreeOutcome(child: ChildProcess, options?: TerminateTreeOptions): Promise<TerminateTreeOutcome>;

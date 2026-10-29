@@ -3,8 +3,9 @@
 //   node --test apps/desktop/native/win-process-tree/process-tree.windows.test.mjs
 // Elsewhere, or without a build, every test is skipped.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
@@ -12,10 +13,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   isWindowsBirth,
+  PROCESS_TREE_UNKILLABLE_EXIT_CODE,
   processBirth,
+  processTreeHelperPath,
+  processTreeHelperRefusal,
+  sealedProcessTreeHelperSha256,
   signalTree,
+  signalTreeOutcome,
   spawnTree,
   terminateTree,
+  terminateTreeOutcome,
   windowsProcessInfo,
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
@@ -238,4 +245,96 @@ test("info names an absent pid as absent and reads this process", { skip }, () =
   assert.equal(self.pid, process.pid);
   assert.equal(self.exited, false);
   assert.equal(processBirth(process.pid, helper), `win32-ft:${self.creationTime}`);
+});
+
+// The helper's wait for an ended job is bounded. With a bound of 0 it checks
+// once, right after TerminateJobObject: processes that each hold 256 MB are
+// still tearing down then, so the job is reported unkillable, and it still
+// empties afterwards (they were not really unkillable, only slower than 0 ms).
+function heavyTree() {
+  const heavy = fixture("heavy.cjs", [
+    "const held = Buffer.alloc(256 * 1024 * 1024, 1);",
+    'require("node:fs").writeFileSync(process.argv[2], String(process.pid));',
+    "setInterval(() => held[0]++, 1000);",
+  ].join("\n"));
+  // Starts three heavy processes, waits for them, then waits too or exits.
+  return fixture("heavy-parent.cjs", [
+    'const { spawn } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    "const [prefix, mode] = process.argv.slice(2);",
+    `const files = [0, 1, 2].map((index) => { const file = prefix + index; spawn(process.execPath, [${JSON.stringify(heavy)}, file], { stdio: "ignore" }); return file; });`,
+    'const ready = () => files.every((file) => fs.existsSync(file)) ? (mode === "exit" ? process.exit(0) : fs.writeFileSync(prefix + "ready", "1")) : setTimeout(ready, 20);',
+    "ready();",
+    "setInterval(() => {}, 1000);",
+  ].join("\n"));
+}
+
+test("a kill whose bounded wait runs out reports the tree unkillable, not ended; the job still empties", { skip }, async () => {
+  const parent = heavyTree();
+  const prefix = join(folder, `heavy-${Math.random().toString(36).slice(2)}-`);
+  const tree = spawnTree(process.execPath, [parent, prefix, "wait"], { stdio: "ignore" }, helper);
+  await waitFor(() => existsSync(`${prefix}ready`), "the heavy processes", 60_000);
+  const birth = processBirth(tree.pid, helper);
+  assert.equal(signalTreeOutcome(tree.pid, "SIGKILL", { ...noHeldTrees, identity: birth, unkillableAfterMs: 0 }), "unkillable");
+  // The helper process waits out its own (default) bound and exits once the job is empty.
+  const { code } = await exited(tree);
+  assert.notEqual(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.equal(windowsTreeSize(tree.pid, birth, helper), 0);
+});
+
+test("a helper whose own bounded wait runs out exits with the unkillable code, and terminateTree says so", { skip }, async () => {
+  const parent = heavyTree();
+  const prefix = join(folder, `heavy-${Math.random().toString(36).slice(2)}-`);
+  // The program exits on its own and leaves the heavy processes behind: the helper ends them and checks once.
+  const left = spawnTree(process.execPath, [parent, prefix, "exit"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 0 });
+  const birth = processBirth(left.pid, helper);
+  const { code } = await exited(left);
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  await waitFor(() => windowsTreeSize(left.pid, birth, helper) === 0, "the job to empty after all");
+
+  const second = join(folder, `heavy-${Math.random().toString(36).slice(2)}-`);
+  const held = spawnTree(process.execPath, [parent, second, "wait"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 0 });
+  await waitFor(() => existsSync(`${second}ready`), "the heavy processes", 60_000);
+  assert.equal(await terminateTreeOutcome(held, { ...helper, unkillableAfterMs: 0, killWaitMs: 10_000 }), "unkillable");
+  assert.equal(await terminateTree(held, helper), false);
+});
+
+test("with the default bound a heavy tree ends whole and terminateTree reports it exited", { skip }, async () => {
+  const parent = heavyTree();
+  const prefix = join(folder, `heavy-${Math.random().toString(36).slice(2)}-`);
+  const tree = spawnTree(process.execPath, [parent, prefix, "wait"], { stdio: "ignore" }, helper);
+  await waitFor(() => existsSync(`${prefix}ready`), "the heavy processes", 60_000);
+  const birth = processBirth(tree.pid, helper);
+  assert.equal(await terminateTreeOutcome(tree, helper), "exited");
+  assert.equal(windowsTreeSize(tree.pid, birth, helper), 0);
+});
+
+test("the helper refuses a wait bound out of range", { skip }, () => {
+  const birth = processBirth(process.pid, helper).slice("win32-ft:".length);
+  const run = (args) => spawnSync(helperPath, args, { stdio: "ignore", windowsHide: true }).status;
+  assert.equal(run(["kill", String(process.pid), birth, "600001"]), 120);
+  assert.equal(run(["kill", String(process.pid), birth, "-1"]), 120);
+  assert.equal(run(["kill", String(process.pid), birth, "5", "6"]), 120);
+  assert.equal(run(["query", String(process.pid), birth, "5"]), 120);
+  assert.equal(run(["spawn", process.execPath, "node -e 0", "x"]), 120);
+});
+
+test("the app uses a found helper only when its bytes are the sealed build", { skip }, () => {
+  const resources = join(folder, `resources-${Math.random().toString(36).slice(2)}`);
+  const runtime = join(resources, "app", "runtime");
+  mkdirSync(runtime, { recursive: true });
+  const packaged = join(runtime, "letagents-process-tree.exe");
+  copyFileSync(helperPath, packaged);
+  const built = createHash("sha256").update(readFileSync(helperPath)).digest("hex");
+  const found = (seal) => processTreeHelperPath({ env: {}, resourcesPath: resources, includeLocalBuild: false, ...(seal === undefined ? {} : { seal }) });
+  // This build, sealed: used.
+  assert.equal(found({ builds: { x64: { sha256: built } } }), packaged);
+  // The committed seal: used exactly when this runner built the sealed bytes.
+  assert.equal(found(), built === sealedProcessTreeHelperSha256("x64") ? packaged : null);
+  // One byte more: refused, with the reason.
+  writeFileSync(packaged, Buffer.concat([readFileSync(helperPath), Buffer.from([0])]));
+  assert.equal(found({ builds: { x64: { sha256: built } } }), null);
+  assert.match(String(processTreeHelperRefusal()), /is not the sealed/);
+  // A configured helper that is not sealed is refused, with no fallback.
+  assert.equal(processTreeHelperPath({ env: { LETAGENTS_PROCESS_TREE_HELPER: packaged }, resourcesPath: resources, seal: { builds: { x64: { sha256: built } } } }), null);
 });

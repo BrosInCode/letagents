@@ -2,20 +2,27 @@
 // runs here on any host, against a recorded helper. The real helper is proved
 // on Windows by apps/desktop/native/win-process-tree/process-tree.windows.test.mjs.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import test from "node:test";
 
 import {
   isBirthEvidence,
   parseWindowsCommandLine,
+  PROCESS_TREE_UNKILLABLE_EXIT_CODE,
   processBirth,
   processTreeHelperPath,
+  processTreeHelperRefusal,
   quoteWindowsArgument,
   resolveWindowsCommand,
+  sealedProcessTreeHelperSha256,
   signalTree,
+  signalTreeOutcome,
   spawnTree,
   terminateTree,
+  terminateTreeOutcome,
   windowsCommandLine,
   windowsProcessInfo,
   windowsTreeSize,
@@ -61,6 +68,11 @@ function recordingSpawn(pid = 4242) {
   };
   return { calls, children, spawn };
 }
+
+// The helper's bytes as the seal names them: processTreeHelperPath uses a file only when it is the sealed build.
+const SEALED_BYTES = Buffer.from("MZ sealed helper");
+const SEAL = { builds: { x64: { sha256: createHash("sha256").update(SEALED_BYTES).digest("hex") } } };
+const sealedHelper = { seal: SEAL, readFile: () => SEALED_BYTES };
 
 const windowsEnv = { PATH: "C:\\Tools;relative\\bin;C:\\Windows\\System32", ComSpec: "C:\\Windows\\System32\\cmd.exe", SystemRoot: "C:\\Windows" };
 const files = new Set(["C:\\Tools\\codex.cmd", "C:\\Tools\\cursor-agent.exe", "C:\\Windows\\System32\\git.exe", HELPER]);
@@ -135,11 +147,11 @@ test("Windows: without the helper the program is spawned directly, as before, an
 
 test("Windows: the helper is the configured one, then the packaged runtime/ copy", () => {
   assert.equal(processTreeHelperPath({ platform: "darwin", env: {} }), null);
-  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: HELPER }, exists }), HELPER);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: HELPER }, exists, arch: "x64", ...sealedHelper }), HELPER);
   // A configured helper that is missing is not replaced by another.
-  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: "C:\\gone.exe" }, resourcesPath: "C:\\Program Files\\LetAgents\\resources", exists }), null);
-  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath: "C:\\Program Files\\LetAgents\\resources", exists, includeLocalBuild: false }), HELPER);
-  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath: "", exists, includeLocalBuild: false }), null);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: "C:\\gone.exe" }, resourcesPath: "C:\\Program Files\\LetAgents\\resources", exists, arch: "x64", ...sealedHelper }), null);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath: "C:\\Program Files\\LetAgents\\resources", exists, includeLocalBuild: false, arch: "x64", ...sealedHelper }), HELPER);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath: "", exists, includeLocalBuild: false, arch: "x64", ...sealedHelper }), null);
 });
 
 test("Windows: a process birth is the helper's creation time; absent is null; anything unproved is undefined", () => {
@@ -311,11 +323,106 @@ test("a failed stop message is not an exit: the tree is still ended after the gr
 
 test("Windows: a retired daemon is signalled only through its recorded birth; a refusal reads as ESRCH", () => {
   const calls: Array<[number, string, unknown]> = [];
-  const ended = (pid: number, signal: NodeJS.Signals, options?: { identity?: string | null }) => { calls.push([pid, signal, options?.identity]); return true; };
+  const ended = (pid: number, signal: NodeJS.Signals, options?: { identity?: string | null }) => { calls.push([pid, signal, options?.identity]); return "ended" as const; };
   signalDaemonProcess(50, "SIGTERM", "win32-ft:123", "win32", ended);
   assert.deepEqual(calls, [[50, "SIGTERM", "win32-ft:123"]]);
-  const refused = () => false;
+  const refused = () => "none" as const;
   assert.throws(() => signalDaemonProcess(50, "SIGKILL", "win32-ft:124", "win32", refused), (error: NodeJS.ErrnoException) => error.code === "ESRCH");
+  // Ended, but still there when the helper's wait ran out: not gone, and not "no such process" either.
+  const unkillable = () => "unkillable" as const;
+  assert.throws(() => signalDaemonProcess(50, "SIGKILL", "win32-ft:123", "win32", unkillable), (error: NodeJS.ErrnoException) => error.code === "EUNKILLABLE");
+});
+
+test("Windows: a helper found on disk is used only when its bytes are the sealed build", () => {
+  const resourcesPath = "C:\\Program Files\\LetAgents\\resources";
+  const other = { seal: SEAL, readFile: () => Buffer.from("MZ another build") };
+  // The packaged helper is not the sealed build: refused, as if it were absent, and the reason is kept.
+  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath, exists, includeLocalBuild: false, arch: "x64", ...other }), null);
+  assert.match(String(processTreeHelperRefusal()), /is not the sealed letagents-process-tree\.exe/);
+  // A configured helper that is not sealed is refused too, with no fallback to another one.
+  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: HELPER }, resourcesPath, exists, arch: "x64", ...other }), null);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: { LETAGENTS_PROCESS_TREE_HELPER: HELPER }, resourcesPath, exists, arch: "x64", ...sealedHelper }), HELPER);
+  // An unreadable file, an architecture with no sealed build, or no seal at all: refused.
+  const unreadable = () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); };
+  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath, exists, includeLocalBuild: false, arch: "x64", seal: SEAL, readFile: unreadable }), null);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath, exists, includeLocalBuild: false, arch: "arm64", ...sealedHelper }), null);
+  assert.match(String(processTreeHelperRefusal()), /No arm64 build/);
+  assert.equal(processTreeHelperPath({ platform: "win32", env: {}, resourcesPath, exists, includeLocalBuild: false, arch: "x64", seal: null, readFile: () => SEALED_BYTES }), null);
+  // The committed seal is the one the app checks against.
+  const committed = JSON.parse(readFileSync(new URL("../../../../shared/letagents-process-tree.seal.json", import.meta.url), "utf8"));
+  assert.equal(sealedProcessTreeHelperSha256("x64"), committed.builds.x64.sha256);
+  assert.match(String(sealedProcessTreeHelperSha256("x64")), /^[0-9a-f]{64}$/);
+});
+
+test("Windows: a tree still there when the helper's bounded wait ran out is unkillable, not ended and not an error", () => {
+  // 4: the helper ended the job (or the one process), but processes remained when its wait ran out.
+  const helper = recordingHelper({ "kill 1400 133752345678901234": { status: 4 } });
+  const options = { platform: "win32" as const, helperPath: HELPER, runHelper: helper.runHelper, liveTrees: new Map(), identity: "win32-ft:133752345678901234" };
+  assert.equal(signalTreeOutcome(1400, "SIGKILL", options), "unkillable");
+  assert.equal(signalTree(1400, "SIGKILL", options), false);
+
+  // A tree this process holds: the helper process is left to report it with its exit code, not killed.
+  const child = new FakeChild(1401);
+  const held = recordingHelper({ "info 1401": info(1401, "21"), "kill 1401 21": { status: 4 } });
+  const liveTrees = new Map([[1401, { child: child as unknown as ChildProcess, helper: HELPER }]]);
+  assert.equal(signalTreeOutcome(1401, "SIGTERM", { platform: "win32", runHelper: held.runHelper, liveTrees }), "unkillable");
+  assert.deepEqual(child.kills, []);
+
+});
+
+test("Windows: the helper's wait bound is passed on only when a caller names one", () => {
+  const helper = recordingHelper({ kill: { status: 0 } });
+  const options = { platform: "win32" as const, helperPath: HELPER, runHelper: helper.runHelper, liveTrees: new Map(), identity: "win32-ft:133752345678901234" };
+  signalTree(1500, "SIGKILL", options);
+  signalTree(1500, "SIGKILL", { ...options, unkillableAfterMs: 0 });
+  assert.deepEqual(helper.calls.map(([, args]) => args), [["kill", "1500", "133752345678901234"], ["kill", "1500", "133752345678901234", "0"]]);
+  assert.throws(() => signalTree(1500, "SIGKILL", { ...options, unkillableAfterMs: -1 }), RangeError);
+  assert.throws(() => signalTree(1500, "SIGKILL", { ...options, unkillableAfterMs: 600_001 }), RangeError);
+
+  const spawned = recordingSpawn(1600);
+  spawnTree("git", ["status"], {}, { platform: "win32", env: windowsEnv, exists, helperPath: HELPER, spawn: spawned.spawn, unkillableAfterMs: 2_500 });
+  assert.deepEqual(spawned.calls[0]!.args.slice(-1), ["2500"]);
+  const plain = recordingSpawn(1700);
+  spawnTree("git", ["status"], {}, { platform: "win32", env: windowsEnv, exists, helperPath: HELPER, spawn: plain.spawn });
+  assert.equal(plain.calls[0]!.args.length, 3);
+});
+
+test("Windows: terminateTreeOutcome names an unkillable tree; terminateTree resolves false for it", async () => {
+  // The kill reports unkillable; the helper process exits later with its unkillable code.
+  const child = new FakeChild(1800);
+  const helper = recordingHelper({ "info 1800": info(1800, "31"), "kill 1800 31": { status: 4 } });
+  const liveTrees = new Map([[1800, { child: child as unknown as ChildProcess, helper: HELPER }]]);
+  const outcome = terminateTreeOutcome(child as unknown as ChildProcess, {
+    platform: "win32", killWaitMs: 50, liveTrees,
+    runHelper: (file, args) => {
+      const answer = helper.runHelper(file, args);
+      if (args[0] === "kill") setImmediate(() => child.exit(PROCESS_TREE_UNKILLABLE_EXIT_CODE));
+      return answer;
+    },
+  });
+  assert.equal(await outcome, "unkillable");
+  assert.deepEqual(child.kills, []);
+
+  // The program obeyed the stop message, but what it left behind could not be ended: the helper says so.
+  const obeys = new FakeChild(1801);
+  liveTrees.set(1801, { child: obeys as unknown as ChildProcess, helper: HELPER });
+  assert.equal(await terminateTree(obeys as unknown as ChildProcess, {
+    platform: "win32", graceful: true, graceMs: 1_000, liveTrees, runHelper: recordingHelper({}).runHelper,
+    requestStop: () => setImmediate(() => obeys.exit(PROCESS_TREE_UNKILLABLE_EXIT_CODE)),
+  }), false);
+  assert.equal(await terminateTreeOutcome(obeys as unknown as ChildProcess, { platform: "win32", liveTrees }), "unkillable");
+
+  // A child that never exits is "running"; a normal exit is "exited".
+  const stuck = new FakeChild(1802);
+  liveTrees.set(1802, { child: stuck as unknown as ChildProcess, helper: HELPER });
+  const answered = recordingHelper({ "info 1802": info(1802, "41"), "kill 1802 41": { status: 0 } });
+  assert.equal(await terminateTreeOutcome(stuck as unknown as ChildProcess, { platform: "win32", killWaitMs: 20, liveTrees, runHelper: answered.runHelper }), "running");
+  stuck.exit(1);
+  assert.equal(await terminateTreeOutcome(stuck as unknown as ChildProcess, { platform: "win32", liveTrees }), "exited");
+  // POSIX has no unkillable outcome: the same exit code there is the program's own.
+  const posix = new FakeChild(1803);
+  posix.exit(PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.equal(await terminateTreeOutcome(posix as unknown as ChildProcess, { platform: "darwin", kill: () => {} }), "exited");
 });
 
 test("Windows: a pid reused by another tree of ours is not ended for a caller whose own child exited, or whose birth differs", () => {
