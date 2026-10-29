@@ -7,6 +7,7 @@ import {
   createDesktopReleaseManifest,
   createDesktopUpdaterConfig,
   createElectronUpdaterMacManifest,
+  createElectronUpdaterWindowsManifest,
   createSquirrelMacReleaseManifest,
   desktopAssetNames,
   desktopMetadataNames,
@@ -127,4 +128,90 @@ test("release inputs reject ambiguous versions, architectures, and transport", (
   assert.throws(() => assertDesktopArchitecture("universal"), /arm64 or x64/);
   assert.throws(() => normalizeReleaseBaseUrl("http://downloads.example.com"), /must use HTTPS/);
   assert.throws(() => normalizeReleaseBaseUrl("not-a-url"), /absolute HTTPS URL/);
+});
+
+test("the Windows updater config reads its own feed folder and asks for no publisher signature", () => {
+  assert.deepEqual(createDesktopUpdaterConfig({ arch: "x64", platform: "win32" }), {
+    provider: "generic",
+    url: "https://downloads.letagents.chat/desktop/feeds/win32-x64/",
+    updaterCacheDirName: "letagents-desktop-updater",
+  });
+  // Unsigned builds: NsisUpdater checks a signature only when publisherName is set.
+  assert.equal("publisherName" in createDesktopUpdaterConfig({ arch: "x64", platform: "win32" }), false);
+  assert.notEqual(
+    createDesktopUpdaterConfig({ arch: "x64", platform: "win32" }).url,
+    createDesktopUpdaterConfig({ arch: "x64" }).url,
+  );
+  assert.throws(() => createDesktopUpdaterConfig({ arch: "arm64", platform: "win32" }), /Windows desktop releases support x64/);
+  assert.throws(() => createDesktopUpdaterConfig({ arch: "x64", platform: "linux" }), /support darwin or win32/);
+});
+
+test("Windows release names never collide with macOS names when artifacts are merged", () => {
+  assert.deepEqual(desktopAssetNames({ version: "0.1.0", arch: "x64", platform: "win32" }), {
+    installer: "LetAgents-0.1.0-win32-x64-setup.exe",
+  });
+  const windows = desktopMetadataNames({ arch: "x64", platform: "win32" });
+  assert.deepEqual(windows, {
+    releaseManifest: "desktop-release-win32-x64.json",
+    updaterManifest: "latest-win32-x64.yml",
+  });
+  const mac = [...Object.values(desktopMetadataNames({ arch: "arm64" })), ...Object.values(desktopMetadataNames({ arch: "x64" }))];
+  for (const name of Object.values(windows)) assert.ok(!mac.includes(name), name);
+});
+
+test("NsisUpdater metadata seals the immutable installer size and SHA-512 digest", () => {
+  const manifest = createElectronUpdaterWindowsManifest({
+    version: "0.1.0",
+    arch: "x64",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0",
+    publishedAt: "2026-08-10T12:00:00Z",
+    notes: "First Windows release",
+    installerArtifact: { name: "LetAgents-0.1.0-win32-x64-setup.exe", bytes: 4321, sha512: "ZGVmNDU2" },
+  });
+  assert.deepEqual(manifest, {
+    version: "0.1.0",
+    files: [{
+      url: "https://downloads.letagents.chat/desktop/v0.1.0/LetAgents-0.1.0-win32-x64-setup.exe",
+      sha512: "ZGVmNDU2",
+      size: 4321,
+    }],
+    path: "https://downloads.letagents.chat/desktop/v0.1.0/LetAgents-0.1.0-win32-x64-setup.exe",
+    sha512: "ZGVmNDU2",
+    releaseName: "LetAgents 0.1.0",
+    releaseNotes: "First Windows release",
+    releaseDate: "2026-08-10T12:00:00.000Z",
+  });
+  // The installer runs with the user's own rights; no elevation flag.
+  assert.equal("isAdminRightsRequired" in manifest.files[0], false);
+  assert.throws(() => createElectronUpdaterWindowsManifest({
+    version: "0.1.0",
+    arch: "x64",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0",
+    publishedAt: "2026-08-10T12:00:00Z",
+    installerArtifact: { name: "LetAgents-0.1.0-darwin-x64.dmg", bytes: 4321, sha512: "ZGVmNDU2" },
+  }), /Windows installer size and base64 SHA-512/);
+});
+
+test("the Windows release manifest records an unsigned win32 build", () => {
+  const manifest = createDesktopReleaseManifest({
+    version: "0.1.0",
+    arch: "x64",
+    platform: "win32",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0/",
+    publishedAt: "2026-08-10T12:00:00Z",
+    signed: false,
+    notarized: false,
+    artifacts: [{ kind: "installer", name: "LetAgents-0.1.0-win32-x64-setup.exe", bytes: 42, sha256: "abc123" }],
+  });
+  assert.equal(manifest.platform, "win32");
+  assert.equal(manifest.signed, false);
+  assert.equal(createDesktopReleaseManifest({
+    version: "0.1.0",
+    arch: "arm64",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0/",
+    publishedAt: "2026-08-10T12:00:00Z",
+    signed: true,
+    notarized: true,
+    artifacts: [],
+  }).platform, "darwin");
 });
