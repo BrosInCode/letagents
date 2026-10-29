@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { Socket, createConnection } from "node:net";
 import { userInfo } from "node:os";
 import { posix, win32 } from "node:path";
 
@@ -227,8 +227,7 @@ function untrusted(message) {
  * socket too, for tests on hosts without pipes.
  */
 export function connectDaemon(connectPath, { proofPath, handshake = false, handshakeTimeoutMs = 10_000 } = {}) {
-  const socket = createConnection(connectPath);
-  if (!handshake && !isWindowsPipePath(connectPath)) return socket;
+  if (!handshake && !isWindowsPipePath(connectPath)) return createConnection(connectPath);
   let proof;
   try {
     const path = proofPath ?? resolveDaemonProofPath(connectPath);
@@ -236,13 +235,18 @@ export function connectDaemon(connectPath, { proofPath, handshake = false, hands
     proof = parseProof(readFileSync(path, "utf8"));
     if (!proof) throw untrusted("the proof file is malformed");
   } catch (error) {
-    // A missing or briefly locked proof (no daemon yet, an antivirus scan)
-    // reads as an absent daemon, which callers retry; an untrusted pipe does not.
-    const code = error?.code === "ERR_LETAGENTS_DAEMON_UNTRUSTED" ? error.code : "ENOENT";
+    // A missing or briefly locked proof (no daemon yet; an antivirus scan is a
+    // sharing violation, EBUSY) reads as an absent daemon, which callers retry.
+    // Denied access (EACCES, or EPERM as libuv reports it on Windows) and an
+    // untrusted pipe keep their own codes: retrying cannot help.
+    const code = error?.code === "ENOENT" || error?.code === "EBUSY" ? "ENOENT" : error?.code ?? "ENOENT";
     const failure = Object.assign(new Error(`Cannot prove this client to the supervisor daemon: ${error.message}`), { code, cause: error });
-    process.nextTick(() => socket.destroy(failure));
-    return socket;
+    // Never connected: the daemon sees nothing from a client without a proof.
+    const unconnected = new Socket();
+    process.nextTick(() => unconnected.destroy(failure));
+    return unconnected;
   }
+  const socket = createConnection(connectPath);
   const emit = socket.emit;
   const write = socket.write;
   const held = [];

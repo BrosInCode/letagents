@@ -205,6 +205,8 @@ export abstract class SupervisorDaemonClientBase {
         this.maintenanceRequests.delete(cancelForMaintenance);
         socket.destroy();
         if (error && (isConnectionUnavailable(error) || error instanceof SupervisorDaemonRequestTimeoutError
+          // A Windows pipe handshake that ran out of time (shared/daemon-endpoint.mjs).
+          || (error as NodeJS.ErrnoException).code === "ETIMEDOUT"
           || /disconnected before replying/.test(error.message))) this.invalidateReadyStatus();
         if (error) reject(error); else resolve(value as T);
       };

@@ -211,6 +211,20 @@ test("a pipe squatter that cannot answer the proof never receives the request", 
   } finally { await env.cleanup(); }
 });
 
+test("a proof the client may not read keeps its access error; retrying cannot help", { skip: process.platform === "win32" && "POSIX mode 000 does not deny the owner on Windows" }, async () => {
+  const env = await harness();
+  try {
+    await env.listen(() => assert.fail("no connection is admitted"));
+    const { chmod } = await import("node:fs/promises");
+    await chmod(env.proofPath, 0o000);
+    const result = await exchange(env.connect(), "ping\n");
+    await chmod(env.proofPath, 0o600);
+    assert.equal(result.connected, false);
+    assert.equal(result.error?.code, process.getuid?.() === 0 ? undefined : "EACCES");
+    assert.equal(isRetryableSupervisorBridgeError(result.error), false);
+  } finally { await env.cleanup(); }
+});
+
 test("a client whose proof file is missing fails like an absent daemon", async () => {
   const env = await harness();
   try {
