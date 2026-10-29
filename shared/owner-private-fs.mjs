@@ -48,12 +48,20 @@ const TOOL_TIMEOUT_MS = 30_000;
 const TOOL_OUTPUT_LIMIT = 4 * 1024 * 1024;
 const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // One line per path, in order: "ok:<SDDL>" or "error:". The paths arrive in an
-// environment variable, never in the command text, so no path is parsed as code.
+// environment variable, one per line (a Windows path cannot hold a line
+// break), never in the command text, so no path is parsed as code. (Not JSON:
+// Windows PowerShell 5.1 does not unroll the array ConvertFrom-Json returns.)
 const READ_SDDL_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
-  `$paths = @(ConvertFrom-Json $env:${PATHS_VARIABLE})`,
+  `$paths = $env:${PATHS_VARIABLE} -split "\`n"`,
   "foreach ($p in $paths) { try { 'ok:' + (Get-Acl -LiteralPath $p).Sddl } catch { 'error:' } }",
 ].join("; ");
+
+/** The environment value that carries `paths` to the PowerShell script. */
+export function encodeSddlPaths(paths) {
+  if (paths.some(path => /[\r\n]/.test(path))) throw privateError("A path cannot hold a line break.");
+  return paths.join("\n");
+}
 
 let testOverride = null;
 /**
@@ -152,7 +160,7 @@ export function userSidAliases(user, computerName) {
 function chunkPaths(paths) {
   const chunks = []; let current = []; let length = 2;
   for (const path of paths) {
-    const cost = JSON.stringify(path).length + 1;
+    const cost = path.length + 1;
     if (current.length && length + cost > PATHS_PER_CALL_CHARACTERS) { chunks.push(current); current = []; length = 2; }
     current.push(path); length += cost;
   }
@@ -241,7 +249,7 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     aliases = userSidAliases(user, env.COMPUTERNAME);
     return user.sid;
   };
-  const environment = paths => ({ ...env, [PATHS_VARIABLE]: JSON.stringify(paths) });
+  const environment = paths => ({ ...env, [PATHS_VARIABLE]: encodeSddlPaths(paths) });
   return {
     async currentUserSid() {
       sid ??= remember(await run(tools.whoami, ["/user", "/fo", "csv", "/nh"], { env }));

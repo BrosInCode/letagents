@@ -51,6 +51,8 @@ export declare function parseWhoamiUser(output: string): { sid: string; domain: 
 export declare function userSidAliases(user: { sid: string; domain: string | null }, computerName: string | undefined): string[];
 /** A SID string, or the SID with the SDDL aliases that also name it. */
 export type UserIdentity = string | { sid: string; aliases?: readonly string[] };
+/** The environment value that carries paths to the PowerShell read: one per line. */
+export declare function encodeSddlPaths(paths: readonly string[]): string;
 export declare function parseSddlLines(output: string, count: number): (string | null)[];
 export declare function icaclsRemoveArguments(path: string, sids: readonly string[]): string[];
 export declare function icaclsSaveArguments(path: string, file: string): string[];

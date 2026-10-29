@@ -11,6 +11,7 @@ import {
   createPrivateDir,
   createPrivateDirSync,
   createWindowsSecurity,
+  encodeSddlPaths,
   everyOwnedByCurrentUserSync,
   everyOwnerPrivateSync,
   forgetOwnerPrivateCache,
@@ -117,7 +118,7 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
     calls.push({ file, args, paths: options.env.LETAGENTS_OWNER_PRIVATE_PATHS });
     if (file.endsWith("whoami.exe")) return `"host\\me","${USER}"\r\n`;
     if (file.endsWith("powershell.exe")) {
-      const paths = JSON.parse(options.env.LETAGENTS_OWNER_PRIVATE_PATHS!) as string[];
+      const paths = options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.split("\n");
       return paths.map(path => (path.endsWith("missing") ? "error:" : `ok:${PRIVATE_FILE}`)).join("\r\n") + "\r\n";
     }
     return "";
@@ -139,7 +140,10 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   assert.match(String(powershell.args[4]), /Get-Acl -LiteralPath \$p/);
   assert.match(String(powershell.args[4]), /\$env:LETAGENTS_OWNER_PRIVATE_PATHS/);
   // The paths travel as JSON in the environment, never in the command text.
-  assert.equal(powershell.paths, JSON.stringify(["C:\\a", "C:\\b missing"]));
+  assert.equal(powershell.paths, "C:\\a\nC:\\b missing");
+  // One path per line, and PowerShell splits on the line break (`n), not on JSON.
+  assert.match(String(powershell.args[4]), /-split "`n"/);
+  assert.throws(() => encodeSddlPaths(["C:\\a\nb"]), { code: "EOWNERPRIVATE" });
   assert.ok(!String(powershell.args[4]).includes("C:\\a"));
   // Owner first (an elevated administrator's files are owned by Administrators), then the DACL.
   assert.deepEqual(calls.filter(call => call.file.endsWith("icacls.exe")).map(call => [call.file, call.args]), [
@@ -193,7 +197,7 @@ test("many paths are read in a few PowerShell calls, each under the Windows envi
     env: { SystemRoot: "C:\\Windows" },
     run: async (file, _args, options) => {
       if (file.endsWith("whoami.exe")) return `"h\\me","${USER}"`;
-      const paths = JSON.parse(options.env.LETAGENTS_OWNER_PRIVATE_PATHS!) as string[];
+      const paths = options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.split("\n");
       sizes.push(options.env.LETAGENTS_OWNER_PRIVATE_PATHS!.length);
       return paths.map(() => `ok:${PRIVATE_FILE}`).join("\n");
     },
@@ -671,6 +675,22 @@ test("real Windows: private folders and files pass, and every tampered ACL is re
     forgetOwnerPrivateCache();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("real Windows: one PowerShell call reads several paths, one answer per path", { skip: windowsOnly }, async () => {
+  const root = scratch();
+  try {
+    const security = createWindowsSecurity();
+    const paths = [root, join(root, "missing"), tmpdir(), join(root, "a b")];
+    mkdirSync(paths[3]!);
+    const answers = await security.readSddl(paths);
+    assert.equal(answers.length, 4);
+    assert.match(String(answers[0]), /^O:/);
+    assert.equal(answers[1], null);
+    assert.match(String(answers[2]), /^O:/);
+    assert.match(String(answers[3]), /^O:/);
+    assert.deepEqual(security.readSddlSync(paths).map(answer => answer === null), [false, true, false, false]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("real Windows: protecting a folder also narrows what a file already in it inherits", { skip: windowsOnly }, async () => {
