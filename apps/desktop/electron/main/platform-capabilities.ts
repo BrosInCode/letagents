@@ -43,14 +43,15 @@ export function desktopPlatformCapabilities(options: PlatformCapabilityOptions =
   const override = options.platform === undefined ? capabilityOverride : null;
   const platform = options.platform ?? override?.platform ?? process.platform;
   const env = options.env ?? process.env;
-  // LETAGENTS_ALLOW_NON_DARWIN_DAEMON lets CI drive the daemon client off macOS.
-  const daemonOverride = env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1";
+  // LETAGENTS_ALLOW_NON_DARWIN_DAEMON lets Linux CI drive the daemon client. It
+  // never applies to Windows: a leaked variable must not start a daemon there.
+  const daemonOverride = platform !== "win32" && env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1";
   const supervisorDaemonAllowed = override?.supervisorDaemonAllowed
     ?? override?.supervisedAgentsSupported
     ?? (platform === "darwin" || daemonOverride);
   return {
     platform,
-    supervisedAgentsSupported: override?.supervisedAgentsSupported ?? (platform !== "win32" || daemonOverride),
+    supervisedAgentsSupported: override?.supervisedAgentsSupported ?? platform !== "win32",
     supervisorDaemonAllowed,
   };
 }

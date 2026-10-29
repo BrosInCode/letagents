@@ -34,13 +34,15 @@ const { registerDesktopSupervisorIpcHandlers } = await import("../main/ipc-handl
 const { registerDesktopWorkerIpcHandlers } = await import("../main/ipc-handlers/workers.js");
 const { registerDaemonMaintenanceIpcHandlers } = await import("../main/ipc-handlers/maintenance.js");
 const { registerDesktopAskIpcHandlers } = await import("../main/ipc-handlers/asks.js");
+const { registerDesktopAuthAndSetupIpcHandlers } = await import("../main/ipc-handlers/auth-setup.js");
+const { registerDesktopRentalDomainIpcHandlers } = await import("../main/ipc-handlers/rental.js");
 const { gateSupervisedAgentIpc } = await import("../main/ipc-handlers/supervised-agent-gate.js");
 const { subscribeLocalTasks, requestDesktopBoardMutation } = await import("../main/rooms/local-task-subscription.js");
 
 // Any request to the supervisor during these tests is a failure.
 const daemonCalls: string[] = [];
 for (const method of ["ensureRunning", "connectIfRunning", "list", "listHostApprovals", "listHostToolRules",
-  "getMaintenanceStatus", "getServiceSnapshot", "waitForStartup"] as const) {
+  "getMaintenanceStatus", "getServiceSnapshot", "waitForStartup", "isMaintenanceHeld"] as const) {
   (supervisorDaemonClient as unknown as Record<string, unknown>)[method] = async () => {
     daemonCalls.push(method);
     throw new Error(`unexpected supervisor call: ${method}`);
@@ -51,6 +53,8 @@ registerDesktopSupervisorIpcHandlers(fakeIpcMain as never);
 registerDesktopWorkerIpcHandlers(fakeIpcMain as never);
 registerDaemonMaintenanceIpcHandlers(fakeIpcMain as never);
 registerDesktopAskIpcHandlers(fakeIpcMain as never);
+registerDesktopAuthAndSetupIpcHandlers(fakeIpcMain as never);
+const startRentalServices = registerDesktopRentalDomainIpcHandlers(fakeIpcMain as never);
 
 function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
   const handler = handlers.get(channel);
@@ -71,6 +75,9 @@ test("the daemon client never starts or connects to the supervisor on Windows", 
   assert.equal(await client.connectIfRunning(), null);
   // An app update has no supervisor to hand off on Windows, so it is not blocked.
   await client.prepareForApplicationUpdate();
+  // Any other read is refused before a socket is opened.
+  await assert.rejects(client.list(null), capabilities.SupervisedAgentsUnsupportedError);
+  await assert.rejects(client.isRuntimeEnvironmentCurrent(), capabilities.SupervisedAgentsUnsupportedError);
   assert.equal(spawns, 0);
 });
 
@@ -83,6 +90,16 @@ test("agent reads answer empty and agent actions answer a typed unsupported resu
   assert.equal(await invoke("desktop:supervisor:watch-agent-stream", "entry"), undefined);
   assert.deepEqual(await invoke("desktop:maintenance:status"), { held: false, ready: false });
   assert.deepEqual(await invoke("desktop:workers:list-agent-providers"), []);
+  const models = await invoke("desktop:workers:list-agent-provider-models", "codex", {}) as Record<string, unknown>;
+  assert.deepEqual({ ...models, error: typeof models.error }, {
+    providerId: "codex", status: "unavailable", models: [], defaultModel: null, error: "string",
+  });
+  const storage = await invoke("desktop:supervisor-grant:get-storage-status") as Record<string, unknown>;
+  assert.equal(storage.available, false);
+  assert.equal(storage.canOpenCredentialStorage, false);
+  const snapshot = await invoke("desktop:supervisor:get-service-snapshot") as Record<string, unknown>;
+  assert.equal(snapshot.status, null);
+  assert.equal(snapshot.state, null);
 
   for (const channel of ["desktop:supervisor:get-status", "desktop:supervisor:create-agent", "desktop:supervisor:set-desired-state",
     "desktop:supervisor:retire-agent", "desktop:supervisor:purge-agent", "desktop:maintenance:restart",
@@ -102,6 +119,15 @@ test("giving an agent is refused with one sentence; asking still works", async (
   assert.equal(given.ok, false);
   assert.match(given.error ?? "", /not available on Windows yet/);
   assert.ok(handlers.has("desktop:asks:create"));
+});
+
+test("rental channels answer the existing disabled result and start no background services", async () => {
+  for (const channel of ["desktop:rental:list-listings", "desktop:rental:get-provider-settings", "desktop:rental:accept-request"]) {
+    assert.deepEqual(await invoke(channel, {}), { enabled: false }, channel);
+  }
+  startRentalServices();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(daemonCalls, []);
 });
 
 test("the gate returns the real IpcMain where agents are supported", () => {

@@ -253,7 +253,9 @@ function openWithWindowsEditor(editorPath: string, path: string): Promise<string
   return new Promise(resolveOpen => {
     try {
       // Detached: a first VS Code window keeps running after LetAgents is done.
-      const child = spawn(editorPath, [path], { detached: true, stdio: 'ignore', windowsHide: false });
+      // Without these, Code.exe would start as plain Node instead of the editor.
+      const { ELECTRON_RUN_AS_NODE: _runAsNode, NODE_OPTIONS: _nodeOptions, ...env } = process.env;
+      const child = spawn(editorPath, [path], { detached: true, stdio: 'ignore', windowsHide: false, env });
       child.once('error', () => resolveOpen('The default editor could not open this file.'));
       child.once('spawn', () => { child.unref(); resolveOpen(''); });
     } catch { resolveOpen('The default editor could not open this file.'); }
