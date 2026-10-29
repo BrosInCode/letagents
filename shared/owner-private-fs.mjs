@@ -31,12 +31,18 @@
  * answer that cannot be read or parsed counts as "not private".
  */
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, unlinkSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, unlink } from "node:fs/promises";
 import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { renameSyncWithRetry, renameWithRetryAsync } from "./rename-retry.mjs";
+
+// TEMPORARY CI DIAGNOSTIC (to be removed): timings of Windows tool use, appended to this file when set.
+function trace(event, started, extra = "") {
+  const file = process.env.LETAGENTS_OWNER_PRIVATE_TRACE;
+  if (file) try { appendFileSync(file, `${process.pid} ${Math.round(performance.now())} ${event} ${Math.round(performance.now() - started)}ms ${extra}\n`); } catch { /* diagnostic only */ }
+}
 
 export const PRIVATE_DIRECTORY_MODE = 0o700;
 export const PRIVATE_FILE_MODE = 0o600;
@@ -187,12 +193,14 @@ function toolError(file, error) {
 }
 
 function runToolSync(file, args, options = {}) {
+  const started = performance.now();
   try {
     return execFileSync(file, args, {
       env: options.env ?? process.env, cwd: toolFolder(file), stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
       timeout: TOOL_TIMEOUT_MS, maxBuffer: TOOL_OUTPUT_LIMIT, encoding: "utf8",
     });
   } catch (error) { throw toolError(file, error); }
+  finally { trace("tool-sync", started, win32.basename(file)); }
 }
 
 /** `whoami /user /fo csv /nh` prints `"machine\name","S-1-5-21-…"`; only the SID is read. */
@@ -490,8 +498,10 @@ export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS
     // The worker gives up after its budget and answers; this wait is the backstop.
     const budget = answered ? timeoutMs : startTimeoutMs;
     answered = true;
-    if (Atomics.wait(flag, 0, 0, budget + 1_000) === "timed-out") { stop(); throw privateError("The permissions reader did not answer in time."); }
+    const started = performance.now();
+    if (Atomics.wait(flag, 0, 0, budget + 1_000) === "timed-out") { trace("sync-timeout", started); stop(); throw privateError("The permissions reader did not answer in time."); }
     const message = receiveMessageOnPort(port)?.message;
+    trace("sync-answer", started, Array.isArray(message?.lines) ? `lines=${message.lines.length}` : "stopped");
     if (!Array.isArray(message?.lines)) { stop(); throw privateError("The permissions reader stopped."); }
     answeredOnce = true;
     return message.lines;
@@ -582,12 +592,14 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     readSddlSync(paths) {
       const reader = paths.length ? usableSyncServer() : null;
       if (reader) {
-        try { return reader.read(paths); } catch { /* the one-shot read below answers instead */ }
+        try { return reader.read(paths); } catch (error) { trace("sync-fallback", performance.now(), String(error?.message)); }
       }
+      const oneShotStarted = performance.now();
       const result = [];
       for (const chunk of chunkPaths(paths)) {
         result.push(...parseSddlLines(runSync(tools.powershell, powershellArguments(), { env: environment(chunk) }), chunk.length));
       }
+      trace("one-shot-sync", oneShotStarted, `paths=${paths.length}`);
       return result;
     },
     /** Per path, the owner, DACL and bytes read through one handle ("object:"), or null. */
@@ -1284,6 +1296,13 @@ function decoded(data, encoding) {
  */
 export function readOwnerPrivateFileSync(path, encoding, options = {}) {
   if (!isWindows(options)) return readFileSync(path, encoding);
+  const started = performance.now();
+  try { return readOwnerPrivateFileSyncTraced(path, encoding, options); }
+  catch (error) { trace("secret-read-sync", started, `${error?.code} ${path}`); throw error; }
+  finally { trace("secret-read-sync", started, path); }
+}
+
+function readOwnerPrivateFileSyncTraced(path, encoding, options) {
   const security = windowsSecurity(options);
   let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {

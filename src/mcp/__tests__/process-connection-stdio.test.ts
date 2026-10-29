@@ -10,7 +10,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
+import { printOwnerPrivateTrace, childProcessEnv, connectOrExplain, posixSignalsOnly } from "./support/platform.js";
 
 async function until<T>(read: () => T | undefined | false, what: string, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -195,3 +195,6 @@ test("a process holds its connection open, learns when its session is ended, and
     rmSync(temp, { recursive: true, force: true });
   }
 });
+
+// TEMPORARY CI DIAGNOSTIC (to be removed).
+test.after(() => printOwnerPrivateTrace(import.meta.url));
