@@ -1,8 +1,9 @@
 /** Dependency links and excludes, alternates, and the safety checks on the source and trusted git authority. */
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, realpath, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, sep } from "node:path";
+import { isOwnerPrivate, nullDevice, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, type GenerationManifest, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, SupervisedWorkspaceGenerationError, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
 import { ProcessExitError, cloneRegularFile, runGit, sourceAuthorityBuffer, sourceAuthorityExitCode, sourceGitEnvironment } from "./git.js";
 import { assertSafeAncestors, atomicWrite } from "./manifest.js";
@@ -107,14 +108,14 @@ export async function readSafeAlternateRoots(
 }
 
 export async function disablePrivateGitAuthority(liveRoot: string): Promise<void> {
-  await runGit(liveRoot, ["config", "--local", "core.hooksPath", "/dev/null"], 1024 * 1024);
+  await runGit(liveRoot, ["config", "--local", "core.hooksPath", nullDevice()], 1024 * 1024);
   await runGit(liveRoot, ["config", "--local", "core.fsmonitor", "false"], 1024 * 1024);
   await runGit(liveRoot, ["config", "--local", "gc.auto", "0"], 1024 * 1024);
 }
 
 export async function disableTrustedGitAuthority(authorityRoot: string): Promise<void> {
-  await chmod(authorityRoot, 0o700);
-  await runGit(authorityRoot, ["config", "--local", "core.hooksPath", "/dev/null"], 1024 * 1024);
+  await protectOwnerPrivate(authorityRoot, "directory");
+  await runGit(authorityRoot, ["config", "--local", "core.hooksPath", nullDevice()], 1024 * 1024);
   await runGit(authorityRoot, ["config", "--local", "core.fsmonitor", "false"], 1024 * 1024);
   await runGit(authorityRoot, ["config", "--local", "gc.auto", "0"], 1024 * 1024);
 }
@@ -137,8 +138,8 @@ export async function assertSafeBareAlternateRoot(
 
 export async function assertTrustedAuthority(manifest: GenerationManifest, authorityRoot: string): Promise<void> {
   const info = await lstat(authorityRoot).catch(() => null);
-  if (!info?.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.()
-    || (info.mode & 0o077) !== 0 || authorityRoot !== join(manifest.generationRoot, AUTHORITY_NAME)) {
+  if (!info?.isDirectory() || info.isSymbolicLink() || !await isOwnerPrivate(authorityRoot, info)
+    || authorityRoot !== join(manifest.generationRoot, AUTHORITY_NAME)) {
     throw generationError("Supervisor-owned Git authority disappeared or was redirected.", "GIT_AUTHORITY_MISSING");
   }
   const objectRoot = manifest.readOnlyRoots.find((entry) => entry.purpose === "git-objects")?.sourcePath;
@@ -146,8 +147,7 @@ export async function assertTrustedAuthority(manifest: GenerationManifest, autho
   await assertSafeBareAlternateRoot(authorityRoot, objectRoot, manifest.limits);
   const baselineRoot = join(manifest.generationRoot, BASELINE_FILES_NAME);
   const baselineInfo = await lstat(baselineRoot).catch(() => null);
-  if (!baselineInfo?.isDirectory() || baselineInfo.isSymbolicLink() || baselineInfo.uid !== process.getuid?.()
-    || (baselineInfo.mode & 0o077) !== 0) {
+  if (!baselineInfo?.isDirectory() || baselineInfo.isSymbolicLink() || !await isOwnerPrivate(baselineRoot, baselineInfo)) {
     throw generationError("Supervisor-owned baseline metadata disappeared or was redirected.", "INVALID_BASELINE_METADATA");
   }
 }

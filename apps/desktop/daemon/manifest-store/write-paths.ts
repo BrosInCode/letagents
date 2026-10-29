@@ -6,9 +6,9 @@
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { chmod } from "node:fs/promises";
 import { pruneSupervisedAgentHistory } from "../supervised-agent-history-retention.js";
 import { type Row, type PreMembershipRoomMoveCancellation, ManifestConflictError, bool, nullableString, storeMethods } from "./shared.js";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 
 export const writePaths = storeMethods({
   /**
@@ -216,7 +216,7 @@ export const writePaths = storeMethods({
       return;
     }
     for (const path of paths) {
-      await chmod(path, 0o600).catch((error: unknown) => {
+      await protectOwnerPrivate(path, "file").catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       });
     }

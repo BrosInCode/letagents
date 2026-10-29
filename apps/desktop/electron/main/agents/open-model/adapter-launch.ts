@@ -1,6 +1,6 @@
 /** Spawning, attaching to and resuming an OpenCode runtime. */
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,6 +18,7 @@ import { type OpenCodeRuntimeControl, readRuntimeControl, safeRuntimeId, withRun
 import { OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError } from "./errors.js";
 import { OpenModelAdapterTurnWait } from "./adapter-turn-wait.js";
 import { OpenModelHandle } from "./handle.js";
+import { protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
 
 export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
   protected async assertPriorStartupProcessGone(authPath: string): Promise<void> {
@@ -98,7 +99,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
     // Refused before anything is written or launched.
     const workspaceEnvironment = workspaceOpenCodeEnvironment(req.workspaceKind);
     await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
-    await chmod(runtimeRoot, 0o700);
+    await protectOwnerPrivate(runtimeRoot, "directory");
     const authPath = join(runtimeRoot, "server-auth.json");
     await this.assertPriorStartupProcessGone(authPath);
     const auth: OpenCodeRuntimeAuth = {

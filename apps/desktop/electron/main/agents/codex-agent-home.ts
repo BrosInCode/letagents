@@ -16,6 +16,7 @@ import {
   projectKeysRefusal,
   type CodexSettingsInspection,
 } from "./codex-home-harness.js";
+import { protectOwnerPrivateSync } from "../../../../../shared/owner-private-fs.mjs";
 
 // An owner can save "always allow" command rules in the `rules` folder of
 // their Codex home. Codex runs a command that matches one outside its sandbox
@@ -253,7 +254,7 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string): { own:
   }
   for (const name of toLink) symlinkSync(join(owner, name), join(home, name));
   const rules = join(home, "rules");
-  if (lstatSync(rules, { throwIfNoEntry: false })?.isDirectory()) chmodSync(rules, 0o700);
+  if (lstatSync(rules, { throwIfNoEntry: false })?.isDirectory()) protectOwnerPrivateSync(rules, "directory");
   rmSync(rules, { recursive: true, force: true });
   mkdirSync(rules);
   chmodSync(rules, 0o555);

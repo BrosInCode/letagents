@@ -5,8 +5,8 @@ import { captureLocalSupervisedRouting, ensureLocalSupervisedRoutingSchema, runL
 import { createRequire } from "node:module";
 import { ensureLocalTaskRevisionSchema, observeLocalTaskCommits } from "../../../shared/local-task-revisions.mjs";
 import { mkdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
 import { withWorkerStateFence, currentWorkerCall, assertWorkerConnection } from "../worker-call-context.js";
 import { ensureLocalWorkLeaseSchema } from "../../../shared/local-work-leases.mjs";
 
@@ -145,10 +145,10 @@ type LocalChatInput = {
 const require = createRequire(import.meta.url);
 const chatStorageSettingsPath =
   process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() ||
-  join(homedir(), ".letagents", "chat-storage.json");
+  letagentsHomePath("chat-storage.json");
 const localChatDatabasePath =
   process.env.LETAGENTS_LOCAL_CHAT_DB?.trim() ||
-  join(homedir(), ".letagents", "local-chat.sqlite");
+  letagentsHomePath("local-chat.sqlite");
 let db: SqliteDatabase | null = null;
 let dbInitialization: Promise<SqliteDatabase> | null = null;
 let databaseInitializationObserverForTest: (() => void) | null = null;
