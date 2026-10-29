@@ -59,6 +59,28 @@ export async function assertSafeAncestors(root: string, relativePath: string, cr
   }
 }
 
+/**
+ * Windows, at plan time: no existing ancestor folder may be reached through
+ * an 8.3 short name (see assertSafeAncestors). A missing ancestor, or one
+ * that is still a file the plan deletes first, ends the walk.
+ */
+export async function assertNoShortNameAncestors(root: string, relativePath: string): Promise<void> {
+  let current = root;
+  let expected = await realpath(root);
+  for (const component of relativePath.split(sep).filter(Boolean).slice(0, -1)) {
+    current = join(current, component);
+    expected = join(expected, component);
+    const info = await lstat(current).catch((error) => {
+      if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) return null;
+      throw error;
+    });
+    if (!info?.isDirectory() || info.isSymbolicLink()) return;
+    if ((await realpath(current)).toLowerCase() !== expected.toLowerCase()) {
+      throw new SupervisedWorkspaceConflictError(relativePath, "an ancestor name is a short-name alias of another folder");
+    }
+  }
+}
+
 export async function persistManifest(manifest: GenerationManifest): Promise<void> {
   validateManifest(manifest);
   const destination = manifestPathOf(manifest);

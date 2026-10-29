@@ -4,7 +4,7 @@ import { link, lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { AUTHORITY_NAME, BASELINE_FILES_NAME, FINAL_INDEX_NAME, type GenerationManifest, RETIRED_NAME, type ReconcileOperation, STAGING_NAME, SupervisedWorkspaceConflictError, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type TreeEntry } from "./types.js";
 import { FileInspectionSession, assertCanonicalDirectoryIdentity, canonicalDirectoryIdentity, ensureDesiredArtifact, inspectExactFile, matchesOperationState, restoreDisplacedWithoutOverwrite, validateAppliedOperationArtifacts } from "./file-inspection.js";
-import { assertSafeAncestors, cleanupTrees, transition, validateManifest } from "./manifest.js";
+import { assertNoShortNameAncestors, assertSafeAncestors, cleanupTrees, transition, validateManifest } from "./manifest.js";
 import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, gitRelativePath, invokeFailpoint, isErrno, isProtectedPath, isWindowsGeneration, limitError, manifestPathOf, operationId, pathExists, projectRelativePath, resultFor, safeRelative, treeEntryEqual } from "./helpers.js";
 import { assertTreeHasNoNormalizedPathCollisions, diffTreeEntries, readGitBlob, snapshotWorktree, treeEntryForRegularFile } from "./worktree.js";
 import { assertTrustedAuthority } from "./source-authority.js";
@@ -302,7 +302,7 @@ export async function buildPlan(
   const byPath = new Map(operations.map((operation) => [operation.relativePath, operation]));
   for (const operation of operations) {
     // Windows: refuse an alias ancestor (see assertSafeAncestors) before anything is applied.
-    if (isWindowsGeneration()) await assertSafeAncestors(manifest.realWorkspace, operation.relativePath, false);
+    if (isWindowsGeneration()) await assertNoShortNameAncestors(manifest.realWorkspace, operation.relativePath);
     const observed = await inspectPlanEntry(manifest, operation.relativePath, inspections);
     if (observed.kind === "file") {
       if (!treeEntryEqual(observed.entry, operation.baseline)
