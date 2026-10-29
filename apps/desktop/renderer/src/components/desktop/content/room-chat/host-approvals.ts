@@ -1,6 +1,7 @@
 import { reactive } from "vue";
 import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
 import { desktopIpc } from "../../../../ipc";
+import { supervisedAgentsSupported } from "../../../../domain/supervised-agents-support";
 import { reuseUnchanged } from "../../../../domain/reuse-unchanged";
 
 export interface HostApprovalRoomState {
@@ -58,6 +59,8 @@ const RUNNING_TURN_STATES = new Set(["dispatching", "responding", "publishing", 
  * time, keeps the cadence tied to the timer that drives it.
  */
 export function hostApprovalPollDue(roomIdentifier: string): boolean {
+  // No agents run from this app here, so no agent can ask for approval.
+  if (!supervisedAgentsSupported.value) return false;
   const ticks = (ticksSinceRead.get(roomIdentifier) ?? Infinity) + 1;
   ticksSinceRead.set(roomIdentifier, ticks);
   if (!lastReadStartedAt.has(roomIdentifier)) return true;
@@ -167,7 +170,7 @@ export function refreshHostApprovals(roomIdentifier: string): Promise<void> {
 
 async function readHostApprovals(roomIdentifier: string): Promise<void> {
   const read = desktopIpc.supervisor?.listHostApprovals;
-  if (!roomIdentifier || !read) return;
+  if (!roomIdentifier || !read || !supervisedAgentsSupported.value) return;
   const state = roomState(roomIdentifier);
   if (state.loading || state.busy) return;
   const epoch = generation;

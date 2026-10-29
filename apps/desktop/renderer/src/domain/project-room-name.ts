@@ -1,5 +1,6 @@
 import type { DesktopGitRoomInfo } from "../../../electron/ipc-types";
 import { repositoryRoomName } from "../../../../../shared/project-room-name.mjs";
+import { localPathBasename } from "./local-path";
 
 /** Use the server's room title (including intentional renames), then project identity. */
 export function projectRoomName(input: {
@@ -12,7 +13,7 @@ export function projectRoomName(input: {
   return (title && title.toLowerCase() !== input.roomIdentifier?.trim().toLowerCase() ? title : null)
     || input.gitRoom?.repository.name?.trim()
     || repositoryRoomName(input.roomIdentifier)
-    || input.rootPath?.split(/[\\/]/).filter(Boolean).pop()
+    || localPathBasename(input.rootPath)
     || input.roomIdentifier
     || "Project";
 }

@@ -1,7 +1,7 @@
 import electron from "electron";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, parse, resolve } from "node:path";
+import { basename, join, parse, resolve } from "node:path";
 import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
@@ -14,6 +14,7 @@ import type {
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
 import { findProjectBinding, projectContextsCompatibleForConnection } from "../../project-bindings.js";
 import { ensureRepoWorktree } from "./worktrees.js";
+import { expandHomePath, fullFolderPathHint, isFullFolderPath, newFolderNameError } from "../local-paths.js";
 import { apiFetch } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
@@ -87,9 +88,8 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
 /** Create only a new directory; an existing file, folder or symlink is never reused. */
 export async function createProjectRoom(parentPath: string, name: string): Promise<DesktopRepoRoomSelection> {
   const projectName = name.trim();
-  if (!projectName || projectName === "." || projectName === ".." || /[\\/:\u0000-\u001f\u007f]/.test(projectName)) {
-    return repoRoomSelectionError("Enter a folder name without slashes or control characters.");
-  }
+  const nameError = newFolderNameError(projectName);
+  if (nameError) return repoRoomSelectionError(nameError);
   const parent = expandHomePath(parentPath.trim());
   const pathError = await projectFolderPathError(parent);
   if (pathError) return repoRoomSelectionError(pathError);
@@ -184,11 +184,6 @@ export async function openRepoRoomFromPath(
   };
 }
 
-function expandHomePath(path: string): string {
-  if (path === "~") return homedir();
-  return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
-}
-
 function repoRoomSelectionError(error: string): DesktopRepoRoomSelection {
   return {
     canceled: false,
@@ -222,7 +217,7 @@ async function isHomeOrDiskRoot(paths: readonly (string | null)[]): Promise<bool
 
 async function projectFolderPathError(path: string): Promise<string | null> {
   if (!path) return "Choose a project folder.";
-  if (!isAbsolute(path)) return "Enter the full path to the folder, starting with / or ~/.";
+  if (!isFullFolderPath(path)) return fullFolderPathHint();
   try {
     const stats = await stat(path);
     return stats.isDirectory() ? null : "That path is a file. Enter the folder that contains it.";

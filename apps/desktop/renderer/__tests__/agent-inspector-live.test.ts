@@ -661,6 +661,7 @@ test("Live layout remount retains the feed and subscription for the same agent/s
     ref, watch, selectedAgentDetailProjection: projection,
     loadAgentInspectorProviders() {}, openAgentInspectorWork() {},
     desktopIpc: { supervisor: { watchAgentStream: (id: string | null) => watches.push(id) } },
+    supervisedAgentsSupported: { value: true },
   }));
   live.open();
   live.feed.value.events.push(event({ sequence: 1 }));

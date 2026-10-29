@@ -1,6 +1,7 @@
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
 
 export const electronMainDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const desktopRoot = join(electronMainDir, "..");
@@ -21,5 +22,5 @@ export const roomMessageHistoryPageSize = 150;
 
 export function getLetAgentsLocalStatePath(): string {
   return process.env.LETAGENTS_STATE_PATH?.trim() ||
-    join(homedir(), ".letagents", "mcp-state.json");
+    letagentsHomePath("mcp-state.json");
 }
