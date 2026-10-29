@@ -9,16 +9,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { getLetAgentsLocalStatePath } from "../paths.js";
+import { letagentsHome } from "../../../../../shared/letagents-home.mjs";
 import {
   ensurePrivateStateFolderSync,
   ownerPrivatePlatform,
+  prepareOwnerPrivateReads,
   protectOwnerPrivateSync,
   readOwnerPrivateFileSync,
   writePrivateFileAtomicallySync,
 } from "../../../../../shared/owner-private-fs.mjs";
+
+// Windows: the first state read checks the file's DACL; start PowerShell for it now (POSIX: nothing).
+prepareOwnerPrivateReads();
 
 const STATE_LOCK_WAIT_MS = 25;
 const STATE_LOCK_TIMEOUT_MS = 2_000;
@@ -138,13 +143,9 @@ function dropDesktopManagedCodexSessions(state: SharedCodexLiveSessionKeys): voi
   if (Object.keys(currentIds).length === 0) delete state.current_codex_live_session_ids;
 }
 
-/**
- * The state file holds worker tokens. Windows: its folder is made private
- * (POSIX: nothing), and the file is read only when its own DACL is private.
- */
+/** The state file holds worker tokens: Windows reads it only while its own DACL is private (POSIX: readFileSync). */
 function readStateFile(statePath: string): string {
-  ensurePrivateStateFolderSync(dirname(statePath));
-  return readOwnerPrivateFileSync(statePath, "utf-8");
+  return readOwnerPrivateFileSync(statePath, "utf-8", { upgradeAdministratorsOnly: true });
 }
 
 /** A file that is not private is refused, never read as empty state (which the next write would replace). */
@@ -187,7 +188,8 @@ function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState)
   // Windows has no mode bits: the shared writer makes the file private before
   // any token is written in it, and before it is published.
   if (ownerPrivatePlatform() === "win32") {
-    ensurePrivateStateFolderSync(dirname(statePath));
+    // LetAgents' own folder is made private when that hides nothing; any other folder is left as it is.
+    if (resolve(dirname(statePath)) === resolve(letagentsHome())) ensurePrivateStateFolderSync(dirname(statePath));
     writePrivateFileAtomicallySync(statePath, `${JSON.stringify(state, null, 2)}\n`, { syncDirectory: false });
     return;
   }

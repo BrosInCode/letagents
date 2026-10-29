@@ -871,9 +871,7 @@ test("Windows: a secret this process wrote is read with no tool; a cold read che
     let before = reads.length;
     assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "{\"token\":\"t2\"}");
     assert.equal(await readOwnerPrivateFile(file, "utf8", options), "{\"token\":\"t2\"}");
-    // NTFS keeps a file's change time through a rename, so there the writer's verdict holds and nothing
-    // is read. POSIX moves it on rename, so on this host the first read after the write checks once.
-    assert.equal(reads.length - before, process.platform === "win32" ? 0 : 1, "the writer's own file needs no read");
+    assert.equal(reads.length, before, "the writer's own file needs no read");
     // A cold process (another MCP worker): the file's own DACL and the folders up to a protected one, in one read.
     forgetOwnerPrivateCache();
     before = reads.length;
@@ -935,7 +933,13 @@ test("Windows: a secret another account owns is refused and never taken over, ev
     writeFileSync(target, "x");
     const linked = join(folder, "linked");
     symlinkSync(target, linked);
-    assert.throws(() => readOwnerPrivateFileSync(linked, "utf8", options), { code: "ELOOP" });
+    // A link is a refusal (never "no file", which a caller could read as empty state and overwrite).
+    assert.throws(() => readOwnerPrivateFileSync(linked, "utf8", options), (error: NodeJS.ErrnoException) => error.code === "EOWNERPRIVATE" && (error.cause as NodeJS.ErrnoException)?.code === "ELOOP");
+    await assert.rejects(readOwnerPrivateFile(linked, "utf8", options), { code: "EOWNERPRIVATE" });
+    assert.throws(() => readOwnerPrivateFileSync(join(folder, "missing"), "utf8", options), { code: "ENOENT" });
+    // No upgrade for another account's file.
+    assert.throws(() => readOwnerPrivateFileSync(file, "utf8", { ...options, upgradeAdministratorsOnly: true }), { code: "EOWNERPRIVATE" });
+    assert.deepEqual(calls, []);
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -969,27 +973,88 @@ test("Windows: a secret another process replaces during the check is opened agai
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("Windows: a state folder is made private only when it is not yet, and another account's folder is refused", () => {
+test("Windows: a state folder is made private only from Administrators-only access; any other folder is left as it is", () => {
   const root = scratch();
   try {
     const folder = join(root, ".letagents");
     mkdirSync(folder);
-    const { security, calls, sddl } = fakeSecurity({ [folder]: `O:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;${USER})` });
+    const { security, calls, sddl } = fakeSecurity({ [folder]: `O:BAD:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;${USER})` });
     // As icacls: the protect replaces the folder's DACL.
     const protecting: WindowsSecurity = { ...security, protectSync(path, kind) { security.protectSync(path, kind); sddl[path] = PRIVATE_FOLDER; } };
     const options = { platform: "win32" as const, windowsSecurity: protecting };
-    ensurePrivateStateFolderSync(folder, options);
+    assert.equal(ensurePrivateStateFolderSync(folder, options), true);
     assert.deepEqual(calls, [`protect:directory:${folder}`]);
     forgetOwnerPrivateCache();
-    ensurePrivateStateFolderSync(folder, options);
+    assert.equal(ensurePrivateStateFolderSync(folder, options), true);
     assert.equal(calls.length, 1, "a private folder is only read");
-    ensurePrivateStateFolderSync(join(root, "missing"), options);
-    assert.equal(calls.length, 1, "a missing folder is left to the writer");
-    const foreign = join(root, "foreign");
-    mkdirSync(foreign);
-    sddl[foreign] = `O:${OTHER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${OTHER})`;
-    assert.throws(() => ensurePrivateStateFolderSync(foreign, options), { code: "EPERM" });
+    assert.equal(ensurePrivateStateFolderSync(join(root, "missing"), options), false);
+    // A grant to another account (Users, Everyone) or another owner: left as it is, nothing exposed is made to look private.
+    for (const [name, folderSddl] of [
+      ["users", `O:${USER}D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;${USER})(A;OICIID;0x1301bf;;;BU)`],
+      ["everyone", `O:${USER}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;${USER})(A;OICI;FR;;;WD)`],
+      ["foreign", `O:${OTHER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${OTHER})`],
+    ] as const) {
+      const other = join(root, name);
+      mkdirSync(other);
+      sddl[other] = folderSddl;
+      assert.equal(ensurePrivateStateFolderSync(other, options), false, name);
+    }
     assert.equal(calls.length, 1);
+    assert.equal(ensurePrivateStateFolderSync(folder, { windowsSecurity: protecting }), process.platform === "win32");
+  } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: an Administrators-only secret (an older version's state) is made private by itself and read; a wider one is not", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const legacy = join(folder, "legacy.json");
+    const shared = join(folder, "shared.json");
+    writeFileSync(legacy, "legacy");
+    writeFileSync(shared, "shared");
+    const { security, calls, sddl } = fakeSecurity({
+      [folder]: `O:${USER}D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;${USER})`,
+      [legacy]: `O:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;${USER})`,
+      [shared]: `O:${USER}D:AI(A;ID;FA;;;SY)(A;ID;FA;;;${USER})(A;ID;0x1200a9;;;BU)`,
+    });
+    const protecting: WindowsSecurity = {
+      ...security,
+      protectSync(path, kind) { security.protectSync(path, kind); sddl[path] = PRIVATE_FILE; },
+      async protect(path, kind) { await security.protect(path, kind); sddl[path] = PRIVATE_FILE; },
+    };
+    const options = { platform: "win32" as const, windowsSecurity: protecting };
+    // Without the option nothing is changed.
+    assert.throws(() => readOwnerPrivateFileSync(legacy, "utf8", options), { code: "EOWNERPRIVATE" });
+    assert.deepEqual(calls, []);
+    assert.equal(readOwnerPrivateFileSync(legacy, "utf8", { ...options, upgradeAdministratorsOnly: true }), "legacy");
+    assert.deepEqual(calls, [`protect:file:${legacy}`], "the file only; its folder is not changed");
+    assert.throws(() => readOwnerPrivateFileSync(shared, "utf8", { ...options, upgradeAdministratorsOnly: true }), { code: "EOWNERPRIVATE" });
+    await assert.rejects(readOwnerPrivateFile(shared, "utf8", { ...options, upgradeAdministratorsOnly: true }), { code: "EOWNERPRIVATE" });
+    assert.equal(calls.length, 1, "a file other accounts could open is never made to look private");
+    assert.match(sddl[shared]!, /;;;BU\)$/);
+  } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Windows: a secret's verdict lasts five minutes at most, even when nothing about the file changed", (t) => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const file = join(folder, "token.json");
+    writeFileSync(file, "secret");
+    const { security, reads, sddl } = fakeSecurity({ [folder]: PRIVATE_FOLDER, [file]: INHERITED_PRIVATE });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+    assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "secret");
+    const before = reads.length;
+    t.mock.timers.tick(4 * 60_000);
+    assert.equal(readOwnerPrivateFileSync(file, "utf8", options), "secret");
+    assert.equal(reads.length, before);
+    // A grant whose change time was set back: seen once the verdict runs out.
+    sddl[file] = `O:${USER}D:AI(A;;FR;;;WD)(A;ID;FA;;;SY)(A;ID;FA;;;${USER})`;
+    t.mock.timers.tick(60_000 + 1);
+    assert.throws(() => readOwnerPrivateFileSync(file, "utf8", options), { code: "EOWNERPRIVATE" });
   } finally { forgetOwnerPrivateCache(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -998,6 +1063,9 @@ test("synchronous reads wait for one long-lived reader in a worker thread; a rea
     + "console.log(line === '' ? 'done:' : line.endsWith('missing') ? 'error:' : 'ok:' + line));";
   const reader = createSyncSddlServer(syncSddlReaderWorker(process.execPath, ["-e", answering]));
   try {
+    // prepare() starts the reader without waiting; the first read takes its answer first.
+    reader.prepare();
+    reader.prepare();
     assert.deepEqual(reader.read(["C:\\a", "C:\\b missing"]), ["C:\\a", null]);
     const started = performance.now();
     for (let index = 0; index < 50; index += 1) assert.deepEqual(reader.read([`C:\\${index}`]), [`C:\\${index}`]);
@@ -1260,6 +1328,13 @@ test("real Windows: a fresh token passes; an Everyone grant and another owner ar
     const writer = countingSecurity();
     const writerOptions = { windowsSecurity: writer.security };
     const token = join(folder, "mcp-state.json");
+    // What a rename changes on this host (logged for the record; the writer does not compare the change time).
+    const probe = join(folder, "probe.tmp");
+    writeFileSync(probe, "probe");
+    const probeBefore = lstatSync(probe, { bigint: true });
+    renameSync(probe, join(folder, "probe.json"));
+    const probeAfter = lstatSync(join(folder, "probe.json"), { bigint: true });
+    console.log(`rename keeps: ino ${probeBefore.ino === probeAfter.ino}, ctime ${probeBefore.ctimeNs === probeAfter.ctimeNs}, mtime ${probeBefore.mtimeNs === probeAfter.mtimeNs}`);
     writePrivateFileAtomicallySync(token, "{\"token\":\"fresh\"}", writerOptions);
 
     // The writer reads its own fresh token back without any tool (no icacls, no Get-Acl).

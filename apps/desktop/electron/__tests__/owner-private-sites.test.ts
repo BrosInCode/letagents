@@ -194,26 +194,34 @@ test("Windows: the desktop reads the shared state file (worker tokens) only whil
   const file = join(folder, "mcp-state.json");
   const session = { session_id: "s1", session_token: "worker-token", room_id: "r", session_kind: "worker" } as StoredAgentSessionState;
   await writeFile(file, JSON.stringify({ agent_sessions: { s1: session } }));
-  const saved = process.env.LETAGENTS_STATE_PATH;
+  const saved = { state: process.env.LETAGENTS_STATE_PATH, home: process.env.HOME, profile: process.env.USERPROFILE };
   process.env.LETAGENTS_STATE_PATH = file;
-  t.after(() => { if (saved === undefined) delete process.env.LETAGENTS_STATE_PATH; else process.env.LETAGENTS_STATE_PATH = saved; });
+  process.env.HOME = root;
+  process.env.USERPROFILE = root;
+  t.after(() => {
+    for (const [name, value] of [["LETAGENTS_STATE_PATH", saved.state], ["HOME", saved.home], ["USERPROFILE", saved.profile]] as const) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
   const fake = fakeWindowsSecurity();
   await asWindows(fake, () => {
-    // State an older version left: its folder is made private once, then the file in it is read.
+    // State an older version left (this account, SYSTEM and Administrators only): the file alone is made private, then read.
     assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token");
-    assert.deepEqual(fake.protects, [`protect:directory:${folder}`]);
+    assert.deepEqual(fake.protects, [`protect:file:${file}`]);
+    // The first write makes LetAgents' own folder private; later writes run no tool.
     saveAgentSession({ ...session, session_token: "worker-token-2" });
-    assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token-2");
-    assert.deepEqual(fake.protects, [`protect:directory:${folder}`], "writes in the private folder run no tool");
+    saveAgentSession({ ...session, session_token: "worker-token-3" });
+    assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token-3");
+    assert.deepEqual(fake.protects, [`protect:file:${file}`, `protect:directory:${folder}`]);
     // A grant of its own: refused (never read as empty state, so never overwritten), named, not repaired.
     fake.tamper(file);
     for (const read of [() => readAgentLocalState(), () => readAgentLocalStateSnapshot(), () => saveAgentSession(session)]) {
       assert.throws(read, (error: NodeJS.ErrnoException) => error.code === "EOWNERPRIVATE" && error.message.includes(file));
     }
     assert.equal(fake.isProtected(file), false);
-    assert.deepEqual(fake.protects, [`protect:directory:${folder}`]);
+    assert.equal(fake.protects.length, 2);
   });
-  assert.match(await readFile(file, "utf8"), /worker-token-2/);
+  assert.match(await readFile(file, "utf8"), /worker-token-3/);
 });
 
 test("Windows: the local supervisor key is private from birth, read again unchanged, and refused when exposed or another account's", async (t) => {

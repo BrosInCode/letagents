@@ -36,6 +36,12 @@ fs.readFileSync = ((...args: Parameters<typeof originalReadFileSync>) => {
   if (String(args[0]) === env.statePath) counts.stateReads += 1;
   return originalReadFileSync(...args);
 }) as typeof originalReadFileSync;
+// Windows reads the state file through a handle it opens after checking the file's DACL.
+const originalOpenSync = fs.openSync;
+fs.openSync = ((...args: Parameters<typeof originalOpenSync>) => {
+  if (process.platform === "win32" && String(args[0]) === env.statePath) counts.stateReads += 1;
+  return originalOpenSync(...args);
+}) as typeof originalOpenSync;
 syncBuiltinESMExports();
 
 const { getLocalChatDatabase } = await import("../main/rooms/local-db.js");

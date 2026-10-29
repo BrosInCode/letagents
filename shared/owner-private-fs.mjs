@@ -325,6 +325,7 @@ export function createSddlServer(start) {
 // above: printable ASCII paths only, and a reader that fails, stops or does
 // not answer in time is stopped for good; the one-shot script answers instead.
 const SYNC_READER_SOURCE = `"use strict";
+process.on("uncaughtException", () => stop());
 const { workerData } = require("node:worker_threads");
 const { spawn } = require("node:child_process");
 const { port, signal, command, args, env, timeoutMs } = workerData;
@@ -356,10 +357,17 @@ port.on("message", (paths) => {
   if (dead) { answer({ error: true }); return; }
   // A reader that does not answer is killed here, so no PowerShell outlives the wait.
   timer = setTimeout(stop, timeoutMs);
-  try { reader().stdin.write(paths.join("\\n") + "\\n\\n"); } catch { stop(); }
+  // An empty request (prepare) only starts PowerShell: its answer is the empty line's "done:".
+  try { reader().stdin.write(paths.length ? paths.join("\\n") + "\\n\\n" : "\\n"); } catch { stop(); }
 });
-process.on("uncaughtException", stop);
 `;
+
+/**
+ * The caller's thread is blocked while it waits (the Electron main thread
+ * among them), so a reader that does not answer is given up sooner than a
+ * one-shot tool; the first answer includes the PowerShell start.
+ */
+const SYNC_READER_TIMEOUT_MS = 10_000;
 
 /** Starts the worker that owns a synchronous reader: `command args` speaks the reader protocol above. */
 export function syncSddlReaderWorker(command, args, env = process.env) {
@@ -369,41 +377,59 @@ export function syncSddlReaderWorker(command, args, env = process.env) {
 }
 
 /** One long-lived reader for synchronous reads; `start` returns its worker (injectable for tests). */
-export function createSyncSddlServer(start, { timeoutMs = TOOL_TIMEOUT_MS } = {}) {
+export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS } = {}) {
   let worker = null; let port = null; let flag = null; let broken = false;
+  /** A prepare() request whose answer has not been taken yet. */
+  let warming = false;
   const stop = () => {
     broken = true;
     try { void worker?.terminate(); } catch { /* already gone */ }
     try { port?.close(); } catch { /* already closed */ }
     worker = null; port = null;
   };
-  function connect() {
-    if (worker) return;
-    const channel = new MessageChannel();
-    flag = new Int32Array(new SharedArrayBuffer(4));
-    worker = start({ port: channel.port2, signal: flag.buffer, timeoutMs });
-    // Neither the worker nor its port may keep the process alive on its own.
-    worker.unref?.();
-    // Seen between reads only: a worker that dies during a read answers through `flag` first.
-    worker.once?.("error", stop);
-    worker.once?.("exit", stop);
-    port = channel.port1;
-    port.unref?.();
+  function post(paths) {
+    if (!worker) {
+      const channel = new MessageChannel();
+      flag = new Int32Array(new SharedArrayBuffer(4));
+      worker = start({ port: channel.port2, signal: flag.buffer, timeoutMs });
+      // Neither the worker nor its port may keep the process alive on its own.
+      worker.unref?.();
+      // Seen between reads only: a worker that dies during a read answers through `flag` first.
+      worker.once?.("error", stop);
+      worker.once?.("exit", stop);
+      port = channel.port1;
+      port.unref?.();
+    }
+    Atomics.store(flag, 0, 0);
+    port.postMessage(paths);
+  }
+  /** The worker's answer to the request just posted, or a throw (and the reader is stopped). */
+  function answer() {
+    // The worker gives up after timeoutMs and answers; this wait is the backstop.
+    if (Atomics.wait(flag, 0, 0, timeoutMs + 1_000) === "timed-out") { stop(); throw privateError("The permissions reader did not answer in time."); }
+    const message = receiveMessageOnPort(port)?.message;
+    if (!Array.isArray(message?.lines)) { stop(); throw privateError("The permissions reader stopped."); }
+    return message.lines;
   }
   return {
     get usable() { return !broken; },
+    /** Start the reader (and PowerShell) now, without waiting, so the first read does not pay for the start. */
+    prepare() {
+      if (broken || worker) return;
+      post([]);
+      warming = true;
+    },
     /** Answers for `paths`, or throws (the caller falls back to a one-shot read). */
     read(paths) {
       if (broken) throw privateError("The permissions reader is not available.");
       if (!paths.every(path => SERVER_PATH.test(path))) throw privateError("Only ASCII paths go to the reader.");
-      connect();
-      Atomics.store(flag, 0, 0);
-      port.postMessage(paths);
-      // The worker gives up after timeoutMs and answers; this wait is the backstop.
-      if (Atomics.wait(flag, 0, 0, timeoutMs + 1_000) === "timed-out") { stop(); throw privateError("The permissions reader did not answer in time."); }
-      const message = receiveMessageOnPort(port)?.message;
-      if (!Array.isArray(message?.lines)) { stop(); throw privateError("The permissions reader stopped."); }
-      try { return parseSddlLines(message.lines.join("\n"), paths.length); }
+      // A worker cannot start once the process is exiting (an "exit" listener that writes a
+      // private file); the one-shot read answers then. (process._exiting is set before "exit".)
+      if (!worker && process._exiting) throw privateError("The process is exiting.");
+      if (warming) { warming = false; answer(); }
+      post(paths);
+      const lines = answer();
+      try { return parseSddlLines(lines.join("\n"), paths.length); }
       catch (error) { stop(); throw error; }
     },
     stop,
@@ -452,6 +478,8 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
       }
       return result;
     },
+    /** Start the synchronous reader now (see createSyncSddlServer's prepare). */
+    prepare() { syncServer?.prepare(); },
     readSddlSync(paths) {
       if (syncServer?.usable && paths.length) {
         try { return syncServer.read(paths); } catch { /* the one-shot read below answers instead */ }
@@ -591,6 +619,22 @@ export function sddlHasProfileDefaultAccess(sddl, sid) {
   const parsed = parseSddl(sddl);
   const user = who(sid);
   if (!parsed || !sidIsUser(parsed.owner, user) || !parsed.dacl || parsed.dacl.flags.includes("NO_ACCESS_CONTROL")) return false;
+  return parsed.dacl.aces.every(ace => DENY_TYPES.has(ace.type)
+    || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ["SY", SYSTEM_SID, "BA", "S-1-5-32-544"].includes(ace.sid))));
+}
+
+/**
+ * As sddlHasProfileDefaultAccess, but the owner may also be Administrators
+ * (what an elevated process gives a new file): only this account, SYSTEM and
+ * Administrators can open it. No other account could have read or changed
+ * it, and an administrator can take any file anyway, so making it private
+ * hides nothing that was exposed.
+ */
+export function sddlHasOnlyAdministratorAccess(sddl, sid) {
+  const parsed = parseSddl(sddl);
+  const user = who(sid);
+  if (!parsed?.dacl || parsed.dacl.flags.includes("NO_ACCESS_CONTROL")) return false;
+  if (!(sidIsUser(parsed.owner, user) || parsed.owner === "BA" || parsed.owner === "S-1-5-32-544")) return false;
   return parsed.dacl.aces.every(ace => DENY_TYPES.has(ace.type)
     || (ALLOW_TYPES.has(ace.type) && (sidIsUser(ace.sid, user) || ["SY", SYSTEM_SID, "BA", "S-1-5-32-544"].includes(ace.sid))));
 }
@@ -965,9 +1009,27 @@ export function assertOwnerPrivateSync(path, options = {}) {
 // (checkObject), on Windows as POSIX refuses a file with group or other bits
 // or another uid. The verdict is kept per path for the file's identity:
 // volume, file ID, change time, write time and size. NTFS moves the change
-// time when a DACL changes (and keeps it, with the file ID, through a rename),
-// so a grant added later is a new identity and is checked again before the
-// next read; an unchanged file costs no tool at all. Only "private" is kept.
+// time when a DACL changes, so a grant added later is a new identity and is
+// checked again before the next read; an unchanged file costs no tool. A
+// file this process wrote privately is remembered as written (see
+// rememberWrittenSecret). Only "private" is kept, and for
+// five minutes at most: a program with this account's rights (or an
+// administrator's) can set the change time back after it widens a DACL, and
+// it could read the file anyway, but such a change is still seen soon.
+//
+// Known limit: Windows permissions are read by path, not from the open
+// handle. The path must name the open file before and after the read, but an
+// account that may rename a folder above the file could point the path at
+// another file only during the read. LetAgents keeps its secrets in this
+// account's profile, where no other account can rename a folder; closing the
+// limit in general needs a native read of the handle's security descriptor.
+
+const SECRET_VERDICT_MS = 5 * 60_000;
+const SECRET_ATTEMPTS = 3;
+/** Opening a file another process is replacing can fail for a moment on Windows. */
+const BUSY_OPEN_CODES = new Set(["EACCES", "EPERM", "EBUSY"]);
+const BUSY_OPEN_WAIT_MS = 25;
+const PAUSE = new Int32Array(new SharedArrayBuffer(4));
 
 function secretIdentity(info) {
   return `${info.dev}:${info.ino}:${info.ctimeNs}:${info.mtimeNs}:${info.size}`;
@@ -976,59 +1038,123 @@ function secretIdentity(info) {
 function rememberSecret(security, path, info) {
   let verdicts = secretVerdicts.get(security);
   if (!verdicts) { verdicts = new Map(); secretVerdicts.set(security, verdicts); }
-  verdicts.set(resolve(path), secretIdentity(info));
+  verdicts.set(resolve(path), { identity: secretIdentity(info), until: Date.now() + SECRET_VERDICT_MS });
 }
 
 function secretIsRemembered(security, path, info) {
-  return secretVerdicts.get(security)?.get(resolve(path)) === secretIdentity(info);
+  const verdict = secretVerdicts.get(security)?.get(resolve(path));
+  return Boolean(verdict && verdict.identity === secretIdentity(info) && Date.now() < verdict.until);
 }
 
-function secretRefused(path) {
-  return privateError(`LetAgents will not read ${path}: it is not private to this Windows account, or its permissions `
-    + "could not be read. Another account owns it, or its permissions let other accounts open it. Make it private "
-    + "(only you and SYSTEM may have access) or delete it, then try again.");
+function secretRefused(path, cause) {
+  const error = privateError(`LetAgents will not read ${path}: it is not private to this Windows account, or it `
+    + "could not be checked. Another account owns it, it is a link, or its permissions let other accounts open "
+    + "it. Make it private (only you and SYSTEM may have access) or delete it, then try again.");
+  if (cause) error.cause = cause;
+  return error;
 }
 
 /**
- * "private", "exposed", or "replaced" (the path names another file now, or
- * this one changed during the check: open it again). `info` is the open
- * file's fstat (bigint).
+ * A failure before the read: a missing file stays ENOENT (no state yet); a
+ * file being replaced by another process gets a short wait and another try;
+ * anything else (a link, no access) is a refusal, never "no file", which a
+ * caller could read as empty state and then overwrite.
  */
-function judgeSecret(security, path, info, isPrivate, after) {
-  let current = null;
-  try { current = lstatSync(path, { bigint: true }); } catch { /* replaced (or removed) */ }
-  if (!current || !sameFile(current, info) || secretIdentity(after) !== secretIdentity(info)) return "replaced";
+function secretFailure(path, error, attempt) {
+  if (error?.code === "ENOENT") return error;
+  if (BUSY_OPEN_CODES.has(error?.code) && attempt < SECRET_ATTEMPTS) return null;
+  return error?.code === "EOWNERPRIVATE" ? error : secretRefused(path, error);
+}
+
+/** The path's own lstat (bigint), or a throw: a link or anything but a regular file is refused. */
+function secretInfo(path, info) {
+  if (info.isSymbolicLink()) throw secretRefused(path, Object.assign(new Error(`${path} is a link`), { code: "ELOOP" }));
+  if (!info.isFile()) throw secretRefused(path);
+  return info;
+}
+
+/**
+ * After the check: "private" (remembered), "exposed", or "replaced" (the
+ * path names another file now, or this one changed during the check).
+ */
+function judgeSecret(security, path, info, isPrivate) {
+  let after = null;
+  try { after = lstatSync(path, { bigint: true }); } catch { /* replaced (or removed) */ }
+  if (!after || secretIdentity(after) !== secretIdentity(info)) return "replaced";
   if (!isPrivate) return "exposed";
   rememberSecret(security, path, info);
   return "private";
 }
 
-const SECRET_ATTEMPTS = 3;
+/** The open file must be the one that was checked (same identity, change time included). */
+function openedIsChecked(opened, info) {
+  return opened.isFile() && secretIdentity(opened) === secretIdentity(info);
+}
+
+/**
+ * `upgradeAdministratorsOnly`: a file that is not private only because
+ * Administrators have access too (state an older version left) is made
+ * private, by itself (its folder is not changed), and read. Only this
+ * account, SYSTEM and Administrators could ever open it; any other grant or
+ * owner is still refused. The new DACL is checked again before the read.
+ */
+function upgradeSecretSync(security, path, options) {
+  try {
+    const [sddl] = security.readSddlSync([path]);
+    if (!sddlHasOnlyAdministratorAccess(sddl, currentUserSync(security))) return false;
+    protectOwnerPrivateSync(path, "file", { ...options, force: true });
+    return true;
+  } catch { return false; }
+}
+
+async function upgradeSecret(security, path, options) {
+  try {
+    const [sddl] = await security.readSddl([path]);
+    if (!sddlHasOnlyAdministratorAccess(sddl, await currentUser(security))) return false;
+    await protectOwnerPrivate(path, "file", { ...options, force: true });
+    return true;
+  } catch { return false; }
+}
 
 /**
  * Read a high-value secret file (a token, a key). POSIX: exactly
- * readFileSync(path, encoding), as before. Windows: the file is opened
- * without following a link and read through that handle only when its own
- * DACL is private to this account; otherwise this throws EOWNERPRIVATE naming
- * the file. Nothing is repaired and no owner is changed. A file replaced
- * during the check (another process saved it) is opened again.
+ * readFileSync(path, encoding), as before. Windows: the path's own DACL is
+ * checked first (the file is not held open meanwhile, so another process can
+ * still replace it), then the file is opened without following a link and
+ * read only when it is the file that was checked; otherwise this throws
+ * EOWNERPRIVATE naming the file (a missing file is ENOENT). A widened file is
+ * never repaired and another account's file is never taken over (see
+ * upgradeAdministratorsOnly for the one upgrade). A file replaced during the
+ * check (another process saved it) is checked again.
  */
 export function readOwnerPrivateFileSync(path, encoding, options = {}) {
   if (!isWindows(options)) return readFileSync(path, encoding);
   const security = windowsSecurity(options);
+  let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {
-    const descriptor = openNoFollowSync(path, constants.O_RDONLY, undefined, options);
+    let verdict;
     try {
-      const info = fstatSync(descriptor, { bigint: true });
-      if (!info.isFile()) throw secretRefused(path);
-      let verdict = secretIsRemembered(security, path, info) ? "private" : null;
-      if (!verdict) {
-        const isPrivate = isOwnerPrivateSync(path, info, { ...options, checkObject: true });
-        verdict = judgeSecret(security, path, info, isPrivate, fstatSync(descriptor, { bigint: true }));
+      const info = secretInfo(path, lstatSync(path, { bigint: true }));
+      verdict = secretIsRemembered(security, path, info) ? "private"
+        : judgeSecret(security, path, info, isOwnerPrivateSync(path, info, { ...options, checkObject: true }));
+      if (verdict === "private") {
+        const descriptor = openNoFollowSync(path, constants.O_RDONLY, undefined, options);
+        try {
+          if (openedIsChecked(fstatSync(descriptor, { bigint: true }), info)) return readFileSync(descriptor, encoding);
+          verdict = "replaced";
+        } finally { closeSync(descriptor); }
       }
-      if (verdict === "private") return readFileSync(descriptor, encoding);
-      if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
-    } finally { closeSync(descriptor); }
+    } catch (error) {
+      const failure = secretFailure(path, error, attempt);
+      if (failure) throw failure;
+      Atomics.wait(PAUSE, 0, 0, BUSY_OPEN_WAIT_MS);
+      continue;
+    }
+    if (verdict === "exposed" && options.upgradeAdministratorsOnly && !upgraded) {
+      upgraded = true;
+      if (upgradeSecretSync(security, path, options)) continue;
+    }
+    if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
 }
 
@@ -1036,61 +1162,79 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
 export async function readOwnerPrivateFile(path, encoding, options = {}) {
   if (!isWindows(options)) return readFile(path, encoding);
   const security = windowsSecurity(options);
+  let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {
-    const handle = await openNoFollow(path, constants.O_RDONLY, undefined, options);
+    let verdict;
     try {
-      const info = await handle.stat({ bigint: true });
-      if (!info.isFile()) throw secretRefused(path);
-      let verdict = secretIsRemembered(security, path, info) ? "private" : null;
-      if (!verdict) {
-        const isPrivate = await isOwnerPrivate(path, info, { ...options, checkObject: true });
-        verdict = judgeSecret(security, path, info, isPrivate, await handle.stat({ bigint: true }));
+      const info = secretInfo(path, await lstat(path, { bigint: true }));
+      verdict = secretIsRemembered(security, path, info) ? "private"
+        : judgeSecret(security, path, info, await isOwnerPrivate(path, info, { ...options, checkObject: true }));
+      if (verdict === "private") {
+        const handle = await openNoFollow(path, constants.O_RDONLY, undefined, options);
+        try {
+          if (openedIsChecked(await handle.stat({ bigint: true }), info)) return await handle.readFile(encoding === undefined ? undefined : { encoding });
+          verdict = "replaced";
+        } finally { await handle.close(); }
       }
-      if (verdict === "private") return await handle.readFile(encoding === undefined ? undefined : { encoding });
-      if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
-    } finally { await handle.close(); }
+    } catch (error) {
+      const failure = secretFailure(path, error, attempt);
+      if (failure) throw failure;
+      await new Promise(resolvePause => setTimeout(resolvePause, BUSY_OPEN_WAIT_MS));
+      continue;
+    }
+    if (verdict === "exposed" && options.upgradeAdministratorsOnly && !upgraded) {
+      upgraded = true;
+      if (await upgradeSecret(security, path, options)) continue;
+    }
+    if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
+}
+
+/** Windows: start the synchronous permissions reader now, so the first secret read does not wait for PowerShell. */
+export function prepareOwnerPrivateReads(options = {}) {
+  if (!isWindows(options)) return;
+  try { windowsSecurity(options).prepare?.(); } catch { /* the first read starts it instead */ }
 }
 
 /**
  * Windows: after a write that made `temporary` private (an exclusive create
  * then privateEntryCreated, or a protect) and renamed it to `path`, remember
  * `path` as private when it still is that file, unchanged since `written` (the
- * temporary's bigint lstat after its last write). POSIX: nothing.
+ * temporary's bigint lstat after its last write).
  */
 function rememberWrittenSecret(security, path, written) {
   try {
     const current = lstatSync(path, { bigint: true });
-    if (!current.isSymbolicLink() && secretIdentity(current) === secretIdentity(written)) rememberSecret(security, path, current);
+    // The change time is not compared: a rename may move it (Windows Server
+    // does). The file is the one this process made private moments ago.
+    const same = (info) => `${info.dev}:${info.ino}:${info.mtimeNs}:${info.size}`;
+    if (!current.isSymbolicLink() && same(current) === same(written)) rememberSecret(security, path, current);
   } catch { /* not remembered: the next read checks it */ }
 }
 
 /**
- * Windows: make the folder that holds this account's LetAgents state private
- * if it is not yet, as the daemon does with its state folder: a private folder
- * is only read (once per process), never changed. One that another account
- * owns is refused with EPERM and never taken over. Making it private also
- * narrows what the files in it inherit, so state written by an older version
- * (a fresh profile folder's access) becomes private; a file with a grant of
- * its own is still refused when read. A missing folder is left to the writer.
+ * Windows: make LetAgents' own state folder private when only this account,
+ * SYSTEM and Administrators have access to it (a fresh profile folder, as an
+ * older version left it), so new state files are private from their create
+ * with no tool. Nothing is exposed by it, and what the files in it inherit
+ * only narrows. A folder that is private is only read (once per process);
+ * any other folder (a grant to another account, another owner) is left as it
+ * is, and writes into it give each file a protected DACL of its own. Callers
+ * pass only LetAgents' own state folder: making a folder private changes what
+ * everything below it inherits. Returns whether the folder is private now.
  * POSIX: nothing.
  */
 export function ensurePrivateStateFolderSync(folder, options = {}) {
-  if (!isWindows(options)) return;
+  if (!isWindows(options)) return false;
   let info;
-  try { info = lstatSync(folder); } catch (error) { if (error.code === "ENOENT") return; throw error; }
-  if (!info.isDirectory() || info.isSymbolicLink()) throw privateError(`${folder} is not a folder; LetAgents keeps its state in a private folder.`);
-  if (isOwnerPrivateSync(folder, info, options)) return;
+  try { info = lstatSync(folder); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  if (!info.isDirectory() || info.isSymbolicLink()) return false;
+  if (isOwnerPrivateSync(folder, info, options)) return true;
+  const security = windowsSecurity(options);
+  const [sddl] = security.readSddlSync([folder]);
+  if (!pathIsInfo(folder, info) || !sddlHasOnlyAdministratorAccess(sddl, currentUserSync(security))) return false;
   protectOwnerPrivateSync(folder, "directory", { ...options, force: true });
-}
-
-export async function ensurePrivateStateFolder(folder, options = {}) {
-  if (!isWindows(options)) return;
-  let info;
-  try { info = await lstat(folder); } catch (error) { if (error.code === "ENOENT") return; throw error; }
-  if (!info.isDirectory() || info.isSymbolicLink()) throw privateError(`${folder} is not a folder; LetAgents keeps its state in a private folder.`);
-  if (await isOwnerPrivate(folder, info, options)) return;
-  await protectOwnerPrivate(folder, "directory", { ...options, force: true });
+  return true;
 }
 
 // ---------------------------------------------------------------- making private paths

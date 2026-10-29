@@ -1,6 +1,7 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, rmSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { isAbsolute } from 'node:path';
+import { readOwnerPrivateFileSync } from './owner-private-fs.mjs';
 
 /** Remote MCP board requests retain their exact registered connection fence. */
 export function withRegisteredWorkerStateFence(statePath, supplied, callback) {
@@ -12,7 +13,9 @@ export function withRegisteredWorkerStateFence(statePath, supplied, callback) {
     }
     return withStateFileLock(statePath, () => {
         let state;
-        try { state = JSON.parse(readFileSync(statePath, "utf8")); } catch { state = null; }
+        // The worker tokens decide here: Windows reads them only while the file's own DACL is private.
+        try { state = JSON.parse(readOwnerPrivateFileSync(statePath, "utf8")); }
+        catch (error) { if (error?.code === "EOWNERPRIVATE") throw error; state = null; }
         const current = state?.agent_sessions?.[supplied.session_id];
         if (!current || current.ended_at || current.session_token !== supplied.session_token
             || current.agent_instance_id !== supplied.agent_instance_id || current.room_id !== supplied.room_id
