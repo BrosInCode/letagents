@@ -99,7 +99,8 @@ function runTool(file, args, options = {}) {
       out.push(chunk);
     });
     child.stderr.resume();
-    child.once("error", error => finish(error));
+    // A tool that cannot start (Node says ENOENT) must never read as "the file is missing".
+    child.once("error", error => finish(toolError(file, error)));
     child.once("close", (code) => {
       if (code !== 0) finish(privateError(`${file} exited with code ${code}.`));
       else finish(null, Buffer.concat(out).toString("utf8"));
@@ -107,11 +108,17 @@ function runTool(file, args, options = {}) {
   });
 }
 
+function toolError(file, error) {
+  return Object.assign(privateError(`${file} failed: ${error?.message ?? String(error)}`), { cause: error });
+}
+
 function runToolSync(file, args, options = {}) {
-  return execFileSync(file, args, {
-    env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
-    timeout: TOOL_TIMEOUT_MS, maxBuffer: TOOL_OUTPUT_LIMIT, encoding: "utf8",
-  });
+  try {
+    return execFileSync(file, args, {
+      env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
+      timeout: TOOL_TIMEOUT_MS, maxBuffer: TOOL_OUTPUT_LIMIT, encoding: "utf8",
+    });
+  } catch (error) { throw toolError(file, error); }
 }
 
 /** `whoami /user /fo csv /nh` prints `"machine\name","S-1-5-21-…"`; only the SID is read. */
@@ -368,8 +375,9 @@ export function sddlIsOwnerPrivate(sddl, sid) {
 /**
  * The access a new folder in a user profile inherits: owned by the user, and
  * allow entries for only the user, SYSTEM and Administrators (inherited or
- * not). A folder in this state was never open to another non-administrator
- * account through its DACL, so it may be made private in place.
+ * not). This reads the current DACL only: it cannot show that another account
+ * never had access, nor revoke a handle opened while it did (a known Windows
+ * limit of making an existing folder private in place).
  */
 export function sddlHasProfileDefaultAccess(sddl, sid) {
   const parsed = parseSddl(sddl);
@@ -556,7 +564,13 @@ function notProtected(path) {
 export async function protectOwnerPrivate(path, kind, options = {}) {
   if (!isWindows(options)) return chmod(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   // A missing path fails with ENOENT, as chmod does, so callers that skip a missing file still can.
+  // Every later failure is EOWNERPRIVATE: a tool's own ENOENT must never read as "the file is missing".
   await lstat(path);
+  try { await protectWindowsPath(path, kind, options); }
+  catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
+}
+
+async function protectWindowsPath(path, kind, options) {
   const security = windowsSecurity(options);
   await security.protect(path, kind);
   const user = await currentUser(security);
@@ -572,6 +586,11 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
 export function protectOwnerPrivateSync(path, kind, options = {}) {
   if (!isWindows(options)) return chmodSync(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   lstatSync(path);
+  try { protectWindowsPathSync(path, kind, options); }
+  catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
+}
+
+function protectWindowsPathSync(path, kind, options) {
   const security = windowsSecurity(options);
   security.protectSync(path, kind);
   const user = currentUserSync(security);

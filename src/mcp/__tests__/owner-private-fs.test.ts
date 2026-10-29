@@ -457,6 +457,25 @@ test("Windows: protect reads the result back, removes leftover entries by SID, a
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Windows: a tool that cannot start is EOWNERPRIVATE, never a missing file", async () => {
+  const root = scratch();
+  try {
+    const file = join(root, "token.json");
+    writeFileSync(file, "{}");
+    const notStarting = () => { throw Object.assign(new Error("spawn C:\\Windows\\System32\\icacls.exe ENOENT"), { code: "ENOENT" }); };
+    const security = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, run: async () => notStarting(), runSync: notStarting });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    await assert.rejects(protectOwnerPrivate(file, "file", options), { code: "EOWNERPRIVATE" });
+    assert.throws(() => protectOwnerPrivateSync(file, "file", options), { code: "EOWNERPRIVATE" });
+    // A backend that throws ENOENT itself (a native helper, say) is wrapped too.
+    const { security: fake } = fakeSecurity();
+    const throwing: WindowsSecurity = { ...fake, async protect() { notStarting(); }, protectSync() { notStarting(); } };
+    await assert.rejects(protectOwnerPrivate(file, "file", { platform: "win32", windowsSecurity: throwing }), { code: "EOWNERPRIVATE" });
+    // Only a missing path itself is ENOENT.
+    await assert.rejects(protectOwnerPrivate(join(root, "missing"), "file", options), { code: "ENOENT" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a fresh profile folder's access (user, SYSTEM, Administrators) is told apart from a shared one", () => {
   assert.equal(sddlHasProfileDefaultAccess(`O:${USER}D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;${USER})`, USER), true);
   assert.equal(sddlHasProfileDefaultAccess(PRIVATE_FOLDER, USER), true);

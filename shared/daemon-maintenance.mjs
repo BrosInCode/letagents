@@ -27,10 +27,13 @@ async function privateParent(path) {
 
 /**
  * Windows: "no record" is trusted only where no other account could have
- * deleted one. A hold is only ever written into a private folder, so a folder
- * of this account's that is not private yet has never held one: it is made
- * private now and the absence stands. A missing folder holds nothing. Any
- * other answer (another account's folder, a tool failure) fails closed.
+ * deleted one. A hold is only ever written into a private folder, so in a
+ * folder of this account's that is not private yet no hold was written; it is
+ * made private now (only from a fresh profile folder's access) and the absence
+ * stands. A missing folder holds nothing. Any other answer (another account's
+ * folder, a tool failure) fails closed. Accepted limit: an account that held
+ * WRITE_DAC on the folder earlier may keep an open handle that no DACL change
+ * revokes; a handle-based design is needed to close that.
  */
 async function absenceIsTrusted(path) {
   try { await lstat(dirname(path)); }
@@ -40,16 +43,18 @@ async function absenceIsTrusted(path) {
 
 /**
  * Windows: make this account's own state folder private if it is not yet
- * (the daemon does the same at start). Only a folder with a fresh profile
- * folder's access (this account, SYSTEM, Administrators) is changed in place;
- * one that grants any other account is refused.
+ * (the daemon's state database code does the same at start). Only a folder
+ * with a fresh profile folder's access (this account, SYSTEM, Administrators)
+ * is changed in place; one that grants any other account is refused.
  */
 async function ensurePrivateParent(path) {
   const folder = dirname(path);
   const info = await lstat(folder);
-  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe service maintenance folder.");
+  const unsafe = () => new Error(`Unsafe service maintenance folder. Make ${folder} private to this account `
+    + "(only you and SYSTEM may have access), then try again.");
+  if (!info.isDirectory() || info.isSymbolicLink()) throw unsafe();
   if (await isOwnerPrivate(folder, info)) return;
-  if (!await hasProfileDefaultAccess(folder, info)) throw new Error("Unsafe service maintenance folder.");
+  if (!await hasProfileDefaultAccess(folder, info)) throw unsafe();
   await protectOwnerPrivate(folder, "directory");
 }
 
