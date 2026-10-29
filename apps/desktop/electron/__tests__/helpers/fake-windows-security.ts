@@ -4,11 +4,12 @@
 // hard link. Everything else reads as an inherited, non-private DACL.
 // Linux reuses an inode at once after a delete, so a test must not delete and
 // recreate a path it has marked (tamper, giveAway, share) and expect a fresh file.
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   forgetOwnerPrivateCache,
   overrideOwnerPrivatePlatformForTesting,
+  sddlHasOnlyAdministratorAccess,
   type PrivateKind,
   type WindowsSecurity,
 } from "../../../../../shared/owner-private-fs.mjs";
@@ -22,7 +23,7 @@ const INHERITED_SDDL = `O:${FAKE_USER_SID}G:${FAKE_USER_SID}D:AI(A;ID;FA;;;SY)(A
 
 export type FakeWindowsSecurity = {
   security: WindowsSecurity;
-  /** "protect:<kind>:<path>" per icacls call, in order. */
+  /** "protect:<kind>:<path>" per icacls call, and "upgrade:<path>" per handle upgrade, in order. */
   protects: string[];
   /** Give a path an extra Users entry (as `icacls /grant Users:R` would); what it holds inherits that. */
   tamper(path: string): void;
@@ -69,11 +70,29 @@ export function fakeWindowsSecurity(): FakeWindowsSecurity {
     // icacls cannot take another account's file from a standard user: it stays theirs.
     if (!foreignFiles.has(id)) { protectedFiles.add(id); sharedFiles.delete(id); }
   };
+  // As the reader's "object:" request: the SDDL and the bytes of what the path names now.
+  const readObject = (path: string) => {
+    const answer = sddl(path);
+    if (!answer) return null;
+    try { return { sddl: answer, data: readFileSync(path) }; } catch { return null; }
+  };
+  // As "upgrade:": a file only this account, SYSTEM and Administrators can open becomes private.
+  const upgrade = (path: string) => {
+    const id = identity(path);
+    if (!id || !sddlHasOnlyAdministratorAccess(sddl(path), FAKE_USER_SID)) return null;
+    protects.push(`upgrade:${path}`);
+    protectedFiles.add(id);
+    return PRIVATE_SDDL;
+  };
   const security: WindowsSecurity = {
     async currentUserSid() { return FAKE_USER_SID; },
     currentUserSidSync() { return FAKE_USER_SID; },
     async readSddl(paths) { return paths.map(sddl); },
     readSddlSync(paths) { return paths.map(sddl); },
+    async readObjects(paths) { return paths.map(readObject); },
+    readObjectsSync(paths) { return paths.map(readObject); },
+    async upgradeObject(path) { return upgrade(path); },
+    upgradeObjectSync(path) { return upgrade(path); },
     async protect(path, kind) { protect(path, kind); },
     protectSync(path, kind) { protect(path, kind); },
   };

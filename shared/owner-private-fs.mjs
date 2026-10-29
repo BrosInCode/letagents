@@ -34,7 +34,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, unlink } from "node:fs/promises";
 import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { renameSyncWithRetry, renameWithRetryAsync } from "./rename-retry.mjs";
 
@@ -45,16 +45,65 @@ const SID_PATTERN = /^S-1-[0-9]+(?:-[0-9]+)+$/;
 /** Paths are passed to PowerShell in one environment variable; Windows caps a value at 32,767 characters. */
 const PATHS_PER_CALL_CHARACTERS = 24_000;
 const TOOL_TIMEOUT_MS = 30_000;
-const TOOL_OUTPUT_LIMIT = 4 * 1024 * 1024;
+const TOOL_OUTPUT_LIMIT = 16 * 1024 * 1024;
+/** The largest secret file read through a handle (its bytes come back in base64). */
+const OBJECT_LIMIT = 8 * 1024 * 1024;
 const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // One line per path, in order: "ok:<SDDL>" or "error:". The paths arrive in an
 // environment variable, one per line (a Windows path cannot hold a line
 // break), never in the command text, so no path is parsed as code. (Not JSON:
 // Windows PowerShell 5.1 does not unroll the array ConvertFrom-Json returns.)
+//
+// Two requests act on one open handle instead of the path, so a folder above
+// the file renamed meanwhile cannot make the answer describe another file:
+//   "object:<path>"  the owner and DACL of the handle, and the file's bytes
+//                    read through it: "ok:<SDDL>|<base64>";
+//   "upgrade:<path>" if the handle's owner is this account or Administrators
+//                    and only this account, SYSTEM and Administrators are
+//                    allowed in, make it this account's with a protected DACL
+//                    for only this account and SYSTEM, through that handle:
+//                    "ok:<new SDDL>"; anything else is "error:".
+const ANSWER_FUNCTION = [
+  "function LetAgentsAnswer([string]$p) {",
+  "  try {",
+  "    if ($p.StartsWith('object:')) {",
+  "      $fs = [System.IO.File]::Open($p.Substring(7), 'Open', 'Read', 'ReadWrite, Delete')",
+  "      try {",
+  `        if ($fs.Length -gt ${OBJECT_LIMIT}) { return 'error:' }`,
+  "        $sddl = $fs.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Access')",
+  "        $bytes = New-Object byte[] $fs.Length; $read = 0",
+  "        while ($read -lt $bytes.Length) { $n = $fs.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }",
+  "        if ($read -ne $bytes.Length -or $fs.ReadByte() -ne -1) { return 'error:' }",
+  "        return 'ok:' + $sddl + '|' + [Convert]::ToBase64String($bytes)",
+  "      } finally { $fs.Dispose() }",
+  "    }",
+  "    if ($p.StartsWith('upgrade:')) {",
+  "      $rights = [System.Security.AccessControl.FileSystemRights]'ReadData, ReadPermissions, ChangePermissions, TakeOwnership'",
+  "      $fs = New-Object System.IO.FileStream($p.Substring(8), [System.IO.FileMode]::Open, $rights, [System.IO.FileShare]'ReadWrite, Delete', 4096, [System.IO.FileOptions]::None)",
+  "      try {",
+  "        $sid = [System.Security.Principal.SecurityIdentifier]; $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+  "        $allowed = @($me.Value, 'S-1-5-18', 'S-1-5-32-544'); $acl = $fs.GetAccessControl()",
+  "        $owner = $acl.GetOwner($sid).Value",
+  "        if ($owner -ne $me.Value -and $owner -ne 'S-1-5-32-544') { return 'error:' }",
+  "        foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) { if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $rule.IdentityReference.Value) { return 'error:' } }",
+  "        $new = New-Object System.Security.AccessControl.FileSecurity",
+  "        $new.SetOwner($me); $new.SetAccessRuleProtection($true, $false)",
+  "        $new.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))",
+  "        $new.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'), 'FullControl', 'Allow')))",
+  "        $fs.SetAccessControl($new)",
+  "        return 'ok:' + $fs.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Access')",
+  "      } finally { $fs.Dispose() }",
+  "    }",
+  "    return 'ok:' + (Get-Acl -LiteralPath $p).Sddl",
+  "  } catch { return 'error:' }",
+  "}",
+].join("\n");
+
 const READ_SDDL_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
+  ANSWER_FUNCTION,
   `$paths = $env:${PATHS_VARIABLE} -split "\`n"`,
-  "foreach ($p in $paths) { try { 'ok:' + (Get-Acl -LiteralPath $p).Sddl } catch { 'error:' } }",
+  "foreach ($p in $paths) { LetAgentsAnswer $p }",
 ].join("; ");
 
 /** The environment value that carries `paths` to the PowerShell script. */
@@ -97,10 +146,19 @@ export function windowsToolPaths(env = process.env) {
   };
 }
 
+/**
+ * A tool runs in its own folder: Windows locks a process's current folder, so
+ * a tool started in the caller's current folder (a temporary folder, say)
+ * would keep it from being deleted while it runs.
+ */
+function toolFolder(file) {
+  return isAbsolute(file) ? dirname(file) : win32.isAbsolute(file) ? win32.dirname(file) : undefined;
+}
+
 function runTool(file, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(file, args, {
-      env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
+      env: options.env ?? process.env, cwd: toolFolder(file), stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
     });
     const out = []; let size = 0; let settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolvePromise(value); };
@@ -127,7 +185,7 @@ function toolError(file, error) {
 function runToolSync(file, args, options = {}) {
   try {
     return execFileSync(file, args, {
-      env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
+      env: options.env ?? process.env, cwd: toolFolder(file), stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false,
       timeout: TOOL_TIMEOUT_MS, maxBuffer: TOOL_OUTPUT_LIMIT, encoding: "utf8",
     });
   } catch (error) { throw toolError(file, error); }
@@ -243,19 +301,27 @@ function powershellArguments() {
 // and a reader that fails, stops or does not answer, use the one-shot script
 // above, which reads the paths from the environment. Synchronous reads have a
 // reader of their own (see createSyncSddlServer).
-const SERVER_SCRIPT = "$ErrorActionPreference = 'Continue'; while ($true) { $line = [Console]::In.ReadLine(); "
+const SERVER_SCRIPT = "$ErrorActionPreference = 'Continue'; " + ANSWER_FUNCTION + "\nwhile ($true) { $line = [Console]::In.ReadLine(); "
   + "if ($null -eq $line) { break }; if ($line -eq '') { [Console]::Out.WriteLine('done:'); [Console]::Out.Flush(); continue }; "
-  + "try { [Console]::Out.WriteLine('ok:' + (Get-Acl -LiteralPath $line).Sddl) } catch { [Console]::Out.WriteLine('error:') } }";
+  + "[Console]::Out.WriteLine((LetAgentsAnswer $line)) }";
 
 const SERVER_ARGUMENTS = Object.freeze(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SERVER_SCRIPT]);
 
 function startSddlServer(powershell, env) {
   return spawn(powershell, SERVER_ARGUMENTS, {
-    env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false,
+    env, cwd: toolFolder(powershell), stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false,
   });
 }
 
 const SERVER_PATH = /^[\x20-\x7e]+$/;
+
+/** An "object:" answer: `<SDDL>|<base64 bytes>`, or null. */
+export function parseObjectAnswer(answer) {
+  if (typeof answer !== "string") return null;
+  const bar = answer.indexOf("|");
+  if (bar <= 0 || !/^[A-Za-z0-9+/=]*$/.test(answer.slice(bar + 1))) return null;
+  return { sddl: answer.slice(0, bar), data: Buffer.from(answer.slice(bar + 1), "base64") };
+}
 
 /** One long-lived reader; `start` returns a child process (injectable for tests). */
 export function createSddlServer(start) {
@@ -325,17 +391,18 @@ export function createSddlServer(start) {
 // above: printable ASCII paths only, and a reader that fails, stops or does
 // not answer in time is stopped for good; the one-shot script answers instead.
 const SYNC_READER_SOURCE = `"use strict";
+let child = null; let buffer = ""; let lines = []; let busy = false; let dead = false; let timer = null; let started = false;
+let port = null; let flag = null;
 process.on("uncaughtException", () => stop());
 const { workerData } = require("node:worker_threads");
 const { spawn } = require("node:child_process");
-const { port, signal, command, args, env, timeoutMs, startTimeoutMs } = workerData;
-const flag = new Int32Array(signal);
-let child = null; let buffer = ""; let lines = []; let busy = false; let dead = false; let timer = null; let started = false;
-function answer(message) { clearTimeout(timer); busy = false; lines = []; port.postMessage(message); Atomics.store(flag, 0, 1); Atomics.notify(flag, 0); }
+const { signal, command, args, env, cwd, timeoutMs, startTimeoutMs } = workerData;
+port = workerData.port; flag = new Int32Array(signal);
+function answer(message) { clearTimeout(timer); busy = false; lines = []; if (!port) return; port.postMessage(message); Atomics.store(flag, 0, 1); Atomics.notify(flag, 0); }
 function stop() { if (dead) return; dead = true; try { if (child) child.kill(); } catch {} if (busy) answer({ error: true }); }
 function reader() {
   if (child) return child;
-  child = spawn(command, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false });
+  child = spawn(command, args, { env, cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false });
   child.stderr.resume();
   child.stdin.on("error", stop);
   child.stdout.setEncoding("utf8");
@@ -375,7 +442,9 @@ const SYNC_READER_START_TIMEOUT_MS = TOOL_TIMEOUT_MS;
 /** Starts the worker that owns a synchronous reader: `command args` speaks the reader protocol above. */
 export function syncSddlReaderWorker(command, args, env = process.env) {
   return ({ port, signal, timeoutMs, startTimeoutMs }) => new Worker(SYNC_READER_SOURCE, {
-    eval: true, workerData: { port, signal, command, args, env: { ...env }, timeoutMs, startTimeoutMs }, transferList: [port],
+    eval: true, workerData: { port, signal, command, args, env: { ...env }, cwd: toolFolder(command), timeoutMs, startTimeoutMs }, transferList: [port],
+    // The process's own flags (--input-type=module, --import <loader>, -e) are not the worker's: its source is CommonJS.
+    execArgv: [],
   });
 }
 
@@ -384,6 +453,7 @@ export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS
   let worker = null; let port = null; let flag = null; let broken = false;
   /** The worker's first answer (the PowerShell start) has a longer budget. */
   let answered = false;
+  let answeredOnce = false;
   /** A prepare() request whose answer has not been taken yet. */
   let warming = false;
   const stop = () => {
@@ -416,10 +486,13 @@ export function createSyncSddlServer(start, { timeoutMs = SYNC_READER_TIMEOUT_MS
     if (Atomics.wait(flag, 0, 0, budget + 1_000) === "timed-out") { stop(); throw privateError("The permissions reader did not answer in time."); }
     const message = receiveMessageOnPort(port)?.message;
     if (!Array.isArray(message?.lines)) { stop(); throw privateError("The permissions reader stopped."); }
+    answeredOnce = true;
     return message.lines;
   }
   return {
     get usable() { return !broken; },
+    /** Whether the worker ever answered: a reader that never started is not worth starting again. */
+    get answeredOnce() { return answeredOnce; },
     /** Start the reader (and PowerShell) now, without waiting, so the first read does not pay for the start. */
     prepare() {
       if (broken || worker) return;
@@ -456,11 +529,16 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
     ? (runSync === runToolSync ? syncSddlReaderWorker(tools.powershell, SERVER_ARGUMENTS, env) : null)
     : startSyncServer;
   let syncServer = startSync ? createSyncSddlServer(startSync) : null;
-  // A reader given up (a slow start on a busy machine, a crash) is started again, twice at most;
-  // without one every synchronous check would start a one-shot PowerShell.
+  // A reader that answered and was then given up (a crash, an answer that did not come in time on a
+  // busy machine) is started again, twice at most; without one every synchronous check would start a
+  // one-shot PowerShell. One that never answered is not: its start does not work here.
   let syncRestarts = 0;
   const usableSyncServer = () => {
-    if (syncServer && !syncServer.usable && syncRestarts < 2 && !process._exiting) { syncRestarts += 1; syncServer = createSyncSddlServer(startSync); }
+    if (syncServer && !syncServer.usable && syncServer.answeredOnce && syncRestarts < 2 && !process._exiting) {
+      syncRestarts += 1;
+      syncServer = createSyncSddlServer(startSync);
+      syncServer.prepare();
+    }
     return syncServer?.usable ? syncServer : null;
   };
   let sid = null;
@@ -504,6 +582,22 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
         result.push(...parseSddlLines(runSync(tools.powershell, powershellArguments(), { env: environment(chunk) }), chunk.length));
       }
       return result;
+    },
+    /** Per path, the owner, DACL and bytes read through one handle ("object:"), or null. */
+    async readObjects(paths) {
+      return (await this.readSddl(paths.map(path => `object:${path}`))).map(parseObjectAnswer);
+    },
+    readObjectsSync(paths) {
+      return this.readSddlSync(paths.map(path => `object:${path}`)).map(parseObjectAnswer);
+    },
+    /** Make an Administrators-only file private through one handle ("upgrade:"): its new SDDL, or null when refused. */
+    async upgradeObject(path) {
+      const [answer] = await this.readSddl([`upgrade:${path}`]);
+      return answer;
+    },
+    upgradeObjectSync(path) {
+      const [answer] = this.readSddlSync([`upgrade:${path}`]);
+      return answer;
     },
     async protect(path, kind) {
       const user = await this.currentUserSid();
@@ -811,11 +905,11 @@ export function privateEntryCreatedSync(path, kind, options = {}) {
 /** Internal: this process just made the entry, so its owner is this account and need not be read first. */
 const JUST_CREATED = Symbol("owner-private just created");
 /**
- * Internal: an upgrade of an Administrators-only secret (see
- * upgradeAdministratorsOnly). The value is the volume and file ID that were
- * checked; the protect refuses unless the path is still that file and the
- * DACL it reads before any change still lets only this account, SYSTEM and
- * Administrators in.
+ * Internal: the upgrade of LetAgents' own state folder (see
+ * ensurePrivateStateFolderSync). The value is the volume and file ID that
+ * were checked; the protect refuses unless the path is still that folder and
+ * the DACL it reads before any change still lets only this account, SYSTEM
+ * and Administrators in.
  */
 const UPGRADE_OF = Symbol("owner-private upgrade of");
 
@@ -1028,24 +1122,22 @@ export function assertOwnerPrivateSync(path, options = {}) {
 
 // ---------------------------------------------------------------- high-value secret files
 //
-// A token or key file is read only after its own DACL was found private
-// (checkObject), on Windows as POSIX refuses a file with group or other bits
-// or another uid. The verdict is kept per path for the file's identity:
-// volume, file ID, change time, write time and size. NTFS moves the change
-// time when a DACL changes, so a grant added later is a new identity and is
-// checked again before the next read; an unchanged file costs no tool. A
-// file this process wrote privately is remembered when it is unchanged since
-// the write (see rememberWrittenSecret). Only "private" is kept, and for
-// five minutes at most: a program with this account's rights (or an
-// administrator's) can set the change time back after it widens a DACL, and
-// it could read the file anyway, but such a change is still seen soon.
+// A token or key file is read on Windows only when its own owner and DACL
+// are private to this account, as POSIX refuses a file with group or other
+// bits or another uid. The owner, the DACL and the bytes come from one open
+// handle (the reader's "object:" request), so a folder above the file that
+// another account renames during the check cannot make the answer describe
+// one file and the bytes come from another.
 //
-// Known limit: Windows permissions are read by path, not from the open
-// handle. The path must name the open file before and after the read, but an
-// account that may rename a folder above the file could point the path at
-// another file only during the read. LetAgents keeps its secrets in this
-// account's profile, where no other account can rename a folder; closing the
-// limit in general needs a native read of the handle's security descriptor.
+// The verdict is kept per path for the file's identity (volume, file ID,
+// change time, write time, size) and a hash of the bytes that were checked.
+// An unchanged file is then read through Node's own handle with no tool: it
+// must still have that identity and those bytes, or it is checked again.
+// NTFS moves the change time when a DACL changes, so a grant added later is
+// checked before the next read. A verdict lasts five minutes at most: a
+// program with this account's rights (or an administrator's) can set the
+// change time back, and it could read the file anyway, but such a change is
+// still seen soon. Only "private" is kept.
 
 const SECRET_VERDICT_MS = 5 * 60_000;
 const SECRET_ATTEMPTS = 3;
@@ -1058,15 +1150,24 @@ function secretIdentity(info) {
   return `${info.dev}:${info.ino}:${info.ctimeNs}:${info.mtimeNs}:${info.size}`;
 }
 
-function rememberSecret(security, path, info) {
-  let verdicts = secretVerdicts.get(security);
-  if (!verdicts) { verdicts = new Map(); secretVerdicts.set(security, verdicts); }
-  verdicts.set(resolve(path), { identity: secretIdentity(info), until: Date.now() + SECRET_VERDICT_MS });
+function digest(data) {
+  return createHash("sha256").update(data).digest("hex");
 }
 
-function secretIsRemembered(security, path, info) {
+function rememberSecret(security, path, info, data) {
+  let verdicts = secretVerdicts.get(security);
+  if (!verdicts) { verdicts = new Map(); secretVerdicts.set(security, verdicts); }
+  verdicts.set(resolve(path), { identity: secretIdentity(info), digest: digest(data), until: Date.now() + SECRET_VERDICT_MS });
+}
+
+function forgetSecret(security, path) {
+  secretVerdicts.get(security)?.delete(resolve(path));
+}
+
+/** The digest of the bytes checked for this identity, while the verdict lasts; else null. */
+function rememberedDigest(security, path, info) {
   const verdict = secretVerdicts.get(security)?.get(resolve(path));
-  return Boolean(verdict && verdict.identity === secretIdentity(info) && Date.now() < verdict.until);
+  return verdict && verdict.identity === secretIdentity(info) && Date.now() < verdict.until ? verdict.digest : null;
 }
 
 function secretRefused(path, cause) {
@@ -1097,70 +1198,92 @@ function secretInfo(path, info) {
 }
 
 /**
- * After the check: "private" (remembered), "exposed", or "replaced" (the
- * path names another file now, or this one changed during the check).
+ * Whether a handle's owner and DACL are private: a protected DACL for only
+ * this account and SYSTEM, or those entries inherited from a folder that is
+ * private itself (it decides what they become).
  */
-function judgeSecret(security, path, info, isPrivate) {
-  let after = null;
-  try { after = lstatSync(path, { bigint: true }); } catch { /* replaced (or removed) */ }
-  if (!after || secretIdentity(after) !== secretIdentity(info)) return "replaced";
-  if (!isPrivate) return "exposed";
-  rememberSecret(security, path, info);
-  return "private";
+function objectIsPrivateSync(path, sddl, user, options) {
+  if (sddlIsOwnerPrivate(sddl, user)) return true;
+  if (!sddlHasPrivateEntries(sddl, user)) return false;
+  const folder = dirname(resolve(path));
+  try {
+    const info = lstatSync(folder, { bigint: true });
+    return info.isDirectory() && !info.isSymbolicLink() && isOwnerPrivateSync(folder, info, options);
+  } catch { return false; }
 }
 
-/** The open file must be the one that was checked (same identity, change time included). */
-function openedIsChecked(opened, info) {
-  return opened.isFile() && secretIdentity(opened) === secretIdentity(info);
+async function objectIsPrivate(path, sddl, user, options) {
+  if (sddlIsOwnerPrivate(sddl, user)) return true;
+  if (!sddlHasPrivateEntries(sddl, user)) return false;
+  const folder = dirname(resolve(path));
+  try {
+    const info = await lstat(folder, { bigint: true });
+    return info.isDirectory() && !info.isSymbolicLink() && await isOwnerPrivate(folder, info, options);
+  } catch { return false; }
 }
 
 /**
- * `upgradeAdministratorsOnly`: a file that is not private only because
- * Administrators have access too (state an older version left) is made
- * private, by itself (its folder is not changed), and read. Only this
- * account, SYSTEM and Administrators could ever open it; any other grant or
- * owner is still refused. The protect itself refuses unless the path is
- * still the file that was checked (`info`) and the DACL it reads before any
- * change is still Administrators-only; the new DACL is checked again before
- * the read.
+ * After a handle check: "replaced" when the path no longer has the identity
+ * seen before the check (another process saved it, or it changed), else
+ * whether the handle's answer was private.
  */
-function upgradeSecretSync(path, info, options) {
-  try { protectOwnerPrivateSync(path, "file", { ...options, force: true, [UPGRADE_OF]: `${info.dev}:${info.ino}` }); return true; }
-  catch { return false; }
+function settleSecret(path, info, isPrivate) {
+  let after = null;
+  try { after = lstatSync(path, { bigint: true }); } catch { /* replaced (or removed) */ }
+  if (!after || secretIdentity(after) !== secretIdentity(info)) return "replaced";
+  return isPrivate ? "private" : "exposed";
 }
 
-async function upgradeSecret(path, info, options) {
-  try { await protectOwnerPrivate(path, "file", { ...options, force: true, [UPGRADE_OF]: `${info.dev}:${info.ino}` }); return true; }
-  catch { return false; }
+function decoded(data, encoding) {
+  return encoding === undefined ? data : data.toString(encoding);
 }
 
 /**
  * Read a high-value secret file (a token, a key). POSIX: exactly
- * readFileSync(path, encoding), as before. Windows: the path's own DACL is
- * checked first (the file is not held open meanwhile, so another process can
- * still replace it), then the file is opened without following a link and
- * read only when it is the file that was checked; otherwise this throws
- * EOWNERPRIVATE naming the file (a missing file is ENOENT). A widened file is
- * never repaired and another account's file is never taken over (see
- * upgradeAdministratorsOnly for the one upgrade). A file replaced during the
- * check (another process saved it) is checked again.
+ * readFileSync(path, encoding), as before. Windows: an unchanged file this
+ * process checked (or wrote) is read through a no-follow handle and must
+ * match what was checked; any other is read through one handle together with
+ * its owner and DACL (see "object:"), and returned only when they are
+ * private. Otherwise this throws EOWNERPRIVATE naming the file (a missing
+ * file is ENOENT). A widened file is never repaired and another account's
+ * file is never taken over (see upgradeAdministratorsOnly for the one
+ * upgrade). A file replaced during the check is checked again.
+ *
+ * `upgradeAdministratorsOnly`: a file that is not private only because
+ * Administrators have access too (state an older version left) is made
+ * private by itself through one handle (see "upgrade:"), then checked again
+ * and read. Only this account, SYSTEM and Administrators could ever open
+ * such a file; any other grant or owner is refused, and no folder changes.
  */
 export function readOwnerPrivateFileSync(path, encoding, options = {}) {
   if (!isWindows(options)) return readFileSync(path, encoding);
   const security = windowsSecurity(options);
   let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {
-    let verdict; let info;
+    let verdict;
     try {
-      info = secretInfo(path, lstatSync(path, { bigint: true }));
-      verdict = secretIsRemembered(security, path, info) ? "private"
-        : judgeSecret(security, path, info, isOwnerPrivateSync(path, info, { ...options, checkObject: true }));
-      if (verdict === "private") {
+      const info = secretInfo(path, lstatSync(path, { bigint: true }));
+      const known = rememberedDigest(security, path, info);
+      if (known) {
         const descriptor = openNoFollowSync(path, constants.O_RDONLY, undefined, options);
         try {
-          if (openedIsChecked(fstatSync(descriptor, { bigint: true }), info)) return readFileSync(descriptor, encoding);
-          verdict = "replaced";
+          if (openedIsChecked(fstatSync(descriptor, { bigint: true }), info)) {
+            const data = readFileSync(descriptor);
+            if (digest(data) === known) return decoded(data, encoding);
+          }
         } finally { closeSync(descriptor); }
+        // Not what was checked (other bytes under the same identity, or another file): check it again.
+        forgetSecret(security, path);
+        verdict = "replaced";
+      } else {
+        if (!security.readObjectsSync) throw secretRefused(path);
+        const [object] = security.readObjectsSync([path]);
+        const isPrivate = Boolean(object) && objectIsPrivateSync(path, object.sddl, currentUserSync(security), options);
+        verdict = settleSecret(path, info, isPrivate);
+        if (verdict === "private") {
+          rememberSecret(security, path, info, object.data);
+          return decoded(object.data, encoding);
+        }
       }
     } catch (error) {
       const failure = secretFailure(path, error, attempt);
@@ -1170,7 +1293,9 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
     }
     if (verdict === "exposed" && options.upgradeAdministratorsOnly && !upgraded) {
       upgraded = true;
-      if (upgradeSecretSync(path, info, options)) continue;
+      let answer = null;
+      try { answer = security.upgradeObjectSync?.(path) ?? null; } catch { /* refused */ }
+      if (answer) continue;
     }
     if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
@@ -1182,17 +1307,29 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
   const security = windowsSecurity(options);
   let upgraded = false;
   for (let attempt = 1; ; attempt += 1) {
-    let verdict; let info;
+    let verdict;
     try {
-      info = secretInfo(path, await lstat(path, { bigint: true }));
-      verdict = secretIsRemembered(security, path, info) ? "private"
-        : judgeSecret(security, path, info, await isOwnerPrivate(path, info, { ...options, checkObject: true }));
-      if (verdict === "private") {
+      const info = secretInfo(path, await lstat(path, { bigint: true }));
+      const known = rememberedDigest(security, path, info);
+      if (known) {
         const handle = await openNoFollow(path, constants.O_RDONLY, undefined, options);
         try {
-          if (openedIsChecked(await handle.stat({ bigint: true }), info)) return await handle.readFile(encoding === undefined ? undefined : { encoding });
-          verdict = "replaced";
+          if (openedIsChecked(await handle.stat({ bigint: true }), info)) {
+            const data = await handle.readFile();
+            if (digest(data) === known) return decoded(data, encoding);
+          }
         } finally { await handle.close(); }
+        forgetSecret(security, path);
+        verdict = "replaced";
+      } else {
+        if (!security.readObjects) throw secretRefused(path);
+        const [object] = await security.readObjects([path]);
+        const isPrivate = Boolean(object) && await objectIsPrivate(path, object.sddl, await currentUser(security), options);
+        verdict = settleSecret(path, info, isPrivate);
+        if (verdict === "private") {
+          rememberSecret(security, path, info, object.data);
+          return decoded(object.data, encoding);
+        }
       }
     } catch (error) {
       const failure = secretFailure(path, error, attempt);
@@ -1202,10 +1339,17 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
     }
     if (verdict === "exposed" && options.upgradeAdministratorsOnly && !upgraded) {
       upgraded = true;
-      if (await upgradeSecret(path, info, options)) continue;
+      let answer = null;
+      try { answer = (await security.upgradeObject?.(path)) ?? null; } catch { /* refused */ }
+      if (answer) continue;
     }
     if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
+}
+
+/** The open file must be the one that was checked (same identity, change time included). */
+function openedIsChecked(opened, info) {
+  return opened.isFile() && secretIdentity(opened) === secretIdentity(info);
 }
 
 /** Windows: start the synchronous permissions reader now, so the first secret read does not wait for PowerShell. */
@@ -1217,15 +1361,15 @@ export function prepareOwnerPrivateReads(options = {}) {
 /**
  * Windows: after a write that made `temporary` private (an exclusive create
  * then privateEntryCreated, or a protect) and renamed it to `path`, remember
- * `path` as private when it still is that file, unchanged since `written` (the
- * temporary's bigint lstat after its last write).
+ * `path` and the bytes written as private when it is still that file,
+ * unchanged since `written` (the temporary's bigint lstat after its last
+ * write). Any change, the change time included (a rename may move it), leaves
+ * it unremembered: the next read checks it.
  */
-function rememberWrittenSecret(security, path, written) {
+function rememberWrittenSecret(security, path, written, data) {
   try {
     const current = lstatSync(path, { bigint: true });
-    // Any change since the write (the change time included, which a rename
-    // may also move) leaves it unremembered: the next read checks its DACL.
-    if (!current.isSymbolicLink() && secretIdentity(current) === secretIdentity(written)) rememberSecret(security, path, current);
+    if (!current.isSymbolicLink() && secretIdentity(current) === secretIdentity(written)) rememberSecret(security, path, current, data);
   } catch { /* not remembered: the next read checks it */ }
 }
 
@@ -1584,7 +1728,7 @@ export async function writePrivateFileAtomically(path, data, options = {}) {
       const written = isWindows(options) ? await lstat(temporary, { bigint: true }) : null;
       await renameWithRetryAsync(temporary, path, { platform: ownerPrivatePlatform(options) });
       // This process made the file private, so its next read needs no check.
-      if (written) rememberWrittenSecret(windowsSecurity(options), path, written);
+      if (written) rememberWrittenSecret(windowsSecurity(options), path, written, typeof data === "string" ? Buffer.from(data, "utf8") : data);
       if (options.syncDirectory !== false) await syncDirectory(dirname(path), options);
     } catch (error) {
       if (!closed) await handle.close().catch(() => undefined);
@@ -1612,7 +1756,7 @@ export function writePrivateFileAtomicallySync(path, data, options = {}) {
       closed = true;
       const written = isWindows(options) ? lstatSync(temporary, { bigint: true }) : null;
       renameSyncWithRetry(temporary, path, { platform: ownerPrivatePlatform(options) });
-      if (written) rememberWrittenSecret(windowsSecurity(options), path, written);
+      if (written) rememberWrittenSecret(windowsSecurity(options), path, written, bytes);
       if (options.syncDirectory !== false) syncDirectorySync(dirname(path), options);
     } catch (error) {
       if (!closed) { try { closeSync(descriptor); } catch { /* already failing */ } }

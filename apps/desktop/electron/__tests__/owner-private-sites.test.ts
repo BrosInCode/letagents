@@ -207,12 +207,12 @@ test("Windows: the desktop reads the shared state file (worker tokens) only whil
   await asWindows(fake, () => {
     // State an older version left (this account, SYSTEM and Administrators only): the file alone is made private, then read.
     assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token");
-    assert.deepEqual(fake.protects, [`protect:file:${file}`]);
+    assert.deepEqual(fake.protects, [`upgrade:${file}`]);
     // The first write makes LetAgents' own folder private; later writes run no tool.
     saveAgentSession({ ...session, session_token: "worker-token-2" });
     saveAgentSession({ ...session, session_token: "worker-token-3" });
     assert.equal(readAgentLocalState().agent_sessions?.s1?.session_token, "worker-token-3");
-    assert.deepEqual(fake.protects, [`protect:file:${file}`, `protect:directory:${folder}`]);
+    assert.deepEqual(fake.protects, [`upgrade:${file}`, `protect:directory:${folder}`]);
     // A grant of its own: refused (never read as empty state, so never overwritten), named, not repaired.
     fake.tamper(file);
     for (const read of [() => readAgentLocalState(), () => readAgentLocalStateSnapshot(), () => saveAgentSession(session)]) {

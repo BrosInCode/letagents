@@ -43,12 +43,12 @@ test("Windows: state an older version left is made private by itself and read; l
     // The folder and the file have a profile folder's access: this account, SYSTEM and Administrators only.
     assert.equal(fake.isProtected(file), false);
     assert.deepEqual(readLocalState(), TOKENS);
-    assert.deepEqual(fake.protects, [`protect:file:${file}`], "the read changes the file only, not its folder");
+    assert.deepEqual(fake.protects, [`upgrade:${file}`], "the read changes the file only, through one handle, not its folder");
     for (let index = 0; index < 10; index += 1) readLocalState();
     // The first write makes LetAgents' own folder private (it hides nothing); then no tool runs per write.
     for (let index = 0; index < 10; index += 1) updateLocalState(state => ({ ...state, local_host_id: `host_${index}` }));
     assert.equal(readLocalState().local_host_id, "host_9");
-    assert.deepEqual(fake.protects, [`protect:file:${file}`, `protect:directory:${folder}`]);
+    assert.deepEqual(fake.protects, [`upgrade:${file}`, `protect:directory:${folder}`]);
     assert.equal(fake.isProtected(file), true);
   });
 }));
