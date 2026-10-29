@@ -464,7 +464,8 @@ jobs:
     needs: dependency-audit
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: windows-latest
-    timeout-minutes: 45
+    # The daemon entry takes about 35 minutes on a Windows runner.
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
