@@ -51,11 +51,13 @@ export function gitEmptyConfigPath(): string {
 
 /**
  * core.hooksPath for every command. POSIX keeps /dev/null. Windows uses the
- * empty folder private to this account (the same one HOME names), checked
- * empty again before the one command here that can run a hook (worktree add).
+ * DOS device `nul`, which can hold no hook. Not an empty folder: clone and
+ * remote run reference-transaction, and read-tree, add and update-index run
+ * post-index-change, so a hook put in that folder later would run in the
+ * supervisor.
  */
 export function gitHooksPath(): string {
-  return ownerPrivatePlatform() === "win32" ? GIT_ENV.HOME! : nullDevice();
+  return ownerPrivatePlatform() === "win32" ? "nul" : nullDevice();
 }
 
 /** Windows: the folders a Git child needs on PATH and the variables Windows itself needs. */
@@ -88,6 +90,10 @@ export const GIT_ENV: NodeJS.ProcessEnv = ownerPrivatePlatform() === "win32"
       GIT_ATTR_NOSYSTEM: "1",
       GIT_OPTIONAL_LOCKS: "0",
       GIT_TERMINAL_PROMPT: "0",
+      // A partial clone (or a promisor remote the agent writes into its
+      // clone's config) would otherwise fetch a missing object, running the
+      // remote's transport.
+      GIT_NO_LAZY_FETCH: "1",
       LC_ALL: "C",
     };
   })()
@@ -116,6 +122,7 @@ export function sourceGitEnvironment(): NodeJS.ProcessEnv {
       HOME: sourceGitHome(),
       GIT_OPTIONAL_LOCKS: "0",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_NO_LAZY_FETCH: "1",
       GIT_PAGER: "cat",
       PAGER: "cat",
       LC_ALL: "C",
@@ -222,7 +229,7 @@ export async function canonicalGitControlTarget(path: string, unavailableMessage
 }
 
 export async function cloneRegularFile(source: string, destination: string, maxBytes: number): Promise<void> {
-  if (ownerPrivatePlatform() === "win32") return copyWindowsRegularFile(source, destination);
+  if (ownerPrivatePlatform() === "win32") return copyWindowsRegularFile(source, destination, maxBytes);
   // BSD cp(1) -c is clonefile-only on macOS. A filesystem without clone support
   // returns a non-zero exit; deliberately do not retry as an ordinary copy.
   await runProcess("/bin/cp", ["-c", "-p", "-P", source, destination], dirname(destination), undefined, Math.min(maxBytes, 1024 * 1024), GIT_ENV);
@@ -236,11 +243,12 @@ export async function cloneRegularFile(source: string, destination: string, maxB
  * after; it never replaces a destination (COPYFILE_EXCL, as cp's no-clobber
  * callers expect). The new file inherits its folder's DACL, not the source's.
  */
-async function copyWindowsRegularFile(source: string, destination: string): Promise<void> {
+async function copyWindowsRegularFile(source: string, destination: string, maxBytes: number): Promise<void> {
   const before = await lstat(source, { bigint: true });
   if (!before.isFile() || before.isSymbolicLink()) {
     throw generationError(`Refusing to copy a link or special file at ${JSON.stringify(source)}.`, "CLONE_ISOLATION_UNPROVEN");
   }
+  if (before.size > BigInt(maxBytes)) throw limitError("file size", maxBytes);
   await copyFile(source, destination, fsConstants.COPYFILE_EXCL);
   const after = await lstat(source, { bigint: true });
   if (!after.isFile() || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino) {

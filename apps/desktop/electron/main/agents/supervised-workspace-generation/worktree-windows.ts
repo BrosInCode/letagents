@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, readdir, statfs, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { isOwnerPrivate, openNoFollow, privateEntryCreated, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
 import { BASELINE_FILES_NAME, type GenerationManifest, PROVIDER_GIT_NAME, type RegularFileInfo, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationSupport } from "./types.js";
@@ -60,6 +60,22 @@ export async function assertWindowsFreeSpace(
   }
 }
 
+/**
+ * A partial clone lacks blobs that only its promisor remote can fetch, and
+ * the private clones have no such remote (and lazy fetches are off). Refuse
+ * it before anything is made, instead of failing in the checkout.
+ */
+export async function assertWindowsFullClone(support: SupervisedWorkspaceGenerationSupport): Promise<void> {
+  const partialClone = await sourceAuthorityText(support, ["config", "--get", "extensions.partialClone"], 1024)
+    .catch((error) => {
+      if (error instanceof ProcessExitError && error.exitCode === 1) return "";
+      throw error;
+    });
+  if (partialClone) {
+    throw generationError("Partial clones (a promisor remote) are not supported by Windows workspace generations.", "PARTIAL_CLONE_UNSUPPORTED");
+  }
+}
+
 /** The authority config that makes snapshots raw: see RAW_SNAPSHOT_ATTRIBUTES. */
 export async function sealRawSnapshotAuthority(authorityRoot: string): Promise<void> {
   await runGit(authorityRoot, ["config", "--local", "core.filemode", "true"], 1024 * 1024);
@@ -76,8 +92,7 @@ export async function sealRawSnapshotAuthority(authorityRoot: string): Promise<v
  * extensions.worktreeConfig holds core.bare=false for the worktree only (the
  * clone itself is bare). The source's own line-ending settings are copied so
  * the checkout writes the bytes the user's checkout has, and so the agent's
- * `git status` reads like the user's. Hooks stay off: hooksPath is the empty
- * private folder, checked empty right before the checkout.
+ * `git status` reads like the user's. Hooks stay off (hooksPath `nul`).
  */
 export async function prepareWindowsWorktree(
   support: SupervisedWorkspaceGenerationSupport,
@@ -102,9 +117,6 @@ export async function prepareWindowsWorktree(
     await runGit(providerGit, ["config", "--local", key, value], 1024 * 1024);
   }
   await runGit(providerGit, ["remote", "remove", "origin"], 1024 * 1024);
-  if ((await readdir(gitHooksPath())).length !== 0) {
-    throw generationError("The private empty Git hooks folder is not empty.", "UNSAFE_GIT_HOOKS_PATH");
-  }
   await runGit(providerGit, ["worktree", "add", "--detach", "--", liveSourceRoot, support.headOid], limits.maxPatchBytes);
   const administration = await worktreeAdministration(providerGit, liveSourceRoot);
   await runGitWithAuthority(administration, liveSourceRoot, ["config", "--worktree", "core.bare", "false"], 1024 * 1024);
@@ -125,26 +137,55 @@ export async function assertGenerationObjectsComplete(
   limits: SupervisedWorkspaceGenerationLimits,
   provider?: { gitDirectory: string; liveSourceRoot: string; headOid: string },
 ): Promise<void> {
-  const checks: Array<[string, string[]]> = [
-    [authorityRoot, ["rev-list", "--objects", "--missing=error", "--quiet", "--no-walk", ...tips]],
+  const checks: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [
+    { args: ["rev-list", "--objects", "--missing=error", "--quiet", "--no-walk", ...tips], env: GIT_ENV },
   ];
   if (provider) {
+    // Only the agent's HEAD is read through its own clone. Its commits are
+    // checked from the supervisor authority, with the clone's objects as an
+    // extra alternate, so no other part of the agent-written config is used.
     const administration = await worktreeAdministration(provider.gitDirectory, provider.liveSourceRoot);
-    checks.push(
-      [provider.gitDirectory, ["rev-list", "--objects", "--missing=error", "--quiet", "--no-walk", provider.headOid]],
-      [administration, ["rev-list", "--objects", "--missing=error", "--quiet", "HEAD", "--not", provider.headOid]],
-    );
+    const agentHead = await gitAuthorityText(administration, null, ["rev-parse", "--verify", "HEAD^{commit}"], 1024)
+      .catch((error) => { throw missingObjects(error); });
+    if (!/^[a-f0-9]{40,64}$/.test(agentHead)) throw generationError("Git returned an invalid commit id.", "INVALID_GIT_TREE");
+    checks.push({
+      args: ["rev-list", "--objects", "--missing=error", "--quiet", agentHead, "--not", provider.headOid],
+      env: { ...GIT_ENV, GIT_ALTERNATE_OBJECT_DIRECTORIES: join(provider.gitDirectory, "objects") },
+    });
   }
-  for (const [gitDirectory, args] of checks) {
-    try {
-      await gitAuthorityText(gitDirectory, null, args, limits.maxPatchBytes);
-    } catch (error) {
-      if (!(error instanceof ProcessExitError)) throw error;
-      throw generationError(
-        `Git objects this generation borrows from the repository are missing (pruned by git gc or removed by a history rewrite); it cannot be resumed or reconciled. Retire or abandon it and start a fresh generation. ${error.message}`,
-        "GENERATION_OBJECTS_MISSING",
-      );
-    }
+  for (const { args, env } of checks) {
+    await gitAuthorityText(authorityRoot, null, args, limits.maxPatchBytes, env).catch((error) => { throw missingObjects(error); });
+  }
+}
+
+function missingObjects(error: unknown): unknown {
+  if (!(error instanceof ProcessExitError)) return error;
+  return generationError(
+    `Git objects this generation borrows from the repository are missing (pruned by git gc or removed by a history rewrite); it cannot be resumed or reconciled. Retire or abandon it and start a fresh generation. ${error.message}`,
+    "GENERATION_OBJECTS_MISSING",
+  );
+}
+
+/**
+ * Windows keeps one read-only attribute per file, shared by its hard links.
+ * Deleting the journal's link to an installed read-only file would clear the
+ * attribute on the user's file too (Node clears it to delete), so each such
+ * link is removed here first and the attribute is set again.
+ */
+export async function releaseReadOnlyInstalls(manifest: GenerationManifest): Promise<void> {
+  for (const operation of manifest.operationJournal) {
+    if (operation.status !== "applied" || !operation.desiredArtifactRelativePath
+      || operation.desiredMode === null || (operation.desiredMode & 0o222) !== 0) continue;
+    const artifact = join(manifest.generationRoot, operation.desiredArtifactRelativePath);
+    const target = join(manifest.realWorkspace, operation.relativePath);
+    const [artifactInfo, targetInfo] = await Promise.all([
+      lstat(artifact, { bigint: true }).catch(() => null),
+      lstat(target, { bigint: true }).catch(() => null),
+    ]);
+    if (!artifactInfo || !targetInfo || artifactInfo.dev !== targetInfo.dev || artifactInfo.ino !== targetInfo.ino) continue;
+    await chmod(artifact, operation.desiredMode | 0o222);
+    await unlink(artifact);
+    await chmod(target, operation.desiredMode);
   }
 }
 
@@ -256,6 +297,27 @@ export async function carryDirtyTrackedFiles(
   await unlink(join(administration, "index"));
   await cloneRegularFile(support.gitIndexPath, join(administration, "index"), limits.maxFileBytes);
   return sourceTree;
+}
+
+/** Which of these Git-form paths (a folder ends in "/") the worktree's ignore rules exclude. */
+export async function ignoredGitPaths(
+  authorityRoot: string,
+  worktree: string,
+  paths: readonly string[],
+  limits: SupervisedWorkspaceGenerationLimits,
+): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  const input = Buffer.concat(paths.map((path) => Buffer.from(`${path}\0`)));
+  try {
+    const output = await runProcess(gitExecutable(), gitArgs([
+      `--git-dir=${authorityRoot}`, `--work-tree=${worktree}`, "check-ignore", "--no-index", "-z", "--stdin",
+    ]), worktree, input, limits.maxPatchBytes, GIT_ENV);
+    return new Set(splitNulBuffer(output).map((value) => value.toString("utf8")));
+  } catch (error) {
+    // check-ignore exits 1 when no path is ignored.
+    if (error instanceof ProcessExitError && error.exitCode === 1) return new Set();
+    throw error;
+  }
 }
 
 async function runProcessInAuthority(

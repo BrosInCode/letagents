@@ -35,7 +35,7 @@ import {
   type SupervisedWorkspaceGenerationFailpoint,
   type SupervisedWorkspaceGenerationHandle,
 } from "../main/agents/supervised-workspace-generation.js";
-import { findWindowsGitExecutable } from "../main/agents/supervised-workspace-generation/git.js";
+import { GIT_ENV, findWindowsGitExecutable } from "../main/agents/supervised-workspace-generation/git.js";
 import { WINDOWS_FRESH_WORKTREE_NOTE } from "../main/agents/supervised-workspace-generation/worktree-windows.js";
 
 const windows = process.platform === "win32";
@@ -210,9 +210,11 @@ generationTest("linked-worktree marker, backlink, and common-directory inconsist
 generationTest("trusted snapshots cannot execute source or generation Git helpers", async () => {
   await withRepository(async (repo) => {
     const marker = join(dirname(repo), "external-helper-ran");
-    const helper = join(dirname(repo), "evil-diff.sh");
-    writeFileSync(helper, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
-    chmodSync(helper, 0o755);
+    const helperFile = join(dirname(repo), "evil-diff.sh");
+    // Git for Windows runs helpers through its sh, which needs "/" paths.
+    const helper = shellPath(helperFile);
+    writeFileSync(helperFile, `#!/bin/sh\ntouch '${shellPath(marker)}'\nexit 1\n`);
+    chmodSync(helperFile, 0o755);
     writeFileSync(join(repo, ".gitattributes"), "tracked.txt diff=evil filter=evil\n");
     git(repo, ["add", ".gitattributes"]);
     git(repo, ["commit", "-qm", "diff attributes"]);
@@ -1248,6 +1250,107 @@ windowsTest("the agent's own Git handles a path that is long only inside the gen
   });
 });
 
+generationTest("no Git hook of the repository or the empty Git home runs in a supervisor command", async () => {
+  await withRepository(async (repo) => {
+    const marker = join(dirname(repo), "hook-ran");
+    const hook = `#!/bin/sh\necho "$0" >> '${shellPath(marker)}'\n`;
+    const planted: string[] = [];
+    for (const folder of [join(repo, ".git", "hooks"), ...(windows ? [GIT_ENV.HOME!] : [])]) {
+      for (const name of ["post-index-change", "reference-transaction", "post-checkout", "pre-commit"]) {
+        const path = join(folder, name);
+        writeFileSync(path, hook, { mode: 0o755 });
+        planted.push(path);
+      }
+    }
+    try {
+      // The planted hooks do run for an ordinary Git command in the repository.
+      git(repo, ["add", "tracked.txt"]);
+      assert.equal(existsSync(marker), true);
+      rmSync(marker);
+
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "no-hooks" });
+      writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
+      await handle.retireAndReconcile();
+      await removeSupervisedWorkspaceGenerationReceipt(handle.manifestPath);
+      assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "agent\n");
+      assert.equal(existsSync(marker), false, existsSync(marker) ? readFileSync(marker, "utf8") : "");
+    } finally {
+      for (const path of planted) rmSync(path, { force: true });
+    }
+  });
+});
+
+windowsTest("an 8.3 short name cannot reach a protected folder of the real workspace", async (t) => {
+  await withRepository(async (repo) => {
+    mkdirSync(join(repo, ".claude"));
+    if (!existsSync(join(repo, "CLAUDE~1"))) {
+      t.skip("this volume has no 8.3 short names");
+      return;
+    }
+    const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "short-name-alias" });
+    mkdirSync(join(handle.liveWorkspace, "CLAUDE~1"));
+    writeFileSync(join(handle.liveWorkspace, "CLAUDE~1", "settings.json"), "{\"hooks\":{}}\n");
+    writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
+    await assert.rejects(handle.retireAndReconcile(), SupervisedWorkspaceConflictError);
+    assert.equal(existsSync(join(repo, ".claude", "settings.json")), false);
+    assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "base\n");
+  });
+});
+
+windowsTest("junctions under an ignored folder (a package manager's) do not block reconciliation", async () => {
+  const outside = mkdtempSync(join(tmpdir(), "letagents-generation-ignored-junction-"));
+  try {
+    writeFileSync(join(outside, "index.js"), "outside\n");
+    await withRepository(async (repo) => {
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "ignored-junction" });
+      mkdirSync(join(handle.liveWorkspace, "node_modules", ".pnpm"), { recursive: true });
+      symlinkSync(outside, join(handle.liveWorkspace, "node_modules", "pkg"), "junction");
+      writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
+      const receipt = await handle.retireAndReconcile();
+      assert.deepEqual(receipt.appliedPaths, ["tracked.txt"]);
+      assert.equal(existsSync(join(repo, "node_modules")), false);
+      assert.equal(readFileSync(join(outside, "index.js"), "utf8"), "outside\n");
+    });
+  } finally {
+    rmSync(outside, { force: true, recursive: true });
+  }
+});
+
+windowsTest("an installed read-only file keeps its attribute when the receipt is removed", async () => {
+  await withRepository(async (repo) => {
+    writeFileSync(join(repo, "read-only.txt"), "before\n");
+    git(repo, ["add", "read-only.txt"]);
+    git(repo, ["commit", "-qm", "read-only fixture"]);
+    chmodSync(join(repo, "read-only.txt"), 0o444);
+    try {
+      const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "read-only-install" });
+      const live = join(handle.liveWorkspace, "read-only.txt");
+      chmodSync(live, 0o666);
+      writeFileSync(live, "after\n");
+      chmodSync(live, 0o444);
+      await handle.retireAndReconcile();
+      assert.equal(readFileSync(join(repo, "read-only.txt"), "utf8"), "after\n");
+      assert.equal(lstatSync(join(repo, "read-only.txt")).mode & 0o7777, 0o444);
+      await removeSupervisedWorkspaceGenerationReceipt(handle.manifestPath);
+      assert.equal(existsSync(dirname(handle.manifestPath)), false);
+      assert.equal(lstatSync(join(repo, "read-only.txt")).mode & 0o7777, 0o444);
+    } finally {
+      chmodSync(join(repo, "read-only.txt"), 0o666);
+    }
+  });
+});
+
+windowsTest("partial clones are refused before anything is made", async () => {
+  await withRepository(async (repo) => {
+    git(repo, ["config", "core.repositoryformatversion", "1"]);
+    git(repo, ["config", "extensions.partialClone", "origin"]);
+    await assert.rejects(
+      assertSupervisedWorkspaceGenerationSupported(repo),
+      (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "PARTIAL_CLONE_UNSUPPORTED",
+    );
+  });
+});
+
 test("git.exe is found on absolute PATH folders with a .exe or .com PATHEXT name only", () => {
   const present = new Set([
     "relative\\bin\\git.exe",
@@ -1364,6 +1467,11 @@ async function realpathForTest(path: string): Promise<string> {
 /** The Git folder the provider's tree belongs to: its own .git (macOS) or the private clone (Windows). */
 function providerGitDirectory(handle: SupervisedWorkspaceGenerationHandle): string {
   return windows ? join(dirname(handle.liveSourceRoot), "provider-git") : join(handle.liveSourceRoot, ".git");
+}
+
+/** A path as Git for Windows' sh reads it ("/"); unchanged elsewhere. */
+function shellPath(path: string): string {
+  return windows ? path.replaceAll("\\", "/") : path;
 }
 
 /** The workspace status a generation shows: a Windows worktree carries no untracked files. */

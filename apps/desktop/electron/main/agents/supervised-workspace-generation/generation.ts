@@ -11,7 +11,7 @@ import { assertClonePlatform, fsyncDirectory, generationDirectoryName, generatio
 import { assertClonefileSupported, assertIndexHasNoLinksOrGitlinks, assertNoUnmergedEntries, assertSafeBareAlternateRoot, assertSourceWorktreeWithinLimits, assertSparseCheckoutDisabled, disablePrivateGitAuthority, disableTrustedGitAuthority, installDependencyExcludes, linkIgnoredDependencyRoots, readSafeAlternateRoots } from "./source-authority.js";
 import { cleanupTrees, loadManifest, persistManifest, transition } from "./manifest.js";
 import { materializeSourceWorktree, pinPrivateCloneHead, reproduceProviderIndex, snapshotWorktree, sourceVisiblePaths } from "./worktree.js";
-import { WINDOWS_FRESH_WORKTREE_NOTE, assertGenerationObjectsComplete, assertWindowsFreeSpace, carryDirtyTrackedFiles, prepareWindowsWorktree, recordWindowsBaselineModes, sealRawSnapshotAuthority } from "./worktree-windows.js";
+import { WINDOWS_FRESH_WORKTREE_NOTE, assertGenerationObjectsComplete, assertWindowsFreeSpace, assertWindowsFullClone, carryDirtyTrackedFiles, prepareWindowsWorktree, recordWindowsBaselineModes, sealRawSnapshotAuthority } from "./worktree-windows.js";
 
 export async function assertSupervisedWorkspaceGenerationSupported(
   realWorkspaceInput: string,
@@ -167,8 +167,10 @@ export async function assertSupervisedWorkspaceGenerationSupported(
   await assertIndexHasNoLinksOrGitlinks(support, DEFAULT_LIMITS);
   await assertNoUnmergedEntries(support, DEFAULT_LIMITS);
   await assertSourceWorktreeWithinLimits(support, DEFAULT_LIMITS);
-  if (isWindowsGeneration()) await assertWindowsFreeSpace(support, parent, DEFAULT_LIMITS);
-  else await assertClonefileSupported(parent);
+  if (isWindowsGeneration()) {
+    await assertWindowsFullClone(support);
+    await assertWindowsFreeSpace(support, parent, DEFAULT_LIMITS);
+  } else await assertClonefileSupported(parent);
   return support;
 }
 
