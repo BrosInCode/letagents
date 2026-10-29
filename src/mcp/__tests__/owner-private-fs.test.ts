@@ -118,8 +118,11 @@ test("the default Windows security runs whoami, PowerShell Get-Acl and icacls wi
   // The paths travel as JSON in the environment, never in the command text.
   assert.equal(powershell.paths, JSON.stringify(["C:\\a", "C:\\b missing"]));
   assert.ok(!String(powershell.args[4]).includes("C:\\a"));
+  // Owner first (an elevated administrator's files are owned by Administrators), then the DACL.
   assert.deepEqual(calls.filter(call => call.file.endsWith("icacls.exe")).map(call => [call.file, call.args]), [
+    ["C:\\Windows\\System32\\icacls.exe", ["C:\\a", "/setowner", `*${USER}`, "/q"]],
     ["C:\\Windows\\System32\\icacls.exe", ["C:\\a", "/inheritance:r", "/grant:r", `*${USER}:F`, "*S-1-5-18:F", "/q"]],
+    ["C:\\Windows\\System32\\icacls.exe", ["C:\\d", "/setowner", `*${USER}`, "/q"]],
     ["C:\\Windows\\System32\\icacls.exe", ["C:\\d", "/inheritance:r", "/grant:r", `*${USER}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "/q"]],
   ]);
 });
@@ -286,7 +289,11 @@ test("Windows: each folder mkdir makes gets the private DACL; an existing one is
     const { security, calls } = fakeSecurity();
     const options = { platform: "win32" as const, windowsSecurity: security };
     await createPrivateDir(join(root, "a", "b", "c"), { recursive: true }, options);
+    // Only the three new folders: never `root` or anything above it (no walk to the drive root).
     assert.deepEqual(calls, ["a", "a/b", "a/b/c"].map(part => `protect:directory:${join(root, ...part.split("/"))}`));
+    calls.length = 0;
+    createPrivateDirSync(join(root, "a", "x", "y"), { recursive: true }, options);
+    assert.deepEqual(calls, ["a/x", "a/x/y"].map(part => `protect:directory:${join(root, ...part.split("/"))}`));
     calls.length = 0;
     await createPrivateDir(join(root, "a", "b"), { recursive: true }, options);
     assert.deepEqual(calls, []);
@@ -367,6 +374,8 @@ test("real Windows: private folders and files pass, and every tampered ACL is re
   try {
     const folder = join(root, "state");
     await createPrivateDir(folder);
+    const [sddl] = await createWindowsSecurity().readSddl([folder]);
+    console.log(`private folder SDDL: ${sddl}`);
     await assertOwnerPrivate(folder, { kind: "directory" });
     const file = join(folder, "token.json");
     await writePrivateFileAtomically(file, "{\"token\":\"t\"}");
@@ -400,6 +409,19 @@ test("real Windows: private folders and files pass, and every tampered ACL is re
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("real Windows: a recursive private mkdir never changes a folder that already existed", { skip: windowsOnly }, async () => {
+  const root = scratch();
+  try {
+    const security = createWindowsSecurity();
+    const [before] = await security.readSddl([root]);
+    await createPrivateDir(join(root, "a", "b"), { recursive: true });
+    const [after] = await security.readSddl([root]);
+    assert.equal(after, before);
+    await assertOwnerPrivate(join(root, "a"), { kind: "directory" });
+    await assertOwnerPrivate(join(root, "a", "b"), { kind: "directory" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("real Windows: openNoFollow refuses a junction and a file symlink target is never followed", { skip: windowsOnly }, async () => {

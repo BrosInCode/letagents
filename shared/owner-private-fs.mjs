@@ -23,6 +23,7 @@
  * whoami.exe gives the current user's SID; PowerShell's Get-Acl gives each
  * path's security descriptor as SDDL (owner and DACL, written with SIDs, so
  * the answer does not depend on the display language); icacls.exe sets the
+ * owner (the current user, also for an elevated administrator) and the
  * protected DACL. icacls is not used to read, because it cannot show the
  * owner. Every answer that cannot be read or parsed counts as "not private".
  */
@@ -138,10 +139,24 @@ export function parseSddlLines(output, count) {
   return lines.map(line => (line.startsWith("ok:") ? line.slice(3).trim() || null : null));
 }
 
-/** The arguments that give a path a protected DACL for only `sid` and SYSTEM. */
-export function icaclsProtectArguments(path, kind, sid) {
+function assertProtectable(path, sid) {
   if (!isAbsolute(path) && !win32.isAbsolute(path)) throw privateError("A private path must be absolute.");
   if (!SID_PATTERN.test(sid)) throw privateError("The current Windows account's SID is invalid.");
+}
+
+/**
+ * The arguments that make `sid` the owner. An elevated administrator's new
+ * files are owned by the Administrators group by default; the account itself
+ * may always take ownership of what it may change.
+ */
+export function icaclsSetOwnerArguments(path, sid) {
+  assertProtectable(path, sid);
+  return [path, "/setowner", `*${sid}`, "/q"];
+}
+
+/** The arguments that give a path a protected DACL for only `sid` and SYSTEM. */
+export function icaclsProtectArguments(path, kind, sid) {
+  assertProtectable(path, sid);
   const rights = kind === "directory" ? "(OI)(CI)F" : "F";
   return [path, "/inheritance:r", "/grant:r", `*${sid}:${rights}`, `*${SYSTEM_SID}:${rights}`, "/q"];
 }
@@ -182,10 +197,14 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
       return result;
     },
     async protect(path, kind) {
-      await run(tools.icacls, icaclsProtectArguments(path, kind, await this.currentUserSid()), { env });
+      const user = await this.currentUserSid();
+      await run(tools.icacls, icaclsSetOwnerArguments(path, user), { env });
+      await run(tools.icacls, icaclsProtectArguments(path, kind, user), { env });
     },
     protectSync(path, kind) {
-      runSync(tools.icacls, icaclsProtectArguments(path, kind, this.currentUserSidSync()), { env });
+      const user = this.currentUserSidSync();
+      runSync(tools.icacls, icaclsSetOwnerArguments(path, user), { env });
+      runSync(tools.icacls, icaclsProtectArguments(path, kind, user), { env });
     },
   };
 }
@@ -364,14 +383,21 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
   windowsSecurity(options).protectSync(path, kind);
 }
 
-/** The folders a recursive mkdir made: from the first one it made down to `path`. */
-function madeFolders(first, path) {
-  const folders = [];
+/**
+ * `path` and its missing ancestors, nearest the root first, read before the
+ * mkdir. It stops at the first folder that exists, so an existing folder is
+ * never changed. (mkdir's own answer cannot be compared as text: on Windows it
+ * may spell the same folder another way, such as a short 8.3 name.)
+ */
+function missingFolders(path) {
+  const missing = [];
   for (let current = resolve(path); ; current = dirname(current)) {
-    folders.unshift(current);
-    if (current === resolve(first) || dirname(current) === current) break;
+    try { lstatSync(current); break; }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    missing.unshift(current);
+    if (dirname(current) === current) break;
   }
-  return folders;
+  return missing;
 }
 
 /**
@@ -379,18 +405,20 @@ function madeFolders(first, path) {
  * as it is). On Windows each folder it makes gets the private DACL.
  */
 export async function createPrivateDir(path, { recursive = false } = {}, options = {}) {
+  const missing = isWindows(options) && recursive ? missingFolders(path) : [];
   const made = await mkdir(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
   if (isWindows(options)) {
-    const folders = recursive ? (made === undefined ? [] : madeFolders(made, path)) : [resolve(path)];
+    const folders = recursive ? (made === undefined ? [] : missing) : [resolve(path)];
     for (const folder of folders) await protectOwnerPrivate(folder, "directory", options);
   }
   return made;
 }
 
 export function createPrivateDirSync(path, { recursive = false } = {}, options = {}) {
+  const missing = isWindows(options) && recursive ? missingFolders(path) : [];
   const made = mkdirSync(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
   if (isWindows(options)) {
-    const folders = recursive ? (made === undefined ? [] : madeFolders(made, path)) : [resolve(path)];
+    const folders = recursive ? (made === undefined ? [] : missing) : [resolve(path)];
     for (const folder of folders) protectOwnerPrivateSync(folder, "directory", options);
   }
   return made;

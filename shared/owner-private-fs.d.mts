@@ -39,6 +39,7 @@ export declare function windowsSystemTool(name: string, env?: NodeJS.ProcessEnv)
 export declare function windowsToolPaths(env?: NodeJS.ProcessEnv): { whoami: string; icacls: string; powershell: string };
 export declare function parseWhoamiUserSid(output: string): string;
 export declare function parseSddlLines(output: string, count: number): (string | null)[];
+export declare function icaclsSetOwnerArguments(path: string, sid: string): string[];
 export declare function icaclsProtectArguments(path: string, kind: PrivateKind, sid: string): string[];
 export declare function createWindowsSecurity(options?: { run?: ToolRunner; runSync?: ToolRunnerSync; env?: NodeJS.ProcessEnv }): WindowsSecurity;
 
