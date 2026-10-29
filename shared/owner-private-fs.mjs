@@ -455,7 +455,14 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
   const startSync = startSyncServer === undefined
     ? (runSync === runToolSync ? syncSddlReaderWorker(tools.powershell, SERVER_ARGUMENTS, env) : null)
     : startSyncServer;
-  const syncServer = startSync ? createSyncSddlServer(startSync) : null;
+  let syncServer = startSync ? createSyncSddlServer(startSync) : null;
+  // A reader given up (a slow start on a busy machine, a crash) is started again, twice at most;
+  // without one every synchronous check would start a one-shot PowerShell.
+  let syncRestarts = 0;
+  const usableSyncServer = () => {
+    if (syncServer && !syncServer.usable && syncRestarts < 2 && !process._exiting) { syncRestarts += 1; syncServer = createSyncSddlServer(startSync); }
+    return syncServer?.usable ? syncServer : null;
+  };
   let sid = null;
   let aliases = null;
   const remember = (output) => {
@@ -486,10 +493,11 @@ export function createWindowsSecurity({ run = runTool, runSync = runToolSync, en
       return result;
     },
     /** Start the synchronous reader now (see createSyncSddlServer's prepare). */
-    prepare() { syncServer?.prepare(); },
+    prepare() { usableSyncServer()?.prepare(); },
     readSddlSync(paths) {
-      if (syncServer?.usable && paths.length) {
-        try { return syncServer.read(paths); } catch { /* the one-shot read below answers instead */ }
+      const reader = paths.length ? usableSyncServer() : null;
+      if (reader) {
+        try { return reader.read(paths); } catch { /* the one-shot read below answers instead */ }
       }
       const result = [];
       for (const chunk of chunkPaths(paths)) {

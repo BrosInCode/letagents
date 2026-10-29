@@ -1137,13 +1137,19 @@ test("Windows: synchronous reads use the long-lived reader, and fall back to one
   assert.deepEqual(oneShot, []);
   assert.deepEqual(security.readSddlSync(["C:\\Users\\José\\x"]), [PRIVATE_FILE]);
   assert.deepEqual(oneShot, ["C:\\Users\\José\\x"]);
-  const failing = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, runSync, startSyncServer: syncSddlReaderWorker(process.execPath, ["-e", "process.exit(1)"]) });
-  assert.deepEqual(failing.readSddlSync(["C:\\c"]), [PRIVATE_FILE]);
-  assert.deepEqual(oneShot.at(-1), "C:\\c");
+  // A reader that fails is started again, twice at most; then every read is one-shot.
+  let starts = 0;
+  const exiting = syncSddlReaderWorker(process.execPath, ["-e", "process.exit(1)"]);
+  const failing = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, runSync, startSyncServer: (channel) => { starts += 1; return exiting(channel); } });
+  for (const name of ["c", "d", "e", "f"]) {
+    assert.deepEqual(failing.readSddlSync([`C:\\${name}`]), [PRIVATE_FILE]);
+    assert.deepEqual(oneShot.at(-1), `C:\\${name}`);
+  }
+  assert.equal(starts, 3);
   // Injected runners get no reader unless the test asks for one.
   const plain = createWindowsSecurity({ env: { SystemRoot: "C:\\Windows" }, runSync });
-  assert.deepEqual(plain.readSddlSync(["C:\\d"]), [PRIVATE_FILE]);
-  assert.deepEqual(oneShot.at(-1), "C:\\d");
+  assert.deepEqual(plain.readSddlSync(["C:\\g"]), [PRIVATE_FILE]);
+  assert.deepEqual(oneShot.at(-1), "C:\\g");
 });
 
 function icacls(...args: string[]): void {
