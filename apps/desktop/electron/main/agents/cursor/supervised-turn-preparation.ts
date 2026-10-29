@@ -28,6 +28,7 @@ import {
   usesExactScratchWorkspace,
 } from "./launch-arguments.js";
 import type { CursorProviderAdapter } from "./provider-adapter.js";
+import { cursorWindowsMcpRuntimeEnv } from "./windows-turn.js";
 
 export function throwIfCursorTurnLaunchAborted(signal?: AbortSignal, roomTurnId?: string | null): void {
   if (signal?.aborted) {
@@ -349,6 +350,7 @@ export async function prepareSupervisedTurn(
       CURSOR_API_KEY: "",
       CURSOR_AUTH_TOKEN: "",
       ...supervisorMcpEnv,
+      ...cursorWindowsMcpRuntimeEnv(mcpRuntimeRoot, supervisorMcpEnv.LETAGENTS_SUPERVISOR_DAEMON_SOCKET),
     };
   } catch (error) {
     if (workspaceGeneration) {

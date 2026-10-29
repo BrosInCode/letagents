@@ -10,10 +10,31 @@ export function isExactCursorLoopbackTestOrigin(value: string): boolean {
   return Number.isSafeInteger(port) && port <= 65_535;
 }
 
+/**
+ * How the operating system confines Cursor's native process tree. This is
+ * the one decision point; every caller asks it instead of testing the
+ * platform itself.
+ * - "macos-sandbox-exec": the wrapper runs Cursor under sandbox-exec with
+ *   the turn's file, process and network rules.
+ * - "windows-unsandboxed": owner decision for Windows. Cursor runs without an
+ *   operating-system sandbox; LetAgents still limits it to the room's folder
+ *   and permission profile (workspace generation, private profile, the
+ *   wrapper's proxies and its one MCP connection).
+ * - "unconfined": other platforms, development only
+ *   (LETAGENTS_ALLOW_NON_DARWIN_DAEMON); never a product path.
+ */
+export type CursorOsSandbox = "macos-sandbox-exec" | "windows-unsandboxed" | "unconfined";
+
+export function cursorOsSandbox(platform: NodeJS.Platform = process.platform): CursorOsSandbox {
+  if (platform === "darwin") return "macos-sandbox-exec";
+  if (platform === "win32") return "windows-unsandboxed";
+  return "unconfined";
+}
+
 let cachedCursorSandboxDelegatingExecutablePaths: string[] | null = null;
 
 export function cursorSandboxDeveloperRoots(): string[] {
-  if (process.platform !== "darwin") return [];
+  if (cursorOsSandbox() !== "macos-sandbox-exec") return [];
   const roots: string[] = [];
   try {
     const selected = readlinkSync("/var/db/xcode_select_link");
@@ -64,7 +85,7 @@ export function cursorSandboxDelegatingExecutablePaths(): string[] {
     "/usr/bin/screencapture", "/usr/bin/security", "/usr/bin/shortcuts", "/usr/bin/xcrun",
     "/usr/sbin/diskutil", "/usr/sbin/networksetup", "/usr/sbin/scutil",
   ]);
-  if (process.platform === "darwin") {
+  if (cursorOsSandbox() === "macos-sandbox-exec") {
     // Resolve selected Developer tool paths without spawning a process on
     // Electron's main thread, then deny effect-delegating binaries directly
     // as well as xcrun above. Repo builds can invoke compilers directly.
@@ -285,7 +306,7 @@ export function cursorSandboxPathVariants(path: string): string[] {
 const CURSOR_TURN_RUNTIME_DATA_PATTERN = /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/;
 
 /** Cursor's native code uses /tmp on macOS; Windows has no /tmp, so its per-user temporary folder stands in. */
-function cursorTemporaryRoot(): string {
+export function cursorTemporaryRoot(): string {
   return realpathSync(ownerPrivatePlatform() === "win32" ? tmpdir() : "/tmp");
 }
 
