@@ -503,11 +503,12 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
   }
   if (windows) {
     // Every file that is a link now, as it is now. Without the record a stale link is only kept, never lost.
+    // The state recorded is the one read that also proves the link (its file id is the owner's file's),
+    // so a refresh between a check and a later read can never be recorded as the owner's former file.
     const linked = Object.fromEntries(readdirSync(home).flatMap((name) => {
-      const path = join(home, name);
-      const entry = lstatSync(path);
-      const state = name !== WINDOWS_LINK_RECORD && linkedFile(path, entry, name) ? linkedFileState(path) : null;
-      return state ? [[name, state]] : [];
+      if (name === WINDOWS_LINK_RECORD || ownDatabase(name)) return [];
+      const state = linkedFileState(join(home, name));
+      return state && state.id === fileId(join(owner, name), true) ? [[name, state]] : [];
     }));
     // Written beside it and renamed over it: a rename replaces whatever is at that name and writes through nothing.
     const staged = join(home, `${WINDOWS_LINK_RECORD}.${randomBytes(6).toString("hex")}`);
