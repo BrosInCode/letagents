@@ -70,9 +70,10 @@ const ANSWER_FUNCTION = [
   "    if ($p.StartsWith('object:')) {",
   "      $fs = [System.IO.File]::Open($p.Substring(7), 'Open', 'Read', 'ReadWrite, Delete')",
   "      try {",
-  `        if ($fs.Length -gt ${OBJECT_LIMIT}) { return 'error:' }`,
+  // The length is read once: a file that grows meanwhile fails the end-of-file check below.
+  `        $length = $fs.Length; if ($length -gt ${OBJECT_LIMIT}) { return 'error:' }`,
   "        $sddl = $fs.GetAccessControl().GetSecurityDescriptorSddlForm('Owner, Access')",
-  "        $bytes = New-Object byte[] $fs.Length; $read = 0",
+  "        $bytes = New-Object byte[] $length; $read = 0",
   "        while ($read -lt $bytes.Length) { $n = $fs.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }",
   "        if ($read -ne $bytes.Length -or $fs.ReadByte() -ne -1) { return 'error:' }",
   "        return 'ok:' + $sddl + '|' + [Convert]::ToBase64String($bytes)",
@@ -350,6 +351,8 @@ export function createSddlServer(start) {
         lines.push(buffer.slice(0, end).replace(/\r$/, ""));
         buffer = buffer.slice(end + 1);
       }
+      // No answer line is longer than a capped object in base64: a reader that writes more is stopped.
+      if (buffer.length > TOOL_OUTPUT_LIMIT) stopReader();
       wake?.();
     });
     child.once("error", stopReader);
@@ -399,7 +402,7 @@ let port = null; let flag = null;
 process.on("uncaughtException", () => stop());
 const { workerData } = require("node:worker_threads");
 const { spawn } = require("node:child_process");
-const { signal, command, args, env, cwd, timeoutMs, startTimeoutMs } = workerData;
+const { signal, command, args, env, cwd, timeoutMs, startTimeoutMs, outputLimit } = workerData;
 port = workerData.port; flag = new Int32Array(signal);
 function answer(message) { clearTimeout(timer); busy = false; lines = []; if (!port) return; port.postMessage(message); Atomics.store(flag, 0, 1); Atomics.notify(flag, 0); }
 function stop() { if (dead) return; dead = true; try { if (child) child.kill(); } catch {} if (busy) answer({ error: true }); }
@@ -417,6 +420,7 @@ function reader() {
       if (!busy) continue;
       if (line === "done:") answer({ lines }); else lines.push(line);
     }
+    if (buffer.length > outputLimit) stop();
   });
   child.once("error", stop);
   child.once("exit", stop);
@@ -445,7 +449,7 @@ const SYNC_READER_START_TIMEOUT_MS = TOOL_TIMEOUT_MS;
 /** Starts the worker that owns a synchronous reader: `command args` speaks the reader protocol above. */
 export function syncSddlReaderWorker(command, args, env = process.env) {
   return ({ port, signal, timeoutMs, startTimeoutMs }) => new Worker(SYNC_READER_SOURCE, {
-    eval: true, workerData: { port, signal, command, args, env: { ...env }, cwd: toolFolder(command), timeoutMs, startTimeoutMs }, transferList: [port],
+    eval: true, workerData: { port, signal, command, args, env: { ...env }, cwd: toolFolder(command), timeoutMs, startTimeoutMs, outputLimit: TOOL_OUTPUT_LIMIT }, transferList: [port],
     // The process's own flags (--input-type=module, --import <loader>, -e) are not the worker's: its source is CommonJS.
     execArgv: [],
   });
