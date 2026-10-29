@@ -26,9 +26,13 @@ RequestExecutionLevel user
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
+!include "Win\COM.nsh"
+!include "Win\Propkey.nsh"
 !include "${PAYLOAD_NSH}"
 
 !define PRODUCT_NAME "LetAgents"
+; The AppUserModelID: also WINDOWS_APP_USER_MODEL_ID in
+; electron/main/windows-app-identity.ts, which the app sets on its process.
 !define APP_ID "chat.letagents.desktop"
 !define EXE_NAME "LetAgents.exe"
 !define UNINSTALLER_NAME "Uninstall LetAgents.exe"
@@ -135,6 +139,43 @@ FunctionEnd
 !insertmacro DEFINE_IS_REGISTERED_INSTALL ""
 !insertmacro DEFINE_IS_REGISTERED_INSTALL "un."
 
+; CreateShortCut cannot set a shortcut's AppUserModelID. Windows shows a
+; desktop app's toast notifications only when the process's ID matches a
+; Start menu shortcut's, so the ID is written through the shell's own
+; property store (NSIS's Win\COM.nsh, no plugin). Uses $0-$6.
+!macro SET_SHORTCUT_APP_ID LNK
+  !insertmacro ComHlpr_CreateInProcInstance ${CLSID_ShellLink} ${IID_IShellLink} r0 ""
+  ${If} $0 P<> 0
+    ${IUnknown::QueryInterface} $0 '("${IID_IPersistFile}",.r1)'
+    ${If} $1 P<> 0
+      ${IPersistFile::Load} $1 '("${LNK}",${STGM_READWRITE}).r4'
+      ${If} $4 = 0
+        ${IUnknown::QueryInterface} $0 '("${IID_IPropertyStore}",.r2)'
+        ${If} $2 P<> 0
+          System::Call 'SHLWAPI::SHStrDupW(w "${APP_ID}",*p.r5)i.r4'
+          ${If} $4 = 0
+            System::Call '*${SYSSTRUCT_PROPERTYKEY}(${PKEY_AppUserModel_ID})p.r3'
+            ; The whole PROPVARIANT, then its fields: giving the third field a
+            ; pointer type in one call would shrink the block to 12 bytes on x86.
+            System::Call '*(&i${SYSSIZEOF_PROPVARIANT})p.r6'
+            System::Call '*$6(&i2 ${VT_LPWSTR},&i6,p r5)'
+            ${IPropertyStore::SetValue} $2 '($3,$6)'
+            ${IPropertyStore::Commit} $2 ""
+            ; Frees the SHStrDupW copy too.
+            System::Call 'OLE32::PropVariantClear(p r6)'
+            System::Free $3
+            System::Free $6
+          ${EndIf}
+          ${IUnknown::Release} $2 ""
+        ${EndIf}
+        ${IPersistFile::Save} $1 '("${LNK}",1)'
+      ${EndIf}
+      ${IUnknown::Release} $1 ""
+    ${EndIf}
+    ${IUnknown::Release} $0 ""
+  ${EndIf}
+!macroend
+
 Function .onInit
   SetShellVarContext current
   ${GetParameters} $R0
@@ -172,9 +213,11 @@ Section "Install"
   WriteUninstaller "$INSTDIR\${UNINSTALLER_NAME}"
 
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}.lnk" "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
+  !insertmacro SET_SHORTCUT_APP_ID "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
   ; A user who deleted the desktop shortcut keeps it deleted across updates.
   ${If} $Updating == "0"
     CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
+    !insertmacro SET_SHORTCUT_APP_ID "$DESKTOP\${PRODUCT_NAME}.lnk"
   ${EndIf}
 
   ; "Ask for an agent" links (letagents://ask/<token>) open the app.

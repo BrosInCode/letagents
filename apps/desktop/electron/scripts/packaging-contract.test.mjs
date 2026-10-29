@@ -202,3 +202,34 @@ test("Windows packaging bundles opencode.exe and points the packaged updater at 
   assert.match(windowsPackager, /signed: false/);
   assert.match(windowsPackager, /createDifferentialBlockmap\(installer, blockmap\)/);
 });
+
+test("the installer's shortcuts and the app's process share one AppUserModelID", async () => {
+  const [installer, identity, main, windowsPackaging] = await Promise.all([
+    source(join(desktopRoot, "electron", "installer", "windows", "installer.nsi")),
+    source(join(desktopRoot, "electron", "main", "windows-app-identity.ts")),
+    source(join(desktopRoot, "electron", "main.ts")),
+    import("./windows-packaging.mjs"),
+  ]);
+  const installerId = /^!define APP_ID "([^"]+)"$/m.exec(installer)?.[1];
+  const processId = /export const WINDOWS_APP_USER_MODEL_ID = "([^"]+)";/.exec(identity)?.[1];
+  assert.ok(installerId);
+  assert.equal(processId, installerId);
+  assert.equal(windowsPackaging.WINDOWS_APP_USER_MODEL_ID, installerId);
+  // Each shortcut the installer creates gets the ID right after it is created.
+  const shortcuts = [...installer.matchAll(/CreateShortCut "([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(shortcuts, ["$SMPROGRAMS\\${PRODUCT_NAME}.lnk", "$DESKTOP\\${PRODUCT_NAME}.lnk"]);
+  for (const shortcut of shortcuts) {
+    const created = installer.indexOf(`CreateShortCut "${shortcut}"`);
+    const tagged = installer.indexOf(`!insertmacro SET_SHORTCUT_APP_ID "${shortcut}"`);
+    assert.ok(tagged > created && installer.slice(created, tagged).split("\n").length <= 2, `${shortcut} gets the AppUserModelID`);
+  }
+  assert.match(installer, /\$\{IPropertyStore::SetValue\} \$2 '\(\$3,\$6\)'/);
+  // The PROPVARIANT block is allocated whole before its fields are written.
+  assert.match(installer, /System::Call '\*\(&i\$\{SYSSIZEOF_PROPVARIANT\}\)p\.r6'\s+System::Call '\*\$6\(&i2 \$\{VT_LPWSTR\},&i6,p r5\)'/);
+  assert.match(installer, /PKEY_AppUserModel_ID/);
+  // The app sets it before notifications are prepared and any window opens.
+  const applied = main.indexOf("applyWindowsAppUserModelId(app);");
+  assert.ok(applied > 0);
+  assert.ok(applied < main.indexOf("prepareDesktopNotifications();\n"));
+  assert.ok(applied < main.indexOf("createWindow();"));
+});
