@@ -60,20 +60,6 @@ jobs:
         working-directory: apps/desktop
         run: node --test electron/scripts/windows-packaging.test.mjs electron/scripts/release-metadata.test.mjs
 
-      # PROBE ONLY (hypothesis test, not product code): does the exit-time
-      # rmSync of the smoke userData folder throw on Windows and leave a modal
-      # main-process error dialog open?
-      - name: Probe patch - guard smoke cleanup
-        shell: bash
-        run: |
-          node -e '
-            const fs = require("fs"); const p = "apps/desktop/electron/main/smoke.ts";
-            const s = fs.readFileSync(p, "utf8");
-            const old = "rmSync(smokeUserDataPath, { recursive: true, force: true });";
-            if (!s.includes(old)) process.exit(1);
-            fs.writeFileSync(p, s.replace(old, "try { rmSync(smokeUserDataPath, { recursive: true, force: true }); } catch (error) { console.error(`LETAGENTS_SMOKE_CLEANUP_FAILED ${String(error)}`); }"));
-          '
-
       - name: Build and package the Windows installer
         shell: bash
         run: |
@@ -84,17 +70,6 @@ jobs:
       - name: Install, smoke-check, and uninstall the installer
         shell: bash
         run: npm --prefix apps/desktop run smoke:windows-install
-
-      - name: Diagnostic - unpackaged smoke check
-        if: ${{ always() }}
-        shell: bash
-        working-directory: apps/desktop
-        timeout-minutes: 3
-        env:
-          LETAGENTS_DESKTOP_SMOKE_CHECK: "1"
-          LETAGENTS_DESKTOP_SMOKE_DEBUG: "1"
-          ELECTRON_ENABLE_LOGGING: "1"
-        run: npx electron .
 
       - name: Upload probe artifacts
         if: ${{ always() }}
