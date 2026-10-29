@@ -74,6 +74,7 @@ let rounds = 0;
 async function scene() {
   rounds += 1;
   const root = join(folder, `state-${rounds}`);
+  mkdirSync(root);
   const endpoint = daemonEndpoint(root);
   await ensureDaemonProof(endpoint.proofPath);
   const report = join(lowFolder, `report-${rounds}.json`);
