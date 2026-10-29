@@ -15,7 +15,15 @@ import {
 } from "../cursor-provider-constants.js";
 import { escapeCursorSandboxRegex } from "../cursor-sandbox-policy.js";
 
-const CURSOR_MCP_CONNECTOR_ROOT_PATTERN = `^${escapeCursorSandboxRegex(CURSOR_MCP_CONNECTOR_PARENT)}/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`;
+/**
+ * The connector-root pattern is built when a wrapper program is assembled, never
+ * at module load: on Windows the parent is a `C:\\...` temporary folder, which
+ * the sandbox-regex escape refuses, and a throw at load broke every main-process
+ * module that imports this one (Cursor does not launch on Windows yet).
+ */
+export function cursorMcpConnectorRootPattern(parent: string = CURSOR_MCP_CONNECTOR_PARENT): string {
+  return `^${escapeCursorSandboxRegex(parent)}/letagents-cursor-mcp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`;
+}
 
 /** Launch values that the wrapper program embeds as JSON literals. */
 export interface CursorWrapperLaunchValues {
@@ -77,7 +85,7 @@ const supervisedAgentEndpoint = ${JSON.stringify(agentUpstreamEndpoint)};
 const supervisedControlPlaneEndpoint = ${JSON.stringify(controlPlaneUpstreamEndpoint)};
 const supervisedControlPlanePaths = new Set(${JSON.stringify(CURSOR_SUPERVISED_CONTROL_PLANE_PATHS)});
 const deniedDelegatingExecutables = ${JSON.stringify(deniedDelegatingExecutablePaths)};
-const mcpConnectorRootPattern = new RegExp(${JSON.stringify(CURSOR_MCP_CONNECTOR_ROOT_PATTERN)});
+const mcpConnectorRootPattern = new RegExp(${JSON.stringify(cursorMcpConnectorRootPattern())});
 let started = false;
 let startPromise = null;
 let native = null;
