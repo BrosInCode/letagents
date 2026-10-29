@@ -9,6 +9,7 @@ import { supervisedAgentsOnly } from "./platform.js";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { assertOwnerPrivateFile, createElectronTestEnv } from "./harness.js";
+import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 const environment = createElectronTestEnv({ prefix: "local-supervision-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
@@ -20,14 +21,16 @@ const { getStoredAgentSession } = await import("../main/agents/state.js");
 const { prepareLocalSupervisorGrant, revokeLocalSupervisorEntry } = await import("../main/rooms/local-supervision-authority.js");
 const { requestLocalSupervisor, executeLocalSupervisorTool } = await import("../main/rooms/local-supervision-runtime.js");
 const boardService = await import("../main/rooms/local-board-service.js");
-process.env.LETAGENTS_BOARD_SOCKET_PATH = join(environment.tempDir, "board.sock");
-const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(environment.tempDir);
+process.env.LETAGENTS_BOARD_SOCKET_PATH = boardEndpoint.connectPath;
+const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
   if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
-});
-// The board socket is a Unix socket served by the supervisor daemon; Windows named
-// pipes are tier 3, so on Windows it is not started and the tests that use it skip.
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
+// The tests that use the board here are supervised claims, leases and daemon
+// restarts (later tier 3 work), so on Windows they skip and it is not started.
 if (!supervisedAgentsOnly) await boardSocket.start();
 test.beforeEach(() => registerLocalBoardOwner(() => {}));
 test.after(async () => { if (!supervisedAgentsOnly) await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });

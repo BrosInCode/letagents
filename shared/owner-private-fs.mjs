@@ -697,9 +697,11 @@ function readAllSync(security, paths) {
   return new Map(unique.map((path, index) => [path, sddls[index]]));
 }
 
-function privatePlan(security, entries) {
+function privatePlan(security, entries, checkObject = false) {
   if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return null;
-  const pending = entries.filter(entry => !isKnown(security, entry.path));
+  // checkObject: the entry's own DACL is read even when it is known, so an
+  // explicit grant added to it later is seen; its folders keep the cache.
+  const pending = entries.filter(entry => checkObject || !isKnown(security, entry.path));
   const plans = pending.map(entry => pathsToRead(security, entry.path));
   // Identities before the read: only these objects may be remembered, and only if they are still there.
   const identities = new Map(plans.flatMap(item => item.read).map(path => [path, identityOf(path)]));
@@ -718,8 +720,8 @@ function settlePlan(security, plan, answers, user) {
 }
 
 /** Windows: is each entry private? Known entries need no read; the rest are read in one call. */
-async function windowsEntriesArePrivate(security, entries) {
-  const plan = privatePlan(security, entries);
+async function windowsEntriesArePrivate(security, entries, checkObject = false) {
+  const plan = privatePlan(security, entries, checkObject);
   if (!plan) return false;
   if (plan.pending.length) {
     const answers = await readAll(security, plan.plans.flatMap(item => item.read));
@@ -728,8 +730,8 @@ async function windowsEntriesArePrivate(security, entries) {
   return entries.every(entry => pathIsInfo(entry.path, entry.info));
 }
 
-function windowsEntriesArePrivateSync(security, entries) {
-  const plan = privatePlan(security, entries);
+function windowsEntriesArePrivateSync(security, entries, checkObject = false) {
+  const plan = privatePlan(security, entries, checkObject);
   if (!plan) return false;
   if (plan.pending.length) {
     const answers = readAllSync(security, plan.plans.flatMap(item => item.read));
@@ -801,10 +803,14 @@ export function everyOwnerPrivateSync(entries, options = {}) {
  * and has no group/other bits (or, with `exactMode`, exactly that mode).
  * Windows: under a folder verified in this process, yes; otherwise one read of
  * the path and the folders above it decides (see decideChain).
+ *
+ * `checkObject: true` (for high-value secrets) always reads the object's own
+ * DACL, even when this process already knows it, so an explicit grant added to
+ * the file later is refused. The folders above still come from the cache.
  */
 export async function isOwnerPrivate(path, info, options = {}) {
   if (!isWindows(options)) return posixPrivate(info, options.exactMode);
-  try { return await windowsEntriesArePrivate(windowsSecurity(options), [{ path, info }]); } catch { return false; }
+  try { return await windowsEntriesArePrivate(windowsSecurity(options), [{ path, info }], options.checkObject === true); } catch { return false; }
 }
 
 /** Windows only: see sddlHasProfileDefaultAccess. POSIX answers as isOwnerPrivate. */
@@ -821,7 +827,7 @@ export async function hasProfileDefaultAccess(path, info, options = {}) {
 
 export function isOwnerPrivateSync(path, info, options = {}) {
   if (!isWindows(options)) return posixPrivate(info, options.exactMode);
-  try { return windowsEntriesArePrivateSync(windowsSecurity(options), [{ path, info }]); } catch { return false; }
+  try { return windowsEntriesArePrivateSync(windowsSecurity(options), [{ path, info }], options.checkObject === true); } catch { return false; }
 }
 
 function kindMatches(info, kind) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ import {
   resolveCurrentSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
 } from "../server/runtime/supervisor-bridge.js";
-import { unixSocketOnly } from "./support/platform.js";
+import { listenTestDaemon, testDaemonSocketPath } from "./support/platform.js";
 
 const session: StoredAgentSessionState = {
   session_id: "agent_session_exact",
@@ -42,9 +42,9 @@ const session: StoredAgentSessionState = {
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };
 
-test("custodial wait negotiates receipts and release retains exact invocation, binding and generation", { skip: unixSocketOnly }, async () => {
+test("custodial wait negotiates receipts and release retains exact invocation, binding and generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "custodial-gate-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   let capable = false;
   let offersCapable = false;
@@ -68,7 +68,7 @@ test("custodial wait negotiates receipts and release retains exact invocation, b
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const env = {
       LETAGENTS_EXECUTION_PROFILE: "supervised_mcp_polling", LETAGENTS_API_URL: "https://example.test",
       LETAGENTS_SUPERVISOR_PROVIDER: "codex", LETAGENTS_SUPERVISOR_ENTRY_ID: "entry_exact",
@@ -167,9 +167,9 @@ test("Open Model supervised coordinates resolve without a Codex context file", a
   });
 });
 
-test("Cursor credential borrowing carries the exact rotating provider-turn capability", { skip: unixSocketOnly }, async () => {
+test("Cursor credential borrowing carries the exact rotating provider-turn capability", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-turn-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -186,7 +186,7 @@ test("Cursor credential borrowing carries the exact rotating provider-turn capab
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const result = await borrowSupervisedWorkerCredential({ ...session, runtime: "cursor" }, {
       LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
       LETAGENTS_SUPERVISOR_ENTRY_ID: "cursor_exact",
@@ -204,9 +204,9 @@ test("Cursor credential borrowing carries the exact rotating provider-turn capab
   }
 });
 
-test("bounded effect completion survives a real handoff socket unlink and delayed successor listen", { skip: unixSocketOnly }, async () => {
+test("bounded effect completion survives a real handoff socket unlink and delayed successor listen", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-handoff-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   let firstClosed = false;
   let successorListening = false;
@@ -249,13 +249,13 @@ test("bounded effect completion survives a real handoff socket unlink and delaye
         // actual ENOENT unlink window more than once before generation 21 is
         // available, rather than succeeding against the same listener.
         successorTimer = setTimeout(() => {
-          successor.listen(socketPath, () => { successorListening = true; });
+          listenTestDaemon(successor, socketPath, () => { successorListening = true; });
         }, 220);
       });
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { first.once("error", reject); first.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { first.once("error", reject); listenTestDaemon(first, socketPath, resolve); });
     const startedAt = Date.now();
     await writeSupervisorContext(root, "generation_exact");
     await completeCurrentSupervisedEffect({ effectId: "effect-exact", result: { sent: true } }, {
@@ -276,9 +276,9 @@ test("bounded effect completion survives a real handoff socket unlink and delaye
   }
 });
 
-test("daemon-owned tool execution has a bounded handshake but no correctness timeout", { skip: unixSocketOnly }, async () => {
+test("daemon-owned tool execution has a bounded handshake but no correctness timeout", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-daemon-execute-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -300,7 +300,7 @@ test("daemon-owned tool execution has a bounded handshake but no correctness tim
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_exact", session.room_id, {
       agent_session_id: session.session_id,
       agent_display_name: session.display_name,
@@ -327,9 +327,9 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
   const operationResult = { state: "completed", room_id: "room_exact", result: { sent: true } };
   const negotiationResult = { protocol_version: 2, generation: 41, pid: 123, started_at: "2026-09-22T00:00:00.000Z" };
 
-  test(`${operationName} waits through an absent daemon socket with its original invocation`, { skip: unixSocketOnly }, async () => {
+  test(`${operationName} waits through an absent daemon socket with its original invocation`, async () => {
     const root = await mkdtemp(join(tmpdir(), "la-prewrite-gap-"));
-    const socketPath = join(root, "daemon.sock");
+    const socketPath = testDaemonSocketPath(root);
     const requests: any[] = [];
     const server = createServer((socket) => {
       let buffer = "";
@@ -357,7 +357,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
       input.mcpRequestId = "later_request";
       const listening = new Promise<void>((resolve, reject) => {
         server.once("error", reject);
-        listenTimer = setTimeout(() => server.listen(socketPath, resolve), 120);
+        listenTimer = setTimeout(() => listenTestDaemon(server, socketPath, resolve), 120);
       });
       const [result] = await Promise.all([pending, listening]);
       assert.deepEqual(result, { state: "completed", roomId: "room_exact", result: { sent: true } });
@@ -378,9 +378,9 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
     }
   });
 
-  test(`${operationName} renegotiates when the socket disappears before its write`, { skip: unixSocketOnly }, async () => {
+  test(`${operationName} renegotiates when the socket disappears before its write`, async () => {
     const root = await mkdtemp(join(tmpdir(), "la-prewrite-unlink-"));
-    const socketPath = join(root, "daemon.sock");
+    const socketPath = testDaemonSocketPath(root);
     const requests: any[] = [];
     let successorTimer: NodeJS.Timeout | undefined;
     const successor = createServer((socket) => {
@@ -404,13 +404,13 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
         const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
         requests.push(request);
         first.close(() => {
-          successorTimer = setTimeout(() => successor.listen(socketPath), 120);
+          successorTimer = setTimeout(() => listenTestDaemon(successor, socketPath), 120);
         });
         socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: negotiationResult })}\n`);
       });
     });
     try {
-      await new Promise<void>((resolve, reject) => { first.once("error", reject); first.listen(socketPath, resolve); });
+      await new Promise<void>((resolve, reject) => { first.once("error", reject); listenTestDaemon(first, socketPath, resolve); });
       assert.deepEqual(await operation({ toolName: "set_reply_thread", input: { thread_parent_id: "msg_9" },
         mcpRequestId: "request_gap", mutation: true }, {
         ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
@@ -430,9 +430,9 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
 
   for (const failure of ["post-write close", "authoritative rejection", "negotiation rejection", "post-write timeout"] as const) {
     if (operationName === "execute" && failure === "post-write timeout") continue; // Admitted execution has no correctness timer.
-    test(`${operationName} does not retry ${failure}`, { skip: unixSocketOnly }, async () => {
+    test(`${operationName} does not retry ${failure}`, async () => {
       const root = await mkdtemp(join(tmpdir(), "la-prewrite-no-replay-"));
-      const socketPath = join(root, "daemon.sock");
+      const socketPath = testDaemonSocketPath(root);
       const requests: any[] = [];
       const server = createServer((socket) => {
         let buffer = "";
@@ -450,7 +450,7 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
         });
       });
       try {
-        await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+        await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
         await assert.rejects(() => operation({ toolName: "send_thread_message", input: { text: "once" },
           mcpRequestId: "request_once", mutation: true }, {
           ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
@@ -479,9 +479,9 @@ for (const operation of [executeCurrentSupervisedTool, prepareCurrentSupervisedE
   });
 }
 
-test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", { skip: unixSocketOnly }, async () => {
+test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-old-daemon-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -500,7 +500,7 @@ test("daemon-owned tool execution recognizes an old daemon and permits compatibi
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_exact", session.room_id, {
       agent_session_id: session.session_id,
       agent_display_name: session.display_name,
@@ -516,9 +516,9 @@ test("daemon-owned tool execution recognizes an old daemon and permits compatibi
   }
 });
 
-test("bounded effect preparation preserves a daemon-owned uncertain mutation outcome", { skip: unixSocketOnly }, async () => {
+test("bounded effect preparation preserves a daemon-owned uncertain mutation outcome", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-uncertain-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -535,7 +535,7 @@ test("bounded effect preparation preserves a daemon-owned uncertain mutation out
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const prepared = await prepareCurrentSupervisedEffect({
       toolName: "send_message", input: { text: "once" }, mcpRequestId: "request_uncertain", mutation: true,
     }, {
@@ -555,9 +555,9 @@ test("bounded effect preparation preserves a daemon-owned uncertain mutation out
   }
 });
 
-test("bounded effect preparation fails closed without valid daemon room authority", { skip: unixSocketOnly }, async () => {
+test("bounded effect preparation fails closed without valid daemon room authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-room-authority-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const roomAuthorities: unknown[] = [undefined, "   ", "room\u0000escape"];
   let preparationIndex = 0;
   const server = createServer((socket) => {
@@ -579,7 +579,7 @@ test("bounded effect preparation fails closed without valid daemon room authorit
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     for (let index = 0; index < roomAuthorities.length; index += 1) {
       await assert.rejects(() => prepareCurrentSupervisedEffect({
         toolName: "read_messages",
@@ -598,9 +598,9 @@ test("bounded effect preparation fails closed without valid daemon room authorit
   }
 });
 
-test("bounded effect preparation fails closed on unknown daemon states and actions", { skip: unixSocketOnly }, async () => {
+test("bounded effect preparation fails closed on unknown daemon states and actions", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-protocol-drift-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const responses = [
     { state: "future_state", room_id: "room_exact", effect_id: "effect_future", action: "execute" },
     { state: "prepared", room_id: "room_exact", effect_id: "effect_future", action: "future_action" },
@@ -620,7 +620,7 @@ test("bounded effect preparation fails closed on unknown daemon states and actio
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await assert.rejects(() => prepareCurrentSupervisedEffect({
       toolName: "read_messages", input: {}, mcpRequestId: "request_future_state", mutation: false,
     }, { ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }), /unsupported state/i);
@@ -634,9 +634,9 @@ test("bounded effect preparation fails closed on unknown daemon states and actio
   }
 });
 
-test("bounded effect completion does not retry an authoritative non-handoff rejection", { skip: unixSocketOnly }, async () => {
+test("bounded effect completion does not retry an authoritative non-handoff rejection", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-reject-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -655,7 +655,7 @@ test("bounded effect completion does not retry an authoritative non-handoff reje
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_exact");
     await assert.rejects(() => completeCurrentSupervisedEffect({ effectId: "effect-rejected" }, {
       LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
@@ -668,9 +668,9 @@ test("bounded effect completion does not retry an authoritative non-handoff reje
   }
 });
 
-test("bounded effect completion surfaces an authoritative successor failure after transient handoff retry", { skip: unixSocketOnly }, async () => {
+test("bounded effect completion surfaces an authoritative successor failure after transient handoff retry", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-double-failure-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   let completionAttempts = 0;
   const server = createServer((socket) => {
@@ -695,7 +695,7 @@ test("bounded effect completion surfaces an authoritative successor failure afte
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_exact");
     await assert.rejects(() => completeCurrentSupervisedEffect({ effectId: "effect-double-failure" }, {
       LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
@@ -708,9 +708,9 @@ test("bounded effect completion surfaces an authoritative successor failure afte
   }
 });
 
-test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", { skip: unixSocketOnly }, async () => {
+test("credential borrowing requires the negotiated daemon generation and defers without desktop delivery", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-credential-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   let result: Record<string, unknown> = { status: "deferred" };
   const server = createServer((socket) => {
@@ -728,7 +728,7 @@ test("credential borrowing requires the negotiated daemon generation and defers 
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const options = { cwd: root, trustedDaemonSocketPath: socketPath };
     await writeSupervisorContext(root, "generation_exact");
     assert.deepEqual(await borrowSupervisedWorkerCredential(session, {}, options), {
@@ -749,9 +749,9 @@ test("credential borrowing requires the negotiated daemon generation and defers 
   }
 });
 
-test("bounded MCP identity and credential borrowing follow a daemon room move instead of stale launch context", { skip: unixSocketOnly }, async () => {
+test("bounded MCP identity and credential borrowing follow a daemon room move instead of stale launch context", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-current-credential-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   let borrowCount = 0;
   const server = createServer((socket) => {
@@ -769,7 +769,7 @@ test("bounded MCP identity and credential borrowing follow a daemon room move in
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_exact", session.room_id, {
       agent_session_id: session.session_id,
       agent_display_name: "Exact worker",
@@ -821,9 +821,9 @@ test("bounded MCP borrowing rejects absent identity before contacting the daemon
   }
 });
 
-test("Codex supervisor context binds and checkpoints through an MCP process without supervisor env", { skip: unixSocketOnly }, async () => {
+test("Codex supervisor context binds and checkpoints through an MCP process without supervisor env", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -838,7 +838,7 @@ test("Codex supervisor context binds and checkpoints through an MCP process with
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_first");
     const options = { cwd: root, trustedDaemonSocketPath: socketPath };
     assert.deepEqual(await bindSupervisedWorkerSessionWithContext(session, {}, options), {
@@ -886,10 +886,10 @@ test("Codex supervisor context binds and checkpoints through an MCP process with
   }
 });
 
-test("validated supervisor cwd survives MCP restart for bind and cursor checkpoint", { skip: unixSocketOnly }, async () => {
+test("validated supervisor cwd survives MCP restart for bind and cursor checkpoint", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-persisted-"));
   const unrelated = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-process-cwd-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -906,7 +906,7 @@ test("validated supervisor cwd survives MCP restart for bind and cursor checkpoi
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await writeSupervisorContext(root, "generation_exact");
     const persistedSession: StoredAgentSessionState = {
       ...session,
@@ -982,10 +982,11 @@ test("Codex supervisor context fails closed for partial, cross-room, and unrelat
   }
 });
 
-test("worktree context cannot redirect a freshly minted worker credential to an attacker socket", { skip: unixSocketOnly }, async () => {
+test("worktree context cannot redirect a freshly minted worker credential to an attacker socket", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-context-socket-"));
-  const trustedSocketPath = join(root, "trusted.sock");
-  const attackerSocketPath = join(root, "attacker.sock");
+  await Promise.all([mkdir(join(root, "trusted")), mkdir(join(root, "attacker"))]);
+  const trustedSocketPath = testDaemonSocketPath(join(root, "trusted"));
+  const attackerSocketPath = testDaemonSocketPath(join(root, "attacker"));
   const trustedRequests: any[] = [];
   const attackerRequests: any[] = [];
   const serverFor = (requests: any[]) => createServer((socket) => {
@@ -1004,8 +1005,8 @@ test("worktree context cannot redirect a freshly minted worker credential to an 
   const attacker = serverFor(attackerRequests);
   try {
     await Promise.all([
-      new Promise<void>((resolve, reject) => { trusted.once("error", reject); trusted.listen(trustedSocketPath, resolve); }),
-      new Promise<void>((resolve, reject) => { attacker.once("error", reject); attacker.listen(attackerSocketPath, resolve); }),
+      new Promise<void>((resolve, reject) => { trusted.once("error", reject); listenTestDaemon(trusted, trustedSocketPath, resolve); }),
+      new Promise<void>((resolve, reject) => { attacker.once("error", reject); listenTestDaemon(attacker, attackerSocketPath, resolve); }),
     ]);
     await writeSupervisorContext(root, "generation_exact", session.room_id, { socket_path: attackerSocketPath });
     assert.equal(await bindSupervisedWorkerSession(session, {}, {
@@ -1023,9 +1024,9 @@ test("worktree context cannot redirect a freshly minted worker credential to an 
   }
 });
 
-test("supervisor bridge accepts the current daemon protocol and binds only the exact worker session credential", { skip: unixSocketOnly }, async () => {
+test("supervisor bridge accepts the current daemon protocol and binds only the exact worker session credential", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -1040,7 +1041,7 @@ test("supervisor bridge accepts the current daemon protocol and binds only the e
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     assert.equal(await bindSupervisedWorkerSession(session, {
       LETAGENTS_SUPERVISOR_ENTRY_ID: "manifest_exact",
       LETAGENTS_SUPERVISOR_DAEMON_SOCKET: socketPath,
@@ -1068,9 +1069,9 @@ test("supervisor bridge accepts the current daemon protocol and binds only the e
   }
 });
 
-test("supervisor bridge binds once per exact daemon generation", { skip: unixSocketOnly }, async () => {
+test("supervisor bridge binds once per exact daemon generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-cache-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   let daemonGeneration = 41;
   const server = createServer((socket) => {
@@ -1088,7 +1089,7 @@ test("supervisor bridge binds once per exact daemon generation", { skip: unixSoc
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const env = supervisedEnv(socketPath);
     assert.equal(await bindSupervisedWorkerSession(session, env), true);
     assert.equal(await bindSupervisedWorkerSession(session, env), true);
@@ -1105,9 +1106,9 @@ test("supervisor bridge binds once per exact daemon generation", { skip: unixSoc
   }
 });
 
-test("confirmed waits bound a wedged exact-binding verification to 250ms or less", { skip: unixSocketOnly }, async () => {
+test("confirmed waits bound a wedged exact-binding verification to 250ms or less", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-fast-wait-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   let wedgeNegotiation = false;
   const requests: any[] = [];
   const server = createServer((socket) => {
@@ -1126,7 +1127,7 @@ test("confirmed waits bound a wedged exact-binding verification to 250ms or less
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const env = supervisedEnv(socketPath);
     assert.equal(await bindSupervisedWorkerSession(session, env, { requestTimeoutMs: 25 }), true);
     wedgeNegotiation = true;
@@ -1149,9 +1150,9 @@ test("confirmed waits bound a wedged exact-binding verification to 250ms or less
   }
 });
 
-test("binding cache includes protected room and credential identity", { skip: unixSocketOnly }, async () => {
+test("binding cache includes protected room and credential identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-protected-cache-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -1168,7 +1169,7 @@ test("binding cache includes protected room and credential identity", { skip: un
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const env = supervisedEnv(socketPath);
     assert.equal(await bindSupervisedWorkerSession(session, env), true);
     assert.equal(await bindSupervisedWorkerSession({ ...session, session_token: "replacement-secret" }, env, {
@@ -1182,9 +1183,9 @@ test("binding cache includes protected room and credential identity", { skip: un
   }
 });
 
-test("a daemon without a stable identity is rebound instead of cached across replacements", { skip: unixSocketOnly }, async () => {
+test("a daemon without a stable identity is rebound instead of cached across replacements", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-no-identity-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -1199,7 +1200,7 @@ test("a daemon without a stable identity is rebound instead of cached across rep
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const env = supervisedEnv(socketPath);
     assert.equal(await bindSupervisedWorkerSession(session, env), true);
     assert.equal(await bindSupervisedWorkerSession(session, env, { allowConfirmedFastPath: true }), true);
@@ -1220,9 +1221,9 @@ test("supervisor transport timeouts are retryable bookkeeping failures", () => {
   assert.equal(isRetryableSupervisorBridgeError(new Error("Worker session room does not match the supervised manifest entry.")), false);
 });
 
-test("supervisor bridge checkpoints the exact worker cursor without sending its session token", { skip: unixSocketOnly }, async () => {
+test("supervisor bridge checkpoints the exact worker cursor without sending its session token", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const requests: any[] = [];
   const server = createServer((socket) => {
     let buffer = "";
@@ -1239,7 +1240,7 @@ test("supervisor bridge checkpoints the exact worker cursor without sending its 
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     assert.equal(await checkpointSupervisedWorkerCursor(session, "msg_2819", supervisedEnv(socketPath)), true);
     assert.equal(requests[1].method, "supervisor.checkpoint_worker_cursor");
     assert.deepEqual(requests[1].params, {
@@ -1256,9 +1257,9 @@ test("supervisor bridge checkpoints the exact worker cursor without sending its 
   }
 });
 
-test("scheduled cursor checkpoints retry transient failures and keep the newest acknowledgement", { skip: unixSocketOnly }, async () => {
+test("scheduled cursor checkpoints retry transient failures and keep the newest acknowledgement", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-cursor-retry-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const checkpoints: string[] = [];
   let failedOnce = false;
   const server = createServer((socket) => {
@@ -1282,7 +1283,7 @@ test("scheduled cursor checkpoints retry transient failures and keep the newest 
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     const scheduledSession = { ...session, session_id: "agent_session_scheduled_retry" };
     const env = supervisedEnv(socketPath);
     scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_012", env, { requestTimeoutMs: 50 });
@@ -1297,14 +1298,14 @@ test("scheduled cursor checkpoints retry transient failures and keep the newest 
   }
 });
 
-test("supervisor bridge fails closed when protocol negotiation is malformed or unsupported", { skip: unixSocketOnly }, async () => {
+test("supervisor bridge fails closed when protocol negotiation is malformed or unsupported", async () => {
   for (const { protocolVersion, responseVersion } of [
     { protocolVersion: "2", responseVersion: 2 },
     { protocolVersion: 4, responseVersion: 4 },
     { protocolVersion: 2, responseVersion: 1 },
   ]) {
     const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-invalid-"));
-    const socketPath = join(root, "daemon.sock");
+    const socketPath = testDaemonSocketPath(root);
     let requestCount = 0;
     const server = createServer((socket) => {
       let buffer = "";
@@ -1318,7 +1319,7 @@ test("supervisor bridge fails closed when protocol negotiation is malformed or u
       });
     });
     try {
-      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
       await assert.rejects(() => bindSupervisedWorkerSession(session, supervisedEnv(socketPath)), /unsupported version|does not match/);
       assert.equal(requestCount, 1, "an invalid negotiation never reaches the binding mutation");
     } finally {
@@ -1328,9 +1329,9 @@ test("supervisor bridge fails closed when protocol negotiation is malformed or u
   }
 });
 
-test("supervisor bridge surfaces negotiation rejection without attempting a bind", { skip: unixSocketOnly }, async () => {
+test("supervisor bridge surfaces negotiation rejection without attempting a bind", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-reject-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   let requestCount = 0;
   const server = createServer((socket) => {
     let buffer = "";
@@ -1344,7 +1345,7 @@ test("supervisor bridge surfaces negotiation rejection without attempting a bind
     });
   });
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await assert.rejects(() => bindSupervisedWorkerSession(session, supervisedEnv(socketPath)), /negotiation denied/);
     assert.equal(requestCount, 1);
   } finally {
@@ -1353,12 +1354,12 @@ test("supervisor bridge surfaces negotiation rejection without attempting a bind
   }
 });
 
-test("supervisor bridge bounds an unresponsive negotiation", { skip: unixSocketOnly }, async () => {
+test("supervisor bridge bounds an unresponsive negotiation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-timeout-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const server = createServer((socket) => socket.resume());
   try {
-    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); listenTestDaemon(server, socketPath, resolve); });
     await assert.rejects(
       () => bindSupervisedWorkerSession(session, supervisedEnv(socketPath), { requestTimeoutMs: 25 }),
       /Timed out communicating/,
@@ -1375,7 +1376,7 @@ test("supervisor bridge bounds an unresponsive negotiation", { skip: unixSocketO
 // budget for a bounded tool call. Neither may hang.
 test("without a daemon, bridge calls end in a retryable transport error instead of hanging", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-no-daemon-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const retryable = (error: unknown) => {
     assert.ok(error instanceof Error, String(error));
     const code = (error as NodeJS.ErrnoException).code;

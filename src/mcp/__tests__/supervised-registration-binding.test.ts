@@ -6,14 +6,14 @@ import { join } from "node:path";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { unixSocketOnly } from "./support/platform.js";
+import { listenTestDaemon, testDaemonSocketPath } from "./support/platform.js";
 
 const root = await mkdtemp(join(tmpdir(), "letagents-supervised-registration-"));
 const home = join(root, "home");
 const workspace = join(root, "workspace");
 const daemonDir = join(home, ".letagents");
-const socketPath = join(daemonDir, "daemon.sock");
 await Promise.all([mkdir(daemonDir, { recursive: true }), mkdir(workspace, { recursive: true })]);
+const socketPath = testDaemonSocketPath(daemonDir);
 
 const controlledEnvironmentKeys = [
   "HOME",
@@ -26,6 +26,8 @@ const controlledEnvironmentKeys = [
   "LETAGENTS_SUPERVISOR_DAEMON_SOCKET",
   "LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID",
   "LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID",
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
+  "USERPROFILE",
 ] as const;
 const originalEnvironment = Object.fromEntries(
   controlledEnvironmentKeys.map((key) => [key, process.env[key]]),
@@ -35,6 +37,7 @@ for (const key of controlledEnvironmentKeys.slice(6)) {
   delete process.env[key];
 }
 process.env.HOME = home;
+process.env.USERPROFILE = home;
 process.env.LETAGENTS_API_URL = "https://letagents.test";
 process.env.LETAGENTS_TOKEN = "owner-token";
 process.env.LETAGENTS_AGENT_NAME = "registration-worker";
@@ -65,10 +68,16 @@ test.after(async () => {
     if (original === undefined) delete process.env[key];
     else process.env[key] = original;
   }
-  await rm(root, { recursive: true, force: true });
+  try {
+    await rm(root, { recursive: true, force: true });
+  } catch (error) {
+    // Windows keeps the open SQLite database locked until this process exits
+    // (EBUSY); the runner's temp directory is cleaned up with the job.
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+  }
 });
 
-test("register_agent_session persists its validated supervised cwd for later bridge calls", { skip: unixSocketOnly }, async () => {
+test("register_agent_session persists its validated supervised cwd for later bridge calls", async () => {
   const originalFetch = globalThis.fetch;
   const requests: Array<Record<string, any>> = [];
   const daemon = createServer((socket) => {
@@ -102,7 +111,7 @@ test("register_agent_session persists its validated supervised cwd for later bri
       })),
       new Promise<void>((resolve, reject) => {
         daemon.once("error", reject);
-        daemon.listen(socketPath, resolve);
+        listenTestDaemon(daemon, socketPath, resolve);
       }),
     ]);
 

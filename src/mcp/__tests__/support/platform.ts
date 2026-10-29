@@ -1,23 +1,74 @@
 import assert from "node:assert/strict";
-import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
+import { randomBytes } from "node:crypto";
+import { lstatSync, realpathSync, statSync } from "node:fs";
+import type { Server, Socket } from "node:net";
+import { isAbsolute, join, relative } from "node:path";
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+import { acceptDaemonPeer, daemonEndpoint, rememberPrivateDaemonProof, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
+import { isOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../shared/owner-private-fs.mjs";
 
 // Platform facts the MCP test suites share. The suites run on Windows in CI;
 // what cannot run there is skipped through these constants, in one place,
 // with the reason beside it.
 
 /**
- * Skip reason for a test that listens on a Unix domain socket. The desktop
- * daemon's control socket is a Unix socket; Windows named pipes are a later
- * tier of the port, and the standalone MCP server never listens itself. On
- * Windows, `listen(<file path>)` fails with EACCES.
+ * Where a fake daemon under `root` listens: `<root>/daemon.sock` on POSIX, the
+ * root's named pipe on Windows (the same endpoint the product computes).
  */
-export const unixSocketOnly = process.platform === "win32"
-  ? "the desktop supervisor bridge uses a Unix socket; Windows named pipes are tier 3"
-  : false;
+export function testDaemonSocketPath(root: string): string {
+  if (process.platform !== "win32") return join(root, "daemon.sock");
+  const endpoint = daemonEndpoint(root);
+  // The proof is written now, during setup: on Windows the private write runs
+  // PowerShell synchronously, which must not block a test's timed window.
+  fakeProof(endpoint.proofPath!);
+  return endpoint.connectPath;
+}
+
+const gatedServers = new WeakSet<Server>();
+/** Proofs the fake daemon wrote in this process, by path. */
+const fakeProofs = new Map<string, string>();
+
+/**
+ * The fake daemon's proof for `proofPath`, written once per process as the
+ * daemon writes its own (private, then remembered by the identity checked).
+ * Later calls reuse it: the synchronous DACL read runs PowerShell (about a
+ * second) and would block the event loop a client's retry budget runs on.
+ */
+function fakeProof(proofPath: string): string {
+  let proof = fakeProofs.get(proofPath);
+  if (!proof) {
+    proof = randomBytes(32).toString("hex");
+    writePrivateFileAtomicallySync(proofPath, `${proof}\n`);
+    const checked = lstatSync(proofPath);
+    if (isOwnerPrivateSync(proofPath, checked)) rememberPrivateDaemonProof(proofPath, checked);
+    fakeProofs.set(proofPath, proof);
+  }
+  return proof;
+}
+
+/**
+ * `server.listen(socketPath, callback)` for a fake daemon. On Windows the
+ * product client runs the pipe handshake first, so each connection listener
+ * is put behind the daemon's side of it, with a proof written for the root.
+ */
+export function listenTestDaemon(server: Server, socketPath: string, callback?: () => void): Server {
+  if (process.platform === "win32" && !gatedServers.has(server)) {
+    const proofPath = resolveDaemonProofPath(socketPath);
+    if (!proofPath) throw new Error(`No test state directory owns ${socketPath}; build it with testDaemonSocketPath.`);
+    // The product client accepts only a proof private to this account, so the
+    // fake writes it the way the daemon does.
+    const proof = fakeProof(proofPath);
+    for (const listener of server.listeners("connection") as Array<(socket: Socket) => void>) {
+      server.off("connection", listener);
+      server.on("connection", (socket: Socket) => acceptDaemonPeer(socket, proof, listener));
+    }
+    gatedServers.add(server);
+  }
+  return callback ? server.listen(socketPath, callback) : server.listen(socketPath);
+}
 
 /**
  * Skip reason for a step that sends SIGTERM as a request a handler can answer.

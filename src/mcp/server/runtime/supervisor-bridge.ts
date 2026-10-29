@@ -1,11 +1,11 @@
 import { isLocalRoomApi, roomApiOrigin } from "../../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { createConnection } from "node:net";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { parsePositivePgIntegerScopedId } from "../../../../shared/message-contracts.mjs";
+import { connectDaemon, daemonEndpoint, prepareDaemonConnection } from "../../../../shared/daemon-endpoint.mjs";
+import { letagentsHome } from "../../../../shared/letagents-home.mjs";
 
 import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
@@ -13,6 +13,11 @@ import { currentSessionScope } from "./session-scope.js";
 
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2, 3]);
+// A supervised worker on a Windows pipe checks the daemon proof's privacy now,
+// so its first request (budgets go down to 250 ms) does not wait for it.
+// A no-op for a Unix socket.
+if (process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET?.trim()) prepareDaemonConnection(process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET.trim());
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 // A signed desktop update can leave the socket absent for roughly 20 seconds.
 // Only unsent operations receive this startup grace; it never permits replay.
@@ -859,7 +864,7 @@ async function resolveSupervisorCoordinates(
   }
   return {
     ...context,
-    socketPath: options.trustedDaemonSocketPath ?? join(homedir(), ".letagents", "daemon.sock"),
+    socketPath: options.trustedDaemonSocketPath ?? daemonEndpoint(letagentsHome()).connectPath,
   };
 }
 
@@ -997,7 +1002,7 @@ function supervisorRequest(
 ): Promise<SupervisorResponse> {
   return new Promise((resolve, reject) => {
     const encoded = `${JSON.stringify(request)}\n`;
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let buffer = "";
     let finished = false;
     let writeAttempted = false;

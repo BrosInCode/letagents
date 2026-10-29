@@ -391,6 +391,34 @@ test("Windows checks ignore mode bits and read the path, and the folders above i
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("Windows: checkObject reads a known secret's own DACL again and refuses a grant added later", async () => {
+  const root = scratch();
+  try {
+    const folder = join(root, "state");
+    mkdirSync(folder);
+    const secret = join(folder, "secret");
+    writeFileSync(secret, "x");
+    const { security, reads, sddl } = fakeSecurity({ [folder]: PRIVATE_FOLDER, [secret]: INHERITED_PRIVATE });
+    const options = { platform: "win32" as const, windowsSecurity: security };
+    const windowsStat = { mode: 0o100666, uid: 0 };
+    assert.equal(await isOwnerPrivate(secret, windowsStat, options), true);
+    // Someone adds an explicit grant to the file itself; the folder stays private.
+    sddl[secret] = `O:${USER}D:AI(A;;FR;;;WD)(A;ID;FA;;;SY)(A;ID;FA;;;${USER})`;
+    // The cache (folders verified once) still answers for an ordinary check: unchanged #1801 behaviour.
+    let before = reads.length;
+    assert.equal(await isOwnerPrivate(secret, windowsStat, options), true);
+    assert.equal(reads.length, before, "an ordinary check of a known entry reads nothing");
+    // checkObject reads the file's own DACL, and only the file (its folder is verified).
+    before = reads.length;
+    assert.equal(await isOwnerPrivate(secret, windowsStat, { ...options, checkObject: true }), false);
+    assert.equal(isOwnerPrivateSync(secret, windowsStat, { ...options, checkObject: true }), false);
+    assert.deepEqual(reads.slice(before), [secret, secret]);
+    // Restored to private, checkObject passes again.
+    sddl[secret] = INHERITED_PRIVATE;
+    assert.equal(await isOwnerPrivate(secret, windowsStat, { ...options, checkObject: true }), true);
+  } finally { rmSync(root, { recursive: true, force: true }); forgetOwnerPrivateCache(); }
+});
+
 test("Windows: an entry another account left in a folder before it was verified is never trusted", async () => {
   const root = scratch();
   try {

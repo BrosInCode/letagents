@@ -1,17 +1,17 @@
-import { join } from "node:path";
 const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
 import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mjs";
 // These storage-domain fixtures run as the board owner. Cross-process calls use the socket below.
 registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
-import { supervisedAgentsOnly } from "./platform.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
+import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { supervisedAgentsOnly } from "./platform.js";
 
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
@@ -100,14 +100,16 @@ const {
   await import("../main/room-stream.js");
 
 const boardService = await import("../main/rooms/local-board-service.js");
-process.env.LETAGENTS_BOARD_SOCKET_PATH = join(env.tempDir, "board.sock");
-const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(env.tempDir);
+process.env.LETAGENTS_BOARD_SOCKET_PATH = boardEndpoint.connectPath;
+const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
   if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
-});
-// The board socket is a Unix socket served by the supervisor daemon; Windows named
-// pipes are tier 3, so on Windows it is not started and the tests that use it skip.
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
+// The desktop refuses local-room boards on Windows until supervised agents run
+// there (#1797's gate), so the tests that use the board skip on Windows.
 if (!supervisedAgentsOnly) await boardSocket.start();
 test.after(async () => { if (!supervisedAgentsOnly) await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
@@ -1325,7 +1327,8 @@ test("local board follows cross-process commits with no idle, message, or other-
   const mcpUrl = new URL("../../../../src/mcp/local-state/local-chat.ts", import.meta.url).href;
   const runMcp = (code: string) => exec(process.execPath,
     ["--import", "tsx", "--input-type=module", "-e", `const m = await import(${JSON.stringify(mcpUrl)}); ${code}`],
-    { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env } });
+    // On Windows the child finds the board pipe's proof through the state directory.
+    { cwd: fileURLToPath(new URL("../../../../", import.meta.url)), env: { ...process.env, [DAEMON_STATE_DIR_ENV]: env.tempDir } });
   const updates = () => emitted.filter((event): event is Extract<DesktopRoomStreamEvent, { type: "task_update" }> =>
     event.type === "task_update" && event.roomIdentifier === room);
   try {

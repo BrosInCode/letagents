@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+// The control plane serves this board socket on Windows too (a named pipe),
+// but the desktop refuses local-room boards there until supervised agents run
+// on Windows (#1797's gate), so every test here still skips on Windows.
 import { supervisedAgentTest as test, supervisedAgentsOnly } from "./platform.js";
-import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { join } from "node:path";
+import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 import { randomUUID } from "node:crypto";
 import { createElectronTestEnv } from "./harness.js";
 const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
@@ -11,7 +14,9 @@ import { runWithLocalBoardOwner, requestLocalBoard, onLocalBoardChanged } from "
 const env = createElectronTestEnv({ prefix: "local-board-service-", paths: ["state", "chatStorage", "localChatDb"] });
 const store = await import("../main/rooms/local-store.js");
 const service = await import("../main/rooms/local-board-service.js");
-const socketPath = join(env.tempDir, "board.sock");
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(env.tempDir);
+const socketPath = boardEndpoint.connectPath;
 process.env.LETAGENTS_BOARD_SOCKET_PATH = socketPath;
 let generation = 1;
 let active = true;
@@ -27,11 +32,9 @@ const makeSocket = () => new DaemonControlSocket(socketPath, async (request: { m
   mutations++;
   await beforeMutation?.();
   return owned(() => service.executeLocalBoardMutation(request.params));
-});
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 let socket = makeSocket();
 await owned(() => store.getLocalTaskDatabase());
-// The board socket is a Unix socket served by the supervisor daemon; Windows named
-// pipes are tier 3, so on Windows it is not started and every test here skips.
 if (!supervisedAgentsOnly) await socket.start();
 test.after(async () => { if (!supervisedAgentsOnly) await socket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
@@ -132,8 +135,8 @@ test("a caller disconnect does not cancel or retry an admitted mutation", async 
   const blocked = new Promise<void>(resolve => { release = resolve; });
   beforeMutation = async () => { admitted(); await blocked; };
   const before = mutations;
-  const client = createConnection(socketPath);
-  await new Promise<void>(resolve => client.once("connect", resolve));
+  const client = connectDaemon(socketPath);
+  await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
   client.write(`${JSON.stringify({ version: 3, id: randomUUID(), method: "local_board.mutate", params: {
     domain: "desktop", operation: "addLocalTask", args: [room, { title: "Only once" }], databasePath: env.localChatDbPath,
   } })}\n`);

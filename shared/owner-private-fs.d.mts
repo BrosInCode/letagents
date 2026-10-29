@@ -35,6 +35,8 @@ export interface OwnerPrivateOptions {
 export interface OwnerPrivateCheckOptions extends OwnerPrivateOptions {
   /** POSIX only: require exactly this mode (& 0o777) instead of "no group or other bits". */
   exactMode?: number;
+  /** Windows only: always read the object's own DACL, even when this process knows it (high-value secrets). */
+  checkObject?: boolean;
 }
 
 /** Tests only: use this platform and WindowsSecurity wherever a call passes no options; null restores the real ones. */

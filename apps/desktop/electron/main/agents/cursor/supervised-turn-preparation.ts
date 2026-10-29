@@ -6,7 +6,7 @@ import { withReadOnlyImageFolders } from "../cursor-room-turn-images.js";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS, CURSOR_MCP_CONNECTOR_PARENT, CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../cursor-provider-constants.js";
 import {
   cursorSandboxPathVariants,
@@ -335,7 +335,7 @@ export async function prepareSupervisedTurn(
     if (!profile.mcpRuntimeEnv) {
       throw new Error("Supervised Cursor's wrapper-hosted MCP environment is unavailable.");
     }
-    const mcpRuntimeRoot = dirname(mcpConnectorSocketPath);
+    const mcpRuntimeRoot = mcpConnectorRoot;
     mcpRuntimeEnv = {
       ELECTRON_RUN_AS_NODE: "1",
       LETAGENTS_API_URL: profile.mcpRuntimeEnv.LETAGENTS_API_URL,
