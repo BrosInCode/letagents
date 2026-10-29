@@ -25,6 +25,18 @@ async function privateParent(path) {
   return info.isDirectory() && !info.isSymbolicLink() && await isOwnerPrivate(folder, info);
 }
 
+/**
+ * Windows: "no record" is trusted only where no other account could have
+ * deleted one. A hold is only ever written into a private folder, so a folder
+ * of this account's that is not private yet has never held one: it is made
+ * private now and the absence stands. A missing folder holds nothing. A
+ * folder another account owns fails closed.
+ */
+async function absenceIsTrusted(path) {
+  try { await ensurePrivateParent(path); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+}
+
 /** Windows: make this account's own state folder private if it is not yet (the daemon does the same at start). */
 async function ensurePrivateParent(path) {
   const folder = dirname(path);
@@ -39,7 +51,11 @@ async function ensurePrivateParent(path) {
 export async function readDaemonMaintenance(path = daemonMaintenancePath()) {
   let file;
   try { file = await openNoFollow(path, constants.O_RDONLY | constants.O_NONBLOCK); }
-  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    if (ownerPrivatePlatform() === "win32") await absenceIsTrusted(path);
+    return null;
+  }
   try {
     const stat = await file.stat();
     if (!stat.isFile() || stat.size > 4096 || !await isOwnerPrivate(path, stat)
@@ -75,7 +91,12 @@ async function publishHold(path) {
       const published = await readDaemonMaintenance(path);
       if (!published) throw new Error("Service maintenance record disappeared before commit.");
       return published;
-    } finally { await file.close(); await unlink(temporary); }
+    } finally {
+      await file.close();
+      // Windows: the staging folder removal below also cleans up; a busy file must not undo a published hold.
+      if (staging) await unlink(temporary).catch(() => undefined);
+      else await unlink(temporary);
+    }
   } finally {
     if (staging) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }

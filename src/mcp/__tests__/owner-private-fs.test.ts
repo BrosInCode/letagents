@@ -350,6 +350,8 @@ test("Windows: a folder another process makes during a recursive mkdir is left a
     // A file where a folder should be is still an error, as with mkdir.
     writeFileSync(join(root, "file"), "x");
     await assert.rejects(createPrivateDir(join(root, "file", "x"), { recursive: true }, { platform: "win32", windowsSecurity: security }));
+    await assert.rejects(createPrivateDir(join(root, "file"), { recursive: true }, { platform: "win32", windowsSecurity: security }), { code: "EEXIST" });
+    assert.throws(() => createPrivateDirSync(join(root, "file"), { recursive: true }, { platform: "win32", windowsSecurity: security }), { code: "EEXIST" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

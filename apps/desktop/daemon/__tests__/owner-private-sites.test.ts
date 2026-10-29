@@ -119,6 +119,15 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     assert.equal(fake.isProtected(dirname(path)), true);
     fake.giveAway(dirname(path));
     await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance folder/);
+    // "No record" is trusted only in this account's folder: one that is not private yet
+    // (it never held a hold) is made private; another account's folder fails closed.
+    await rm(path);
+    await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance folder/);
+    const fresh = join(root, "fresh", ".letagents");
+    await mkdir(fresh, { recursive: true });
+    assert.equal(await readDaemonMaintenance(join(fresh, "daemon-maintenance.json")), null);
+    assert.equal(fake.isProtected(fresh), true);
+    assert.equal(await readDaemonMaintenance(join(root, "missing", "daemon-maintenance.json")), null);
   });
 });
 

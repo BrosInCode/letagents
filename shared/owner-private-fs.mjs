@@ -580,6 +580,12 @@ function existingFolder(folder, error) {
   if (!info.isDirectory() || info.isSymbolicLink()) throw error;
 }
 
+/** As recursive mkdir: a target that already exists must be a folder. */
+function assertFolder(path) {
+  const info = lstatSync(path);
+  if (!info.isDirectory()) throw Object.assign(new Error(`EEXIST: file already exists, mkdir '${path}'`), { code: "EEXIST", path });
+}
+
 /**
  * mkdir with mode 0700, exactly as on POSIX today (an existing folder is left
  * as it is). On Windows a recursive call makes the missing folders one at a
@@ -602,6 +608,7 @@ export async function createPrivateDir(path, { recursive = false } = {}, options
     first ??= folder;
     await protectOwnerPrivate(folder, "directory", options);
   }
+  assertFolder(path);
   return first;
 }
 
@@ -619,6 +626,7 @@ export function createPrivateDirSync(path, { recursive = false } = {}, options =
     first ??= folder;
     protectOwnerPrivateSync(folder, "directory", options);
   }
+  assertFolder(path);
   return first;
 }
 
