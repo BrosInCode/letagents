@@ -496,50 +496,95 @@ function isDirectoryInfo(info) {
   return typeof info?.isDirectory === "function" && info.isDirectory();
 }
 
-// ---------------------------------------------------------------- Windows: verified folders
+// ---------------------------------------------------------------- Windows: verified and known entries
 //
 // Starting icacls or PowerShell costs tens to hundreds of milliseconds, so it
-// must not happen for every file. A private folder (owner: this account; a
-// protected DACL for only this account and SYSTEM, inheritable) passes its
-// entries to every file and folder made in it. Inside it, only this account,
-// SYSTEM and Administrators can make an entry or change one's DACL, and they
-// are the principals a POSIX 0600/0700 check also cannot keep out (this
-// account and root). So once a folder is verified, nothing below it is read
-// again or protected again in this process: a file written there inherits the
-// private entries at creation. A folder is verified by reading it (or by this
-// process protecting it), and the result is kept for the life of the process.
+// must not happen for every file. Two per-process sets, keyed by identity
+// (volume and file index, so a renamed or replaced entry never matches):
+//   - verified folders: a folder whose own entries are private (owner: this
+//     account; allow entries only for this account and SYSTEM, inheritable).
+//     Whatever is made in it from then on inherits those entries.
+//   - known entries: entries this process made inside a verified folder (see
+//     privateEntryCreated), protected, or read and found private.
+// A known entry is private without another read or protect. An entry that is
+// not known, even inside a verified folder, is read once (it may have been
+// there, and owned by another account, before the folder was made private),
+// and a protect of it runs in full, so another account's entry fails, as
+// chmod fails with EPERM on POSIX.
 
 let verifiedFolders = new WeakMap();
+let knownEntries = new WeakMap();
 
-/** Forget every verified folder (tests that change a DACL behind the cache's back). */
-export function forgetOwnerPrivateCache() { verifiedFolders = new WeakMap(); }
+/** Forget what this process verified (tests that change a DACL behind the cache's back). */
+export function forgetOwnerPrivateCache() { verifiedFolders = new WeakMap(); knownEntries = new WeakMap(); }
 
-/** The key of an existing path: its real path (no junctions, long names), lowercased. */
-function folderKey(path) {
-  let real;
-  try { real = realpathSync.native(path); } catch { real = resolve(path); }
-  return real.toLowerCase();
+/** The identity of `path` itself, or null for a missing path or a link (a link is never trusted). */
+function identityOf(path) {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    return info.isSymbolicLink() ? null : `${info.dev}:${info.ino}`;
+  } catch { return null; }
+}
+
+function addTo(map, security, path) {
+  const id = identityOf(path);
+  if (!id) return;
+  let set = map.get(security);
+  if (!set) { set = new Set(); map.set(security, set); }
+  set.add(id);
+}
+
+function inSet(map, security, path) {
+  const id = identityOf(path);
+  return Boolean(id && map.get(security)?.has(id));
 }
 
 function rememberPrivateFolder(security, path) {
-  let set = verifiedFolders.get(security);
-  if (!set) { set = new Set(); verifiedFolders.set(security, set); }
-  set.add(folderKey(path));
+  addTo(verifiedFolders, security, path);
+  addTo(knownEntries, security, path);
 }
 
-/** Whether `path` (if `self`) or a folder above it was verified private in this process. */
-function insideVerifiedFolder(security, path, self) {
-  const set = verifiedFolders.get(security);
-  if (!set?.size) return false;
-  let current = folderKey(path);
-  if (self && set.has(current)) return true;
-  for (let depth = 0; depth < 256; depth += 1) {
-    const parent = dirname(current);
-    if (parent === current) return false;
-    if (set.has(parent)) return true;
-    current = parent;
+function isKnown(security, path) {
+  return inSet(knownEntries, security, path);
+}
+
+/**
+ * Whether the folder `path` sits in is verified private. The parent must be
+ * verified itself: a link on the way is never followed, and a folder that is
+ * only private by inheritance counts once it was read or made here.
+ */
+function parentIsVerified(security, path) {
+  const parent = dirname(resolve(path));
+  return parent !== resolve(path) && inSet(verifiedFolders, security, parent);
+}
+
+/**
+ * Tell the helper that this process has just made `path` (a file or folder)
+ * exclusively, for example with open(..., "wx") or mkdir. POSIX: nothing to
+ * do (the mode was set at creation). Windows: inside a verified folder the
+ * entry inherits the private entries, so it is known and nothing runs;
+ * elsewhere it is protected in full.
+ */
+export async function privateEntryCreated(path, kind, options = {}) {
+  if (!isWindows(options)) return;
+  const security = windowsSecurity(options);
+  if (parentIsVerified(security, path)) {
+    if (kind === "directory") rememberPrivateFolder(security, path);
+    else addTo(knownEntries, security, path);
+    return;
   }
-  return false;
+  await protectOwnerPrivate(path, kind, { ...options, force: true });
+}
+
+export function privateEntryCreatedSync(path, kind, options = {}) {
+  if (!isWindows(options)) return;
+  const security = windowsSecurity(options);
+  if (parentIsVerified(security, path)) {
+    if (kind === "directory") rememberPrivateFolder(security, path);
+    else addTo(knownEntries, security, path);
+    return;
+  }
+  protectOwnerPrivateSync(path, kind, { ...options, force: true });
 }
 
 /** `path` and every folder above it, nearest first. */
@@ -554,18 +599,37 @@ function chainOf(path) {
 
 /**
  * Private when the path's own entries are private and so are those of every
- * folder above it, up to the first one with a protected DACL (inheritance off).
- * The folders on the way are remembered as verified.
+ * folder above it, up to the first one that is verified in this process or
+ * has a protected DACL (inheritance off). The folders on the way, and the
+ * path, are remembered.
  */
 function decideChain(security, chain, answers, user, pathIsFolder) {
   for (let index = 0; index < chain.length; index += 1) {
-    if (!sddlHasPrivateEntries(answers.get(chain[index]), user)) return false;
-    if (parseSddl(answers.get(chain[index])).dacl.flags.includes("P")) {
-      for (let folder = pathIsFolder ? 0 : 1; folder <= index; folder += 1) rememberPrivateFolder(security, chain[folder]);
+    if (index > 0 && inSet(verifiedFolders, security, chain[index])) {
+      rememberChain(security, chain, index, pathIsFolder);
+      return true;
+    }
+    const sddl = answers.get(chain[index]);
+    if (!sddlHasPrivateEntries(sddl, user)) return false;
+    if (parseSddl(sddl).dacl.flags.includes("P")) {
+      rememberChain(security, chain, index + 1, pathIsFolder);
       return true;
     }
   }
   return false;
+}
+
+function rememberChain(security, chain, end, pathIsFolder) {
+  for (let index = 1; index < end; index += 1) rememberPrivateFolder(security, chain[index]);
+  if (pathIsFolder) rememberPrivateFolder(security, chain[0]);
+  else addTo(knownEntries, security, chain[0]);
+}
+
+/** The paths to read for an entry that is not known: itself, and the folders above up to a verified one. */
+function pathsToRead(security, path) {
+  const chain = chainOf(path);
+  const end = chain.findIndex((folder, index) => index > 0 && inSet(verifiedFolders, security, folder));
+  return { chain, read: end < 0 ? chain : chain.slice(0, end) };
 }
 
 async function readAll(security, paths) {
@@ -580,33 +644,37 @@ function readAllSync(security, paths) {
   return new Map(unique.map((path, index) => [path, sddls[index]]));
 }
 
-/** Windows: is each entry private? Entries under a verified folder need no read; the rest are read in one call. */
+function privatePlan(security, entries) {
+  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return null;
+  const pending = entries.filter(entry => !isKnown(security, entry.path));
+  return { pending, plans: pending.map(entry => pathsToRead(security, entry.path)) };
+}
+
+/** Windows: is each entry private? Known entries need no read; the rest are read in one call. */
 async function windowsEntriesArePrivate(security, entries) {
-  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
-  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, isDirectoryInfo(entry.info)));
-  if (!pending.length) return true;
-  const chains = pending.map(entry => chainOf(entry.path));
-  const answers = await readAll(security, chains.flat());
+  const plan = privatePlan(security, entries);
+  if (!plan) return false;
+  if (!plan.pending.length) return true;
+  const answers = await readAll(security, plan.plans.flatMap(item => item.read));
   const user = await currentUser(security);
-  return pending.every((entry, index) => decideChain(security, chains[index], answers, user, isDirectoryInfo(entry.info)))
+  return plan.pending.every((entry, index) => decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info)))
     && entries.every(entry => pathIsInfo(entry.path, entry.info));
 }
 
 function windowsEntriesArePrivateSync(security, entries) {
-  if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
-  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, isDirectoryInfo(entry.info)));
-  if (!pending.length) return true;
-  const chains = pending.map(entry => chainOf(entry.path));
-  const answers = readAllSync(security, chains.flat());
+  const plan = privatePlan(security, entries);
+  if (!plan) return false;
+  if (!plan.pending.length) return true;
+  const answers = readAllSync(security, plan.plans.flatMap(item => item.read));
   const user = currentUserSync(security);
-  return pending.every((entry, index) => decideChain(security, chains[index], answers, user, isDirectoryInfo(entry.info)))
+  return plan.pending.every((entry, index) => decideChain(security, plan.plans[index].chain, answers, user, isDirectoryInfo(entry.info)))
     && entries.every(entry => pathIsInfo(entry.path, entry.info));
 }
 
-/** Windows: is each entry owned by this account? Under a verified folder that holds (see above). */
+/** Windows: is each entry owned by this account? Known entries are; the rest are read in one call. */
 async function windowsEntriesAreOwned(security, entries) {
   if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
-  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, true));
+  const pending = entries.filter(entry => !isKnown(security, entry.path));
   if (!pending.length) return true;
   const answers = await readAll(security, pending.map(entry => entry.path));
   const user = await currentUser(security);
@@ -616,7 +684,7 @@ async function windowsEntriesAreOwned(security, entries) {
 
 function windowsEntriesAreOwnedSync(security, entries) {
   if (!entries.every(entry => pathIsInfo(entry.path, entry.info))) return false;
-  const pending = entries.filter(entry => !insideVerifiedFolder(security, entry.path, true));
+  const pending = entries.filter(entry => !isKnown(security, entry.path));
   if (!pending.length) return true;
   const answers = readAllSync(security, pending.map(entry => entry.path));
   const user = currentUserSync(security);
@@ -678,7 +746,7 @@ export async function hasProfileDefaultAccess(path, info, options = {}) {
   const security = windowsSecurity(options);
   try {
     if (!pathIsInfo(path, info)) return false;
-    if (insideVerifiedFolder(security, path, true)) return true;
+    if (isKnown(security, path)) return true;
     const [sddl] = await security.readSddl([path]);
     return pathIsInfo(path, info) && sddlHasProfileDefaultAccess(sddl, await currentUser(security));
   } catch { return false; }
@@ -719,10 +787,10 @@ function notProtected(path) {
 }
 
 /**
- * POSIX: chmod 0700/0600. Windows: under a folder verified private in this
- * process there is nothing to do (the path inherits the private entries, and
- * no tool runs on a file that may be open, such as a SQLite database). Else
- * a protected DACL for this account and SYSTEM, read back afterwards: an
+ * POSIX: chmod 0700/0600. Windows: for an entry known private in this process
+ * (made here inside a verified folder, or already protected or read) there is
+ * nothing to do. Else a protected DACL for this account and SYSTEM, set by
+ * icacls (which fails on another account's entry) and read back afterwards: an
  * entry the protect call left behind (a domain group a profile inherits, say)
  * is removed by SID; if the result is still not private, this throws, as a
  * failed chmod would. A protected folder is then verified for the process.
@@ -734,10 +802,11 @@ export async function protectOwnerPrivate(path, kind, options = {}) {
   // Every later failure is EOWNERPRIVATE: a tool's own ENOENT must never read as "the file is missing".
   await lstat(path);
   const security = windowsSecurity(options);
-  if (!options.force && insideVerifiedFolder(security, path, kind === "directory")) return;
+  if (!options.force && isKnown(security, path)) return;
   try { await protectWindowsPath(security, path, kind); }
   catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
   if (kind === "directory") rememberPrivateFolder(security, path);
+  else addTo(knownEntries, security, path);
 }
 
 /** The DACL after a protect; owner is this account (icacls /setowner just succeeded). */
@@ -767,10 +836,11 @@ export function protectOwnerPrivateSync(path, kind, options = {}) {
   if (!isWindows(options)) return chmodSync(path, kind === "directory" ? PRIVATE_DIRECTORY_MODE : PRIVATE_FILE_MODE);
   lstatSync(path);
   const security = windowsSecurity(options);
-  if (!options.force && insideVerifiedFolder(security, path, kind === "directory")) return;
+  if (!options.force && isKnown(security, path)) return;
   try { protectWindowsPathSync(security, path, kind); }
   catch (error) { throw error?.code === "EOWNERPRIVATE" ? error : toolError("protect", error); }
   if (kind === "directory") rememberPrivateFolder(security, path);
+  else addTo(knownEntries, security, path);
 }
 
 function protectWindowsPathSync(security, path, kind) {
@@ -824,7 +894,7 @@ export async function createPrivateDir(path, { recursive = false } = {}, options
   if (!isWindows(options)) return mkdir(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
   if (!recursive) {
     await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });
-    await protectOwnerPrivate(resolve(path), "directory", options);
+    await privateEntryCreated(resolve(path), "directory", options);
     return undefined;
   }
   let first;
@@ -832,7 +902,7 @@ export async function createPrivateDir(path, { recursive = false } = {}, options
     try { await mkdir(folder, { mode: PRIVATE_DIRECTORY_MODE }); }
     catch (error) { existingFolder(folder, error); continue; }
     first ??= folder;
-    await protectOwnerPrivate(folder, "directory", options);
+    await privateEntryCreated(folder, "directory", options);
   }
   assertFolder(path);
   return first;
@@ -842,7 +912,7 @@ export function createPrivateDirSync(path, { recursive = false } = {}, options =
   if (!isWindows(options)) return mkdirSync(path, { recursive, mode: PRIVATE_DIRECTORY_MODE });
   if (!recursive) {
     mkdirSync(path, { mode: PRIVATE_DIRECTORY_MODE });
-    protectOwnerPrivateSync(resolve(path), "directory", options);
+    privateEntryCreatedSync(resolve(path), "directory", options);
     return undefined;
   }
   let first;
@@ -850,7 +920,7 @@ export function createPrivateDirSync(path, { recursive = false } = {}, options =
     try { mkdirSync(folder, { mode: PRIVATE_DIRECTORY_MODE }); }
     catch (error) { existingFolder(folder, error); continue; }
     first ??= folder;
-    protectOwnerPrivateSync(folder, "directory", options);
+    privateEntryCreatedSync(folder, "directory", options);
   }
   assertFolder(path);
   return first;
@@ -928,14 +998,14 @@ const EXCLUSIVE_WRITE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXC
  */
 export async function createPrivateStagingFolder(path, options = {}) {
   const folder = await mkdtemp(join(dirname(path), `.${pathName(path)}.letagents-`));
-  try { await protectOwnerPrivate(folder, "directory", options); }
+  try { await privateEntryCreated(folder, "directory", options); }
   catch (error) { await rm(folder, { recursive: true, force: true }).catch(() => undefined); throw error; }
   return folder;
 }
 
 function privateStagingFolderSync(path, options) {
   const folder = mkdtempSync(join(dirname(path), `.${pathName(path)}.letagents-`));
-  try { protectOwnerPrivateSync(folder, "directory", options); }
+  try { privateEntryCreatedSync(folder, "directory", options); }
   catch (error) { try { rmSync(folder, { recursive: true, force: true }); } catch { /* already failing */ } throw error; }
   return folder;
 }
@@ -973,6 +1043,7 @@ export async function writePrivateFileAtomically(path, data, options = {}) {
     try {
       // The file leaves the staging folder, so it needs a protected DACL of its own.
       if (staging) await protectOwnerPrivate(temporary, "file", { ...options, force: true });
+      else await privateEntryCreated(temporary, "file", options);
       await handle.writeFile(data);
       await handle.sync();
       await handle.close();
@@ -997,6 +1068,7 @@ export function writePrivateFileAtomicallySync(path, data, options = {}) {
     let closed = false;
     try {
       if (staging) protectOwnerPrivateSync(temporary, "file", { ...options, force: true });
+      else privateEntryCreatedSync(temporary, "file", options);
       const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
       for (let offset = 0; offset < bytes.length;) offset += writeSync(descriptor, bytes, offset, bytes.length - offset);
       fsyncSync(descriptor);

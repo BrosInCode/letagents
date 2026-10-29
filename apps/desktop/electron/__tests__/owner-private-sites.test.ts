@@ -113,7 +113,7 @@ test("Windows: Cursor profile files are written private and read without followi
   assert.equal(await readFile(file, "utf8"), "{\"a\":1}");
 });
 
-test("Windows: moving a Cursor conversation reads nothing under the verified profile, and a foreign profile stops it", async (t) => {
+test("Windows: moving a Cursor conversation reads every owner in one call, and a foreign entry or profile stops it", async (t) => {
   const root = await scratch(t);
   const configDir = join(root, "profile", "config");
   const fake = fakeWindowsSecurity();
@@ -131,13 +131,17 @@ test("Windows: moving a Cursor conversation reads nothing under the verified pro
     await writeFile(join(source, "s1", "store.db"), "db");
     reads.length = 0;
     relocateCursorConversationNamespace({ configDir }, workspaceA, workspaceB, "s1");
-    // The profile folder is verified private, so the walk below it reads nothing.
-    assert.deepEqual(reads, []);
+    // The walk's entries were not made through the helper, so their owners are read: once, in one call.
+    assert.deepEqual(reads, [3]);
     const target = join(chats, createHash("md5").update(workspaceB).digest("hex"));
     assert.equal(await readFile(join(target, "s1", "store.db"), "utf8"), "db");
-    // A profile folder another account owns stops the move before the walk.
+    // An entry another account owns stops the move.
+    fake.security.readSddlSync = paths => paths.length > 1 ? paths.map((_, index) => index === 0 ? null : "x") : readSddlSync(paths);
+    assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /unsupported or redirected entries/);
+    fake.security.readSddlSync = readSddlSync;
+    // So does a profile folder another account owns.
     fake.giveAway(dirname(configDir));
-    assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"));
+    assert.throws(() => relocateCursorConversationNamespace({ configDir }, workspaceB, workspaceA, "s1"), /private to this account/);
   });
 });
 

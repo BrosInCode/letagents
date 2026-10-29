@@ -58,6 +58,12 @@ export declare function icaclsRemoveArguments(path: string, sids: readonly strin
 export declare function icaclsSaveArguments(path: string, file: string): string[];
 /** The DACL line of an `icacls /save` file (UTF-16LE or UTF-8). */
 export declare function parseIcaclsSave(bytes: Uint8Array): string;
+/**
+ * After this process made `path` exclusively (open "wx", mkdir): POSIX no-op;
+ * Windows marks it known when its folder is verified, else protects it.
+ */
+export declare function privateEntryCreated(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): Promise<void>;
+export declare function privateEntryCreatedSync(path: string, kind: PrivateKind, options?: OwnerPrivateOptions): void;
 /** Forget every folder verified private in this process (tests that change a DACL behind the cache's back). */
 export declare function forgetOwnerPrivateCache(): void;
 export declare function icaclsSetOwnerArguments(path: string, sid: string): string[];

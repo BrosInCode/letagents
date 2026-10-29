@@ -103,10 +103,13 @@ test("Windows: a maintenance hold is written private and a tampered record is re
     assert.deepEqual((await readdir(dirname(path))).sort(), ["daemon-maintenance.json", "daemon-maintenance.json.lock"]);
     fake.tamper(path);
     await assert.rejects(readDaemonMaintenance(path), /Unsafe service maintenance record/);
-    // The lock lives in the verified private folder, so its folder vouches for it: inside, only
-    // this account, SYSTEM and Administrators can make or change an entry.
+    // A lock this account owns but that is not private is repaired; another account's is refused,
+    // even inside the verified folder (it may have been there before the folder was private).
     fake.tamper(`${path}.lock`);
     await withDaemonMaintenanceOperation(async () => undefined, path);
+    assert.equal(fake.isProtected(`${path}.lock`), true);
+    fake.giveAway(`${path}.lock`);
+    await assert.rejects(withDaemonMaintenanceOperation(async () => undefined, path), /Unsafe service maintenance lock/);
     // A record is trusted only in a private folder; an operation repairs this account's own folder.
     // (A second folder: the fake remembers files by inode, which Linux reuses at once after a delete.)
     const second = join(root, "home2", ".letagents", "daemon-maintenance.json");

@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { link, lstat, open, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { createPrivateDir, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { createPrivateDir, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../../shared/owner-private-fs.mjs";
 import type { HostApprovalChallenge, HostApprovalOperation, SignedHostApprovalRequest } from "../../shared/host-approval-auth.js";
 
 type SecretStorage = {
@@ -68,7 +68,7 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
       const file = await openNoFollow(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
       try {
         // Windows has no mode bits: the empty file gets its private DACL first. The hard link shares it.
-        if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(temporary, "file");
+        await privateEntryCreated(temporary, "file");
         await file.writeFile(bytes); await file.sync(); await file.close();
         // link is exclusive: a racing creator cannot overwrite the stable key.
         try { await link(temporary, path); }

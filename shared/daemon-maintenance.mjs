@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { letagentsHome } from "./letagents-home.mjs";
 import {
-  createPrivateDir, hasProfileDefaultAccess, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform,
+  createPrivateDir, hasProfileDefaultAccess, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated,
   protectOwnerPrivate, syncDirectory as syncFolder,
 } from "./owner-private-fs.mjs";
 
@@ -91,6 +91,7 @@ async function publishHold(path) {
   const temporary = `${path}.${value.id}.tmp`;
   const file = await open(temporary, "wx", 0o600);
   try {
+    await privateEntryCreated(temporary, "file");
     await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
     await file.sync();
     try { await link(temporary, path); }
@@ -167,7 +168,7 @@ async function createWindowsLock(lockPath) {
   let created;
   try { created = await open(lockPath, "wx", 0o600); }
   catch (error) { if (error.code === "EEXIST") return; throw error; }
-  try { await protectOwnerPrivate(lockPath, "file"); } finally { await created.close(); }
+  try { await privateEntryCreated(lockPath, "file"); } finally { await created.close(); }
 }
 export const createDaemonMaintenance = (path = daemonMaintenancePath()) => withDaemonMaintenanceOperation(owner => owner.create(), path);
 export const clearDaemonMaintenance = (id, path = daemonMaintenancePath()) => withDaemonMaintenanceOperation(owner => owner.clear(id), path);

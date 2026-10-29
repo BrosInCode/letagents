@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { createPrivateDir, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { createPrivateDir, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 
 import type { ProviderRoomTurnAttachment, RoomTurnAttachmentOrigin, RoomTurnFileAccess, RoomTurnImageDelivery, RoomTurnImageMimeType } from "./provider-action-port.js";
@@ -583,7 +583,7 @@ export class RoomTurnAttachmentStager {
     const folder = await mkdtemp(join(this.root, STAGED_FOLDER_PREFIX));
     this.active.add(folder);
     // POSIX mkdtemp makes it 0700; Windows gives it the private DACL.
-    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(folder, "directory");
+    await privateEntryCreated(folder, "directory");
     return folder;
   }
 
@@ -618,7 +618,7 @@ async function isPrivateFolder(path: string): Promise<boolean> {
 async function writeExclusive(path: string, bytes: Uint8Array): Promise<void> {
   const handle = await openNoFollow(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   try {
-    if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(path, "file");
+    await privateEntryCreated(path, "file");
     await handle.writeFile(bytes);
   } finally { await handle.close(); }
 }

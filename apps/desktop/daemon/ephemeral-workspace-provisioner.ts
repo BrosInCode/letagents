@@ -3,7 +3,7 @@ import { lstat, mkdir, open, opendir, readFile, realpath, rm, unlink } from "nod
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { ensureScratchWorkspaceRepository } from "../../../shared/scratch-workspace-repository.mjs";
-import { ownerPrivatePlatform, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
 import { WORKSPACE_MARKER, WORKSPACE_MARKER_EXCLUDE, type WorkspaceMarker } from "./workspace-provisioner.js";
 
@@ -201,7 +201,7 @@ export class EphemeralWorkspaceProvisioner {
     const handle = await open(temporary, "wx", 0o600);
     try {
       // Windows has no mode bits: the empty file gets its private DACL before the marker is written.
-      if (ownerPrivatePlatform() === "win32") await protectOwnerPrivate(temporary, "file");
+      await privateEntryCreated(temporary, "file");
       await handle.writeFile(`${JSON.stringify(marker)}\n`, "utf8");
       await handle.sync();
     } finally {

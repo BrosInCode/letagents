@@ -60,6 +60,16 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await protectOwnerPrivate(directory, "directory");
+  // Windows: an existing database, -wal or -shm file is checked and protected
+  // now, before this process opens it (one that another account made fails,
+  // as chmod would); no tool runs on it while it is open. A new one inherits
+  // the folder's private entries.
+  if (ownerPrivatePlatform() === "win32") {
+    for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
+      try { await protectOwnerPrivate(candidate, "file"); }
+      catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+  }
   // Fresh sibling daemons can race at the one-time WAL conversion or schema
   // DDL before busy_timeout is fully effective. Close each failed handle and
   // back off outside SQLite; never turn an unrelated initialization error into
@@ -77,9 +87,7 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
       configureDaemonStateConnection(database);
-      // Windows: the folder was made private before the database opened, so the
-      // database, -wal and -shm files inherit its private entries; no tool may
-      // change the DACL of an open SQLite file.
+      // Windows did this before the open (above): no tool may change the DACL of an open SQLite file.
       if (ownerPrivatePlatform() !== "win32") {
         for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await protectOwnerPrivate(candidate, "file"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
       }
