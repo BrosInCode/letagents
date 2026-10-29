@@ -109,6 +109,43 @@ export async function prepareWindowsWorktree(
   return providerGit;
 }
 
+/**
+ * Both private clones borrow the repository's objects (alternates). A `git gc`
+ * or a history rewrite there can remove objects a generation still needs.
+ * Check, without walking history, that every object of the base commit and of
+ * the given snapshot trees is present (and, for the provider's worktree, of
+ * every commit the agent made on top), so a resume or an export fails closed
+ * instead of reconciling from a partial tree.
+ */
+export async function assertGenerationObjectsComplete(
+  authorityRoot: string,
+  tips: readonly string[],
+  limits: SupervisedWorkspaceGenerationLimits,
+  provider?: { gitDirectory: string; liveSourceRoot: string; headOid: string },
+): Promise<void> {
+  const checks: Array<[string, string[]]> = [
+    [authorityRoot, ["rev-list", "--objects", "--missing=error", "--quiet", "--no-walk", ...tips]],
+  ];
+  if (provider) {
+    const administration = await worktreeAdministration(provider.gitDirectory, provider.liveSourceRoot);
+    checks.push(
+      [provider.gitDirectory, ["rev-list", "--objects", "--missing=error", "--quiet", "--no-walk", provider.headOid]],
+      [administration, ["rev-list", "--objects", "--missing=error", "--quiet", "HEAD", "--not", provider.headOid]],
+    );
+  }
+  for (const [gitDirectory, args] of checks) {
+    try {
+      await gitAuthorityText(gitDirectory, null, args, limits.maxPatchBytes);
+    } catch (error) {
+      if (!(error instanceof ProcessExitError)) throw error;
+      throw generationError(
+        `Git objects this generation borrows from the repository are missing (pruned by git gc or removed by a history rewrite); it cannot be resumed or reconciled. Retire or abandon it and start a fresh generation. ${error.message}`,
+        "GENERATION_OBJECTS_MISSING",
+      );
+    }
+  }
+}
+
 /** The worktree's own folder under the private clone, read from its .git file and checked. */
 async function worktreeAdministration(providerGit: string, liveSourceRoot: string): Promise<string> {
   const target = gitControlPath(

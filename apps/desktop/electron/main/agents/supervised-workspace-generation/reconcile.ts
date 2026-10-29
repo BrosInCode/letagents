@@ -9,7 +9,7 @@ import { assertSafeRelativePath, compareUtf8, fsyncDirectory, generationError, i
 import { assertTreeHasNoNormalizedPathCollisions, diffTreeEntries, readGitBlob, snapshotWorktree, treeEntryForRegularFile } from "./worktree.js";
 import { assertTrustedAuthority } from "./source-authority.js";
 import { cloneRegularFile } from "./git.js";
-import { WINDOWS_DEFAULT_FILE_MODE, inheritWorkspaceAcl, readWindowsBaselineModes, windowsFileMetadataDigest } from "./worktree-windows.js";
+import { WINDOWS_DEFAULT_FILE_MODE, assertGenerationObjectsComplete, inheritWorkspaceAcl, readWindowsBaselineModes, windowsFileMetadataDigest } from "./worktree-windows.js";
 
 export async function retireAndReconcile(
   initial: GenerationManifest,
@@ -20,13 +20,23 @@ export async function retireAndReconcile(
   const inspections = new FileInspectionSession(manifest.limits.maxChangedPaths);
   const retiredRoot = join(manifest.generationRoot, RETIRED_NAME);
   const authorityRoot = join(manifest.generationRoot, AUTHORITY_NAME);
+  // Windows: checked before the rename, so a generation whose borrowed objects
+  // are gone stays ready and can be abandoned for a fresh one.
+  let baseObjectsChecked = false;
+  const assertBaseObjects = async (): Promise<void> => {
+    if (!isWindowsGeneration() || baseObjectsChecked) return;
+    await assertGenerationObjectsComplete(authorityRoot, [manifest.headOid, manifest.baselineTreeOid!], manifest.limits);
+    baseObjectsChecked = true;
+  };
   if (manifest.phase === "ready") {
+    await assertBaseObjects();
     await ensureQuarantined(manifest, retiredRoot, authorityRoot);
     manifest = await transition(manifest, "quarantined");
     await invokeFailpoint(failpoint, "after_quarantined", manifestPathOf(manifest));
   }
   if (manifest.phase === "quarantined") {
     await assertTrustedAuthority(manifest, authorityRoot);
+    await assertBaseObjects();
     const finalTreeOid = await snapshotWorktree(
       authorityRoot,
       retiredRoot,
@@ -39,6 +49,9 @@ export async function retireAndReconcile(
     await invokeFailpoint(failpoint, "after_frozen", manifestPathOf(manifest));
   }
   if (manifest.phase === "frozen") {
+    if (isWindowsGeneration()) {
+      await assertGenerationObjectsComplete(authorityRoot, [manifest.baselineTreeOid!, manifest.finalTreeOid!], manifest.limits);
+    }
     const operationJournal = await buildPlan(manifest, authorityRoot, inspections);
     manifest = await transition(manifest, "planned", { operationJournal });
     await invokeFailpoint(failpoint, "after_planned", manifestPathOf(manifest));

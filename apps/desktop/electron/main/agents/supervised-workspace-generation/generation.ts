@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { access, lstat, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createPrivateDir, isOwnedByCurrentUser, protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
-import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, type RecoverSupervisedWorkspaceGenerationOptions, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
+import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, PROVIDER_GIT_NAME, type RecoverSupervisedWorkspaceGenerationOptions, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot } from "./types.js";
 import { FileInspectionSession, validateAppliedOperationArtifacts } from "./file-inspection.js";
 import { ProcessExitError, canonicalGitControlTarget, discoverSourceGitText, gitControlPath, gitOutputPath, gitText, readStableGitControlFile, runGit, sourceAuthorityText } from "./git.js";
 import { abandonManifest, retireAndReconcile } from "./reconcile.js";
@@ -11,7 +11,7 @@ import { assertClonePlatform, fsyncDirectory, generationDirectoryName, generatio
 import { assertClonefileSupported, assertIndexHasNoLinksOrGitlinks, assertNoUnmergedEntries, assertSafeBareAlternateRoot, assertSourceWorktreeWithinLimits, assertSparseCheckoutDisabled, disablePrivateGitAuthority, disableTrustedGitAuthority, installDependencyExcludes, linkIgnoredDependencyRoots, readSafeAlternateRoots } from "./source-authority.js";
 import { cleanupTrees, loadManifest, persistManifest, transition } from "./manifest.js";
 import { materializeSourceWorktree, pinPrivateCloneHead, reproduceProviderIndex, snapshotWorktree, sourceVisiblePaths } from "./worktree.js";
-import { WINDOWS_FRESH_WORKTREE_NOTE, assertWindowsFreeSpace, carryDirtyTrackedFiles, prepareWindowsWorktree, recordWindowsBaselineModes, sealRawSnapshotAuthority } from "./worktree-windows.js";
+import { WINDOWS_FRESH_WORKTREE_NOTE, assertGenerationObjectsComplete, assertWindowsFreeSpace, carryDirtyTrackedFiles, prepareWindowsWorktree, recordWindowsBaselineModes, sealRawSnapshotAuthority } from "./worktree-windows.js";
 
 export async function assertSupervisedWorkspaceGenerationSupported(
   realWorkspaceInput: string,
@@ -406,7 +406,16 @@ export async function recoverSupervisedWorkspaceGeneration(
 
 /** Reopen the validated exact generation for provider continuation recovery. */
 export async function openSupervisedWorkspaceGeneration(manifestPath: string): Promise<SupervisedWorkspaceGenerationHandle> {
-  return makeHandle(await loadManifest(manifestPath));
+  const manifest = await loadManifest(manifestPath);
+  if (isWindowsGeneration() && manifest.phase === "ready") {
+    await assertGenerationObjectsComplete(
+      join(manifest.generationRoot, AUTHORITY_NAME),
+      [manifest.headOid, manifest.baselineTreeOid!],
+      manifest.limits,
+      { gitDirectory: join(manifest.generationRoot, PROVIDER_GIT_NAME), liveSourceRoot: manifest.liveSourceRoot, headOid: manifest.headOid },
+    );
+  }
+  return makeHandle(manifest);
 }
 
 export function makeHandle(

@@ -27,6 +27,7 @@ import {
   assertSupervisedWorkspaceGenerationSupported,
   createSupervisedWorkspaceGeneration,
   recoverSupervisedWorkspaceGeneration,
+  openSupervisedWorkspaceGeneration,
   removeSupervisedWorkspaceGenerationReceipt,
   SupervisedWorkspaceConflictError,
   SupervisedWorkspaceGenerationError,
@@ -1114,6 +1115,55 @@ windowsTest("a Windows generation checks out the workspace's own line endings an
   });
 });
 
+generationTest("the whole generation lifecycle never writes the repository's .git", async () => {
+  await withRepository(async (repo) => {
+    mkdirSync(join(repo, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "dep", "index.js"), "dep\n");
+    writeFileSync(join(repo, "tracked.txt"), "dirty\n");
+    writeFileSync(join(repo, "staged.txt"), "staged\n");
+    git(repo, ["add", "staged.txt"]);
+    git(repo, ["pack-refs", "--all"]);
+    const before = gitDirectoryFingerprint(join(repo, ".git"));
+
+    const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "source-git-untouched" });
+    writeFileSync(join(handle.liveWorkspace, "agent.txt"), "agent\n");
+    git(handle.liveSourceRoot, ["add", "-A"]);
+    git(handle.liveSourceRoot, ["-c", "user.email=agent@example.test", "-c", "user.name=Agent", "commit", "-qm", "agent work"]);
+    git(handle.liveSourceRoot, ["branch", "agent-branch"]);
+    git(handle.liveSourceRoot, ["config", "core.hooksPath", join(repo, "planted-hooks")]);
+    // Windows: per-worktree config goes to the private clone's worktree folder.
+    if (windows) git(handle.liveSourceRoot, ["config", "--worktree", "core.fsmonitor", "true"]);
+    assert.deepEqual(gitDirectoryFingerprint(join(repo, ".git")), before);
+
+    await handle.retireAndReconcile();
+    await removeSupervisedWorkspaceGenerationReceipt(handle.manifestPath);
+    assert.equal(readFileSync(join(repo, "agent.txt"), "utf8"), "agent\n");
+    assert.deepEqual(gitDirectoryFingerprint(join(repo, ".git")), before);
+  });
+});
+
+windowsTest("objects pruned from the repository fail resume and export closed, and the generation can be abandoned", async () => {
+  await withRepository(async (repo) => {
+    const handle = await createSupervisedWorkspaceGeneration({ realWorkspace: repo, turnIdentity: "pruned-objects" });
+    writeFileSync(join(handle.liveWorkspace, "tracked.txt"), "agent\n");
+    // The private clones borrow this blob through alternates; a gc after a
+    // history rewrite in the repository would delete it the same way.
+    const blob = git(repo, ["rev-parse", "HEAD:tracked.txt"]);
+    const loose = join(repo, ".git", "objects", blob.slice(0, 2), blob.slice(2));
+    const saved = join(dirname(repo), "saved-object");
+    chmodSync(loose, 0o666);
+    renameSync(loose, saved);
+    const missing = (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "GENERATION_OBJECTS_MISSING";
+    await assert.rejects(openSupervisedWorkspaceGeneration(handle.manifestPath), missing);
+    await assert.rejects(handle.retireAndReconcile(), missing);
+    assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "base\n");
+    assert.equal(JSON.parse(readFileSync(handle.manifestPath, "utf8")).phase, "ready");
+    assert.equal((await handle.abandon()).phase, "aborted");
+    assert.equal(readFileSync(join(repo, "tracked.txt"), "utf8"), "base\n");
+    renameSync(saved, loose);
+  });
+});
+
 test("git.exe is found on absolute PATH folders with a .exe or .com PATHEXT name only", () => {
   const present = new Set([
     "relative\\bin\\git.exe",
@@ -1148,6 +1198,26 @@ function overwriteGitControlFile(path: string, contents: string): void {
   } finally {
     closeSync(descriptor);
   }
+}
+
+/** Path and bytes of every file under the parts of .git a generation could write, and the object names. */
+function gitDirectoryFingerprint(gitDirectory: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const visit = (relativePath: string): void => {
+    const path = join(gitDirectory, relativePath);
+    if (!existsSync(path)) return;
+    if (lstatSync(path).isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(relativePath, name));
+      return;
+    }
+    result[relativePath] = readFileSync(path).toString("base64");
+  };
+  for (const name of ["config", "config.worktree", "HEAD", "index", "packed-refs", "refs", "worktrees", "info", "logs", "hooks"]) visit(name);
+  const objects = join(gitDirectory, "objects");
+  result["objects/"] = readdirSync(objects).sort()
+    .flatMap((name) => lstatSync(join(objects, name)).isDirectory() ? readdirSync(join(objects, name)).sort().map((entry) => `${name}/${entry}`) : [name])
+    .join(",");
+  return result;
 }
 
 function countLooseObjects(objects: string): number {
