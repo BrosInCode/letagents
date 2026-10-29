@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [before, after, before-daemon-suite, after-daemon-suite]
+        side: [after, after-daemon-suite]
     env:
       LETAGENTS_API_URL: http://127.0.0.1:9
     steps:
@@ -28,6 +28,7 @@ jobs:
         run: |
           home="${RUNNER_TEMP//\\//}/home"
           mkdir -p "${home}"
+          export HOME="${home}" USERPROFILE="${home}"
           git config --global core.autocrlf false
           printf 'HOME=%s\nUSERPROFILE=%s\n' "${home}" "${home}" >> "${GITHUB_ENV}"
 
