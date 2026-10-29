@@ -201,6 +201,9 @@ test("Windows: a program that is on no PATH entry is never looked for in the wor
   assert.equal(missing.resolved, null);
   assert.equal(missing.file, "C:\\Windows\\letagents-not-on-path\\claude");
   assert.deepEqual(missing.args, ["--version"]);
+  // A missing batch name too: ENOENT, never a cmd.exe error.
+  const missingShim = providerLaunchCommand("claude.cmd", [], { platform: "win32", env: windowsEnv, exists: () => false, allowCmd: true });
+  assert.deepEqual(missingShim, { file: "C:\\Windows\\letagents-not-on-path\\claude.cmd", args: [], resolved: null, envAdditions: null });
   // A path the caller gave keeps its meaning.
   assert.equal(providerLaunchCommand(".\\bin\\claude.exe", [], { platform: "win32", env: windowsEnv, cwd: "C:\\repo", exists: () => false }).file, ".\\bin\\claude.exe");
 });

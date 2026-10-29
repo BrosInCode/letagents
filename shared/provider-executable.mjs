@@ -93,8 +93,12 @@ export function providerLaunchCommand(command, args, options = {}) {
   const resolved = resolveWindowsCommand(command, { env, cwd: options.cwd, exists: options.exists });
   const execPath = options.launchOptions?.execPath ?? process.execPath;
   // Not found: a bare name given to spawn as it is would be looked for in the working directory
-  // first, which is the user's repository. A path that cannot exist fails with Node's own ENOENT.
-  const program = resolved ?? (isBareName(command) ? notFoundPath(command, env) : command);
+  // first, which is the user's repository. A path that cannot exist fails with Node's own ENOENT,
+  // and is spawned as it is, so a missing `tool.cmd` is ENOENT too and never a cmd.exe error.
+  if (resolved === null && isBareName(command)) {
+    return { file: notFoundPath(command, env), args: [...args], resolved: null, envAdditions: null };
+  }
+  const program = resolved ?? command;
   // Decided before any argument is quoted for cmd.exe: a shim's script runs with no shell, anything else is refused.
   if (options.allowCmd !== true && isWindowsBatchExecutable(program, platform) && !nodeShimOf(program, execPath, options.launchOptions)) {
     throw new ProviderBatchFileError(program);

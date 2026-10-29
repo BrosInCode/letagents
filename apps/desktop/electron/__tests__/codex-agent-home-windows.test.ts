@@ -36,7 +36,8 @@ test("Windows: the agents' home links folders by junction and files by hard link
   const { owner, agents, remove } = fixture();
   t.after(remove);
   assert.deepEqual(linkCodexAgentHome(owner, agents), { own: [], inPlaceOfOwners: [] });
-  assert.deepEqual(readdirSync(agents).sort(), ["auth.json", "config.toml", "rules", "sessions"]);
+  assert.deepEqual(readdirSync(agents).sort(), [".letagents-links.json", "auth.json", "config.toml", "rules", "sessions"]);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(agents, ".letagents-links.json"), "utf8"))).sort(), ["auth.json", "config.toml"], "the record names the hard links");
   assert.ok(lstatSync(join(agents, "sessions")).isSymbolicLink(), "a junction reads as a link");
   assert.ok(!lstatSync(join(agents, "auth.json")).isSymbolicLink());
   assert.ok(sameFile(join(agents, "auth.json"), join(owner, "auth.json")), "the sign-in is the owner's own file");
@@ -102,7 +103,7 @@ test("Windows: Codex's SQLite databases get no second name, and the agents' own 
   writeFileSync(join(owner, "state_5.sqlite-wal"), "owner journal");
   writeFileSync(join(owner, "logs_1.sqlite"), "owner logs");
   linkCodexAgentHome(owner, agents);
-  assert.deepEqual(readdirSync(agents).sort(), ["auth.json", "config.toml", "rules", "sessions"], "no database is linked");
+  assert.deepEqual(readdirSync(agents).sort(), [".letagents-links.json", "auth.json", "config.toml", "rules", "sessions"], "no database is linked");
   // The agents' Codex makes its own; the next launch keeps it and says nothing about it.
   writeFileSync(join(agents, "state_5.sqlite"), "agents' database");
   writeFileSync(join(agents, "state_5.sqlite-shm"), "agents' shared memory");
@@ -140,4 +141,14 @@ test("Windows: an agents' home whose junction leads into another Codex home is r
   symlinkSync(join(other, "sessions"), join(agents, "sessions"), "junction");
   assert.throws(() => linkCodexAgentHome(owner, agents), CodexAgentHomeError);
   assert.ok(lstatSync(join(agents, "sessions")).isSymbolicLink(), "the junction is not turned under a running agent");
+});
+
+test("Windows: an owner's file under the record's name is never linked, and the record writes through nothing", { skip: windowsOnly }, (t) => {
+  const { owner, agents, remove } = fixture();
+  t.after(remove);
+  writeFileSync(join(owner, ".letagents-links.json"), "the owner's own file");
+  linkCodexAgentHome(owner, agents);
+  linkCodexAgentHome(owner, agents);
+  assert.equal(readFileSync(join(owner, ".letagents-links.json"), "utf8"), "the owner's own file");
+  assert.ok(!sameFile(join(agents, ".letagents-links.json"), join(owner, ".letagents-links.json")));
 });

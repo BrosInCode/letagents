@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, resolve } from "node:path";
@@ -149,6 +149,8 @@ const WINDOWS_OWN_DATABASE = /\.(?:sqlite3?|db)(?:-wal|-shm|-journal)?$/i;
  * removed and linked again. One that changed is an entry of its own.
  */
 const WINDOWS_LINK_RECORD = ".letagents-links.json";
+/** Windows: the name a former link that changed while it was moved aside is kept under. */
+const WINDOWS_FORMER_LINK_PREFIX = ".letagents-former-";
 /** `mtimeNs` in full (NTFS keeps 100 ns), as text: a millisecond would let a write in the same one pass for no write. */
 type LinkedFileState = { id: string; size: string; mtimeNs: string };
 
@@ -423,7 +425,8 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
     );
   }
   const ownDatabase = (name: string) => windows && WINDOWS_OWN_DATABASE.test(name);
-  const toLink = new Set(readdirSync(owner).filter((name) => !ownDatabase(name)));
+  // The record's own name is this code's, never a link to an owner's file of that name.
+  const toLink = new Set(readdirSync(owner).filter((name) => !ownDatabase(name) && !(windows && name === WINDOWS_LINK_RECORD)));
   toLink.delete("rules");
   const own: string[] = [];
   const inPlaceOfOwners: string[] = [];
@@ -440,8 +443,22 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
       continue;
     }
     if (formerLink(path, entry, name)) {
-      // Still exactly the owner's former file: removed, and linked again below when the owner has one.
-      unlinkSync(path);
+      // Still exactly the owner's former file. It is moved aside first and looked at again there, so a
+      // write that a running agent makes between the look and the move is never deleted: a file that
+      // changed stays, under its new name, as an entry of the agents' own. The name is linked again below.
+      const aside = join(home, `${WINDOWS_FORMER_LINK_PREFIX}${randomBytes(6).toString("hex")}-${name}`);
+      try {
+        renameSync(path, aside);
+      } catch {
+        // Held open without sharing, or gone: kept as it is, as an entry of its own.
+        own.push(name);
+        if (toLink.delete(name)) inPlaceOfOwners.push(name);
+        continue;
+      }
+      const moved = linkedFileState(aside);
+      const recorded = record[name]!;
+      if (moved && moved.id === recorded.id && moved.size === recorded.size && moved.mtimeNs === recorded.mtimeNs) unlinkSync(aside);
+      else own.push(basename(aside));
       continue;
     }
     const empty = entry.isDirectory() ? readdirSync(path).length === 0 : entry.isFile() && entry.size === 0;
@@ -472,7 +489,15 @@ export function linkCodexAgentHome(ownerHome: string, agentHome: string, platfor
       const state = name !== WINDOWS_LINK_RECORD && linkedFile(path, entry, name) ? linkedFileState(path) : null;
       return state ? [[name, state]] : [];
     }));
-    try { writeFileSync(join(home, WINDOWS_LINK_RECORD), JSON.stringify(linked)); } catch { /* the next launch keeps what it cannot tell */ }
+    // Written beside it and renamed over it: a rename replaces whatever is at that name and writes through nothing.
+    const staged = join(home, `${WINDOWS_LINK_RECORD}.${randomBytes(6).toString("hex")}`);
+    try {
+      writeFileSync(staged, JSON.stringify(linked), { flag: "wx" });
+      renameSync(staged, join(home, WINDOWS_LINK_RECORD));
+    } catch {
+      // The next launch keeps what it cannot tell.
+      rmSync(staged, { force: true });
+    }
   }
   const rules = join(home, "rules");
   if (lstatSync(rules, { throwIfNoEntry: false })?.isDirectory()) protectOwnerPrivateSync(rules, "directory");
