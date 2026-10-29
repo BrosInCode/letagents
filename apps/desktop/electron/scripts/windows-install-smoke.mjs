@@ -138,7 +138,7 @@ const smoke = await new Promise((resolvePromise, reject) => {
 assert(smoke.status === 0, `The installed app's smoke check exited with ${smoke.status ?? smoke.signal}.`);
 const notification = /LETAGENTS_DESKTOP_SMOKE_NOTIFICATION (\S+)/.exec(smoke.output)?.[1] ?? "not reported";
 console.log(`Smoke notification from the installed app: ${notification}`);
-assert(notification !== "failed", "Windows refused the installed app's notification.");
+assert(notification === "shown", `Windows did not show the installed app's notification (${notification}).`);
 
 // Update the running app as electron-updater does: the installer gets
 // --updated --force-run, must close the app (here it does not quit by
