@@ -25,7 +25,7 @@ export const PROCESS_TREE_HELPER_NAME = "letagents-process-tree.exe";
 /** The birth identity of a Windows process: its creation FILETIME in decimal. */
 export const WINDOWS_BIRTH_PREFIX = "win32-ft:";
 const WINDOWS_BIRTH = /^win32-ft:([1-9]\d{0,19})$/;
-const HELPER_TIMEOUT_MS = 10_000;
+const HELPER_TIMEOUT_MS = 15_000;
 
 /** Children this process started through the helper and that have not exited. */
 const liveTrees = new Map();
@@ -346,13 +346,19 @@ function endWindowsTree(pid, options) {
     ?? (options.helperPath === undefined ? processTreeHelperPath({ platform: "win32", env: options.helperEnv }) : options.helperPath);
   if (held) {
     // Node holds this child's handle, so its pid cannot belong to anyone else.
-    if (live?.helper) {
-      const birth = processBirth(pid, { ...options, platform: "win32", helperPath: helper });
-      // A recorded birth that is not this child's names a process that is gone.
-      if (identity && isWindowsBirth(birth) && birth !== identity) return false;
-      if (isWindowsBirth(birth) && killByBirth(helper, pid, birth, options) === "ended") return true;
+    const birth = live?.helper || (identity && !options.child)
+      ? processBirth(pid, { ...options, platform: "win32", helperPath: helper })
+      : undefined;
+    // A child found only by its pid is the one the caller recorded only if its
+    // birth is proved to be that record; unreadable is not proof.
+    if (identity && !options.child && birth !== identity) return false;
+    if (live?.helper && isWindowsBirth(birth)) {
+      const ended = killByBirth(helper, pid, birth, options);
+      if (ended === "ended") return true;
+      if (ended === "absent") return false;
     }
-    // A helper's own exit closes its job, so child.kill() ends the tree too.
+    // The helper could not be asked: a helper's own exit closes its job, so
+    // child.kill() ends the tree too.
     try { return child.kill() !== false; } catch { return false; }
   }
   if (!helper || !isWindowsBirth(identity)) return false;
@@ -362,6 +368,9 @@ function endWindowsTree(pid, options) {
 function killByBirth(helper, pid, identity, options) {
   const creation = WINDOWS_BIRTH.exec(identity.trim())[1];
   const result = runHelper(helper, ["kill", String(pid), creation], options);
+  // The helper ends the job first and then waits for it to empty: a timeout
+  // means the tree is being ended, not that it could not be.
+  if (result?.error?.code === "ETIMEDOUT") return "ended";
   if (!result || result.error) return "unknown";
   // 0: the job was ended and is empty; 5: the one process with that birth was ended;
   // 4: ended, with processes still dying after the helper's wait.
@@ -409,6 +418,18 @@ async function settlesWithin(promise, ms) {
  * the group). Resolves true when the child has exited.
  */
 export async function terminateTree(child, options = {}) {
+  // A stop message that cannot be sent is reported as an 'error' on the next
+  // tick; while this runs it is neither an exit nor an uncaught exception.
+  const ignoreError = () => {};
+  child.on("error", ignoreError);
+  try {
+    return await terminateChildTree(child, options);
+  } finally {
+    child.off("error", ignoreError);
+  }
+}
+
+async function terminateChildTree(child, options) {
   const platform = options.platform ?? process.platform;
   const graceMs = options.graceMs ?? 5_000;
   const exited = exitedPromise(child);

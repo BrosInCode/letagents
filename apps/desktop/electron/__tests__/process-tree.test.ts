@@ -302,8 +302,8 @@ test("a failed stop message is not an exit: the tree is still ended after the gr
   const result = await terminateTree(child as unknown as ChildProcess, {
     platform: "win32", graceful: true, graceMs: 20, killWaitMs: 20, liveTrees,
     runHelper: (file, args) => { const answer = helper.runHelper(file, args); if (args[0] === "kill") child.exit(1); return answer; },
-    // The IPC channel is gone: Node reports it as an 'error' on the live child.
-    requestStop: () => { child.emit("error", Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" })); },
+    // The IPC channel is gone: Node reports it as an 'error' on the live child, on the next tick.
+    requestStop: () => { process.nextTick(() => child.emit("error", Object.assign(new Error("Channel closed"), { code: "ERR_IPC_CHANNEL_CLOSED" }))); },
   });
   assert.equal(result, true);
   assert.deepEqual(helper.calls.map(([, args]) => args), [["info", "1200"], ["kill", "1200", "8"]]);
@@ -334,4 +334,31 @@ test("Windows: a pid reused by another tree of ours is not ended for a caller wh
   assert.equal(helper.calls.some(([, args]) => args.join(" ") === "kill 1300 99"), false);
   // B's own birth still ends B.
   assert.equal(signalTree(1300, "SIGKILL", { ...options, identity: "win32-ft:99" }), true);
+});
+
+test("Windows: a recorded birth that cannot be proved never ends a tree found only by its pid", () => {
+  // B (a helper tree) holds the pid, but its birth cannot be read now.
+  const treeB = new FakeChild(1400);
+  const unreadable = recordingHelper({ "info 1400": { status: 3 } });
+  const helperTrees = new Map([[1400, { child: treeB as unknown as ChildProcess, helper: HELPER }]]);
+  assert.equal(signalTree(1400, "SIGKILL", { platform: "win32", runHelper: unreadable.runHelper, liveTrees: helperTrees, identity: "win32-ft:11", probe: () => {} }), false);
+  // C was spawned without the helper, so nothing can read its birth.
+  const treeC = new FakeChild(1401);
+  const directTrees = new Map([[1401, { child: treeC as unknown as ChildProcess, helper: null as unknown as string }]]);
+  assert.equal(signalTree(1401, "SIGKILL", { platform: "win32", liveTrees: directTrees, helperPath: null, identity: "win32-ft:11", probe: () => {} }), false);
+  assert.deepEqual(treeB.kills, []);
+  assert.deepEqual(treeC.kills, []);
+  // Without a recorded birth, a held tree is still ended as before.
+  assert.equal(signalTree(1401, "SIGKILL", { platform: "win32", liveTrees: directTrees, helperPath: null }), true);
+  assert.deepEqual(treeC.kills, [undefined]);
+});
+
+test("Windows: a kill that is still waiting for the job to empty is not replaced by a kill of the helper alone", () => {
+  const child = new FakeChild(1500);
+  const liveTrees = new Map([[1500, { child: child as unknown as ChildProcess, helper: HELPER }]]);
+  const runHelper = (_file: string, args: string[]) => args[0] === "info"
+    ? info(1500, "7")
+    : { status: null as unknown as number, stdout: "", error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }) };
+  assert.equal(signalTree(1500, "SIGKILL", { platform: "win32", runHelper, liveTrees }), true);
+  assert.deepEqual(child.kills, []);
 });

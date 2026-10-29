@@ -299,8 +299,9 @@ static int run_kill(DWORD pid, u64 creation) {
     }
     result = drain_job(job, NULL, DRAIN_MS) ? 0 : EXIT_SURVIVORS;
     CloseHandle(job);
-    /* The helper exits once its program has. */
-    WaitForSingleObject(process, DRAIN_MS);
+    /* The helper exits once its program has: a short wait, so this command
+       stays well inside its caller's timeout. */
+    WaitForSingleObject(process, 1000);
     CloseHandle(process);
     return result;
   }

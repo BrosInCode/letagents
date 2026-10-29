@@ -78,6 +78,8 @@ export interface SignalTreeOptions extends ProcessTreeHelperOptions {
   identity?: string | null;
   /** The child when the caller holds it. */
   child?: ChildProcess;
+  /** Windows: the kill(0) probe used when a birth cannot be read. */
+  probe?: (pid: number) => void;
   /** POSIX: signal only the group, never the pid alone. */
   groupOnly?: boolean;
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
