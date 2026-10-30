@@ -44,7 +44,7 @@ import {
   flush,
   withLoopAlive,
 } from "./cursor-provider-adapter.fixture.js";
-import { needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
+import { needsPosixSignals, needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
 
 test("the supervised native Cursor sandbox blocks late hook reads", {
   skip: process.platform !== "darwin",
@@ -1425,7 +1425,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", { skip: needsPosixSignals }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-term-recovery-"));
   try {
     const configDir = join(root, "config");
@@ -1482,7 +1482,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", { skip: needsPosixSignals }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-terminal-"));
   try {
     const configDir = join(root, "config");

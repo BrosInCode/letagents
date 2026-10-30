@@ -187,13 +187,13 @@ export const needsShellScriptGit: string | false = process.platform === "win32"
   : false;
 
 /**
- * Tests that give the approval path rules (the approval projection, the automatic edit rule) an absolute file path
- * as a provider reports it on POSIX. On Windows the path has backslashes and a drive letter; the rules refuse a
- * backslash name as unsafe, so on Windows they refuse the request (they fail closed). Whether they should read a
- * Windows path is a security decision for the path rules, not for a test.
+ * Tests that give the approval projection or the automatic edit rule an absolute file path as a provider reports it on
+ * POSIX. On Windows the path has backslashes and a drive letter. Both rules refuse a name with a backslash as unsafe
+ * (workspaceRelativePath in execution-approval-projection.ts), so on Windows they refuse and a person is asked: they
+ * fail closed. Whether they should read a Windows path is a security decision for those rules, not for a test.
  */
 export const needsPosixFilePathReports: string | false = process.platform === "win32"
-  ? "the approval path rules read POSIX paths; a Windows path (backslashes) is refused as unsafe"
+  ? "the approval projection and the edit rule refuse an absolute path with backslashes as unsafe, so on Windows they ask a person"
   : false;
 
 /** Tests that make a folder fsync fail on purpose: Windows cannot fsync a folder, and NTFS journals a rename itself. */
@@ -215,3 +215,8 @@ export function assertKilledBySelf(child: { signal: string | null; status: numbe
 
 /** How long a test lets a child Node process run before it gives up: loading TypeScript takes much longer on the Windows test machines. */
 export const CHILD_PROCESS_TIMEOUT_MS = process.platform === "win32" ? 90_000 : 15_000;
+
+/** Tests whose fake native process must handle SIGTERM (a graceful stop with a late reply or an exit code): Windows ends a process without a signal. */
+export const needsPosixSignals: string | false = process.platform === "win32"
+  ? "needs a native process that handles SIGTERM, which Windows does not deliver"
+  : false;

@@ -27,7 +27,7 @@ import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { systemProcessIdentity } from "../process-identity.js";
-import { needsPosixFilePathReports, WINDOWS_TEST_HELPER } from "../../electron/__tests__/platform.js";
+import { needsModeBits, needsPosixFilePathReports, WINDOWS_TEST_HELPER } from "../../electron/__tests__/platform.js";
 
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -1469,7 +1469,7 @@ for (const provider of ["claude-code", "codex", "open-model"] as const) {
   });
 }
 
-test("room workspace rules require the same durable attempt, room, account, policy and private marker", async () => {
+test("room workspace rules require the same durable attempt, room, account, policy and private marker", { skip: needsModeBits }, async () => {
   const f = await fixture("claude-code", { hostActorId: () => "host-owner" }, true);
   try {
     const [candidate] = await f.broker.list("room");

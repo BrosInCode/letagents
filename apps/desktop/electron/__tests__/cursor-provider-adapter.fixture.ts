@@ -35,6 +35,7 @@ import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
+import { cursorMcpPipeConnectorArgs } from "../main/agents/cursor/windows-turn.js";
 import { testDaemonEndpoint, writeFakeProvider } from "./platform.js";
 
 /** Where Cursor's private folders go: /tmp on POSIX (the sandbox profile names it), the temporary folder on Windows. */
@@ -275,7 +276,8 @@ socket.once("close", () => process.exit(0));
       mcpServers: {
         letagents: {
           command: process.execPath,
-          args: ["-e", connectorSource, mcpConnectorSocketPath],
+          // Windows: the wrapper listens on a named pipe, which only the product's own pipe connector can open.
+          args: process.platform === "win32" ? cursorMcpPipeConnectorArgs(mcpConnectorSocketPath) : ["-e", connectorSource, mcpConnectorSocketPath],
           env: { ELECTRON_RUN_AS_NODE: "1" },
         },
       },
@@ -803,7 +805,8 @@ if (configText.includes("LETAGENTS_SUPERVISOR_")
   || Object.keys(process.env).some((key) => key.startsWith("LETAGENTS_SUPERVISOR_"))) process.exit(71);
 const config = JSON.parse(configText);
 const server = Object.values(config.mcpServers)[0];
-const socketPath = server.args[server.args.length - 1];
+// Windows: the connector gets the named pipe, then its proof file and the pipe addon (cursorMcpPipeConnectorArgs).
+const socketPath = process.platform === "win32" ? server.args[2] : server.args[server.args.length - 1];
 const connector = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ["pipe", "pipe", "inherit"] });
 note("connector-spawned:" + connector.pid);
 const lines = readline.createInterface({ input: connector.stdout });
@@ -928,7 +931,8 @@ childProcess.spawnSync = function(command, args, options) {
       throw new Error(`${error instanceof Error ? error.message : String(error)}; ${diagnostic}; ${terminals.join(";")}`);
     }
     const firstSocket = first.text!.slice("connector-ok:".length);
-    assert.equal(existsSync(dirname(firstSocket)), false, "fresh-turn connector root is removed at terminal");
+    // The folder the launch made, not dirname of what the fake reports: on Windows that is a pipe name.
+    assert.equal(existsSync(connectorRoots[0]!), false, "fresh-turn connector root is removed at terminal");
     const firstRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
     const firstRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.throws(
@@ -944,7 +948,7 @@ childProcess.spawnSync = function(command, args, options) {
     const second = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-resume" })));
     const secondSocket = second.text!.slice("connector-ok:".length);
     assert.notEqual(secondSocket, firstSocket, "resume receives a new one-turn connector capability");
-    assert.equal(existsSync(dirname(secondSocket)), false, "resume connector root is removed at terminal");
+    assert.equal(existsSync(connectorRoots[1]!), false, "resume connector root is removed at terminal");
     const secondRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
     const secondRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.notEqual(secondRuntimePid, firstRuntimePid);

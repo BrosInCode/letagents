@@ -326,7 +326,7 @@ const ready = setInterval(() => {
   }
 });
 
-test("the supervised agent proxy admits HTTP/1 retries and background Runs until the native terminal result", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("the supervised agent proxy admits HTTP/1 retries and background Runs until the native terminal result", {}, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h1-proxy-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
@@ -546,7 +546,7 @@ function value(flag) { const index = args.indexOf(flag); return index >= 0 ? arg
   }
 });
 
-test("the supervised agent proxy relays sequential and bounded concurrent HTTP/2 Runs through the live turn lease", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("the supervised agent proxy relays sequential and bounded concurrent HTTP/2 Runs through the live turn lease", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h2-proxy-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
@@ -681,7 +681,7 @@ function request(...args) { return startRequest(...args).done; }
 });
 
 for (const terminalWhileHeld of [false, true]) {
-test(`the supervised agent proxy bounds and cancels held Runs before ${terminalWhileHeld ? "terminal" : "attestation"}`, { skip: needsWindowsFakeCursorAgent }, async () => {
+test(`the supervised agent proxy bounds and cancels held Runs before ${terminalWhileHeld ? "terminal" : "attestation"}`, async () => {
   // Cursor opens its model connection at startup, before its MCP handshake has
   // finished. The proxy must HOLD that first Run until live attestation
   // completes and then admit it -- not reject it, which is what made Cursor
@@ -814,7 +814,7 @@ function request(body, path = "/agent.v1.AgentService/Run") {
 
 }
 
-test("a held Run whose MCP attestation never completes fails with the exact causal reason and is never forwarded upstream", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("a held Run whose MCP attestation never completes fails with the exact causal reason and is never forwarded upstream", async () => {
   // With the model Run held rather than rejected, Cursor no longer dies in a
   // retry storm; the turn instead fails when the capability deadline elapses,
   // recording that exact attestation reason (not the generic connector-ended
@@ -869,7 +869,8 @@ setInterval(() => {}, 1000);
             ...input,
             testAgentUpstreamEndpoint,
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 800,
+            // A node cold start on Windows takes several times longer, and the deadline also covers the wrapper's verify handshake.
+            testMcpCapabilityTimeoutMs: process.platform === "win32" ? 5_000 : 800,
           });
         },
       },
@@ -899,7 +900,7 @@ setInterval(() => {}, 1000);
   }
 });
 
-test("two concurrent supervised agents each hold and admit their own Run independently", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("two concurrent supervised agents each hold and admit their own Run independently", async () => {
   // The hold state is per-wrapper-process, so concurrent turns must not
   // interfere: each holds its own first Run and admits it on its own
   // attestation, with no shared admission slot or cross-turn deadlock.
@@ -995,7 +996,7 @@ function request(body) {
   }
 });
 
-test("the supervised agent proxy rejects a boundary-violating request immediately, never holding it for attestation", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("the supervised agent proxy rejects a boundary-violating request immediately, never holding it for attestation", async () => {
   // The attestation hold is only for authorized Run requests. A request
   // outside that boundary -- wrong path or a bearer that is not the wrapper's
   // placeholder -- must be rejected at once, never granted the grace window.

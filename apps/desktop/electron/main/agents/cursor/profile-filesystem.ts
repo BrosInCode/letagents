@@ -8,6 +8,7 @@ import {
   copyFileSync,
   existsSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -309,6 +310,32 @@ export function linkDarwinLoginKeychains(sourceHomeDir: string, homeDir: string)
     return;
   }
   symlinkSync(source, link, "dir");
+}
+
+/**
+ * Windows has no login Keychain: Cursor keeps its login in
+ * %APPDATA%\\Cursor\\auth.json. As on macOS, only a profile that may see the
+ * login gets it. It is a hard link, so a token Cursor refreshes reaches the
+ * owner's own file, and removing the profile leaves that file as it is.
+ */
+export function linkWindowsCursorLogin(sourceHomeDir: string, homeDir: string, sourceAppData = process.env.APPDATA?.trim(), platform: NodeJS.Platform = process.platform): void {
+  if (platform !== "win32") return;
+  removeWindowsCursorLogin(homeDir, platform);
+  const source = join(sourceAppData || join(sourceHomeDir, "AppData", "Roaming"), "Cursor", "auth.json");
+  if (!pathEntryExists(source)) return;
+  const stat = lstatSync(source);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Cursor's saved login must be a regular file.");
+  const roaming = join(homeDir, "AppData", "Roaming");
+  ensurePrivateProfileTree(homeDir, [join(homeDir, "AppData"), roaming, join(roaming, "Cursor")]);
+  linkSync(source, windowsCursorLoginPath(homeDir));
+}
+
+export function removeWindowsCursorLogin(homeDir: string, platform: NodeJS.Platform = process.platform): void {
+  if (platform === "win32") removePrivateProfileAuthorityEntry(windowsCursorLoginPath(homeDir));
+}
+
+function windowsCursorLoginPath(homeDir: string): string {
+  return join(homeDir, "AppData", "Roaming", "Cursor", "auth.json");
 }
 
 export function darwinLoginKeychainReadRoots(sourceHomeDir: string): string[] {

@@ -857,7 +857,17 @@ export class WorkerBindingStore {
       if (checksumOf(current) !== expectedChecksum) {
         throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
       }
-      await rename(temporary, backup);
+      // Windows refuses to replace a file another opener is reading or replacing at the same moment (EPERM,
+      // EBUSY). Try again briefly; an opener that won meanwhile has installed the identical redacted proof.
+      for (let attempt = 0; ; attempt += 1) {
+        try { await rename(temporary, backup); break; } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (process.platform !== "win32" || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "") || attempt >= 20) throw error;
+          const raced = await this.readOwnerOnly(backup).catch(() => undefined);
+          if (raced !== undefined && isRedactedLegacyBackup(raced, expectedChecksum)) return;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
       await protectOwnerPrivate(backup, "file");
       await this.syncDirectory(dirname(backup));
       const converted = await this.readOwnerOnly(backup);

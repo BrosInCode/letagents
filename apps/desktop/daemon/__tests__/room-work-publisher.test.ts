@@ -1274,6 +1274,8 @@ test('a background staging pass preserves a workspace captured while its authori
     // First check enters flush; second occurs after stageChanged loaded its v1 row.
     if (++checks === 2) await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
   };
+  // The staging pass needs the first workspace capture's background Git work to have finished. Git starts much slower on Windows.
+  if (process.platform === 'win32') await new Promise((resolve) => setTimeout(resolve, 1500));
   await f.publisher.flush();
   assert.equal(f.row().summary?.version, 3);
   assert.deepEqual(f.sent.at(-1)?.summary, f.row().summary);

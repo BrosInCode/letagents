@@ -293,7 +293,7 @@ test("a managed Codex launch turns off the owner's extensions and commits as the
     'shell_environment_policy.set.GIT_COMMITTER_NAME="octo-fake"',
     `shell_environment_policy.set.GIT_COMMITTER_EMAIL=${JSON.stringify(FAKE_NOREPLY)}`,
     ...CODEX_OWNER_FEATURE_OVERRIDES,
-    codexSkillDisableOverride([...new Set([personal, realpathSync(personal)])]),
+    codexSkillDisableOverride([...new Set([personal, realpathSync.native(personal)])]),
     'mcp_servers={ "owner.dotted" = { enabled = false }, "owner_browser" = { enabled = false } }',
     'model="caller-model"',
   ]);

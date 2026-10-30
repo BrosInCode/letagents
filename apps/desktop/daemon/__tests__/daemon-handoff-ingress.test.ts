@@ -259,6 +259,8 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     await Promise.all([commitReached, bindingCommitReached]);
 
     heldSocket = connectDaemon(paths.socketPath);
+    // A connection that nobody reads never reports that the daemon closed it on Windows.
+    heldSocket.resume();
     await new Promise<void>((resolve, reject) => {
       heldSocket!.once("connect", resolve);
       heldSocket!.once("error", reject);

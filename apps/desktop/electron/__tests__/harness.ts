@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -87,8 +87,17 @@ export function removeTestDirectory(folder: string): void {
     try {
       rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     } catch (error) {
-      process.stderr.write(`test cleanup could not remove ${folder}: ${String(error)}\n`);
-      process.exitCode = 1;
+      // Something still holds a file open (a database a daemon test did not stop). The system releases every
+      // handle when this process ends, so a detached process, which outlives it, removes the folder then.
+      try {
+        spawn(process.execPath, ["-e", `
+          const folder = process.argv[1];
+          setTimeout(() => { try { require("node:fs").rmSync(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch {} }, 1500);
+        `, folder], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      } catch {
+        process.stderr.write(`test cleanup could not remove ${folder}: ${String(error)}\n`);
+        process.exitCode = 1;
+      }
     }
   });
 }

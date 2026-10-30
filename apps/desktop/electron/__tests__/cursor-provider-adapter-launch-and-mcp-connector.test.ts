@@ -787,7 +787,7 @@ attestFixtureMcp().then(() => {
   }
 });
 
-test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-delayed-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
@@ -888,7 +888,7 @@ test("concurrent supervised Cursor turns keep isolated worker-socket namespaces 
   }
 });
 
-test("the exact live Cursor connector times out and reaps native work when Cursor never connects", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("the exact live Cursor connector times out and reaps native work when Cursor never connects", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-no-connector-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
@@ -921,8 +921,9 @@ setInterval(() => {}, 1000);
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
             // Budgets BOTH the wrapper's verify handshake and the connect
             // wait; too tight and a slow node cold-start times verify out
-            // first, changing the expected failure message.
-            testMcpCapabilityTimeoutMs: 500,
+            // first, changing the expected failure message. A node cold start
+            // on Windows takes several times longer.
+            testMcpCapabilityTimeoutMs: process.platform === "win32" ? 5_000 : 500,
           });
         },
       },
@@ -957,7 +958,7 @@ setInterval(() => {}, 1000);
   }
 });
 
-test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", { skip: needsWindowsFakeCursorAgent }, async () => {
+test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", async () => {
   // The verify-phase timeout is the only bound between wrapper start and
   // connector listen; this pins it so a mutation that drops the deadline
   // (reintroducing an unbounded startup wait) fails loudly.
@@ -999,7 +1000,8 @@ setInterval(() => {}, 1000);
             mcpRuntimeEntryPath: wedgedRuntime,
             testAgentUpstreamEndpoint: "http://127.0.0.1:9",
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 300,
+            // A node cold start on Windows takes several times longer: the wedged runtime must still start.
+            testMcpCapabilityTimeoutMs: process.platform === "win32" ? 3_000 : 300,
           });
         },
       },

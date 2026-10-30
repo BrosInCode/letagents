@@ -68,6 +68,8 @@ const READ_ONLY_PROFILE_PREFIX = "letagents_read_only_";
 export const CODEX_BUILT_IN_READ_ONLY_PROFILE = ":read-only";
 const DENY_CHECK_TIMEOUT_MS = 15_000;
 const DENY_CHECK_FOLDER = "codex-deny-check-";
+// Windows keeps a folder busy for a moment after a process that ran in it ends.
+const SCRATCH_REMOVAL = { recursive: true, force: true, maxRetries: process.platform === "win32" ? 20 : 0, retryDelay: 100 };
 const DENY_CHECK_DENIED = "letagents-check-denied-file";
 const DENY_CHECK_OPEN = "letagents-check-open-file";
 /** An address on this machine where nothing listens: what a check that needs no service gives Codex for every address it could call. */
@@ -613,7 +615,7 @@ export async function checkCodexKeepsLinkedSignIn(codexBin: string, env: NodeJS.
     return false;
   } finally {
     listener.close();
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
+    if (scratch) rmSync(scratch, SCRATCH_REMOVAL);
   }
 }
 
@@ -719,7 +721,7 @@ export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.Proces
   } catch {
     return false;
   } finally {
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
+    if (scratch) rmSync(scratch, SCRATCH_REMOVAL);
   }
 }
 

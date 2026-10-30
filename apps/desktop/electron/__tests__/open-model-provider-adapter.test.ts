@@ -41,6 +41,9 @@ import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";
 
+/** Windows starts the sealed MCP runtime; a test has no packaged one. */
+const testMcpRuntime = () => ({ entryPath: join(tmpdir(), "letagents-mcp-entry.js"), readRoots: [] });
+
 type LaunchRecord = {
   binary: string;
   args: string[];
@@ -100,7 +103,7 @@ function createHarness() {
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
-    resolveMcpRuntime: () => ({ entryPath: join(tmpdir(), "letagents-mcp-entry.js"), readRoots: [] }),
+    resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
       const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
@@ -2878,6 +2881,7 @@ test("Open Model durably fences the crash window between detached launch and PID
   const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
   let launches = 0;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -2925,6 +2929,7 @@ test("Open Model clears its exact intent when the launch is refused before any p
     binary: "opencode",
     runtimeRoot,
     dependencies: {
+      resolveMcpRuntime: testMcpRuntime,
       allocatePort: async () => 43822,
       launch: () => { throw refusal; },
     },
@@ -2946,7 +2951,7 @@ test("Open Model clears its exact intent after a real no-pid launch failure", as
   const missingBinaryAdapter = new OpenModelProviderAdapter({
     binary: join(runtimeRoot, "missing-opencode"),
     runtimeRoot,
-    dependencies: { allocatePort: async () => 43821 },
+    dependencies: { resolveMcpRuntime: testMcpRuntime, allocatePort: async () => 43821 },
     startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
@@ -2991,6 +2996,7 @@ test("Open Model serializes A/B startup ownership for the same runtime path", as
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: {
+      resolveMcpRuntime: testMcpRuntime,
       ...harness.dependencies,
       launch(input) {
         launches += 1;
@@ -3048,6 +3054,7 @@ test("Open Model persists an ambiguous startup birth and fences replacement unti
   let priorIdentity: string | null | undefined = "opencode-birth-6104";
   let failSessionCreation = true;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -3138,6 +3145,7 @@ test("Open Model persists and fences a fresh pid whose birth is initially unveri
   let launches = 0;
   let firstIdentity: string | null | undefined;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -3193,6 +3201,7 @@ test("fresh launch cleanup never signals a recycled or unverifiable pid", async 
   const exited = new Promise<ProviderProcessExit>(() => {});
   const signals: Array<NodeJS.Signals> = [];
   const dependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     getProcessIdentity: () => "replacement-birth",
     signalProcess: (_pid: number, signal: NodeJS.Signals) => { signals.push(signal); },
   };
@@ -4631,6 +4640,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   let nextPort = 43_821;
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
       let resolveExit!: (exit: ProviderProcessExit) => void;

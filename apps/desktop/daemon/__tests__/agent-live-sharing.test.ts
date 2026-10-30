@@ -11,7 +11,7 @@ import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
-import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
@@ -97,7 +97,7 @@ async function withDaemon(run: (context: {
   }
 }
 
-test("live sharing is off for a new agent and only the desktop app's signed request turns it on", { timeout: 60_000 }, async () => {
+test("live sharing is off for a new agent and only the desktop app's signed request turns it on", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, manifestPath, generation, signed, configuration, setSharing, outsider }) => {
     assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_owner") })).ok, true);
     const fresh = await configuration("supervised_owner");
@@ -177,7 +177,7 @@ async function setSharingAt(socketPath: string, signed: (operation: HostApproval
   return daemonRequest(socketPath, "supervisor.host_approval_request", signed("set_live_sharing", { entryId: "supervised_owner", daemonGeneration, enabled: true }));
 }
 
-test("an agent that fetches its own messages, or a rented agent, cannot share its live activity", { timeout: 60_000 }, async () => {
+test("an agent that fetches its own messages, or a rented agent, cannot share its live activity", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setSharing }) => {
     assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_polling", { delivery_mode: "mcp_polling" }) })).ok, true);
     assert.equal((await configuration("supervised_polling")).live_sharing_availability, "polling");

@@ -14,7 +14,7 @@ import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
-import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import { windowsSystemTool } from "../../../../shared/owner-private-fs.mjs";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
@@ -140,7 +140,7 @@ async function withDaemon(run: (context: {
   }
 }
 
-test("only the desktop app's signed request turns an agent's use of its owner's own setup on", { timeout: 60_000 }, async () => {
+test("only the desktop app's signed request turns an agent's use of its owner's own setup on", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, generation, signed, configuration, setOwnSetup, storedPolicy, outsider }) => {
     const created = await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_owner", "codex") });
     assert.equal(created.ok, true, created.error);
@@ -287,7 +287,7 @@ test("only the desktop app's signed request turns an agent's use of its owner's 
   });
 });
 
-test("the roster shows what a running agent really has, not only what is saved", { timeout: 60_000 }, async () => {
+test("the roster shows what a running agent really has, not only what is saved", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setOwnSetup, setRunning, roster }) => {
     const id = "supervised_owner";
     assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent(id, "codex") })).ok, true);
@@ -371,7 +371,7 @@ test("turning the owner's own setup off restarts an idle agent that still has it
   }
 });
 
-test("a signed request still cannot give a rental, a Cursor agent, an Open Model agent or an agent that collects its own messages the owner's own setup", { timeout: 60_000 }, async () => {
+test("a signed request still cannot give a rental, a Cursor agent, an Open Model agent or an agent that collects its own messages the owner's own setup", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setOwnSetup, storedPolicy, forceStoredKey }) => {
     for (const [id, provider, availability, reason, deliveryMode] of [
       ["supervised_rental_0123456789abcdef", "cursor", "rental", /rented agent works for someone else/, "daemon_inbox"],
@@ -419,7 +419,7 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
   });
 });
 
-test("an imported manifest never brings the owner's own setup with it", { timeout: 60_000 }, async () => {
+test("an imported manifest never brings the owner's own setup with it", { timeout: 60_000 * WAIT_SCALE }, async () => {
   const { createHash } = await import("node:crypto");
   await withDaemon(async ({ configuration, storedPolicy }) => {
     assert.equal((await configuration("supervised_imported")).home_harness, false);
@@ -457,7 +457,7 @@ function installedClaude(scratch: string): string | null {
   }
 }
 
-test("a policy an unsigned creation stored keeps nothing of a project running once the owner signs the switch on", { timeout: 180_000 }, async () => {
+test("a policy an unsigned creation stored keeps nothing of a project running once the owner signs the switch on", { timeout: 180_000 * WAIT_SCALE }, async () => {
   const scratch = await mkdtemp(join(tmpdir(), "letagents-home-harness-launch-"));
   try {
     await withDaemon(async ({ socketPath, setOwnSetup, storedPolicy, configuration }) => {

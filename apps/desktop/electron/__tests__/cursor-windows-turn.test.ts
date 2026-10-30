@@ -21,6 +21,7 @@ import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.j
 import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-types.js";
 import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
 import { cursorMcpConnectorRootPattern, WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
+import { linkWindowsCursorLogin, removeWindowsCursorLogin } from "../main/agents/cursor/profile-filesystem.js";
 import {
   assertCursorMcpPipeAddon,
   assertCursorWindowsCommandLines,
@@ -448,3 +449,26 @@ test("the helper's unkillable exit code is a failure of its own, not Cursor's ex
   assert.deepEqual(evidence(null, "SIGKILL"), { type: "exit", code: null, signal: "SIGKILL" });
 });
 
+test("only a profile that may see the login gets Cursor's Windows login, and the owner's file stays", () => {
+  const root = mkdtempSync(join(tmpdir(), "cursor-windows-login-"));
+  try {
+    const roaming = join(root, "owner", "Roaming");
+    const home = join(root, "profile");
+    mkdirSync(join(roaming, "Cursor"), { recursive: true });
+    const owner = join(roaming, "Cursor", "auth.json");
+    const linked = join(home, "AppData", "Roaming", "Cursor", "auth.json");
+    linkWindowsCursorLogin(join(root, "owner"), home, roaming, "win32");
+    assert.equal(existsSync(linked), false, "no login: nothing to link");
+    writeFileSync(owner, '{"accessToken":"a"}');
+    linkWindowsCursorLogin(join(root, "owner"), home, roaming, "win32");
+    writeFileSync(linked, '{"accessToken":"refreshed"}');
+    assert.equal(readFileSync(owner, "utf8"), '{"accessToken":"refreshed"}', "a refresh reaches the owner's file");
+    linkWindowsCursorLogin(join(root, "owner"), home, roaming, "win32");
+    assert.equal(existsSync(linked), true, "linking again replaces the old link");
+    removeWindowsCursorLogin(home, "win32");
+    assert.equal(existsSync(linked), false);
+    assert.equal(existsSync(owner), true, "the owner's own file stays");
+    linkWindowsCursorLogin(join(root, "owner"), home, roaming, "darwin");
+    assert.equal(existsSync(linked), false, "macOS uses its Keychain");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

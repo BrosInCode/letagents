@@ -169,7 +169,7 @@ test("only a global identity in a GitHub repository is replaced", async () => {
 });
 
 test("an email from a conditional include is kept; an unconditional include is the global identity", async () => {
-  const work = realpathSync(fixture("work"));
+  const work = realpathSync.native(fixture("work"));
   const included = join(fixture("included"), "work.gitconfig");
   writeFileSync(included, "[user]\n\temail = work@example.invalid\n");
   const { gitEnv } = gitHome(`[user]\n\temail = owner@example.invalid\n[includeIf "gitdir:${configPath(work)}/"]\n\tpath = ${configPath(included)}\n`);
@@ -246,7 +246,7 @@ test("any author or committer setting from a repository, worktree or conditional
     .find((setting) => setting.key === "committer.email")?.scope, "worktree");
   assert.deepEqual(await identityFor(worktreeScoped, gitEnv), {}, "worktree committer.email");
 
-  const work = realpathSync(fixture("author-work"));
+  const work = realpathSync.native(fixture("author-work"));
   const included = join(fixture("author-included"), "work.gitconfig");
   writeFileSync(included, "[author]\n\tname = Work Persona\n");
   const { gitEnv: conditional } = gitHome(

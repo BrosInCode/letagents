@@ -328,6 +328,9 @@ export function processBirth(pid, options = {}) {
   const info = windowsProcessInfo(pid, options);
   if (info === null) return null;
   if (info === undefined) return probeAbsence(pid, options);
+  // A process that has ended still has a record while any handle to it is open (the parent's own
+  // handle, for one). The helper waited on the process itself: it is gone, not a live birth.
+  if (info.exited) return null;
   return `${WINDOWS_BIRTH_PREFIX}${info.creationTime}`;
 }
 
