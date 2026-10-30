@@ -1,5 +1,4 @@
 import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
-import { ref } from "vue";
 import type { LegacySettingsPaneId, SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
 
 export const settingsNavGroups: SettingsNavGroup[] = [
@@ -95,17 +94,21 @@ export function filterSettingsNavigation(query: string): SettingsNavGroup[] {
 
 /**
  * The pane Settings showed last in this window. Settings reopens there when
- * nothing asks for a particular pane; null until Settings first opens.
+ * nothing asks for a particular pane; null until Settings first opens. Not
+ * reactive on purpose: Settings writes it, and nothing may react to that write
+ * while Settings is open.
  */
-export const lastSettingsPane = ref<SettingsPaneId | null>(null);
+export const lastSettingsPane: { value: SettingsPaneId | null } = { value: null };
 
 /**
  * The pane plain "Settings" opens: the last one shown, else Chat storage. A
- * hidden pane (setup, reached only from its own entry) is never reopened.
+ * hidden pane (setup) reopens at the pane it belongs to.
  */
 export function reopenedSettingsPane(): SettingsPaneId {
   const last = lastSettingsPane.value;
-  const hidden = Object.values(settingsSubsections).some((items) =>
-    items?.some((item) => item.id === last && item.hidden));
-  return last && !hidden ? last : "storage:chat";
+  if (!last) return "storage:chat";
+  const hidden = Object.values(settingsSubsections)
+    .flatMap((items) => items ?? [])
+    .find((item) => item.id === last && item.hidden);
+  return hidden ? hidden.parent ?? "storage:chat" : last;
 }

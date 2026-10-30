@@ -693,9 +693,15 @@ watch(sections, () => {
 // waits until the rail lists it. Rows above it may still change height as their
 // own data loads, so the section is held at the top for a moment, until you
 // scroll or click.
-const pendingSection = ref<string | null>(props.initialSection ?? null);
+const pendingSection = ref<string | null>(null);
 let stopHolding: (() => void) | null = null;
-watch(() => props.initialSection, (section) => { pendingSection.value = section ?? null; });
+// A section that never shows is dropped, so the panel never jumps there later on its own.
+let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+watch(() => props.initialSection, (section) => {
+  pendingSection.value = section ?? null;
+  clearTimeout(pendingTimer);
+  if (section) pendingTimer = setTimeout(() => { pendingSection.value = null; }, 3000);
+}, { immediate: true });
 watch([pendingSection, sections], async () => {
   const target = sections.value.find((section) => section.id === pendingSection.value);
   if (!target) return;
@@ -730,7 +736,10 @@ function onContentWheel(): void {
   stopHoldingSection();
   releaseSectionLock();
 }
-onBeforeUnmount(stopHoldingSection);
+onBeforeUnmount(() => {
+  stopHoldingSection();
+  clearTimeout(pendingTimer);
+});
 
 const renameDirty = computed(() => {
   const draft = renameDraft.value.trim();

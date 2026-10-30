@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import {
+  boardMayShowTicketSettings,
+  rememberActiveConnectionCount,
   roomShowsTicketSettings,
   ticketSettingsSummary,
 } from "../src/components/desktop/content/room-board/ticket-settings";
@@ -28,6 +30,15 @@ function stubBridge(filters: unknown[] | Error, connections: Array<{ status: str
   };
 }
 
+test("Board manager asks the server nothing in a room with no connector and no imported card", () => {
+  rememberActiveConnectionCount(0);
+  assert.equal(boardMayShowTicketSettings([{ externalRef: null }, {}]), false);
+  assert.equal(boardMayShowTicketSettings([{ externalRef: "jira:SCRUM-1" }]), true, "an imported card asks");
+  rememberActiveConnectionCount(1);
+  assert.equal(boardMayShowTicketSettings([]), true, "a known active connection asks");
+  rememberActiveConnectionCount(0);
+});
+
 test("the Tickets rail summary counts filters and hides with no filter and no connection", () => {
   assert.equal(ticketSettingsSummary(0, 0), null);
   assert.equal(ticketSettingsSummary(0, 1), "No filters");
@@ -46,4 +57,10 @@ test("Board manager links to ticket filters only where Room settings shows them"
   assert.equal(await roomShowsTicketSettings("room-1"), true);
   stubBridge(new Error("no connectors on this server"), new Error("signed out"));
   assert.equal(await roomShowsTicketSettings("room-1"), false);
+  stubBridge([], [{ status: "active" }]);
+  await roomShowsTicketSettings("room-1");
+  assert.equal(boardMayShowTicketSettings([]), true, "the check remembers an active connection");
+  stubBridge([], []);
+  await roomShowsTicketSettings("room-1");
+  assert.equal(boardMayShowTicketSettings([]), false, "and forgets it when it is gone");
 });

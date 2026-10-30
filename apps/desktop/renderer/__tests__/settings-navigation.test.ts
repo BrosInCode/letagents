@@ -75,8 +75,47 @@ test("plain Settings reopens the pane shown last, and Chat storage the first tim
     lastSettingsPane.value = "account:connectors";
     assert.equal(reopenedSettingsPane(), "account:connectors");
     lastSettingsPane.value = "account:connectors-setup";
-    assert.equal(reopenedSettingsPane(), "storage:chat", "a hidden setup pane is not reopened");
+    assert.equal(reopenedSettingsPane(), "account:connectors-agents", "a hidden setup pane reopens at its parent");
   } finally {
+    lastSettingsPane.value = previous;
+  }
+});
+
+test("choosing a hidden pane inside open Settings stays there, and reopening goes to its parent", async () => {
+  const { effectScope, nextTick, ref, watch } = await import("vue");
+  const { useAppSettingsPaneWatcher, useAppSidebarLayout } = await import("../src/composables/app/useAppSidebarLayout.js");
+  const { settingsEntry } = await import("../src/domain/desktop-navigation.js");
+  const previous = lastSettingsPane.value;
+  const scope = effectScope();
+  try {
+    lastSettingsPane.value = null;
+    const roomEntry = { type: "room", id: "room:acme" };
+    const app = { activeEntry: ref<unknown>(roomEntry), requestedSettingsPane: ref(null), sidebarMode: ref("expanded") };
+    scope.run(() => {
+      const layout = useAppSidebarLayout(app);
+      Object.assign(app, layout);
+      useAppSettingsPaneWatcher(app);
+      layout.openSettingsSurface();
+      // SettingsView's own chain: the initial pane prop sets the pane, and the pane is remembered.
+      const activePane = ref(layout.settingsPaneForActiveEntry.value);
+      watch(layout.settingsPaneForActiveEntry, (pane) => { activePane.value = pane; });
+      watch(activePane, (pane) => { lastSettingsPane.value = pane; }, { immediate: true });
+      Object.assign(app, { layout, activePane });
+    });
+    const { layout, activePane } = app as unknown as {
+      layout: ReturnType<typeof useAppSidebarLayout>;
+      activePane: { value: string };
+    };
+    assert.equal(activePane.value, "storage:chat");
+    activePane.value = "account:connectors-setup";
+    await nextTick();
+    await nextTick();
+    assert.equal(activePane.value, "account:connectors-setup", "Set up is not sent back to Chat storage");
+    app.activeEntry.value = roomEntry;
+    app.activeEntry.value = settingsEntry;
+    assert.equal(layout.settingsPaneForActiveEntry.value, "account:connectors-agents");
+  } finally {
+    scope.stop();
     lastSettingsPane.value = previous;
   }
 });

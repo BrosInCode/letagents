@@ -100,7 +100,7 @@ import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { desktopIpc } from "../../../../ipc/index";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import { relativeTime } from "../room-board/formatters";
-import { ticketSettingsSummary } from "../room-board/ticket-settings";
+import { rememberActiveConnectionCount, ticketSettingsSummary } from "../room-board/ticket-settings";
 
 const props = defineProps<{ roomIdentifier: string }>();
 // The Room settings rail lists Tickets only while this block shows (null hides it).
@@ -165,6 +165,7 @@ async function load(): Promise<void> {
   connections.value = connectionList.status === "fulfilled"
     ? connectionList.value.connections.filter((connection) => connection.status === "active")
     : [];
+  if (connectionList.status === "fulfilled") rememberActiveConnectionCount(connections.value.length);
   if (!connections.value.some((connection) => connection.id === connectionId.value)) {
     connectionId.value = connections.value[0]?.id ?? "";
   }

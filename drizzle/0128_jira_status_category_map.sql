@@ -12,7 +12,7 @@ UPDATE "tracker_connections" AS tc
          SELECT jsonb_object_agg(d.key, d.value)
            FROM jsonb_each('{"type:new": "todo", "type:indeterminate": "in_progress", "type:done": "done"}'::jsonb) AS d
           WHERE NOT EXISTS (
-            SELECT 1 FROM jsonb_object_keys(tc."status_map") AS k WHERE lower(k) = d.key
+            SELECT 1 FROM jsonb_object_keys(tc."status_map") AS k WHERE lower(trim(k)) = d.key
           )
        ), '{}'::jsonb) || tc."status_map",
        "unmapped_statuses" = '[]'::jsonb

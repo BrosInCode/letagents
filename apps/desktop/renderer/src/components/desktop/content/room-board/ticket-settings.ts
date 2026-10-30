@@ -11,6 +11,23 @@ export function ticketSettingsSummary(filterCount: number, activeConnectionCount
   return `${filterCount} ${filterCount === 1 ? "filter" : "filters"}`;
 }
 
+// Active tracker connections last seen in this app session; Room settings and
+// the check below keep it current. Unknown counts as none.
+let knownActiveConnections = 0;
+
+export function rememberActiveConnectionCount(count: number): void {
+  knownActiveConnections = count;
+}
+
+/**
+ * Whether Board manager may ask the server about ticket settings at all: the
+ * board shows an imported card, or you have an active tracker connection. A
+ * room with neither (no connectors) makes no request.
+ */
+export function boardMayShowTicketSettings(tasks: ReadonlyArray<{ externalRef?: string | null }>): boolean {
+  return knownActiveConnections > 0 || tasks.some((task) => Boolean(task.externalRef));
+}
+
 /**
  * True when Room settings shows its Tickets section for this room: the room
  * has a ticket filter, or you have an active tracker connection. Otherwise the
@@ -25,5 +42,6 @@ export async function roomShowsTicketSettings(roomIdentifier: string): Promise<b
   const activeConnectionCount = connectionList.status === "fulfilled"
     ? connectionList.value.connections.filter((connection) => connection.status === "active").length
     : 0;
+  if (connectionList.status === "fulfilled") rememberActiveConnectionCount(activeConnectionCount);
   return ticketSettingsSummary(filterCount, activeConnectionCount) !== null;
 }

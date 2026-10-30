@@ -131,7 +131,7 @@ import {
   type BoardEmptyStateAction,
 } from "./room-board/board-presentation";
 import { activeBoardManagerAgents } from "./room-board/governance-presentation";
-import { roomShowsTicketSettings } from "./room-board/ticket-settings";
+import { boardMayShowTicketSettings, roomShowsTicketSettings } from "./room-board/ticket-settings";
 import RoomBoardCreateTaskDialog from "./room-board/RoomBoardCreateTaskDialog.vue";
 import RoomBoardEmptyState from "./room-board/RoomBoardEmptyState.vue";
 import RoomBoardGovernancePanel from "./room-board/RoomBoardGovernancePanel.vue";
@@ -256,7 +256,7 @@ watch(() => [governanceOpen.value, props.roomIdentifier, props.ticketKeys] as co
   // Hidden until this room's answer arrives; a later check makes an earlier one stale.
   const check = ++ticketSettingsCheck;
   showTicketSettings.value = false;
-  if (!open || !ticketKeys) return;
+  if (!open || !ticketKeys || !boardMayShowTicketSettings(props.tasks)) return;
   const shows = await roomShowsTicketSettings(roomIdentifier);
   if (check === ticketSettingsCheck) showTicketSettings.value = shows;
 }, { immediate: true });
