@@ -60,9 +60,9 @@ function assertNoRedirect(launcher, base, relative, files) {
 // What cmd-shim writes for a bin with no shebang, which runs the file as it
 // is (`prog + " " + args + " " + target + " %*"`, with args and target empty):
 const NPM_SHIM_HEAD = ["@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0"];
-// A line that starts a program in the shim's folder claims this shape, on any
-// line of the file. A script shim's `"%dp0%\node.exe"` is not such a claim.
-const NPM_SHIM_NATIVE_CLAIM = /^[ \t]*"%dp0%\\(?!node\.exe")[^"\r\n]+\.exe"[ \t]/im;
+// A program named from the shim's own folder claims this shape, anywhere in
+// the file and however it is quoted. A script shim's node.exe beside it does not.
+const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)(?!\\*node\.exe)[^"\r\n]*\.exe/i;
 const NPM_SHIM_NATIVE_TARGET = /^"%dp0%\\([^"]+\.exe)"   %\*$/i;
 // One path segment, in characters that mean nothing to cmd.exe or to Windows path parsing.
 const NPM_TARGET_SEGMENT = /^[A-Za-z0-9@_+-](?:[A-Za-z0-9@._+-]*[A-Za-z0-9@_+-])?$/;
@@ -172,8 +172,9 @@ $nodePath = "$scriptPath\versions\$versionName\node.exe"
 & "$nodePath" "$scriptPath\versions\$versionName\index.js" $args
 exit $LASTEXITCODE
 `);
-// The same pattern as the script's, which .NET matches without case.
-const CURSOR_VERSION_FOLDER = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/i;
+// The same pattern as the script's, which .NET matches without case and with
+// `\d` as any Unicode digit.
+const CURSOR_VERSION_FOLDER = /^(\p{Nd}{4})\.(\p{Nd}{1,2})\.(\p{Nd}{1,2})(?:-\p{Nd}{2}-\p{Nd}{2}-\p{Nd}{2})?-[a-f0-9]+$/iu;
 
 /** `lines` without the updater's hook, when they start with one, compared with the launcher's own lines. */
 function matchesLauncher(lines, hooks, expected) {
@@ -189,7 +190,7 @@ function isCursorLauncherPs1(text) {
   return matchesLauncher(significantLines(text).filter((line) => !CURSOR_PS1_COMMENT.test(line)), CURSOR_PS1_PROMOTE_HOOKS, CURSOR_PS1);
 }
 
-/** The script's date, as its Parse-VersionString makes it: a build time in the name is not part of it. */
+/** The script's date, as its Parse-VersionString makes it: a build time in the name is not part of it. NaN for a date of other digits. */
 function cursorVersionDate(name) {
   const [, year, month, day] = CURSOR_VERSION_FOLDER.exec(name);
   return Number(`${year}${month.padStart(2, "0")}${day.padStart(2, "0")}`);
@@ -217,6 +218,7 @@ function selectedCursorVersion(launcher, root, files) {
     .map((entry) => entry.name);
   if (candidates.length === 0) throw new ProviderInstallError(launcher, `${versions} holds no Cursor version.`);
   const latest = Math.max(...candidates.map(cursorVersionDate));
+  if (Number.isNaN(latest)) throw new ProviderInstallError(launcher, `${versions} holds a version whose date LetAgents cannot read.`);
   const selected = candidates.filter((name) => cursorVersionDate(name) === latest);
   if (selected.length > 1) {
     throw new ProviderInstallError(launcher, `${versions} holds ${selected.length} versions of one date (${selected.join(", ")}), and Cursor's launcher does not `
@@ -225,9 +227,14 @@ function selectedCursorVersion(launcher, root, files) {
   return selected[0];
 }
 
+function isPresent(entry, files) {
+  try { files.realpath(entry); return true; } catch { return false; }
+}
+
 /** What a launcher in `root` runs, as its PowerShell script decides it: node.exe beside it, else the selected version's. */
 function cursorProgram(launcher, root, files) {
-  const folder = files.exists(join(root, "node.exe")) ? "" : join("versions", selectedCursorVersion(launcher, root, files));
+  // Test-Path, so anything of that name decides the branch. A folder is then refused as a missing program.
+  const folder = isPresent(join(root, "node.exe"), files) ? "" : join("versions", selectedCursorVersion(launcher, root, files));
   const paths = ["node.exe", "index.js"].map((name) => {
     if (!files.exists(join(root, folder, name))) throw new ProviderInstallError(launcher, `${join(root, folder, name)} is missing.`);
     return assertNoRedirect(launcher, root, join(folder, name), files);

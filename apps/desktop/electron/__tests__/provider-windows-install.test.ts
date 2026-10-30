@@ -170,6 +170,11 @@ test("a native-program shim with anything else in it, or with its program gone, 
     `calc.exe\r\n${OPENCODE_CMD}`,
     `${OPENCODE_CMD}C:\\Temp\\evil.exe\r\n`,
     `${OPENCODE_CMD}node "%~dp0\\..\\evil.js" %*\r\n`,
+    `${OPENCODE_CMD}node "%~dp0\\node_modules\\evil\\run.js" %*\r\n`,
+    OPENCODE_CMD.replace("\"%dp0%\\node_modules", "@\"%dp0%\\node_modules"),
+    OPENCODE_CMD.replace("\"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe\"", "%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe"),
+    OPENCODE_CMD.replace("%dp0%\\node_modules", "%~dp0node_modules"),
+    OPENCODE_CMD.replace("\"%dp0%\\node_modules", "start \"\" \"%dp0%\\node_modules"),
     OPENCODE_CMD.replace("@ECHO off", "@ECHO on"),
     OPENCODE_CMD.replace("SETLOCAL", "SETLOCAL\r\nSET PATH=C:\\evil"),
     OPENCODE_CMD.replace("   %*", " %*"),
@@ -222,6 +227,12 @@ test("Cursor's version is the latest date, as the script orders them, not the la
   assert.equal(providerLaunchCommand("cursor-agent", [], ignored.options(cursorEnv)).file, nodeOf("2026.10.21-fff"));
 });
 
+test("Cursor's folder pattern is .NET's: any digit counts, so a date no number can be made of fails closed", () => {
+  const timestamp = "2026.10.22-\u0661\u0662-\u0660\u0660-\u0660\u0660-bbb";
+  assert.throws(() => providerLaunchCommand("cursor-agent", [], cursorDisk(["2026.10.22-aaa", timestamp]).options(cursorEnv)), REFUSED(/versions of one date/));
+  assert.throws(() => providerLaunchCommand("cursor-agent", [], cursorDisk(["2026.10.22-aaa", "\u0662\u0660\u0662\u0667.1.1-bbb"]).options(cursorEnv)), REFUSED(/whose date LetAgents cannot read/));
+});
+
 test("two Cursor versions of one date fail closed and name both: the script has no defined order for them", () => {
   for (const versions of [["2026.10.22-aaa", "2026.10.22-bbb"], ["2026.10.22-27dcf5f", "2026.10.22-10-00-00-aaa"], ["2026.10.2-aaa", "2026.10.02-bbb"]]) {
     assert.throws(() => providerLaunchCommand("cursor-agent", [], cursorDisk(versions).options(cursorEnv, { allowCmd: true })), (error: Error) =>
@@ -243,6 +254,11 @@ test("a node.exe beside the install's launcher wins, as the script's first check
   const launch = providerLaunchCommand("cursor-agent", [], disk.options(cursorEnv));
   assert.equal(launch.file, `${INSTALL}\\node.exe`);
   assert.deepEqual(launch.args, [`${INSTALL}\\index.js`]);
+});
+
+test("a folder named node.exe beside the launcher takes the script's first branch, and fails closed there", () => {
+  const disk = cursorDisk().file(`${INSTALL}\\node.exe\\inner.txt`).file(`${INSTALL}\\index.js`);
+  assert.throws(() => providerLaunchCommand("cursor-agent", [], disk.options(cursorEnv, { allowCmd: true })), REFUSED(/cursor-agent\\node\.exe is missing/));
 });
 
 test("every promote hook Cursor's updater writes is accepted, and a launcher with none", () => {
