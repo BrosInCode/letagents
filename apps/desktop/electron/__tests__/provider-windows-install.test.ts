@@ -331,6 +331,22 @@ test("a batch file that cannot be read fails closed: every check depends on its 
   assert.throws(() => providerLaunchCommand("cursor-agent", [], options), REFUSED(/cursor-agent\.cmd: it could not be read/));
 });
 
+test("a script shim is read once, so a read that fails afterwards cannot turn it into a cmd.exe launch", () => {
+  const shim = "@ECHO off\r\nnode \"%~dp0\\node_modules\\tool\\cli.js\" %*\r\n";
+  const disk = new Disk().file(`${NPM}\\tool.cmd`, shim).file(`${NPM}\\node.exe`);
+  const options = disk.options(npmEnv);
+  let reads = 0;
+  options.launchOptions.readFile = () => {
+    reads += 1;
+    if (reads > 1) throw new Error("EBUSY");
+    return shim;
+  };
+  const launch = providerLaunchCommand("tool", ["-p"], options);
+  assert.equal(reads, 1);
+  assert.equal(launch.file, `${NPM}\\node.exe`);
+  assert.equal(launch.windowsVerbatimArguments, undefined);
+});
+
 test("a batch file that claims neither install is still refused as a batch file", () => {
   const disk = new Disk().file(`${NPM}\\sometool.cmd`, "@echo off\r\nC:\\tools\\agent.exe %*\r\n");
   assert.throws(() => providerLaunchCommand("sometool", [], disk.options(npmEnv)), ProviderBatchFileError);

@@ -59,14 +59,15 @@ export function notFoundPath(command, env) {
 
 /**
  * What a batch file runs, read as codexLaunchCommand reads it, with no shell: both null for a batch
- * file only cmd.exe can start. One that cannot be read is refused: every check here depends on its text.
+ * file only cmd.exe can start. One that cannot be read is refused: every check here depends on its text,
+ * and the launch uses that same text.
  */
 function batchProgramOf(program, execPath, env, launchOptions = {}) {
   const readFile = launchOptions.readFile ?? ((filePath) => readFileSync(filePath, "utf8"));
   let text;
   try { text = readFile(program); } catch { throw new ProviderInstallError(program, "it could not be read."); }
   const nodeShim = parseNodeShim(program, text, { execPath, exists: launchOptions.exists });
-  return { nodeShim, installed: windowsInstalledProgram(program, text, { ...launchOptions, env, isNodeShim: nodeShim !== null }) };
+  return { text, nodeShim, installed: windowsInstalledProgram(program, text, { ...launchOptions, env, isNodeShim: nodeShim !== null }) };
 }
 
 /** A Windows batch file that is neither an npm or pnpm shim nor a known install: only cmd.exe could start it. */
@@ -114,12 +115,14 @@ export function providerLaunchCommand(command, args, options = {}) {
   }
   const program = resolved ?? command;
   // Decided before any argument is quoted for cmd.exe: a shim's script or a known install runs with no shell, anything else is refused.
+  let launchOptions = options.launchOptions;
   if (isWindowsBatchExecutable(program, platform)) {
-    const { nodeShim, installed } = batchProgramOf(program, execPath, env, { exists: options.exists, ...options.launchOptions });
+    const { text, nodeShim, installed } = batchProgramOf(program, execPath, env, { exists: options.exists, ...launchOptions });
     if (installed) return { file: installed.file, args: [...installed.args, ...args], resolved, envAdditions: installed.envAdditions };
     if (options.allowCmd !== true && !nodeShim) throw new ProviderBatchFileError(program);
+    launchOptions = { ...launchOptions, readFile: () => text };
   }
-  const launch = codexLaunchCommand(program, args, { ...options.launchOptions, execPath, platform, env });
+  const launch = codexLaunchCommand(program, args, { ...launchOptions, execPath, platform, env });
   const electron = options.electron ?? Boolean(process.versions.electron);
   const runsShimOnElectron = electron && resolved !== null && resolved !== execPath && launch.file === execPath;
   return { ...launch, resolved, envAdditions: runsShimOnElectron ? { ELECTRON_RUN_AS_NODE: "1" } : null };

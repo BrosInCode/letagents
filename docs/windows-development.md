@@ -232,6 +232,8 @@ file, and never goes to `cmd.exe`. That is also what happens in these three case
 - A package or version folder is a junction or a symbolic link, as `npm link` makes. Set the `LETAGENTS_*_BIN` variable
   to the real `.exe`.
 
+A batch file that names any other `.exe` from its own folder, such as a shim for a `bun` script, also stops there.
+
 Cursor's launcher also applies a staged update (`versions\promote-staged.cmd`) before it starts. The app does not run
 that script. A staged update waits until you next run `cursor-agent` in a terminal.
 
