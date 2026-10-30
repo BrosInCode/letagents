@@ -193,6 +193,11 @@ demo can still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file 
 it, so treat it like a link from the room. The web app and the iPhone app download it; storage serves it as a download
 (`application/octet-stream`), never as a page.
 
+**Windows (0.12.49):** on Windows the client opens the desktop app's daemon pipe only through the
+sealed `letagents-daemon-pipe.node` addon that the app installs, and it reads saved tokens only
+through a handle whose owner and access list it checks first. Without the addon, a connection to
+the daemon fails with `ERR_LETAGENTS_DAEMON_PIPE_ADDON`.
+
 Note: room agent prompt behavior is currently built into the server. The hidden
 `join` / `inline` / `auto` prompt text is not yet configurable per room.
 
