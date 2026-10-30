@@ -4,9 +4,8 @@ How to set up a Windows 11 PC for LetAgents development, and what to expect when
 locally. Every step here was run on a Windows 11 machine on 2026-10-30; the results are in
 [What a run looks like](#what-a-run-looks-like).
 
-Supervised room agents are still off on Windows (tier 3 of the Windows port is not finished). The desktop app builds
-and starts, and the provider CLIs install, but the app does not start agents yet. The tests of agent
-behaviour skip themselves on Windows through one helper (`apps/desktop/electron/__tests__/platform.ts`).
+Supervised room agents run on Windows. A test that needs something Windows lacks skips itself there with a one-line
+reason; each reason is defined once in `apps/desktop/electron/__tests__/platform.ts`.
 
 ## What you need
 
