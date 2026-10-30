@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { open, readlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { gitSpawnFile } from './git-executable.mjs';
 import { WORKSPACE_FILE_LIMIT, WORKSPACE_PATCH_LIMIT, parseWorkspaceChangeSummary } from './workspace-change-summary.mjs';
 const execute = promisify(execFile);
 /**
@@ -24,7 +25,7 @@ export const WORKSPACE_SETTLE_TIMEOUT_MS = 100_000;
 // Replace refs are off: with them the workspace could put another tree in the place of the
 // one a comparison starts from, and the comparison would show nothing.
 async function run(cwd, args, limit = 4 * 1024 * 1024, signal) {
-    const result = await execute('git', ['--no-optional-locks', ...args], {
+    const result = await execute(gitSpawnFile(), ['--no-optional-locks', ...args], {
         cwd, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: limit, signal,
         env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
     });

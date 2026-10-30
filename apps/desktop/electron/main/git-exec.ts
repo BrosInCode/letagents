@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { GIT_NOT_FOUND_MESSAGE, resolveGitExecutable } from "../../../../shared/git-executable.mjs";
 import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "./desktop-shell-environment.js";
 
 const execFileAsync = promisify(execFile);
@@ -31,11 +32,15 @@ export async function runGit(
     options.signal?.throwIfAborted();
     await desktopShellEnvironmentReady();
     options.signal?.throwIfAborted();
-    const { stdout, stderr } = await execFileAsync("git", args, {
+    // GUI launches may inherit only Apple's Git shim. Use the same resolved
+    // PATH as desktop agents, with stable diagnostics for repository detection.
+    const env = { ...desktopRuntimeEnvironment(), LC_ALL: "C" };
+    // POSIX: "git". Windows: the absolute git.exe, found also when Git was installed after the app started.
+    const git = resolveGitExecutable({ env });
+    if (git === null) return { stdout: "", stderr: GIT_NOT_FOUND_MESSAGE, code: 1 };
+    const { stdout, stderr } = await execFileAsync(git, args, {
       cwd,
-      // GUI launches may inherit only Apple's Git shim. Use the same resolved
-      // PATH as desktop agents, with stable diagnostics for repository detection.
-      env: { ...desktopRuntimeEnvironment(), LC_ALL: "C" },
+      env,
       encoding: "utf8",
       windowsHide: options.windowsHide ?? true,
       ...(options.signal ? { signal: options.signal } : {}),

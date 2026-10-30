@@ -3,6 +3,7 @@ import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "
 import { copyTextToClipboard } from "../domain/clipboard";
 import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { projectRoomName } from "../domain/project-room-name";
+import { repoPickerErrorMessage } from "../domain/repo-picker-error";
 import { rootPathLabel, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
 
@@ -244,7 +245,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       const result = await desktopIpc.repos.createProject(parent, name);
       if (!isCurrentProjectRequest(request)) return;
       if (result.error || !result.snapshot) {
-        newRoomProjectCreationError.value = result.error || "LetAgents could not create that project.";
+        newRoomProjectCreationError.value = repoPickerErrorMessage(result.error, "LetAgents could not create that project.");
         return;
       }
       newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
@@ -252,7 +253,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       confirmProjectRoomFromModal();
     } catch (error) {
       if (!isCurrentProjectRequest(request)) return;
-      newRoomProjectCreationError.value = error instanceof Error ? error.message : "LetAgents could not create that project.";
+      newRoomProjectCreationError.value = repoPickerErrorMessage(error, "LetAgents could not create that project.");
     } finally {
       if (isCurrentProjectRequest(request)) {
         newRoomBusy.value = false;
@@ -437,7 +438,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         return;
       }
       if (result.error || !result.snapshot) {
-        newRoomFeedback.value = result.error || "LetAgents could not open a room from that folder.";
+        newRoomFeedback.value = repoPickerErrorMessage(result.error, "LetAgents could not open a room from that folder.");
         newRoomFeedbackState.value = "error";
         newRoomStep.value = "error";
         return;
@@ -448,7 +449,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       newRoomStep.value = "project";
     } catch (error) {
       if (!isCurrentProjectRequest(request)) return;
-      newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the project picker.";
+      newRoomFeedback.value = repoPickerErrorMessage(error, "LetAgents could not open the project picker.");
       newRoomFeedbackState.value = "error";
       newRoomStep.value = "error";
     } finally {
@@ -486,7 +487,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       const result = await desktopIpc.repos.openRoom(path, { newProjectRoom: true });
       if (!isCurrentProjectRequest(request)) return;
       if (result.error || !result.snapshot) {
-        newRoomProjectPathError.value = result.error || "LetAgents could not open a room from that folder.";
+        newRoomProjectPathError.value = repoPickerErrorMessage(result.error, "LetAgents could not open a room from that folder.");
         return;
       }
       newRoomProjectSelection.value = projectSelectionFromResult(result, result.snapshot);
@@ -494,7 +495,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
       newRoomFeedbackState.value = result.warning ? "info" : "success";
     } catch (error) {
       if (!isCurrentProjectRequest(request)) return;
-      newRoomProjectPathError.value = error instanceof Error ? error.message : "LetAgents could not open that folder.";
+      newRoomProjectPathError.value = repoPickerErrorMessage(error, "LetAgents could not open that folder.");
     } finally {
       if (isCurrentProjectRequest(request)) {
         newRoomBusy.value = false;

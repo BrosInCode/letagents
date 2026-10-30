@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, parse } from "node:path";
 
 import type { DesktopAgentCommitIdentitySettings } from "../../ipc-types.js";
+import { gitSpawnFile } from "../../../../../shared/git-executable.mjs";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 /**
@@ -147,7 +148,7 @@ function gitProbeEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 /** Every config entry Git sees from `cwd`, last value winning; null when Git cannot answer. */
 function listGitConfig(cwd: string, env: NodeJS.ProcessEnv): Promise<Map<string, { scope: string; value: string | null }> | null> {
   return new Promise((resolve) => {
-    const child = execFile("git", ["config", "--show-scope", "--list", "-z"], {
+    const child = execFile(gitSpawnFile({ env }), ["config", "--show-scope", "--list", "-z"], {
       cwd, env, encoding: "utf8", timeout: GIT_PROBE_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
     }, (error, stdout) => {
       if (error) return resolve(null);
