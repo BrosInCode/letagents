@@ -23,6 +23,8 @@ export abstract class OpenModelAdapterBase {
   protected readonly stopGraceMs: number;
   protected readonly runtimeRoot: string;
   protected readonly handles = new Map<string, OpenModelHandle>();
+  /** Work attempts whose tree may have outlived its closed job: no replacement starts beside it. */
+  protected readonly survivingTrees = new Set<string>();
 
   constructor(options: OpenModelProviderAdapterOptions = {}) {
     this.binary = options.binary
@@ -358,6 +360,7 @@ export abstract class OpenModelAdapterBase {
 
   protected finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean, treeMayRun = false): void {
     if (handle.terminal) return;
+    if (treeMayRun) this.survivingTrees.add(handle.workAttemptId);
     if (this.handles.get(handle.workAttemptId) === handle) {
       const actual = this.deps.getProcessIdentity(handle.pid);
       const evidence = treeMayRun ? null : processExited || actual === null ? "process_exit"

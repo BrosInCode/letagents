@@ -70,6 +70,9 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
+    if (this.survivingTrees.has(req.workAttemptId)) {
+      throw new Error("OpenCode's processes from this agent's last run did not end, so LetAgents will not start another beside them. Restart this computer, then start the agent again.");
+    }
     const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
     if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
       throw new Error("Typed Open Model lifecycle authority requires daemon-inbox delivery.");

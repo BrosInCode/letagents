@@ -4533,6 +4533,7 @@ test("Open Model generic process errors are degraded; actual exit or independent
     assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), proven);
     assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), !proven);
     assert.doesNotMatch(JSON.stringify(observations), /private transport failure/);
+    if (kind === "unkillable") await assert.rejects(adapter.spawn(spawnRequest()), /did not end, so LetAgents will not start another/);
   }
 });
 
