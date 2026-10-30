@@ -66,11 +66,11 @@ function assertNoRedirect(launcher, base, relative, files) {
 // is (`prog + " " + args + " " + target + " %*"`, with args and target empty):
 const NPM_SHIM_HEAD = ["@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0"];
 // A program named from the shim's own folder claims this shape, anywhere in
-// the file and however it is quoted, once a script shim's exact node.exe
-// tokens are set aside. This catches a damaged install. It is no security
-// boundary: whoever can edit the file can write a batch file with no claim.
+// the file, once a script shim's exact node.exe tokens are set aside. This
+// catches a damaged install. It is no security boundary: cmd.exe has many
+// spellings, and whoever can edit the file can write a batch file with no claim.
 const NPM_SHIM_NODE_TOKEN = /"(?:_prog=)?%(?:~dp0|dp0%)\\?node\.exe"/gi;
-const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)[^"\r\n]*\.exe(?![\w.\\/-])/i;
+const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)[^"\r\n]*\.exe(?![\w-]|[.\\][\w@-])/i;
 const NPM_SHIM_NATIVE_TARGET = /^"%dp0%\\([^"]+\.exe)"   %\*$/i;
 // One path segment, in characters that mean nothing to cmd.exe or to Windows path parsing.
 const NPM_TARGET_SEGMENT = /^[A-Za-z0-9@_+-](?:[A-Za-z0-9@._+-]*[A-Za-z0-9@_+-])?$/;

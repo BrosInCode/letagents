@@ -233,9 +233,10 @@ A file that looks like one of these but differs stops the launch with an error t
   the real `.exe`. For Cursor, set `LETAGENTS_CURSOR_AGENT_BIN` to the `cursor-agent.cmd` in the real version folder,
   not to its `node.exe`.
 
-A batch file that names any other `.exe` from its own folder, such as a shim for a `bun` script, also stops there.
-Any other batch file is refused for a Cursor turn. A version check or another provider's start can still run it through
-`cmd.exe`, which refuses an argument that holds a quote or a line break.
+A batch file that plainly names any other `.exe` from its own folder, such as a shim for a `bun` script, also stops
+there. Any other batch file is refused for a Cursor turn. A version check or another provider's start can still run it
+through `cmd.exe`, which refuses an argument that holds a quote or a line break. These checks catch a damaged install.
+They are no security boundary, because whoever can edit such a file can already make it run anything.
 
 Cursor's launcher also applies a staged update (`versions\promote-staged.cmd`) before it starts. The app does not run
 that script. A staged update waits until you next run `cursor-agent` in a terminal.
