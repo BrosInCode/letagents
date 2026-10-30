@@ -23,6 +23,7 @@ import {
   boardStatusOptions,
   canManageRoomBoard,
   deriveTaskTitle,
+  taskMatchesBoardSearch,
   visibleBoardGroups,
 } from "../src/components/desktop/content/room-board/board-presentation";
 import { findLocalRoomWorker } from "../src/components/desktop/content/room-board/board-workers";
@@ -473,6 +474,15 @@ describe("board task actions", () => {
 });
 
 describe("room board helpers", () => {
+  it("finds an imported card by its ticket key, ref, tracker, or ticket state", () => {
+    const imported = task({ title: "Fix login", externalRef: "jira:SCRUM-1", ticketState: "in_review" });
+    for (const query of ["SCRUM-1", "scrum-1", "jira:SCRUM-1", "Jira", "In review"]) {
+      assert.equal(taskMatchesBoardSearch(imported, query), true, query);
+    }
+    assert.equal(taskMatchesBoardSearch(imported, "SCRUM-2"), false);
+    assert.equal(taskMatchesBoardSearch(task({ title: "Fix login" }), "SCRUM-1"), false);
+  });
+
   it("uses stable owner identities and keeps known owners distinct from unassigned", () => {
     const tasks = [
       task(),

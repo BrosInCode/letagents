@@ -144,6 +144,23 @@
   min-height: 32px;
 }
 
+.desktop-board-governance-ticket-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.desktop-board-governance-ticket-settings .desktop-board-secondary-action {
+  flex: 0 0 auto;
+  min-height: 32px;
+}
+
 .desktop-board-governance-body,
 .desktop-board-governance-section,
 .desktop-board-governance-section-panel {

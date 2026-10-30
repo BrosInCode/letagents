@@ -138,7 +138,9 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     const status = asRecord(fields.status);
     const rawStatus = asString(status.name) ?? "Unknown";
     const assignee = asRecord(fields.assignee);
-    const mapped = mapTicketState(conn.status_map, { name: rawStatus });
+    // Jira's status category (new, indeterminate, done) maps a status the map does not name.
+    const statusCategory = asString(asRecord(status.statusCategory).key);
+    const mapped = mapTicketState(conn.status_map, { name: rawStatus, type: statusCategory });
     return {
       provider: "jira",
       key,
@@ -152,7 +154,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       tracker_updated_at: jiraTime(fields.updated),
       payload: {
         id: asString(record.id),
-        status_category: asString(asRecord(status.statusCategory).key),
+        status_category: statusCategory,
       },
     };
   }

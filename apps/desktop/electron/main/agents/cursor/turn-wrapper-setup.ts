@@ -493,10 +493,11 @@ let nativeHelperBirth = null;
 let windowsConnectorProof = null;
 let windowsConnectorRejections = 0;
 let windowsConnectorsPending = 0;
-function windowsProveConnector(socket, admit) {
-  // The pipe's default DACL lets other local accounts connect. Only a client
-  // that sends this turn's proof, which only this account can read, is
-  // Cursor's connector; anyone else is closed before any MCP byte flows.
+${WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE}function windowsProveConnector(socket, admit) {
+  // Until windowsSealConnectorPipe replaced it, the pipe's default DACL lets
+  // other local accounts connect. Only a client that sends this turn's proof,
+  // which only this account can read, is Cursor's connector; anyone else
+  // (the seal's own client among them) is closed before any MCP byte flows.
   if (finalizing || authorityRetiring || mcpConnectorAdmitted || !windowsConnectorProof
     || windowsConnectorsPending >= 8) { socket.destroy(); return; }
   windowsConnectorsPending += 1;
@@ -570,6 +571,66 @@ function readNativeHelperBirth(pid) {
 }
 `;
 }
+
+// Node creates the connector pipe with the default named-pipe DACL: full
+// control for SYSTEM, Administrators and the owner, read for Everyone and
+// the anonymous logon. Once it listens, the wrapper replaces that DACL with a
+// protected one for this user alone. All instances of a pipe share one
+// security descriptor, so the instances libuv creates later get it too, and
+// no other account can open the pipe or add an instance. Node has no call
+// for it, so Windows PowerShell does it through a client handle of its own
+// (Identification only, no data written): it sets the DACL, reads it back
+// and answers "ok:" only when it is exactly that DACL. Only .NET calls, no
+// cmdlet (a cmdlet loads modules, which can take tens of seconds).
+// Before the seal, a handle another ordinary account opens is a read-only
+// client that the wrapper closes unproven, without a byte. Only SYSTEM,
+// Administrators and this user can open one with WRITE_DAC; they can change
+// the DACL at any time anyway (as owner, or by taking ownership), so the seal
+// does not hold against them, and the connector's checks do not need it to.
+const WINDOWS_CONNECTOR_PIPE_SEAL_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$answer = 'error:'",
+  "try {",
+  "  $sddl = 'D:P(A;;FA;;;' + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + ')'",
+  "  $sections = [System.Security.AccessControl.AccessControlSections]::Access",
+  "  $rights = [System.IO.Pipes.PipeAccessRights]'ReadData, ReadAttributes, ReadPermissions, ChangePermissions'",
+  "  $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $env:LETAGENTS_CURSOR_MCP_PIPE, $rights, [System.IO.Pipes.PipeOptions]::None, [System.Security.Principal.TokenImpersonationLevel]::Identification, [System.IO.HandleInheritability]::None)",
+  "  try {",
+  "    $pipe.Connect(10000)",
+  "    $security = $pipe.GetAccessControl()",
+  "    $security.SetSecurityDescriptorSddlForm($sddl, $sections)",
+  "    $pipe.SetAccessControl($security)",
+  "    $after = $pipe.GetAccessControl().GetSecurityDescriptorSddlForm($sections)",
+  "    $expected = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl).GetSddlForm($sections)",
+  "    if ($after -eq $expected) { $answer = 'ok:' + $after } else { $answer = 'error:' + $after }",
+  "  } finally { $pipe.Dispose() }",
+  "} catch { $answer = 'error:' + $_.Exception.Message }",
+  "[Console]::Out.WriteLine($answer)",
+].join("\n");
+
+/** The wrapper's windowsSealConnectorPipe(pipePath): resolves once the pipe's DACL admits only this user. */
+export const WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE = String.raw`function windowsSealConnectorPipe(pipePath) {
+  return new Promise((resolve, reject) => {
+    const systemRoot = [process.env.SystemRoot, process.env.windir]
+      .find((value) => typeof value === "string" && /^[A-Za-z]:\\[^"<>|?*\r\n]*$/.test(value)) || "C:\\Windows";
+    const powershell = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    require("node:child_process").execFile(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ${JSON.stringify(WINDOWS_CONNECTOR_PIPE_SEAL_SCRIPT)}], {
+      // PowerShell runs in its own folder, so it locks no folder of the turn's.
+      cwd: path.win32.dirname(powershell),
+      env: { ...process.env, LETAGENTS_CURSOR_MCP_PIPE: pipePath.slice("\\\\.\\pipe\\".length) },
+      encoding: "utf8",
+      maxBuffer: 64 * 1024,
+      timeout: 30000,
+      windowsHide: true,
+    }, (error, stdout) => {
+      const answer = String(stdout || "").trim().split(/\r?\n/).pop() || "";
+      if (!error && answer.startsWith("ok:D:P(")) { resolve(); return; }
+      reject(new Error("Cursor's MCP connector pipe could not be limited to this user: "
+        + (answer || (error && error.message) || "no answer")));
+    });
+  });
+}
+`;
 
 // macOS and Linux: the process-group reaping the wrapper has always done.
 const POSIX_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(signal) {

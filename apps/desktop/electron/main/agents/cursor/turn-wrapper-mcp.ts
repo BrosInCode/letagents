@@ -390,6 +390,8 @@ ${windows ? String.raw`      // Windows: main created this folder private (inher
       // The secret Cursor's pipe connector must send first (windowsProveConnector).
       windowsConnectorProof = readFileSync(path.join(connectorRoot, "connector.proof"), "utf8").trim();
       if (!/^[0-9a-f]{64}$/.test(windowsConnectorProof)) throw new Error("invalid MCP connector proof");
+      // The connector sends the proof only to a pipe this process serves.
+      writeFileSync(path.join(connectorRoot, "connector.server"), String(process.pid), { flag: "wx" });
       for (const directory of [expectedRuntimePaths.USERPROFILE, expectedRuntimePaths.APPDATA, expectedRuntimePaths.LOCALAPPDATA]) {
         mkdirSync(directory, { recursive: true });
       }` : String.raw`      mkdirSync(connectorRoot, { mode: 0o700 });`}
@@ -491,7 +493,15 @@ ${windows ? String.raw`      // Windows: main created this folder private (inher
           failStart(new Error("Cursor MCP connector startup was cancelled."));
           return;
         }
-        server.removeListener("error", failStart);
+${windows ? String.raw`        // Cursor starts only once the pipe admits this user alone.
+        try { await windowsSealConnectorPipe(windowsTurn.connectorListenPath); }
+        catch (error) { void closeMcpConnector(); failStart(error); return; }
+        if (finalizing || authorityRetiring) {
+          try { server.close(); } catch {}
+          failStart(new Error("Cursor MCP connector startup was cancelled."));
+          return;
+        }
+` : ""}        server.removeListener("error", failStart);
 ${windows ? String.raw`        // A named pipe has no file mode; see cursorMcpConnectorListenPath.
 ` : String.raw`        try { chmodSync(mcpConnectorSocketPath, 0o600); }
         catch (error) { void closeMcpConnector(); failStart(error); return; }

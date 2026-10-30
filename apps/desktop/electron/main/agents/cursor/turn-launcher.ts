@@ -27,6 +27,7 @@ import { cursorWrapperProxySource } from "./turn-wrapper-proxies.js";
 import { cursorWrapperSetupSource, type CursorWrapperLaunchValues } from "./turn-wrapper-setup.js";
 import { cursorWrapperStartSource } from "./turn-wrapper-start.js";
 import {
+  assertCursorMcpPipeAddon,
   assertCursorWindowsCommandLines,
   cursorMcpConnectorListenPath,
   cursorWindowsNativeLaunch,
@@ -269,6 +270,7 @@ export function defaultLaunchTurn(input: {
         temporaryRoot: cursorTemporaryRoot(),
       };
       if (connectorListenPath) {
+        assertCursorMcpPipeAddon();
         windowsConnectorRoot = dirname(input.mcpConnectorSocketPath!);
         prepareCursorWindowsConnectorRoot(windowsConnectorRoot);
       }
