@@ -78,7 +78,7 @@
             <h3>{{ card.agent?.agent_key ? "Agent" : "Assigned to" }}</h3>
             <div class="work-agent-detail">
               <ChatAvatar
-                :name="workOwner(card)"
+                :name="workOwnerAvatarName(card)"
                 :agent="Boolean(card.agent?.agent_key)"
                 :agent-key="card.agent?.agent_key"
                 :provider="card.agent?.provider"
@@ -297,6 +297,7 @@ import {
   workGroups,
   workKey,
   workOwner,
+  workOwnerAvatarName,
   workState,
   workTone,
 } from "./model";

@@ -33,7 +33,7 @@
           type="button"
           :data-testid="`desktop-room-settings-nav-${section.id}`"
           :aria-current="activeSection === section.id ? 'true' : undefined"
-          @click="goToSection(section.id)"
+          @click="stopHoldingSection(); goToSection(section.id)"
         >
           <component :is="section.icon" aria-hidden="true" />
           <span class="room-settings-nav-title">{{ section.title }}</span>
@@ -46,7 +46,7 @@
       </div>
     </nav>
 
-    <div ref="contentElement" class="room-settings-content" @scroll.passive="syncActiveSection" @wheel.passive="releaseSectionLock">
+    <div ref="contentElement" class="room-settings-content" @scroll.passive="syncActiveSection" @wheel.passive="onContentWheel" @pointerdown="stopHoldingSection" @keydown="stopHoldingSection">
       <section class="room-settings-section" data-section="general" aria-labelledby="room-settings-heading-general">
         <h3 id="room-settings-heading-general">General</h3>
         <div class="room-settings-list">
@@ -122,7 +122,7 @@
         </div>
       </section>
 
-      <RoomTrackerFilters v-if="cloudRoom" :room-identifier="room.identifier" />
+      <RoomTrackerFilters v-if="cloudRoom" :room-identifier="room.identifier" @summary="ticketsSummary = $event" />
 
       <section class="room-settings-section" data-section="guidelines" aria-labelledby="room-settings-heading-guidelines">
         <h3 id="room-settings-heading-guidelines">Guidelines</h3>
@@ -364,7 +364,7 @@
 
 <script setup lang="ts">
 import RoomNotificationSettings from "./RoomNotificationSettings.vue";
-import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, X } from "@lucide/vue";
+import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
@@ -407,6 +407,8 @@ const props = defineProps<{
   githubEventsVisible: boolean;
   storageBusy: boolean;
   storageFeedback?: { message: string; error: boolean } | null;
+  /** The section to scroll to once it is shown, for example "tickets". */
+  initialSection?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -431,9 +433,11 @@ const renameSaved = ref(false);
 const routingSummary = ref<string | null>(null);
 const replyOrderSummary = ref<string | null>(null);
 const guidelinesSummary = ref<string | null>(null);
+// Null while the Ticket filters block shows nothing (no filter and no tracker connection).
+const ticketsSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);
 
-type SectionId = "general" | "conversation" | "guidelines" | "data" | "alerts" | "github";
+type SectionId = "general" | "conversation" | "tickets" | "guidelines" | "data" | "alerts" | "github";
 type StorageChoice = "inherit" | "cloud" | "local";
 interface SectionLink {
   id: SectionId;
@@ -650,6 +654,9 @@ const sections = computed<SectionLink[]>(() => {
           summary: conversationSettingsSummary(routingSummary.value, replyOrderSummary.value),
         }
       : null,
+    cloudRoom.value && ticketsSummary.value
+      ? { id: "tickets", title: "Tickets", icon: Ticket, summary: ticketsSummary.value }
+      : null,
     { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },
     {
       id: "data",
@@ -680,6 +687,58 @@ onBeforeUnmount(() => clearTimeout(renameSavedTimer));
 
 watch(sections, () => {
   if (!sections.value.some((section) => section.id === activeSection.value)) activeSection.value = "general";
+});
+
+// A section can show only after its data loads (Tickets does), so the scroll
+// waits until the rail lists it. Rows above it may still change height as their
+// own data loads, so the section is held at the top for a moment, until you
+// scroll or click.
+const pendingSection = ref<string | null>(null);
+let stopHolding: (() => void) | null = null;
+// A section that never shows is dropped, so the panel never jumps there later on its own.
+let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+watch(() => props.initialSection, (section) => {
+  pendingSection.value = section ?? null;
+  clearTimeout(pendingTimer);
+  if (section) pendingTimer = setTimeout(() => { pendingSection.value = null; }, 3000);
+}, { immediate: true });
+watch([pendingSection, sections], async () => {
+  const target = sections.value.find((section) => section.id === pendingSection.value);
+  if (!target) return;
+  pendingSection.value = null;
+  await nextTick();
+  goToSection(target.id);
+  holdSection(target.id);
+}, { immediate: true });
+
+function holdSection(id: SectionId): void {
+  stopHoldingSection();
+  const content = contentElement.value;
+  const element = content?.querySelector<HTMLElement>(`[data-section="${id}"]`);
+  if (!content || !element || typeof ResizeObserver === "undefined") return;
+  const observer = new ResizeObserver(() => {
+    content.scrollTo({ top: element.offsetTop - 22, behavior: "auto" });
+  });
+  for (const child of Array.from(content.children)) observer.observe(child);
+  const timer = setTimeout(stopHoldingSection, 1500);
+  stopHolding = () => {
+    observer.disconnect();
+    clearTimeout(timer);
+  };
+}
+
+function stopHoldingSection(): void {
+  stopHolding?.();
+  stopHolding = null;
+}
+
+function onContentWheel(): void {
+  stopHoldingSection();
+  releaseSectionLock();
+}
+onBeforeUnmount(() => {
+  stopHoldingSection();
+  clearTimeout(pendingTimer);
 });
 
 const renameDirty = computed(() => {

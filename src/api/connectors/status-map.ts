@@ -14,7 +14,9 @@ export function defaultStatusMap(provider: TrackerProvider): Record<string, Tick
 
 /**
  * The generic state for one tracker status. A status name entry wins over a
- * `type:<type>` entry; neither gives `in_progress`, flagged as unmapped.
+ * `type:<type>` entry; neither gives `in_progress`, flagged as unmapped. The
+ * type is Linear's state type or Jira's status category key (`new`,
+ * `indeterminate`, `done`); GitHub Issues has none.
  */
 export function mapTicketState(
   statusMap: Record<string, string>,

@@ -454,7 +454,7 @@ import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
 import { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./composables/app/useAppInbox";
 import { useAppRentalActions, useAppRentalEvents } from "./composables/app/useAppRentals";
-import { useAppSidebarLayout } from "./composables/app/useAppSidebarLayout";
+import { useAppSettingsPaneWatcher, useAppSidebarLayout } from "./composables/app/useAppSidebarLayout";
 import { useAppProjectRepo, useAppProjectRepoWatchers } from "./composables/app/useAppProjectRepo";
 import { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./composables/app/useAppSidebarMessages";
 import { useAppSidebarSelection, useAppSidebarEntries } from "./composables/app/useAppSidebarSelection";
@@ -612,6 +612,8 @@ const {
 Object.assign(app, useAppChatScrollWatchers(app));
 
 Object.assign(app, useAppSelectionWatchers(app));
+
+useAppSettingsPaneWatcher(app);
 
 Object.assign(app, useAppProjectRepoWatchers(app));
 
