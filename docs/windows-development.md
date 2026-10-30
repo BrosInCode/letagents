@@ -128,6 +128,8 @@ CI's runner is an elevated administrator; a normal developer shell is not. Some 
   developers). Without either, they fail with `EPERM: operation not permitted, symlink`.
 - One daemon pipe test needs an elevated shell.
 
+On a VM driven from a Mac, [SSH sessions](#run-commands-from-the-mac-with-no-windows) are elevated.
+
 MCP server (`mcp-tests-windows`):
 
 ```bash
@@ -294,6 +296,132 @@ Mac, 4 virtual CPUs, 6 GB):
   `--test-timeout=120000` (143 s; it passes with 300000), and a few tests with their own short limits fail on time
   (see [Known failures](#known-failures)).
 - In a VM, run nothing else heavy at the same time: two test runs sharing 4 CPUs make the timing tests fail.
+
+### Run commands from the Mac with no windows
+
+`prlctl exec "<vm>" --current-user <command>` starts the command on the VM's desktop, and Windows opens a console
+window for it. The window stays open until the command ends. OpenSSH runs commands in session 0, which has no
+desktop, so no window opens and the output still comes back to the Mac.
+
+On the Mac, make a key for the VM only:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/letagents_windows_vm
+```
+
+An agent cannot type a passphrase. If agents use this key, use an empty passphrase, or load the key with
+`ssh-add --apple-use-keychain`. Read the security notes below first.
+
+In the VM, run the blocks below in order in an elevated PowerShell. From the Mac, you can run each block as SYSTEM with
+`prlctl exec "<vm>" powershell -NoProfile -EncodedCommand "$(iconv -f UTF-8 -t UTF-16LE block.ps1 | base64 | tr -d '\n')"`,
+without `--current-user`.
+Keep each command short: 1,700 encoded characters worked and 4,600 failed with "Unable to open new session".
+
+1. Install the server, and limit the firewall rule to the Mac's address on the VM network before anything listens
+   (`10.211.55.2` here; on the Mac, see `ifconfig bridge100`). Then start the server once, so it writes `sshd_config`
+   and its host keys:
+
+   ```powershell
+   Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'
+   Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -Profile Any -RemoteAddress 10.211.55.2
+   Set-Service sshd -StartupType Automatic
+   Start-Service sshd
+   ```
+
+2. Turn off password login. Run this once. The lines go at the top of the file because lines below the `Match` block
+   apply only to that group. Both `no` lines are needed: `keyboard-interactive` can also accept a password. Write the
+   file as ASCII: `>` writes UTF-16 and `Set-Content -Encoding UTF8` adds a BOM, and `sshd` does not accept either.
+
+   ```powershell
+   $config = "$env:ProgramData\ssh\sshd_config"
+   $head = "PasswordAuthentication no`r`nKbdInteractiveAuthentication no`r`nPubkeyAuthentication yes`r`n`r`n"
+   [IO.File]::WriteAllText($config, $head + [IO.File]::ReadAllText($config), [Text.Encoding]::ASCII)
+   ```
+
+3. Add the public key. For a user in Administrators, the server reads `administrators_authorized_keys`, not the
+   user's own `.ssh` folder, and it ignores that file unless only SYSTEM and Administrators can write to it:
+
+   ```powershell
+   $keys = "$env:ProgramData\ssh\administrators_authorized_keys"
+   [IO.File]::WriteAllText($keys, "<the line of letagents_windows_vm.pub>`r`n", [Text.Encoding]::ASCII)
+   icacls.exe $keys /inheritance:r /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
+   ```
+
+4. Check the file and restart the server. The edit of step 2 applies only after this restart:
+
+   ```powershell
+   & "$env:WINDIR\System32\OpenSSH\sshd.exe" -t
+   Restart-Service sshd
+   ```
+
+On the Mac:
+
+1. Add the host to `~/.ssh/config`. `HostKeyAlias` ties the host key to this name, so a new VM address needs only a
+   new `HostName`:
+
+   ```text
+   Host windows-vm
+     HostName 10.211.55.3
+     HostKeyAlias windows-vm
+     User <windows user>
+     IdentityFile ~/.ssh/letagents_windows_vm
+     IdentitiesOnly yes
+     StrictHostKeyChecking yes
+   ```
+
+2. Read the host key through `prlctl`, so the first connection needs no trust prompt:
+
+   ```bash
+   prlctl exec "<vm>" cmd /c type 'C:\ProgramData\ssh\ssh_host_ed25519_key.pub' | tr -d '\r' | cut -d' ' -f1,2 | sed 's/^/windows-vm /' >> ~/.ssh/known_hosts
+   ```
+
+   If you rebuild the VM, its host key changes: run `ssh-keygen -R windows-vm`, then repeat this step.
+
+3. Test the key login:
+
+   ```bash
+   ssh windows-vm 'whoami & node -v'
+   ```
+
+4. Test that password login is off. The last line must end in `Permission denied (publickey).` If it also names
+   `keyboard-interactive` or `password`, step 2 or step 4 of the VM list did not apply:
+
+   ```bash
+   ssh -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=0 windows-vm true </dev/null
+   ```
+
+Close standard input for unattended commands (`ssh windows-vm '...' </dev/null`). The remote shell is `cmd.exe`, so put
+long Git Bash commands in a script file and run that. `%LOCALAPPDATA%` expands in `cmd.exe`; quote the path if your
+user name has a space:
+
+```bash
+ssh windows-vm '%LOCALAPPDATA%\Programs\PortableGit-2.56.0.4\bin\bash.exe -lc "bash //Mac/Home/Downloads/run.sh"' </dev/null
+```
+
+An SSH session is not the same as a `prlctl --current-user` session:
+
+| Item | `ssh windows-vm` | `prlctl exec --current-user` |
+| --- | --- | --- |
+| Window on the VM desktop | none | one for each command |
+| Elevation | elevated (High integrity) | not elevated (Medium integrity) |
+| Symbolic links | allowed, as on CI | `EPERM` without Developer Mode |
+| Mac folders | `\\Mac\Home\...` (`Z:` is not mapped) | `Z:\...` |
+| Programs with a window | cannot show (session 0) | show on the desktop |
+
+Because SSH sessions are elevated, the tests in [Known failures](#known-failures) that need elevation behave as on CI.
+Use `prlctl exec --current-user` for anything that must show on the desktop, such as the desktop app or a sign-in in a
+browser.
+
+Security notes. Keep this setup for a local test VM:
+
+- The key gives administrator access to the VM with no UAC prompt. The firewall rule checks only the source address,
+  so any program that runs as your Mac user can use a key with no passphrase. A key loaded in `ssh-agent` has the same
+  risk while it is loaded.
+- The risk also goes the other way. With the Mac home folder shared, a program in the VM can read the Mac's home
+  folder, including `~/.ssh`, and the VM runs `npm` installs and tests. If you do not need the shared folder, turn it
+  off in the VM's Parallels settings.
+
+The VM's address can change. If `ssh` times out, check `prlctl list -i "<vm>"`, and update `HostName`.
 
 ## Known failures
 
