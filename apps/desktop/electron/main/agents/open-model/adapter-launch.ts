@@ -19,6 +19,7 @@ import { OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError } from "./errors.js
 import { OpenModelAdapterTurnWait } from "./adapter-turn-wait.js";
 import { OpenModelHandle } from "./handle.js";
 import { protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
+import { ProviderInstallError } from "../../../../../../shared/provider-executable.mjs";
 
 export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
   protected async assertPriorStartupProcessGone(authPath: string): Promise<void> {
@@ -194,14 +195,7 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       startupIntent: { url },
     };
     await writeRuntimeControl(authPath, intentControl);
-    const launch = this.deps.launch({
-      binary: this.binary,
-      args: ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
-      cwd: req.cwd,
-      env,
-    });
-    if (launch.child.pid === undefined || launch.child.pid === null) {
-      await launch.exited;
+    const clearStartupIntent = async (): Promise<void> => {
       try {
         const currentControl = await readRuntimeControl(authPath);
         if (currentControl.username !== intentControl.username
@@ -219,6 +213,24 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
           { cause: error },
         );
       }
+    };
+    let launch: ReturnType<typeof this.deps.launch>;
+    try {
+      launch = this.deps.launch({
+        binary: this.binary,
+        args: ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
+        cwd: req.cwd,
+        env,
+      });
+    } catch (error) {
+      // Refused before anything started: no process exists, and the next attempt must see this
+      // reason, not a stale intent. Any other throw may come after the start, so its intent stays.
+      if (error instanceof ProviderInstallError) await clearStartupIntent();
+      throw error;
+    }
+    if (launch.child.pid === undefined || launch.child.pid === null) {
+      await launch.exited;
+      await clearStartupIntent();
       throw new Error("OpenCode launch did not expose a process id.");
     }
     const pid = launch.child.pid;

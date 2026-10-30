@@ -39,6 +39,7 @@ import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerIns
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
+import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";
 import { supervisedAgentsOnly } from "./platform.js";
 
 type LaunchRecord = {
@@ -2913,6 +2914,29 @@ test("Open Model durably fences the crash window between detached launch and PID
     /startup intent has no durable process identity; refusing to start a competing runtime/,
   );
   assert.equal(launches, 1, "intent-only recovery must not launch a replacement");
+});
+
+test("Open Model clears its exact intent when the launch is refused before any process starts", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-refused-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const request = spawnRequest({ cwd: runtimeRoot });
+  const refusal = new ProviderInstallError("opencode.cmd", "its program is missing.");
+  const refusedAdapter = () => new OpenModelProviderAdapter({
+    binary: "opencode",
+    runtimeRoot,
+    dependencies: {
+      allocatePort: async () => 43822,
+      launch: () => { throw refusal; },
+    },
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(refusedAdapter().spawn(request), (error) => error === refusal);
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  assert.equal((JSON.parse(await readFile(authPath, "utf8")) as { startupIntent?: unknown }).startupIntent, undefined);
+  // The next try gives the same reason, not "an operator must verify the prior runtime is gone".
+  await assert.rejects(refusedAdapter().spawn(request), (error) => error === refusal);
 });
 
 test("Open Model clears its exact intent after a real no-pid launch failure", async (t) => {

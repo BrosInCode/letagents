@@ -453,7 +453,7 @@ export async function runCursorSandboxedInspection(input: {
       program.file,
       [...program.args, ...input.commandArgs],
       input.cwd,
-      inspectionEnv,
+      { ...inspectionEnv, ...program.environment },
       [writableRoot],
       [],
       [],

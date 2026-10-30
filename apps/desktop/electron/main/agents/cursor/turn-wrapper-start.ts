@@ -35,6 +35,7 @@ ${windows ? String.raw`  // windows-unsandboxed: no operating-system sandbox (ow
   const sandboxed = false;
   // Cursor starts inside letagents-process-tree.exe's own job (windowsTurn).
   const nativeCommand = windowsTurn.helper;
+  Object.assign(nativeEnv, windowsTurn.environment);
 ` : String.raw`  const sandboxed = !fullAccess && process.platform === "darwin"
     && (restrictRemoteAuthority
       || deniedReadPaths.length > 0

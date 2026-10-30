@@ -202,26 +202,44 @@ does. Sign in to LetAgents in the app as usual.
 | --- | --- | --- | --- |
 | Claude Code | `https://claude.ai/install.ps1` | latest (2.1.312 tested) | `%USERPROFILE%\.local\bin\claude.exe` |
 | Codex | `npm install --global @openai/codex@0.166.0` | 0.166.0 | the npm shim's `node` + `codex.js` |
-| OpenCode | `npm install --global opencode-ai@<letagentsRuntime.openCodeVersion>` | 1.18.20 today | refused in dev mode, see below |
-| Cursor agent | `https://cursor.com/install?win32=true` | latest (2026.10.22-27dcf5f tested) | refused, see below |
+| OpenCode | `npm install --global opencode-ai@<letagentsRuntime.openCodeVersion>` | 1.18.20 today | the npm shim's `opencode.exe` (the packaged app uses its own) |
+| Cursor agent | `https://cursor.com/install?win32=true` | latest (2026.10.22-27dcf5f tested) | the install's own `node.exe` + `index.js`, see below |
 
 Codex and OpenCode come from npm at pinned versions; npm checks each package against the registry's integrity value,
 and their install scripts run (OpenCode's picks its binary). Claude Code and the Cursor agent come from the vendors'
 own install scripts, fetched over HTTPS and run as published, with no pin: Claude's script checks the binary's SHA-256
 against its release manifest, and Cursor's checks nothing. Read them first if your policy needs it.
 
-The app finds each program on `PATH` through `shared/provider-executable.mjs`. It starts a native program, or an npm
-shim as the `node` and script it runs; it refuses any other batch file, because `cmd.exe` would re-read the prompt's
-quotes and line breaks. Two of the installs above are such batch files:
+The app finds each program on `PATH` through `shared/provider-executable.mjs`. It starts a native program, or what a
+batch file really runs, with no `cmd.exe` and no PowerShell, because `cmd.exe` would re-read the prompt's quotes and
+line breaks. It reads a batch file and never runs it to find out (`shared/provider-windows-install.mjs`):
 
-- OpenCode: `opencode-ai` names a native `opencode.exe` as its bin, so npm's `opencode.cmd` starts that `.exe`, not a
-  script. The packaged app uses its own `resources\app\runtime\opencode.exe`, so only dev mode is affected. For
-  dev mode, set `LETAGENTS_OPENCODE_BIN` to
-  `%LOCALAPPDATA%\Programs\node-v22.23.4-win-x64\node_modules\opencode-ai\bin\opencode.exe`.
-  (In the test, `opencode-ai` 1.19.5 was installed; 1.18.20 has the same `.exe` bin.)
-- Cursor: the official installer makes `%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd`, which runs PowerShell, which
-  runs a `node.exe` and `index.js` in `versions\<version>`. There is no single program to name in
-  `LETAGENTS_CURSOR_AGENT_BIN`, so Cursor cannot start from LetAgents on Windows yet.
+- An npm shim of a script: the `node` and the script.
+- An npm shim of a native program (`opencode-ai`): that `.exe`, when it is inside the package folder the shim names and
+  no link leads out of that folder.
+- Cursor's official launcher (`%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd`, then `cursor-agent.ps1`): the `node.exe`
+  and `index.js` in the `versions\<version>` folder with the latest date, as the script selects it (except that a
+  hidden folder counts here, and not for the script). The app also sets
+  the `CURSOR_INVOKED_AS` and `NODE_COMPILE_CACHE` values that the launcher sets.
+
+A file that looks like one of these but differs stops the launch with an error that names the file, and never goes to
+`cmd.exe`. That is also what happens in these three cases:
+
+- Cursor changes the code in its launcher. Comments may change. LetAgents then needs an update.
+- Two version folders have one date. The script compares only the date, and PowerShell 5.1's sort gives no defined
+  order, so what it would run is not known. Delete the older folder, or set `LETAGENTS_CURSOR_AGENT_BIN` to
+  `versions\<version>\cursor-agent.cmd`.
+- A package or version folder is a junction or a symbolic link, as `npm link` makes. Set `LETAGENTS_OPENCODE_BIN` to
+  the real `.exe`. For Cursor, set `LETAGENTS_CURSOR_AGENT_BIN` to the `cursor-agent.cmd` in the real version folder,
+  not to its `node.exe`.
+
+A batch file that plainly names any other `.exe` from its own folder, such as a shim for a `bun` script, also stops
+there. Any other batch file is refused for a Cursor turn. A version check or another provider's start can still run it
+through `cmd.exe`, which refuses an argument that holds a quote or a line break. These checks catch a damaged install.
+They are no security boundary, because whoever can edit such a file can already make it run anything.
+
+Cursor's launcher also applies a staged update (`versions\promote-staged.cmd`) before it starts. The app does not run
+that script. A staged update waits until you next run `cursor-agent` in a terminal.
 
 Sign in to each in a terminal before you use it as an agent (supervised agents are off on Windows for now):
 

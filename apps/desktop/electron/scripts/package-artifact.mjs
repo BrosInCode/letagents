@@ -400,7 +400,7 @@ const required = [
     "shared/workspace-turn-capture.mjs",
     "shared/workspace-turn-capture-worker.mjs",
     // The helper's runtime side and the seal it checks the helper against.
-    ...(windows ? ["shared/codex-executable.mjs", "shared/letagents-process-tree.seal.json", "shared/process-tree.mjs", "shared/provider-executable.mjs"] : []),
+    ...(windows ? ["shared/codex-executable.mjs", "shared/letagents-process-tree.seal.json", "shared/process-tree.mjs", "shared/provider-executable.mjs", "shared/provider-windows-install.mjs"] : []),
     // The daemon pipe addon's runtime side and the seal it checks the addon against.
     ...(windows ? ["shared/daemon-endpoint.mjs", "shared/daemon-pipe-native.mjs", "shared/letagents-daemon-pipe.seal.json"] : []),
   ].map((relative) => ({
