@@ -377,7 +377,7 @@ An SSH session is not the same as a `prlctl --current-user` session:
   in a browser.
 - The Mac key gives administrator access to the VM with no UAC prompt. The firewall rule limits it to the Mac. Keep
   this for a local test VM, and do not use it on a machine that holds real data.
-- Windows can give the VM a new address. If `ssh` times out, check `prlctl list -i "<vm>"`, and update `HostName`.
+- The VM's address can change. If `ssh` times out, check `prlctl list -i "<vm>"`, and update `HostName`.
 
 ## Known failures
 
