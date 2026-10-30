@@ -1,4 +1,7 @@
 import nodeTest from "node:test";
+import { createServer, type Server, type Socket } from "node:net";
+
+import { acceptDaemonPeer, daemonEndpoint, ensureDaemonProof, isWindowsPipePath, resolveDaemonProofPath } from "../../../../shared/daemon-endpoint.mjs";
 
 // The supervisor daemon and the supervised agents it runs are macOS-only
 // until tier 3 of the Windows port: the daemon's control socket, singleton,
@@ -35,3 +38,24 @@ export const supervisedAgentTest: typeof nodeTest = supervisedAgentsOnly
     },
   })
   : nodeTest;
+
+/**
+ * The daemon endpoint under a test root: `<root>/daemon.sock` on POSIX, a
+ * per-root named pipe with its proof file on Windows.
+ */
+export function testDaemonEndpoint(root: string): { socketPath: string; peerProofPath: string | null } {
+  const endpoint = daemonEndpoint(root);
+  return { socketPath: endpoint.listenPath, peerProofPath: endpoint.proofPath };
+}
+
+/**
+ * A stand-in daemon server for `socketPath`. On Windows it answers the proof
+ * handshake first, as every daemon pipe does; elsewhere it is net.createServer.
+ */
+export function createTestDaemonServer(socketPath: string, onConnection: (socket: Socket) => void): Server {
+  if (!isWindowsPipePath(socketPath)) return createServer(onConnection);
+  const proofPath = resolveDaemonProofPath(socketPath);
+  if (!proofPath) throw new Error(`No daemon proof is known for ${socketPath}.`);
+  const proof = ensureDaemonProof(proofPath);
+  return createServer((socket) => { void proof.then((value) => acceptDaemonPeer(socket, value, onConnection)); });
+}

@@ -15,7 +15,7 @@ import {
   RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY,
   WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL,
 } from "./worker-binding-retention.js";
-import { privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { ownerPrivatePlatform, privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -1038,6 +1038,8 @@ export class WorkerBindingStore {
     await protectOwnerPrivate(path, "file").catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
   private async syncDirectory(path: string): Promise<void> {
+    // Windows cannot fsync a folder handle; NTFS journals the rename itself.
+    if (ownerPrivatePlatform() === "win32") return;
     const handle = await open(path, "r");
     try { await handle.sync(); } finally { await handle.close(); }
   }

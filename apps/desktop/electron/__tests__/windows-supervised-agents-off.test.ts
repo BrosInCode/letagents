@@ -3,6 +3,7 @@ import { join } from "node:path";
 import test, { mock } from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
+import { testDaemonEndpoint } from "./platform.js";
 
 const env = createElectronTestEnv({ prefix: "windows-supervised-agents-off-" });
 
@@ -66,7 +67,7 @@ function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
 test("the daemon client never starts or connects to the supervisor on Windows", async () => {
   let spawns = 0;
   const client = new SupervisorDaemonClient({
-    socketPath: join(env.tempDir, "daemon.sock"),
+    ...testDaemonEndpoint(env.tempDir),
     spawnDaemon: () => { spawns += 1; throw new Error("spawned"); },
   });
   await assert.rejects(client.ensureRunning(), (error: Error & { code?: string }) =>

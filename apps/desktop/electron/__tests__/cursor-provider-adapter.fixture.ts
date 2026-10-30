@@ -34,6 +34,7 @@ import type {
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { testDaemonEndpoint } from "./platform.js";
 
 export const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
@@ -1478,18 +1479,18 @@ export async function cursorDaemonFixture() {
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
   const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
   const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
-  const { createConnection } = await import("node:net");
+  const { connectDaemon } = await import(new URL("../../../../shared/daemon-endpoint.mjs", import.meta.url).href);
   const { DatabaseSync } = await import("node:sqlite");
   const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const root = realpathSync(await mkdtemp(join(tmpdir(), "cursor-daemon-")));
   const id = "cursor_agent";
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
   const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolveRequest, reject) => {
-    const socket = createConnection(paths.socketPath);
+    const socket = connectDaemon(paths.socketPath);
     let received = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);

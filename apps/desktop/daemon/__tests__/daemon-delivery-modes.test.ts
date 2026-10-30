@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { join } from "node:path";
 import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { DatabaseSync } from "node:sqlite";
@@ -19,6 +18,7 @@ import type { ProviderActionPort } from "../provider-action-port.js";
 import type { ProviderRecoveryDiagnostics } from "../provider-stream-coordinator.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   runtimeReadySubscription,
   SupervisorDaemon,
@@ -32,8 +32,7 @@ import {
   provisionedWorkspace,
   committedSourceRepository,
   primeDaemonBareRepository,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 for (const modeCase of ["mcp_polling", "daemon_inbox", "custodial_polling_v1"] as const) {
 const custodial = modeCase === "custodial_polling_v1";
@@ -42,7 +41,7 @@ const expectedReadyState = deliveryMode === "daemon_inbox" ? "idle" : "working";
 test(`two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (${modeCase})`, async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -531,7 +530,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
 
 test("daemon restart preserves multiple isolated Cursor owners from older manifests", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const duplicate = (id: string): DaemonManifestEntry => ({
     ...entry,
     id,
@@ -561,7 +560,7 @@ test("idle daemon-inbox Cursor resumes the same durable execution after restart 
   const env = await fixture();
   const id = "cursor_idle_restart";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     workerBindingsPath: join(env.root, "worker-bindings.json"),
@@ -696,7 +695,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
   const env = await fixture();
   const id = "cursor_turn_capability";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     workerBindingsPath: join(env.root, "worker-bindings.json"),
@@ -999,7 +998,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     const disconnectedParams = {
       ...executeParams, mcp_request_id: "effect-disconnect", tool_name: "get_board",
     };
-    const abandoned = createConnection(paths.socketPath);
+    const abandoned = connectDaemon(paths.socketPath);
     await new Promise<void>((resolve, reject) => {
       abandoned.once("connect", resolve);
       abandoned.once("error", reject);
@@ -1315,7 +1314,7 @@ test("Open Model admits multiple isolated supervised agents in one room", async 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
   };
@@ -1348,7 +1347,7 @@ test("display-name repair preserves the exact supervised runtime", async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
   };
@@ -1384,7 +1383,7 @@ test("display-name repair preserves the exact supervised runtime", async () => {
 test("concurrent Claude Code creation mints one isolated provider generation per agent", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1470,7 +1469,7 @@ test("restart fences a title-mutated orphan, durably closes its generation, and 
   await execFileAsync("git", ["-C", source, "commit", "-m", "fixture"]);
   await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     workerBindingsPath: join(env.root, "worker-bindings.json"),

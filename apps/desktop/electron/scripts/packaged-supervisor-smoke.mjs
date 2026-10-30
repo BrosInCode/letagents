@@ -13,6 +13,9 @@ const bundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") :
 const executable = windows ? join(bundle, "LetAgents.exe") : join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
 const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
+// A Windows daemon's first start takes about 8 s in an emulated x64 VM.
+const launchTimeoutMs = windows ? 90_000 : 15_000;
+const daemonReadyTimeoutMs = windows ? 30_000 : 5_000;
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 // macOS: <home>/.letagents/daemon.sock. Windows: the named pipe for that folder.
 const socketPath = daemonEndpoint(join(home, ".letagents")).connectPath;
@@ -57,12 +60,13 @@ function request(method, params) {
 function launch() {
   return new Promise((resolveLaunch, reject) => {
     const child = spawn(executable, [], {
-      env: { ...process.env, HOME: home, USERPROFILE: home, LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
+      // Its own APPDATA: an installed app holds the single-instance lock of the real one.
+      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
     let ready = false;
-    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`packaged Electron launch timed out: ${output}`)); }, 15_000);
+    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`packaged Electron launch timed out: ${output}`)); }, launchTimeoutMs);
     const capture = (chunk) => {
       output += chunk;
       if (!ready && output.includes("LETAGENTS_PACKAGED_SUPERVISOR_READY")) {
@@ -100,7 +104,7 @@ async function launchDevelopmentDaemon() {
     stdio: "ignore",
   });
   child.unref();
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + daemonReadyTimeoutMs;
   while (Date.now() < deadline) {
     try { return await request("daemon.status"); }
     catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }

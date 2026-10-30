@@ -2,7 +2,7 @@ import { createDaemonMaintenance, readDaemonMaintenance, daemonMaintenancePath }
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes, sign as nativeSign } from "node:crypto";
-import { createServer, type Server } from "node:net";
+import type { Server } from "node:net";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { supervisedAgentTest as test } from "./platform.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 
 import {
   SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
@@ -38,6 +39,7 @@ import { apiUrl as configuredApiUrl } from "../main/paths.js";
 import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
 import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
+import { createTestDaemonServer, testDaemonEndpoint } from "./platform.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
@@ -1142,7 +1144,8 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-electron-supervisor-"));
-  return { root, socketPath: join(root, "daemon.sock"), cleanup: () => rm(root, { recursive: true, force: true }) };
+  await protectOwnerPrivate(root, "directory", { force: true });
+  return { root, ...testDaemonEndpoint(root), cleanup: () => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) };
 }
 
 function fakeChild(): ChildProcess {
@@ -1244,7 +1247,7 @@ test("daemon client reads large fragmented UTF-8 snapshots and validates the com
     await context.test(mode, async () => {
       const env = await fixture();
       const charter = "Review café 🌱\n".repeat(100_000);
-      const server = createServer(socket => {
+      const server = createTestDaemonServer(env.socketPath, socket => {
         let requestBuffer = "";
         socket.setEncoding("utf8");
         socket.on("error", () => {}); // The client deliberately closes after the first frame.
@@ -1616,7 +1619,7 @@ async function startWireDaemon(
   };
   let handoffPrepared = false;
   const handoff = { prepare: null as null | (() => Promise<void>) };
-  const server = createServer((socket) => {
+  const server = createTestDaemonServer(socketPath, (socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {

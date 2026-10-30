@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,6 +11,8 @@ import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 /**
  * A real daemon on its own socket and database. An agent's tools hold the
@@ -21,7 +22,7 @@ type Reply = { ok: boolean; result?: unknown; error?: string };
 
 function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<Reply> {
   return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
+    const client = connectDaemon(socketPath);
     let received = "";
     let settled = false;
     const timeout = setTimeout(() => { client.destroy(); reject(new Error(`'${method}' did not answer`)); }, 10_000);
@@ -63,7 +64,7 @@ async function withDaemon(run: (context: {
   outsider: KeyObject;
 }) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "letagents-live-sharing-"));
-  const paths = { lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+  const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl") };
   const host = generateKeyPairSync("ed25519");
   const outsider = generateKeyPairSync("ed25519");

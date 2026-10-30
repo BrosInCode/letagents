@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
-import { createConnection, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
+import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
 import { DatabaseSync } from "node:sqlite";
@@ -19,6 +19,7 @@ import { productionSupervisorGrantHttp } from "../cloud-http.js";
 import { createGitCommand, RepositoryNetworkError, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   SupervisorDaemon,
   execFileAsync,
@@ -30,8 +31,7 @@ import {
   provisionedWorkspace,
   fakeGit,
   entry,
-  originRemoteFixture,
-} from "./helpers/daemon-fixture.js";
+  originRemoteFixture, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("fence loss fatally stops the control endpoint", async () => {
   const env = await fixture();
@@ -42,13 +42,13 @@ test("fence loss fatally stops the control endpoint", async () => {
     await daemon.start();
     await writeFile(`${lockPath}.generation`, "2\n");
     await new Promise<void>((resolve, reject) => {
-      const client = createConnection(socketPath); client.once("error", reject);
+      const client = connectDaemon(socketPath); client.once("error", reject);
       client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, method: "manifest.list" }) + "\n"));
       client.on("close", () => resolve());
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(() => new Promise<void>((resolve, reject) => {
-      const client = createConnection(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
+      const client = connectDaemon(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
     }));
     await daemon.stop();
   } finally { await env.cleanup(); }
@@ -61,7 +61,7 @@ test("control socket bounds an oversized JSON-lines frame", async () => {
     const socket = new DaemonControlSocket(socketPath, () => ({ ok: true }), undefined, 16);
     await socket.start();
     await new Promise<void>((resolve, reject) => {
-      const client = createConnection(socketPath); client.once("error", reject);
+      const client = connectDaemon(socketPath); client.once("error", reject);
       client.on("connect", () => client.write("x".repeat(17)));
       client.on("close", () => resolve());
     });
@@ -1296,7 +1296,7 @@ test("providerStreamLifecycle never fails the agent on a tool call's own error s
 
 test("all approval settlement callers schedule fault-only recovery under current daemon authority", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   try {
@@ -1388,7 +1388,7 @@ test("unchanged delegation replays do not restart a failed provider, but committ
   const env = await fixture();
   const id = "unchanged-delegation";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };

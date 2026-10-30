@@ -198,14 +198,7 @@ export function fakeRecoveryClock(startMs = 10_000) {
   };
 }
 
-/**
- * The daemon endpoint under a test root: `<root>/daemon.sock` on POSIX, a
- * per-root named pipe with its proof file on Windows.
- */
-export function testDaemonEndpoint(root: string): { socketPath: string; peerProofPath: string | null } {
-  const endpoint = daemonEndpoint(root);
-  return { socketPath: endpoint.listenPath, peerProofPath: endpoint.proofPath };
-}
+export { testDaemonEndpoint } from "../../../electron/__tests__/platform.js";
 
 export async function daemonRequest(socketPath: string, method: string, params?: unknown, version = DAEMON_PROTOCOL_VERSION): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> {
   return new Promise((resolve, reject) => {

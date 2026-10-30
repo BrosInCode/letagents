@@ -27,6 +27,7 @@ import {
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
 import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("daemon delivery refuses mcp_polling ingress for every provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
@@ -479,7 +480,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
   let daemon: SupervisorDaemon | null = null;
   try {
     const paths = {
-      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+      lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
       manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
       workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
@@ -695,7 +696,7 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
   const releasePreparedStore = deferred<void>();
   try {
     const paths = {
-      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+      lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
       manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
       workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
@@ -867,7 +868,7 @@ for (const scenario of [
 test(`a Cursor turn that finished without proof its authority ended is settled as lost, its reply is withheld, the next message still runs, and the reason ${scenario.name}`, { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cursor-unproven-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
     attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
     workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
@@ -1000,7 +1001,7 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
     for (const initial of ["pending", "established"] as const) {
       const caseRoot = join(root, initial);
       const paths = {
-        lockPath: join(caseRoot, "daemon.lock"), socketPath: join(caseRoot, "daemon.sock"),
+        lockPath: join(caseRoot, "daemon.lock"), ...testDaemonEndpoint(caseRoot),
         manifestPath: join(caseRoot, "daemon.sqlite"), auditPath: join(caseRoot, "audit.log"),
         attemptsPath: join(caseRoot, "attempts.sqlite"), attemptsRoot: join(caseRoot, "attempts"),
         workspaceRoot: caseRoot, workerBindingsPath: join(caseRoot, "bindings.sqlite"),
@@ -1152,7 +1153,7 @@ test("a worker bearer rotation after Cursor native release keeps the turn alive 
     } finally { if (timeout) clearTimeout(timeout); }
   };
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
     attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
     workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
@@ -1306,7 +1307,7 @@ test("a worker bearer rotation after Cursor native release keeps the turn alive 
 test("a crashed Cursor turn settles as interrupted instead of blocking the FIFO after its lane fails", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cursor-crash-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
     attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
     workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),

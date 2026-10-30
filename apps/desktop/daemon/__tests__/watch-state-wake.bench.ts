@@ -25,6 +25,7 @@ import { DatabaseSync, StatementSync } from "node:sqlite";
 import { mapEntry } from "../../electron/main/supervisor-daemon.js";
 import { SupervisorDaemon } from "../main.js";
 import type { DaemonManifestEntry } from "../types.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 const ENTRIES = Number(process.argv[2] ?? 150);
 const RUNNING = Number(process.argv[3] ?? 8);
@@ -78,7 +79,7 @@ function seedInbox(database: DatabaseSync, agentId: string, roomId: string, rece
 async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "letagents-watch-state-bench-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };

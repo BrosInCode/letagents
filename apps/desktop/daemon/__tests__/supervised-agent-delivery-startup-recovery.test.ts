@@ -21,13 +21,14 @@ import {
   recordExecution,
 } from "./helpers/supervised-agent-delivery-fixture.js";
 import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("daemon socket restores and skips only exact pre-turn authority without replacing the provider", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-restore-socket-"));
   let daemon: SupervisorDaemon | null = null;
   try {
     const paths = {
-      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+      lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
       manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
       workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),

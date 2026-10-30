@@ -27,13 +27,12 @@ import {
   TEST_SUPERVISOR,
   provisionedWorkspace,
   fakeGit,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("host grant renewal retries transient failures, rotates the bearer in place, and rejects stale Electron rollback", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -151,7 +150,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
     const env = await fixture();
     const id = `host_grant_block_${rejection}`;
     const paths = {
-      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
       manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
       attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     };
@@ -228,7 +227,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
 test("an unattached live durable generation blocks a duplicate provider start", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -277,7 +276,7 @@ test("an unattached live durable generation blocks a duplicate provider start", 
 test("a failed provider launch terminalizes its generation and releases the shared workspace fence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -327,7 +326,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
@@ -465,7 +464,7 @@ test("a provider handle returned already terminal is fenced and resumes under a 
 test("direct terminal recovery increases delay and quarantines before a sixth generation", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -524,7 +523,7 @@ test("direct terminal recovery increases delay and quarantines before a sixth ge
 test("a terminal handle discovered during daemon reattach is fenced and resumes once", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -594,7 +593,7 @@ test("a terminal handle discovered during daemon reattach is fenced and resumes 
 test("direct provider convergence quarantines persisted crash loops without another spawn", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   let spawnCount = 0;
@@ -877,7 +876,7 @@ test("supervisor convergence persists the retry deadline before it can restart",
       spawn: async () => { calls.push("spawn"); return handle; }, attach: async () => null, resume: async () => handle,
       poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
     };
-    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const daemonStore = (daemon as unknown as { store: ManifestStore }).store;
     (daemonStore as unknown as { write: () => never }).write = () => { throw new Error("reconcile must not call the full manifest write path"); };
@@ -898,7 +897,7 @@ test("five terminal exit edges across reload quarantine even with intermediate w
   let reloaded: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") };
+    const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") };
     await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "working" }]);
     let spawnCalls = 0;
     const port: ProviderActionPort = {
@@ -930,7 +929,7 @@ test("reconciliation journals intent before provider dispatch and attaches it af
   let reloaded: SupervisorDaemon | null = null;
   try {
     const manifestPath = join(env.root, "manifest.json");
-    const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") };
+    const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") };
     await new ManifestStore(manifestPath).write(0, [{ ...entry, observed_state: "failed", reconciliation: { exit_timestamps_ms: [0], consecutive_action_failures: 1, last_observed_state: "failed", next_restart_at_ms: 0, completed_action_ids: [], last_action_sequence: 0, pending_action: null } }]);
     let releaseSpawn!: () => void;
     let signalSpawn!: () => void;
@@ -976,7 +975,7 @@ test("an absent pending intent redispatches its exact durable identity and kind,
       resume: async () => { throw new Error("the durable restart_fresh kind must not become resume"); },
       poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
     };
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const input = { workAttemptId: "attempt", reconciliationActionId: "newer-tick", reconciliationActionSequence: 8, nowMs: 2_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: { workAttemptId: "attempt", providerContinuationId: "thread" } };
     assert.equal((await daemon.reconcile(entry.id, input, 100)).decision.action, "restart_fresh");
@@ -988,7 +987,7 @@ test("an absent pending intent redispatches its exact durable identity and kind,
     daemon = null;
     await new ManifestStore(manifestPath).write(stored.generation, stored.entries.map((candidate) => candidate.id === entry.id ? { ...candidate, reconciliation: { ...candidate.reconciliation!, pending_action: { id: "ambiguous-intent", sequence: 9, kind: "restart_fresh", recorded_at_ms: 3 } } } : candidate));
     attachment = "ambiguous";
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const held = await daemon.reconcile(entry.id, { ...input, reconciliationActionId: "later-tick", reconciliationActionSequence: 10, nowMs: 3_000 }, 100);
     assert.equal(held.disposition, "held");
@@ -1003,7 +1002,7 @@ test("global manifest mutation serialization preserves concurrent different-entr
   try {
     const manifestPath = join(env.root, "manifest.json");
     await new ManifestStore(manifestPath).write(0, [entry, { ...entry, id: "agent_2" }]);
-    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin");
+    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin");
     await daemon.start();
     await Promise.all([daemon.transition("agent_1", "failed", "none", "exit", "test"), daemon.transition("agent_2", "failed", "none", "exit", "test")]);
     assert.deepEqual((await new ManifestStore(manifestPath).load()).entries.map((candidate) => candidate.observed_state), ["failed", "failed"]);
@@ -1021,7 +1020,7 @@ test("scheduled convergence records provider exits and durable escalation notice
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }), spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async (_handle, listener) => { onExit = listener; return () => { onExit = null; }; },
     };
-    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    const daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "working" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "generation-1", reconciliationActionSequence: 1, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 60_000);
     onExit?.({ endedAt: "now", exitCode: 1, signal: null, terminalCause: "crashed", providerContinuationId: null });
@@ -1055,7 +1054,7 @@ test("scheduled convergence atomically replaces exit subscriptions and preserves
       spawn: async () => replacement, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async (handle) => { poked.push(handle.pid); observePoke(); }, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async (handle, listener) => { subscriptions += 1; listeners.set(handle.pid ?? -1, listener); return () => { listeners.delete(handle.pid ?? -1); }; },
     };
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     let sequence = 0;
     const input = () => { sequence += 1; return { workAttemptId: "attempt", reconciliationActionId: `generation-${sequence}`, reconciliationActionSequence: sequence, nowMs: Date.now(), lastPollAtMs: 0, addressedMessagesWaiting: 1, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" as const }, resumeFrom: null }; };
@@ -1100,7 +1099,7 @@ test("a slow old replacement registration cannot overwrite a newer child listene
         return () => { listeners.delete(handle.pid ?? -1); };
       },
     };
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     let sequence = 0;
     const input = () => { sequence += 1; return { workAttemptId: "attempt", reconciliationActionId: `g-${sequence}`, reconciliationActionSequence: sequence, nowMs: Date.now() + 10_000, lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }; };
@@ -1129,7 +1128,7 @@ test("a replacement child terminal callback enters durable convergence", async (
       spawn: async () => ({ workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" }), attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async (handle, listener) => { if (handle.pid === 2) replacementExit = listener; return () => {}; },
     };
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "g-1", reconciliationActionSequence: 1, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 60_000);
     assert.ok(replacementExit, "the spawned child replaces the initial exit listener");
@@ -1153,7 +1152,7 @@ test("a transient replacement listener failure retries the promoted child withou
       spawn: async () => { spawnCount += 1; return { workAttemptId: "attempt", pid: 2, providerContinuationId: null, observedState: "starting" }; }, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async (handle, listener) => { if (handle.pid === 2 && failReplacementListener) { failReplacementListener = false; throw new Error("transient replacement listener failure"); } if (handle.pid === 2) replacementExit = listener; return () => {}; },
     };
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "failed" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "g-1", reconciliationActionSequence: 1, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 5);
     await eventually(async () => replacementExit !== null, "replacement listener retry");
@@ -1176,7 +1175,7 @@ test("desired stopped turns every terminal into a clean stopped observation and 
       capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }), spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }),
       onExit: async () => { if (failSubscribe) throw new Error("listener bridge unavailable"); return () => {}; },
     };
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     await daemon.observeProviderExit(entry.id, { endedAt: "now", exitCode: 0, signal: null, terminalCause: "exited", providerContinuationId: null });
     assert.equal((await new ManifestStore(manifestPath).load()).entries[0]?.observed_state, "stopped");
@@ -1186,12 +1185,12 @@ test("desired stopped turns every terminal into a clean stopped observation and 
     let unsubscribedAfterTickFailure = false;
     const tickFailurePort = { ...port, onExit: async () => () => { unsubscribedAfterTickFailure = true; } };
     await daemon.stop();
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", tickFailurePort);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", tickFailurePort);
     await daemon.start();
     await assert.rejects(() => daemon!.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "stopped" }, () => { throw new Error("initial tick input failed"); }, 100, 60_000), /initial tick input failed/);
     assert.equal(unsubscribedAfterTickFailure, true, "a post-subscribe initial tick failure removes the listener");
     await daemon.stop();
-    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
+    daemon = new SupervisorDaemon({ lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath, auditPath: join(env.root, "audit.jsonl") }, "darwin", port);
     await daemon.start();
     const stop = await daemon.scheduleConvergence(entry.id, { workAttemptId: "attempt", pid: 1, providerContinuationId: null, observedState: "stopped" }, () => ({ workAttemptId: "attempt", reconciliationActionId: "g2", reconciliationActionSequence: 2, nowMs: Date.now(), lastPollAtMs: null, addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, spawn: { workAttemptId: "attempt", roomId: "room", cwd: "/tmp/work", launchPolicy: {} }, handle: null, resumeFrom: null }), 100, 60_000);
     await stop(); await daemon.stop();
@@ -1234,7 +1233,7 @@ test("an intentional stop-turn terminal remains idle without restarting the runn
   await new ManifestStore(manifestPath).write(0, [stoppedTurnEntry]);
   const daemon = new SupervisorDaemon({
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath,
     auditPath: join(env.root, "audit.jsonl"),
   }, "darwin");
@@ -1297,7 +1296,7 @@ test("restart recovery quarantines every dispatched turn control regardless of c
   };
   const daemon = new SupervisorDaemon({
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath,
     auditPath: join(env.root, "audit.jsonl"),
   }, "darwin", port, false);

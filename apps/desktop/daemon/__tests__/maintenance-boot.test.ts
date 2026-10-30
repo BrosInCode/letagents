@@ -3,17 +3,18 @@ import test from "node:test";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { createDaemonMaintenance, clearDaemonMaintenance, daemonMaintenancePath, readDaemonMaintenance } from "../../../../shared/daemon-maintenance.mjs";
 import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 function request(path: string, method: string, params?: unknown): Promise<{ ok: boolean; result: any; error?: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(path); let text = "";
+    const socket = connectDaemon(path); let text = "";
     socket.on("connect", () => socket.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: method, method, params }) + "\n"));
     socket.on("error", reject); socket.on("data", chunk => { text += chunk; if (text.includes("\n")) { socket.end(); resolve(JSON.parse(text.split("\n")[0]!)); } });
   });
@@ -28,7 +29,7 @@ function snapshot(path: string): string {
 
 test("maintenance cold boot preserves all durable rows and refuses work until explicit resume", { skip: supervisedAgentsOnly, timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
-  const paths = { lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"), attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root };
+  const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"), attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root };
   const entry: DaemonManifestEntry = { id: "agent", room_id: "room", display_name: "Preserved", provider: "cursor", model: null, charter: "saved input", desired_state: "running", observed_state: "failed", condition: "coordination_blocked", permission_profile_id: "sandboxed_write", created_by: "fixture", created_at: "2026-01-01T00:00:00.000Z" };
   const store = new ManifestStore(paths.manifestPath); await store.write(0, [entry]); await store.close();
   const savedFile = join(root, "saved-work.txt"); await writeFile(savedFile, "user work");

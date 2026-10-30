@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -33,6 +32,8 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ProviderPermissionObservation } from "../../shared/provider-permissions.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -47,7 +48,7 @@ async function eventually(predicate: () => Promise<boolean>, label: string, time
 
 async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let body = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
@@ -1225,7 +1226,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   }
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1371,7 +1372,7 @@ test("an mcp-polling provider cannot receive Inspector control without an exact 
   };
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1423,7 +1424,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
   const adapter = fakeAdapter("claude-code", calls);
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1597,7 +1598,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
 test("operator-applied legacy native correction settles its interrupted FIFO row instead of retrying it", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-ncr-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1669,7 +1670,7 @@ test("operator-applied legacy native correction settles its interrupted FIFO row
 test("operator resolution remains available after the controlled runtime is detached or replaced", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-historical-control-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
   };
   const workAttemptId = "11111111-1111-4111-8111-111111111111";

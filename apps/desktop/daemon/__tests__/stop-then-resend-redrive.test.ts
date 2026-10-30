@@ -5,7 +5,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
@@ -17,6 +16,8 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 const TEST_OID = "a".repeat(40);
 type DaemonInternals = {
@@ -55,7 +56,7 @@ async function eventually(predicate: () => Promise<boolean>, label: string, time
 
 async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let body = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
@@ -78,7 +79,7 @@ test("a crash after native Stop quarantines exact A until operator resolution at
   await mkdir(workspacePath, { recursive: true });
   await writeFile(join(workspacePath, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo", work_attempt_id: workAttemptId, task_id: "redrive", remote_url: "https://example.invalid/repo", resolved_revision: TEST_OID, bare_path: bare }));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -357,7 +358,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
   await mkdir(workspacePath, { recursive: true });
   await writeFile(join(workspacePath, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo", work_attempt_id: workAttemptId, task_id: "prepared-fold", remote_url: "https://example.invalid/repo", resolved_revision: TEST_OID, bare_path: bare }));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -535,7 +536,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
   await mkdir(workspacePath, { recursive: true });
   await writeFile(join(workspacePath, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo", work_attempt_id: workAttemptId, task_id: "not-applied-fold", remote_url: "https://example.invalid/repo", resolved_revision: TEST_OID, bare_path: bare }));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };

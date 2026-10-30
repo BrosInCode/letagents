@@ -22,6 +22,7 @@ import {
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
 import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("SupervisorDaemon stop fences and drains its production-owned delivery before releasing stores", { skip: supervisedAgentsOnly }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-delivery-drain-"));
@@ -29,7 +30,7 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
   try {
     const entered = deferred<void>(); const release = deferred<{ messages: Array<Record<string, unknown>> }>(); let aborted = false;
     daemon = new SupervisorDaemon({
-      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
+      lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
     }, "darwin", provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), false, 60_000, undefined, {}, {
       poll: ({ signal }) => new Promise((resolve) => {
@@ -94,7 +95,7 @@ test("SupervisorDaemon stop detaches an unresolved provider turn without retaini
       return { endedAt: "", exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: null };
     };
     const paths = {
-      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
+      lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
     };
     daemon = new SupervisorDaemon(paths, "darwin", port, false, 60_000, undefined, {}, {
@@ -727,7 +728,7 @@ test("daemon socket retry accepts only the exact blocked binding and reports com
   try {
     const entered = deferred<void>(); release = deferred<{ turnId: string; outcome: "no_reply"; text: null }>();
     const paths = {
-      lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+      lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
       attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"), workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
     };
     daemon = new SupervisorDaemon(paths, "darwin", provider(async (_handle, _request, options) => {

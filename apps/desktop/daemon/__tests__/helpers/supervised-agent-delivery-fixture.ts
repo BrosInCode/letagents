@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { type ProviderActionHandle, type ProviderActionPort } from "../../provider-action-port.js";
 import { ManifestStore } from "../../manifest-store.js";
@@ -12,6 +11,7 @@ import { SupervisedAgentInboxStore } from "../../supervised-agent-inbox-store.js
 import { RoomTurnAttachmentStager } from "../../room-turn-attachments.js";
 import { projectDeliveryReceipts } from "../../manifest-view-projection.js";
 import { DAEMON_PROTOCOL_VERSION } from "../../types.js";
+import { connectDaemon } from "../../../../../shared/daemon-endpoint.mjs";
 
 export const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
@@ -107,7 +107,7 @@ export function installCursorCompletionProjectionFixture(store: SupervisedAgentI
 
 export async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let buffer = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);

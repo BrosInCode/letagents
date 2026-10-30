@@ -21,8 +21,7 @@ import {
   eventually,
   daemonRequest,
   flushActivity,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("generation handoff reattaches the same provider and publishes its supervised native stream to the exact worker endpoint", async () => {
   const env = await fixture();
@@ -59,7 +58,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
   await execFileAsync("git", ["-C", source, "remote", "add", "origin", source]);
 
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     workerBindingsPath: join(env.root, "worker-bindings.json"),
