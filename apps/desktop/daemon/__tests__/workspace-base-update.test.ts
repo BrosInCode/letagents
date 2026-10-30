@@ -8,7 +8,6 @@ import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { captureRecordedRemoteTips, captureRemoteTips, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, card, commit, count, environment, fixture, git, lines, listed, recorded, turn, write } from './fixtures/workspace-turns.js';
-import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
 
 // A change card must count what the agent changed. Commits that enter the
 // workspace through a fetch followed by a checkout, merge, rebase or pull are
@@ -264,7 +263,7 @@ test('a base that moves during the turn is counted: only what the remote held be
   assertPlain(none);
 });
 
-test('without an answer from the remote, the card is the plain comparison', { skip: supervisedAgentsOnly }, async t => {
+test('without an answer from the remote, the card is the plain comparison', async t => {
   const f = fixture(t);
   const lonely = join(f.root, 'lonely');
   git(f.root, 'init', '-q', '-b', 'main', lonely);

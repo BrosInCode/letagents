@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies } from "../main/agents/cursor-provider-adapter.js";
 import type {
   ProviderSpawnRequest,
@@ -57,7 +56,7 @@ test("daemon Cursor correction refuses an unjournaled side turn and native resum
   assert.equal((await turn).text, "continued safely");
 });
 
-test("daemon Cursor restart-resume preserves exact write authority and sandbox flags", { skip: supervisedAgentsOnly }, async () => {
+test("daemon Cursor restart-resume preserves exact write authority and sandbox flags", async () => {
   for (const [permissionProfileId, sandbox] of [
     ["sandboxed_write", "enabled"],
     ["full_access", "disabled"],
@@ -101,7 +100,7 @@ test("daemon Cursor restart-resume preserves exact write authority and sandbox f
   }
 });
 
-test("daemon Cursor rejects missing supervisor coordinates and preserves selected write authority", { skip: supervisedAgentsOnly }, async () => {
+test("daemon Cursor rejects missing supervisor coordinates and preserves selected write authority", async () => {
   const missingHarness = createHarness();
   const missingAdapter = supervisedAdapter(missingHarness);
   await assert.rejects(
@@ -208,7 +207,7 @@ test("a successful result is TURN-terminal: the lane goes idle with NO claimed p
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "the session id is the only continuation state");
 });
 
-test("Cursor missing wrapper cwd proves no native child was acquired", { skip: supervisedAgentsOnly }, async () => {
+test("Cursor missing wrapper cwd proves no native child was acquired", async () => {
   const harness = createHarness();
   const adapter = new CursorProviderAdapter({ dependencies: { ...harness.dependencies, launchTurn: input => {
     const child = defaultLaunchTurn({ ...input, deferStart: true });
@@ -345,7 +344,7 @@ test("Cursor Stop joins the bounded turn settlement barrier before retiring its 
   assert.equal(handle.pid, null);
 });
 
-test("Cursor releases native custody after failed checkpoint only when exact workspace retirement is saved", { skip: supervisedAgentsOnly }, async () => {
+test("Cursor releases native custody after failed checkpoint only when exact workspace retirement is saved", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-retired-custody-"));
   const harness = createHarness({ ownsDescendantReaping: true });
   try {

@@ -18,7 +18,6 @@ import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHos
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
-import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
@@ -812,7 +811,7 @@ for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const
   });
 
   // Intermittent on the Windows runner (1 of 4 runs: one capture instead of three); the publisher is daemon-only.
-  test(`${provider} publishes workspace review after a no-reply turn through the shared path`, { skip: supervisedAgentsOnly }, async t => {
+  test(`${provider} publishes workspace review after a no-reply turn through the shared path`, async t => {
     const f = await fixture(t, provider);
     const reads: string[] = [];
     f.options.workspaceLocation = async workAttemptId => { reads.push(workAttemptId); return f.location; };
@@ -901,7 +900,7 @@ async function remoteFixture(t: TestContext) {
   return { root, git, remote, team, land, revision, clone };
 }
 
-test('a base branch update during a turn is not published as the agent\'s contribution', { skip: supervisedAgentsOnly }, async t => {
+test('a base branch update during a turn is not published as the agent\'s contribution', async t => {
   const f = await fixture(t);
   const { git, remote, team, land, revision, clone } = await remoteFixture(t);
   const workspace = clone('agent');
@@ -974,7 +973,7 @@ test('a base branch update during a turn is not published as the agent\'s contri
   assert.deepEqual(paths(settled(4).contribution.changes), ['theirs-5.ts']);
 });
 
-test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', { skip: supervisedAgentsOnly }, async t => {
+test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', async t => {
   const f = await fixture(t);
   const { root, git, remote, land, revision, clone } = await remoteFixture(t);
   await land('theirs.ts');
@@ -1005,7 +1004,7 @@ test('the daemon asks the remote it recorded, not a repository that the workspac
   }
 });
 
-test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', { skip: supervisedAgentsOnly }, async t => {
+test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', async t => {
   const f = await fixture(t);
   const { git, remote, land, revision, clone } = await remoteFixture(t);
   let clock = Date.parse('2026-08-31T12:00:00Z');
@@ -1058,7 +1057,7 @@ test('an answer serves the turns of the next minute only: a base that landed aft
   assert.equal(asked.length, 3);
 });
 
-test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', { skip: supervisedAgentsOnly }, async t => {
+test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', async t => {
   const f = await fixture(t);
   const { git, remote, revision, clone } = await remoteFixture(t);
   let clock = Date.parse('2026-08-31T12:00:00Z');
@@ -1167,7 +1166,7 @@ test('only a recorded remote that is reached over the network is asked', async (
   assert.equal(recordedRemote(identity('letagents-ephemeral:room', '0'.repeat(40))), null);
 });
 
-test('a remote that does not answer delays neither the start of a turn nor its capture for long', { skip: supervisedAgentsOnly }, async t => {
+test('a remote that does not answer delays neither the start of a turn nor its capture for long', async t => {
   const f = await fixture(t);
   // The recorded remote accepts the connection and never says anything.
   const sockets: Socket[] = [];

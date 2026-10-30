@@ -17,7 +17,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import {
   boundedCursorRoomTurnPrompt,
   CursorProviderAdapter,
@@ -81,7 +80,7 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "session id captured from the stream");
 });
 
-test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", { skip: supervisedAgentsOnly }, () => {
+test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "cursor-resume-ownership-")));
   const id = randomUUID();
   try {
@@ -108,7 +107,7 @@ test("Cursor resume ownership rejects occupied or unsafe structures without chan
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("supervised Cursor room turns say there is no network and git fails from the sandbox only for sandboxed writes", { skip: supervisedAgentsOnly }, () => {
+test("supervised Cursor room turns say there is no network and git fails from the sandbox only for sandboxed writes", () => {
   const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
   const sandboxed = boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_1", "sandboxed_write");
   assert.match(sandboxed, limit);
@@ -117,7 +116,7 @@ test("supervised Cursor room turns say there is no network and git fails from th
   assert.doesNotMatch(boundedClaudeRoomTurnPrompt(roomTurnRequest()), limit);
 });
 
-test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", { skip: supervisedAgentsOnly }, () => {
+test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", () => {
   assert.deepEqual(
     cursorLaunchPolicyArgs({ mode: "plan", force: true, sandbox: "disabled" }),
     ["--mode", "plan", "--force", "--sandbox", "disabled"],
@@ -262,7 +261,7 @@ test("cursorCliEnv passes the environment through without curation (v10 §3 — 
   assert.equal(env.CURSOR_API_KEY, "kept-too");
 });
 
-test("daemon-owned Cursor starts idle without inference and gives only the first journaled turn exact bridge authority", { skip: supervisedAgentsOnly }, async () => {
+test("daemon-owned Cursor starts idle without inference and gives only the first journaled turn exact bridge authority", async () => {
   const harness = createHarness();
   const previousOwnerToken = process.env.LETAGENTS_TOKEN;
   const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
@@ -484,7 +483,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
   }
 });
 
-test("the production Cursor profile keeps supervisor coordinates out of native config and passes them only to the wrapper MCP", { skip: supervisedAgentsOnly }, async () => {
+test("the production Cursor profile keeps supervisor coordinates out of native config and passes them only to the wrapper MCP", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-production-profile-"));
   const workspace = join(root, "workspace");
   const sourceHome = join(root, "source-home");
@@ -587,7 +586,7 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
   }
 });
 
-test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it", { skip: supervisedAgentsOnly },
+test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it",
   () => verifyMcpConnectorRetirement());
 
 test("MCP retirement escalates a live exact runtime despite slow process-table scans", {
@@ -619,7 +618,7 @@ test("the wrapper retries a timed-out process-group probe with a longer bound an
   await t.test("a definite still-alive answer is final and is not retried", () => verifyMcpRuntimeSignalFence("group_alive"));
 });
 
-test("the exact live Cursor connector rejects a swapped runtime with a missing or malformed completion contract", { skip: supervisedAgentsOnly }, async () => {
+test("the exact live Cursor connector rejects a swapped runtime with a missing or malformed completion contract", async () => {
   for (const completionContract of ["missing", "wrong_type", "enum_superset", "required_text"] as const) {
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-live-contract-${completionContract}-`));
     const configDir = join(root, "config");
@@ -684,7 +683,7 @@ attestFixtureMcp().then(() => {
   }
 });
 
-test("the exact live Cursor connector rejects bounded capability-attestation floods", { skip: supervisedAgentsOnly }, async () => {
+test("the exact live Cursor connector rejects bounded capability-attestation floods", async () => {
   // Client-side floods no longer exist as an attestation concern: the wrapper
   // proves the contract against its hosted runtime before Cursor launches, and
   // client traffic is piped only after attestation settles. A runtime that
@@ -765,7 +764,7 @@ attestFixtureMcp().then(() => {
   }
 });
 
-test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", { skip: supervisedAgentsOnly }, async () => {
+test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-delayed-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
@@ -867,7 +866,7 @@ test("concurrent supervised Cursor turns keep isolated worker-socket namespaces 
   }
 });
 
-test("the exact live Cursor connector times out and reaps native work when Cursor never connects", { skip: supervisedAgentsOnly }, async () => {
+test("the exact live Cursor connector times out and reaps native work when Cursor never connects", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-no-connector-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
@@ -937,7 +936,7 @@ setInterval(() => {}, 1000);
   }
 });
 
-test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", { skip: supervisedAgentsOnly }, async () => {
+test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", async () => {
   // The verify-phase timeout is the only bound between wrapper start and
   // connector listen; this pins it so a mutation that drops the deadline
   // (reintroducing an unbounded startup wait) fails loudly.

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { SupervisorDaemon } from "../main.js";
 import type { ProviderActionPort } from "../provider-action-port.js";

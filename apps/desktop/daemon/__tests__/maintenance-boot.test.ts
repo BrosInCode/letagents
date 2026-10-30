@@ -8,7 +8,6 @@ import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { createDaemonMaintenance, clearDaemonMaintenance, daemonMaintenancePath, readDaemonMaintenance } from "../../../../shared/daemon-maintenance.mjs";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
@@ -27,7 +26,7 @@ function snapshot(path: string): string {
   } finally { db.close(); }
 }
 
-test("maintenance cold boot preserves all durable rows and refuses work until explicit resume", { skip: supervisedAgentsOnly, timeout: 15_000 }, async () => {
+test("maintenance cold boot preserves all durable rows and refuses work until explicit resume", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
   const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"), attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root };
   const entry: DaemonManifestEntry = { id: "agent", room_id: "room", display_name: "Preserved", provider: "cursor", model: null, charter: "saved input", desired_state: "running", observed_state: "failed", condition: "coordination_blocked", permission_profile_id: "sandboxed_write", created_by: "fixture", created_at: "2026-01-01T00:00:00.000Z" };

@@ -40,7 +40,6 @@ import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";
-import { supervisedAgentsOnly } from "./platform.js";
 
 type LaunchRecord = {
   binary: string;
@@ -440,7 +439,7 @@ function assistantWithTool(
   };
 }
 
-test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", { skip: supervisedAgentsOnly }, async () => {
+test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", async () => {
   const keys = ["GH_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME", "APPDATA", "GH_TOKEN", "GITHUB_TOKEN"] as const;
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   try {
@@ -4921,7 +4920,7 @@ const OPEN_MODEL_SESSION_AFTER_EXIT = {
 } as const;
 
 for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
-  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, { skip: supervisedAgentsOnly }, async () => {
+  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, async () => {
     const { ACTIVITY_RECORD_CONTINUED_NOTICE } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
     const agent = await openModelDaemonFixture();
     let letConverge = () => {};

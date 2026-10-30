@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { supervisedAgentsOnly } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 
@@ -50,7 +49,7 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
 });
 
-test("Codex app-server launcher uses the managed worktree as its process cwd", { skip: supervisedAgentsOnly }, async () => {
+test("Codex app-server launcher uses the managed worktree as its process cwd", async () => {
   const bin = join(tempDir, "codex-reporting-app-server-cwd");
   writeFileSync(
     bin,
@@ -70,7 +69,7 @@ test("Codex app-server launcher uses the managed worktree as its process cwd", {
   assert.equal(exit.output?.stdout, realpathSync(tempDir));
 });
 
-test("Codex app-server launcher captures early process output without leaking env secrets", { skip: supervisedAgentsOnly }, async () => {
+test("Codex app-server launcher captures early process output without leaking env secrets", async () => {
   const bin = join(tempDir, "codex-failing-app-server");
   const secret = "provider-secret-for-test";
   writeFileSync(
@@ -99,7 +98,7 @@ test("Codex app-server launcher captures early process output without leaking en
   assert.doesNotMatch(exit.output?.stderr ?? "", new RegExp(secret));
 });
 
-test("Codex app-server launcher redacts inherited environment secrets", { skip: supervisedAgentsOnly }, async () => {
+test("Codex app-server launcher redacts inherited environment secrets", async () => {
   const bin = join(tempDir, "codex-failing-app-server-inherited-env");
   const secret = "inherited-token-secret-for-test";
   const previousToken = process.env.LETAGENTS_TOKEN;
@@ -126,7 +125,7 @@ test("Codex app-server launcher redacts inherited environment secrets", { skip: 
   }
 });
 
-test("Codex app-server launcher strips ambient LetAgents credentials for bounded and custodial polling profiles", { skip: supervisedAgentsOnly }, async () => {
+test("Codex app-server launcher strips ambient LetAgents credentials for bounded and custodial polling profiles", async () => {
   const bin = join(tempDir, "codex-reporting-supervised-environment");
   const boundedReport = join(tempDir, "codex-supervised-environment.json");
   const ordinaryReport = join(tempDir, "codex-ordinary-environment.json");
@@ -203,7 +202,7 @@ test("Codex app-server launcher strips ambient LetAgents credentials for bounded
   }
 });
 
-test("Codex app-server launcher redacts split inherited secrets after parent exit", { skip: supervisedAgentsOnly }, async () => {
+test("Codex app-server launcher redacts split inherited secrets after parent exit", async () => {
   const bin = join(tempDir, "codex-failing-app-server-late-stderr");
   const secret = "late-inherited-token-secret-for-test";
   const previousToken = process.env.LETAGENTS_TOKEN;
@@ -243,7 +242,7 @@ test("Codex app-server launcher redacts split inherited secrets after parent exi
   }
 });
 
-test("Codex app-server launcher suppresses partial output when stdio does not close", { skip: supervisedAgentsOnly }, async () => {
+test("Codex app-server launcher suppresses partial output when stdio does not close", async () => {
   const bin = join(tempDir, "codex-failing-app-server-held-stderr");
   const secret = "abcdefghijklmnopqrstuvwxyz1234567890";
   const previousToken = process.env.LETAGENTS_TOKEN;

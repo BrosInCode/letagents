@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 // The control plane serves this board socket on Windows too (a named pipe),
 // but the desktop refuses local-room boards there until supervised agents run
 // on Windows (#1797's gate), so every test here still skips on Windows.
-import { supervisedAgentTest as test, supervisedAgentsOnly } from "./platform.js";
+import test from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
@@ -35,8 +35,8 @@ const makeSocket = () => new DaemonControlSocket(socketPath, async (request: { m
 }, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 let socket = makeSocket();
 await owned(() => store.getLocalTaskDatabase());
-if (!supervisedAgentsOnly) await socket.start();
-test.after(async () => { if (!supervisedAgentsOnly) await socket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+await socket.start();
+test.after(async () => { await socket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const mutate = (operation: string, args: unknown[], extra: Record<string, unknown> = {}) => requestLocalBoard(
   "mutate", { domain: "desktop", operation, args, databasePath: env.localChatDbPath, ...extra });

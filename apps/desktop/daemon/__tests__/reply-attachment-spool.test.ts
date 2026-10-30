@@ -8,7 +8,6 @@ import test from "node:test";
 
 import { MESSAGE_ATTACHMENT_LIMITS, validRecordedReplyAttachments } from "../../../../shared/message-attachments.mjs";
 import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "letagents-reply-spool-"));
@@ -138,7 +137,7 @@ test("a refused call keeps nothing it copied, and a new choice keeps only its ow
   } finally { await env.cleanup(); }
 });
 
-test("an existing spool copy is trusted only as a regular file the daemon wrote", { skip: supervisedAgentsOnly }, async () => {
+test("an existing spool copy is trusted only as a regular file the daemon wrote", async () => {
   const env = await setup();
   try {
     const recorded = await env.spool.snapshot(env.input(["notes.md"], "planted"));

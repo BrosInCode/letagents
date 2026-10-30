@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 import test from "node:test";
-import { supervisedAgentsOnly } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 
@@ -172,7 +171,7 @@ function stopAfterTest(
   });
 }
 
-test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex's bundled ones", { skip: supervisedAgentsOnly }, async () => {
+test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex's bundled ones", async () => {
   const home = fixture("home");
   const codexHome = join(home, ".codex");
   const personal = writeSkill(join(codexHome, "skills", "scope-guard"), "scope-guard");
@@ -262,7 +261,7 @@ test("the MCP server list fails closed when Codex cannot produce it", async () =
   );
 });
 
-test("a managed Codex launch turns off the owner's extensions and commits as the GitHub noreply identity", { skip: supervisedAgentsOnly }, async () => {
+test("a managed Codex launch turns off the owner's extensions and commits as the GitHub noreply identity", async () => {
   const codex = fakeCodex();
   const home = fixture("launch-home");
   const codexHome = join(home, ".codex");
@@ -325,7 +324,7 @@ test("a managed Codex launch does not start when its MCP servers cannot be liste
   assert.equal(codex.calls().some((call) => call.args[0] === "app-server"), false);
 });
 
-test("a managed Codex launch does not start when the project changes the LetAgents server", { skip: supervisedAgentsOnly }, async () => {
+test("a managed Codex launch does not start when the project changes the LetAgents server", async () => {
   const codex = fakeCodex();
   await assert.rejects(
     launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, {
@@ -337,7 +336,7 @@ test("a managed Codex launch does not start when the project changes the LetAgen
   assert.equal(codex.calls().some((call) => call.args[0] === "app-server"), false);
 });
 
-test("rental Codex launches keep their isolated environment without the owner's commit identity", { skip: supervisedAgentsOnly }, async () => {
+test("rental Codex launches keep their isolated environment without the owner's commit identity", async () => {
   const identity = { GIT_AUTHOR_EMAIL: FAKE_NOREPLY, GIT_COMMITTER_EMAIL: FAKE_NOREPLY };
   const ordinary = codexAppServerEnvironment({ commitEnvironment: identity, env: { FAKE_CANARY: "kept" } });
   assert.equal(ordinary.env.GIT_AUTHOR_EMAIL, FAKE_NOREPLY);
@@ -371,7 +370,7 @@ test("rental Codex launches keep their isolated environment without the owner's 
   assert.equal(server.env.GIT_AUTHOR_EMAIL, null);
 });
 
-test("the Codex provider adapter launches its app-server through the managed launch", { skip: supervisedAgentsOnly }, async () => {
+test("the Codex provider adapter launches its app-server through the managed launch", async () => {
   const codex = fakeCodex();
   const project = githubRepo("adapter-project");
   const adapter = new CodexProviderAdapter({
@@ -916,7 +915,7 @@ test("a hook the project defines is turned off by key, the owner's hooks are not
   await assert.rejects(homeHarnessDecision({ hooks, stuck: { hooks: true } }), /Codex did not turn off this project's own hooks/);
 });
 
-test("a project whose Codex config sets anything else, or that ships command rules, is refused", { skip: supervisedAgentsOnly }, async () => {
+test("a project whose Codex config sets anything else, or that ships command rules, is refused", async () => {
   await assert.rejects(homeHarnessDecision({
     layers: [{ dotCodexFolder: "/work/attempt/.codex", config: { mcp_servers: {}, shell_environment_policy: { inherit: "all" }, features: { plugins: true }, plugins: {}, model: "x" } }],
   }), { message: "This project's Codex config (.codex/config.toml) sets features, model, plugins, shell_environment_policy, so LetAgents will not start Codex here with your own setup. "
@@ -958,7 +957,7 @@ test("a project whose Codex config sets anything else, or that ships command rul
   assert.deepEqual([untrusted.overrides, untrusted.foldersAsked], [[], []]);
 });
 
-test("a folder of a project layer is listed more widely than Codex reads it: hidden, nested, linked or unreadable all count", { skip: supervisedAgentsOnly }, async (t) => {
+test("a folder of a project layer is listed more widely than Codex reads it: hidden, nested, linked or unreadable all count", async (t) => {
   const base = fixture("project-folder-entries");
   const elsewhere = join(base, "elsewhere");
   mkdirSync(elsewhere, { recursive: true });
@@ -999,7 +998,7 @@ test("a folder of a project layer is listed more widely than Codex reads it: hid
   }
 });
 
-test("a refusal names a project's file from the top of the repository, not from where LetAgents keeps the agent's copy", { skip: supervisedAgentsOnly }, async () => {
+test("a refusal names a project's file from the top of the repository, not from where LetAgents keeps the agent's copy", async () => {
   // A work folder as the background service lays it out: a linked worktree, whose top holds a `.git` file.
   const top = join(fixture("agents-copy"), "worktrees", "attempt");
   const cwd = join(top, "packages", "app");
@@ -1036,7 +1035,7 @@ test("a refusal names a project's file from the top of the repository, not from 
   assert.ok((await refusedFor(cwd, { dotCodexFolder: outside, config: {} })).includes(`from this project's ${join(outside, "rules")}, and that folder`));
 });
 
-test("a listing that fails for a managed launch says why, and never the command line that carries the room server's coordinates", { skip: supervisedAgentsOnly }, async () => {
+test("a listing that fails for a managed launch says why, and never the command line that carries the room server's coordinates", async () => {
   const codex = fakeCodex();
   const secret = "coordinate-that-must-not-be-shown";
   const failed = (bin: string, env: Record<string, string>) => codexHomeHarnessOverrides(bin, {
@@ -1094,7 +1093,7 @@ function isIsolation(override: string): boolean {
   return CODEX_OWNER_FEATURE_OVERRIDES.includes(override) || override.startsWith("skills.config=") || override.startsWith("mcp_servers={");
 }
 
-test("a managed launch with the owner's own setup adds none of the overrides that turn the owner's extensions off, and changes nothing else", { skip: supervisedAgentsOnly }, async () => {
+test("a managed launch with the owner's own setup adds none of the overrides that turn the owner's extensions off, and changes nothing else", async () => {
   const off = await launchWithOwnSetup(fakeCodex(), {});
   const on = await launchWithOwnSetup(fakeCodex(), { homeHarness: true });
   const offOverrides = overridesOf(off.server!.args);
@@ -1121,7 +1120,7 @@ test("a managed launch with the owner's own setup adds none of the overrides tha
   }
 });
 
-test("only an exact true keeps the owner's own setup on", { skip: supervisedAgentsOnly }, async () => {
+test("only an exact true keeps the owner's own setup on", async () => {
   for (const unclear of [undefined, false, "true", 1, null, {}]) {
     const launched = await launchWithOwnSetup(fakeCodex(), { homeHarness: unclear });
     const overrides = overridesOf(launched.server!.args);
@@ -1130,7 +1129,7 @@ test("only an exact true keeps the owner's own setup on", { skip: supervisedAgen
   }
 });
 
-test("with the owner's own setup a project's server and hooks are turned off for the launch", { skip: supervisedAgentsOnly }, async () => {
+test("with the owner's own setup a project's server and hooks are turned off for the launch", async () => {
   const projectHook = { key: "/project/.codex/hooks.json:session_start:0:0", source: "project" };
   // A hook Codex names the owner's source for, but lists only inside the project: it is the project's too.
   const labelledOwners = { key: "plugin:from-the-project:stop:0:0", source: "plugin", projectOnly: true };
@@ -1150,7 +1149,7 @@ test("with the owner's own setup a project's server and hooks are turned off for
   assert.equal(overridesOf(launched.server!.args).some((override) => CODEX_OWNER_FEATURE_OVERRIDES.includes(override)), false);
 });
 
-test("with the owner's own setup the app-server's environment carries none of the room agent's coordinates", { skip: supervisedAgentsOnly }, async () => {
+test("with the owner's own setup the app-server's environment carries none of the room agent's coordinates", async () => {
   const coordinates = {
     LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_fake", LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/fake/daemon.sock",
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt", LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation",
@@ -1170,7 +1169,7 @@ test("with the owner's own setup the app-server's environment carries none of th
   assert.equal(codexAppServerEnvironment({ env: coordinates }).env.LETAGENTS_SUPERVISOR_ENTRY_ID, "supervised_fake");
 });
 
-test("a rental launch never keeps the owner's own setup, whatever it is asked", { skip: supervisedAgentsOnly }, async () => {
+test("a rental launch never keeps the owner's own setup, whatever it is asked", async () => {
   const codex = fakeCodex();
   const home = fixture("rental-own-setup-home");
   const launch = await launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, {
@@ -1188,7 +1187,7 @@ test("a rental launch never keeps the owner's own setup, whatever it is asked", 
   assert.equal(server.env.GIT_AUTHOR_EMAIL, null, "and it still carries no owner identity");
 });
 
-test("with the owner's own setup a launch still stops when the project changes the LetAgents server or Codex cannot be asked", { skip: supervisedAgentsOnly }, async () => {
+test("with the owner's own setup a launch still stops when the project changes the LetAgents server or Codex cannot be asked", async () => {
   for (const [failure, message] of [
     [{ FAKE_CODEX_STEER: "1" }, /This project's Codex config changes the LetAgents MCP server/],
     [{ FAKE_CODEX_MCP_FAIL: "1" }, /Codex could not list its MCP servers/],
@@ -1210,7 +1209,7 @@ test("with the owner's own setup a launch still stops when the project changes t
   }
 });
 
-test("an inspection that never answers is given up on and its process is stopped", { skip: supervisedAgentsOnly,  timeout: 20_000 }, async (t) => {
+test("an inspection that never answers is given up on and its process is stopped", { timeout: 20_000 }, async (t) => {
   const codex = fakeCodex();
   const pidFile = join(fixture("inspection-hang"), "pid");
   // Whatever this test finds, the stand-in is not left behind.
@@ -1230,7 +1229,7 @@ test("an inspection that never answers is given up on and its process is stopped
   assert.equal(alive, false, "the Codex that never answered is not left running");
 });
 
-test("nothing Codex prints when an inspection stops reaches the refusal anyone is shown", { skip: supervisedAgentsOnly }, async () => {
+test("nothing Codex prints when an inspection stops reaches the refusal anyone is shown", async () => {
   const codex = fakeCodex();
   // The stand-in exits with a message that quotes a value from the owner's config, as a config error can.
   const error = await launchWithOwnSetup(codex, { homeHarness: true, env: { FAKE_CODEX_INSPECT_FAIL: "1", FAKE_CODEX_STDERR: 'error in `mcp_servers.owner.env`: API_KEY = "fake-secret-value"' } })
@@ -1293,7 +1292,7 @@ test("a running Codex is known to have its owner's setup by what it was started 
   }
 });
 
-test("a listing that Codex never answers is killed, and the check of a running agent says it timed out", { skip: supervisedAgentsOnly,  timeout: 30_000 }, async () => {
+test("a listing that Codex never answers is killed, and the check of a running agent says it timed out", { timeout: 30_000 }, async () => {
   // A stand-in Codex that never answers anything: the real listing is what gives up on it.
   const dir = fixture("live-check-hang");
   const bin = join(dir, "codex");
@@ -1338,7 +1337,7 @@ test("only so many running agents are checked against their projects at once", {
   })));
 });
 
-test("a running Codex's command line is read without ever holding the caller up", { skip: supervisedAgentsOnly,  timeout: 30_000 }, async (t) => {
+test("a running Codex's command line is read without ever holding the caller up", { timeout: 30_000 }, async (t) => {
   // This test's own process, read with the real `ps`.
   const own = await readCodexCommandLine(process.pid);
   assert.ok(own && own.includes("node"), "a readable process is read");

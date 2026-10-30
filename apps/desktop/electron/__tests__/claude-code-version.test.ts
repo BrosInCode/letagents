@@ -14,7 +14,6 @@ import {
 } from "../main/agents/claude-code-version.js";
 import { clearProbeCache } from "../main/agents/provider-probe-cache.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 // Every preflight case below fakes the Claude CLI with different output; no
 // case may be answered from a probe that an earlier case memoised.
@@ -47,7 +46,7 @@ test("Claude Code executable resolution has one explicit precedence", () => {
   );
 });
 
-for (const approval of [false, true]) test(`Claude Code ${approval ? "tool approval" : "runtime"} preflight gives an update message before auth or launch`, { skip: supervisedAgentsOnly }, async () => {
+for (const approval of [false, true]) test(`Claude Code ${approval ? "tool approval" : "runtime"} preflight gives an update message before auth or launch`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-version-"));
   const bin = join(root, "claude");
   const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
@@ -84,7 +83,7 @@ for (const approval of [false, true]) test(`Claude Code ${approval ? "tool appro
   }
 });
 
-test("Claude Code preflight truthfully includes the managed LetAgents connection", { skip: supervisedAgentsOnly }, async (t) => {
+test("Claude Code preflight truthfully includes the managed LetAgents connection", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-ready-"));

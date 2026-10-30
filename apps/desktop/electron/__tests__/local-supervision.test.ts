@@ -5,7 +5,6 @@ import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mj
 registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test from "node:test";
-import { supervisedAgentsOnly } from "./platform.js";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { assertOwnerPrivateFile, createElectronTestEnv } from "./harness.js";
@@ -29,11 +28,9 @@ const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: 
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
 }, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
-// The tests that use the board here are supervised claims, leases and daemon
-// restarts (later tier 3 work), so on Windows they skip and it is not started.
-if (!supervisedAgentsOnly) await boardSocket.start();
+await boardSocket.start();
 test.beforeEach(() => registerLocalBoardOwner(() => {}));
-test.after(async () => { if (!supervisedAgentsOnly) await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const origin = "letagents-local://rooms";
 
@@ -195,7 +192,7 @@ test("local work claims have one owner and retries preserve exact lease identity
   assert.deepEqual(await winner.owned(), [], "review work cannot authorize failed-turn continuation");
 });
 
-test("separate local writers racing to claim a task create exactly one work lease", { skip: supervisedAgentsOnly }, async () => {
+test("separate local writers racing to claim a task create exactly one work lease", async () => {
   const roomId = "local_work_process_race";
   await createLocalRoom({ roomIdentifier: roomId });
   const actors = await Promise.all([worker(roomId, "Oak", "race_oak"), worker(roomId, "Elm", "race_elm")]);
@@ -303,7 +300,7 @@ test("local lease handoff, release, completion, and stale epochs stop the old ow
   assert.equal((await getLocalTask(roomId, task.id))?.activeLeases.length, 0);
 });
 
-test("local assignments do not acquire authority without a claim and native heartbeat cannot revive ended ownership", { skip: supervisedAgentsOnly }, async () => {
+test("local assignments do not acquire authority without a claim and native heartbeat cannot revive ended ownership", async () => {
   const roomId = "local_work_authority";
   await createLocalRoom({ roomIdentifier: roomId });
   const oak = await worker(roomId, "Oak", "work_authority");
@@ -340,7 +337,7 @@ test("local assignments do not acquire authority without a claim and native hear
   assert.equal((await getLocalTask(roomId, task.id))?.prUrl, null);
 });
 
-test("MCP supervised claims establish exact ownership and missing leases cannot authorize progress", { skip: supervisedAgentsOnly }, async () => {
+test("MCP supervised claims establish exact ownership and missing leases cannot authorize progress", async () => {
   const roomId = "local_work_mcp_claim";
   await createLocalRoom({ roomIdentifier: roomId });
   const oak = await worker(roomId, "Oak", "mcp_claim");
@@ -364,7 +361,7 @@ test("MCP supervised claims establish exact ownership and missing leases cannot 
   assert.equal((await oak.owned())[0].leaseId, claimed.active_leases[0].id);
 });
 
-test("legacy desktop and MCP assignments remain lease-free when their sessions end", { skip: supervisedAgentsOnly }, async () => {
+test("legacy desktop and MCP assignments remain lease-free when their sessions end", async () => {
   const roomId = "local_work_legacy_compatibility";
   await createLocalRoom({ roomIdentifier: roomId });
   const { saveAgentSession, markAgentSessionEnded } = await import("../main/agents/state.js");
@@ -397,7 +394,7 @@ test("legacy desktop and MCP assignments remain lease-free when their sessions e
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM local_work_leases WHERE agent_session_id=?").get(identity.session_id)?.count, 0);
 });
 
-test("desktop and MCP readers share local leases and legacy writes cannot leave stale ownership", { skip: supervisedAgentsOnly }, async () => {
+test("desktop and MCP readers share local leases and legacy writes cannot leave stale ownership", async () => {
   const roomId = "local_work_shared_store";
   await createLocalRoom({ roomIdentifier: roomId });
   const oak = await worker(roomId, "Oak", "work_shared");
@@ -412,7 +409,7 @@ test("desktop and MCP readers share local leases and legacy writes cannot leave 
   assert.deepEqual((await mcp.getLocalTask(roomId, task.id)).active_leases, []);
 });
 
-test("a legacy release observed before a new claim cannot revoke its successor", { skip: supervisedAgentsOnly }, async () => {
+test("a legacy release observed before a new claim cannot revoke its successor", async () => {
   const roomId = "local_work_legacy_release";
   await createLocalRoom({ roomIdentifier: roomId });
   const oak = await worker(roomId, "Oak", "legacy_release");
@@ -559,7 +556,7 @@ test("local saved work is atomic, replayable, and readable while signed out", as
 });
 
 
-test("daemon restart restores local authority and the unread cursor without cloud access", { skip: supervisedAgentsOnly }, async () => {
+test("daemon restart restores local authority and the unread cursor without cloud access", async () => {
   const { join } = await import("node:path");
   const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
   const { ManifestStore } = await import(new URL("../../daemon/manifest-store.ts", import.meta.url).href);

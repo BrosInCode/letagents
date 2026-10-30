@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdtemp, open, readlink, realpath, rm } from 'node:fs/promises';
 import { devNull, tmpdir } from 'node:os';
 import nodePath, { dirname, join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
 import { gitSpawnFile } from './git-executable.mjs';
 import { signalTree, spawnTree } from './process-tree.mjs';
@@ -330,7 +330,8 @@ export async function captureRecordedRemoteTips(url, directory = tmpdir(), { onN
             onNoAnswer('no remote was recorded');
             return null;
         }
-        const outside = { GIT_DIR: devNull };
+        // Git for Windows reads \\.\nul as an empty gitfile and stops; a folder that does not exist is no repository there.
+        const outside = { GIT_DIR: process.platform === 'win32' ? join(tmpdir(), `letagents-no-repository-${randomUUID()}`) : devNull };
         const ssh = process.env.GIT_SSH_COMMAND || (await git(directory, ['config', '--get', 'core.sshCommand'], signal, undefined, undefined, outside).catch(() => '')).trim() || 'ssh';
         const quiet = { ...outside, ...noPrompt(ssh) };
         // An insteadOf rewrite, or a remote that is named like the URL, shows in the address Git would use.

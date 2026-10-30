@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { leasedBranchRef } from "../../../../shared/agent-branch.mjs";
 import { AutomaticPermissionReviewer } from "../automatic-permission-review.js";

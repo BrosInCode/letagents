@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "../control-request-router.js";
 import { SupervisorDaemon } from "../main.js";

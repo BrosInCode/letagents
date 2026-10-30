@@ -6,7 +6,7 @@ import { createServer as createHttpServer, request as httpRequest } from "node:h
 import { createServer as createHttp2Server } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 import { CursorProviderAdapter, defaultLaunchTurn } from "../main/agents/cursor-provider-adapter.js";
 import {
   productionPersonalIdentityDependencies,

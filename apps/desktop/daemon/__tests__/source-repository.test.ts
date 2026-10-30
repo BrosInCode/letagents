@@ -14,7 +14,6 @@ import {
   UnusableSourceRepositoryError,
   type GitCommand,
 } from "../workspace-provisioner.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 /**
  * Build a fake GitCommand keyed by the meaningful subcommand. A value throws
@@ -101,7 +100,7 @@ test("returns origin remote + revision for a valid repository", async () => {
 });
 
 
-test("originless local projects provision isolated worktrees without changing the source", { skip: supervisedAgentsOnly }, async () => {
+test("originless local projects provision isolated worktrees without changing the source", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-local-source-")));
   const source = join(root, "project");
   const exec = promisify(execFile);
@@ -156,7 +155,7 @@ test("originless local projects provision isolated worktrees without changing th
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("originless repositories borrowing objects produce independent private clones", { skip: supervisedAgentsOnly }, async () => {
+test("originless repositories borrowing objects produce independent private clones", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-local-alternates-")));
   const exec = promisify(execFile);
   const git: GitCommand = async (args) => (await exec("git", args, { cwd: root })).stdout;

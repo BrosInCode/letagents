@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { codexAccountUsage, inspectorUsageSchema, ProviderUsageTracker, readCodexUsageTail } from "../main/agents/provider-usage.js";
-import { supervisedAgentsOnly } from "./platform.js";
 const at = "2026-10-10T20:00:00.000Z";
 const sample = { last: { totalTokens: 62000 }, total: { totalTokens: 4200000 }, modelContextWindow: 200000 };
 
@@ -144,7 +143,7 @@ test("Cursor account transport is bounded and sends authorization only to its fi
   await assert.rejects(readCursorAccountUsage("Bearer test\nheader", at, request));
 });
 
-test("Cursor reads only exact session context from its native SQLite/protobuf state, including zero after compaction", { skip: supervisedAgentsOnly }, async () => {
+test("Cursor reads only exact session context from its native SQLite/protobuf state, including zero after compaction", async () => {
   const { readCursorContext, readCursorUsageOwner } = await import("../main/agents/cursor-usage.js");
   const { DatabaseSync } = await import("node:sqlite");
   const { createHash } = await import("node:crypto");

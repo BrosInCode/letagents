@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { ManifestStore } from "../manifest-store.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError } from "../singleton.js";
 import { type DaemonActivityEvent, type DaemonManifestEntry } from "../types.js";

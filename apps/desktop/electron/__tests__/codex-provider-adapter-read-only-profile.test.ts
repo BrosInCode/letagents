@@ -36,9 +36,8 @@ import {
   SIGN_IN_NOT_CONFIRMED,
   NOT_THE_PROFILE_REPLIES,
 } from "./codex-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
-test("Codex Read-only counts as a sandboxed access level wherever a saved command rule is looked for: the home at launch, each turn, and each conversation load", { skip: supervisedAgentsOnly, timeout: 60_000 }, async (t) => {
+test("Codex Read-only counts as a sandboxed access level wherever a saved command rule is looked for: the home at launch, each turn, and each conversation load", { timeout: 60_000 }, async (t) => {
   const run = (harness: ReturnType<typeof createHarness>, adapter: CodexProviderAdapter, handle: ProviderHandle, client: number, name: string) => adapter.runRoomTurn(handle, turnOf(name), {
     checkpointTurnStarted: async (turnId) => { harness.clients[client]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
   });

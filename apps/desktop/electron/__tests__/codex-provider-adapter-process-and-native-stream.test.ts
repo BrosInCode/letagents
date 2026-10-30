@@ -20,7 +20,6 @@ import {
   spawnRequest,
   flush,
 } from "./codex-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 test("spawn fails clearly when the configured LetAgents MCP workplace is absent", async () => {
   const harness = createHarness({ workplacePresent: false });
@@ -165,7 +164,7 @@ test("stop refuses signals without the exact process birth before dispatch or es
   }
 });
 
-test("Codex exact-reference stop validates the complete recorded owner before signalling", { skip: supervisedAgentsOnly }, async () => {
+test("Codex exact-reference stop validates the complete recorded owner before signalling", async () => {
   const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
@@ -206,7 +205,7 @@ test("Codex exact-reference stop validates the complete recorded owner before si
   assert.equal(harness.clients.length, 1);
 });
 
-test("Codex exact-reference stop proves OS death even with a cached protocol terminal", { skip: supervisedAgentsOnly }, async () => {
+test("Codex exact-reference stop proves OS death even with a cached protocol terminal", async () => {
   const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
   const signalProcess = harness.dependencies.signalProcess;
   harness.dependencies.signalProcess = (pid, signal) => {
@@ -230,7 +229,7 @@ test("Codex exact-reference stop proves OS death even with a cached protocol ter
   assert.equal(harness.launches.length, 1);
 });
 
-test("Codex exact-reference stop rechecks birth at escalation and never trusts a signal as death", { skip: supervisedAgentsOnly }, async () => {
+test("Codex exact-reference stop rechecks birth at escalation and never trusts a signal as death", async () => {
   for (const evidence of ["unknown", "malformed", "replaced", "absent", "still_alive", "force"] as const) {
     const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
     const signalProcess = harness.dependencies.signalProcess;

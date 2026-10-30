@@ -6,7 +6,7 @@ import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { dirname, join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";

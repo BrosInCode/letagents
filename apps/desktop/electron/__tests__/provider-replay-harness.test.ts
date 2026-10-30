@@ -24,7 +24,6 @@ import {
   type ProviderReplayEntry,
   type TranscriptStartEntry,
 } from "./provider-replay/transcript.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 const START: TranscriptStartEntry = {
   type: "transcript_start",
@@ -752,7 +751,7 @@ test("the committed recordings hold no known leak shape and do not change under 
   }
 });
 
-test("the Codex recorder records nothing when it is imported, and its cleanup stops the app-server and removes the workspace", { skip: supervisedAgentsOnly }, async () => {
+test("the Codex recorder records nothing when it is imported, and its cleanup stops the app-server and removes the workspace", async () => {
   // Importing would run a recording if the file did not check how it was started.
   const { agentHomeDigest, discardRecording } = await import("../scripts/record-codex-replay.js");
 

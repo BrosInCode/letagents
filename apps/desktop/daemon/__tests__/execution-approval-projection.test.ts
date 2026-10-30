@@ -18,7 +18,6 @@ import {
 } from "../execution-approval-projection.js";
 import type { ApprovalReference } from "../execution-approval-journal.js";
 import type { ExecutionApprovalProjectionSource } from "../execution-approval-projection.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 const expectedBase = {
   requestId: "request",
@@ -94,7 +93,7 @@ function admitRequest(database: DatabaseSync, source: ExecutionApprovalProjectio
   return { ...expectedBase, requestId, nativeRequestId, requestSha256 };
 }
 
-test("projection persists only canonical workspace-relative counts and survives reopen", { skip: supervisedAgentsOnly }, async () => {
+test("projection persists only canonical workspace-relative counts and survives reopen", async () => {
   const f = await fixture();
   const diff = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
   try {

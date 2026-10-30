@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
@@ -4000,7 +3999,7 @@ test("generation rollover preserves only the exact in-memory credential authorit
   } finally { await env.cleanup(); }
 });
 
-test("legacy import retains token-free recovery evidence", { skip: supervisedAgentsOnly }, async () => {
+test("legacy import retains token-free recovery evidence", async () => {
   const env = await fixture(); try {
     const secret = "legacy-secret-must-not-survive";
     await (await import("node:fs/promises")).writeFile(env.legacy, JSON.stringify({ version: 1, bindings: {

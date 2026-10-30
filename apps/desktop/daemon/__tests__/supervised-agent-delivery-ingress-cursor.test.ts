@@ -26,7 +26,6 @@ import {
   enqueue,
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("daemon delivery refuses mcp_polling ingress for every provider", async () => {
@@ -475,7 +474,7 @@ test("throwing source observation hooks cannot block native delivery", async () 
   }
 });
 
-test("Cursor dynamic checkpoint converges after manifest commit but attempt durability failure", { skip: supervisedAgentsOnly }, async () => {
+test("Cursor dynamic checkpoint converges after manifest commit but attempt durability failure", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-cursor-provider-checkpoint-"));
   let daemon: SupervisorDaemon | null = null;
   try {
@@ -689,7 +688,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
   }
 });
 
-test("first and sequential Cursor turns cross one atomic prepared boundary without losing FIFO authority", { skip: supervisedAgentsOnly }, async () => {
+test("first and sequential Cursor turns cross one atomic prepared boundary without losing FIFO authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cfa-"));
   let daemon: SupervisorDaemon | null = null;
   const preparedStoreEntered = deferred<void>();
@@ -865,7 +864,7 @@ for (const scenario of [
       + "The turn's reply was not posted. Automatic recovery was stopped after repeated provider exits. The agent needs you to recover it.",
   },
 ] as const) {
-test(`a Cursor turn that finished without proof its authority ended is settled as lost, its reply is withheld, the next message still runs, and the reason ${scenario.name}`, { skip: supervisedAgentsOnly }, async () => {
+test(`a Cursor turn that finished without proof its authority ended is settled as lost, its reply is withheld, the next message still runs, and the reason ${scenario.name}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cursor-unproven-"));
   const paths = {
     lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
@@ -984,7 +983,7 @@ test(`a Cursor turn that finished without proof its authority ended is settled a
 });
 }
 
-test("handoff after Cursor native release waits for first-turn and resumed init authority without killing the turn", { skip: supervisedAgentsOnly }, async () => {
+test("handoff after Cursor native release waits for first-turn and resumed init authority without killing the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cursor-init-handoff-"));
   const bounded = async <T>(operation: Promise<T>, label: string): Promise<T> => {
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -1133,7 +1132,7 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a worker bearer rotation after Cursor native release keeps the turn alive through its init checkpoint", { skip: supervisedAgentsOnly }, async () => {
+test("a worker bearer rotation after Cursor native release keeps the turn alive through its init checkpoint", async () => {
   // A periodic bearer rotation used to land between Cursor's native release
   // and its stream-json init. The init checkpoint then saw a stale bearer, so
   // the adapter reaped the live wrapper (exit 143) and the turn was lost.
@@ -1304,7 +1303,7 @@ test("a worker bearer rotation after Cursor native release keeps the turn alive 
   }
 });
 
-test("a crashed Cursor turn settles as interrupted instead of blocking the FIFO after its lane fails", { skip: supervisedAgentsOnly }, async () => {
+test("a crashed Cursor turn settles as interrupted instead of blocking the FIFO after its lane fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cursor-crash-"));
   const paths = {
     lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),

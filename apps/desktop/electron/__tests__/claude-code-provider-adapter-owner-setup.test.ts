@@ -37,7 +37,6 @@ import {
   STORED_CLAUDE_OPTIONS,
   pause,
 } from "./claude-code-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 test("Claude starts exactly as before without the owner's own setup, and reads the owner's servers and settings with it", async () => {
   const launch = async (homeHarness: boolean, permissionProfileId: string, launchPolicy: Record<string, unknown>) => {
@@ -154,7 +153,7 @@ test("with the owner's own setup the Claude CLI's environment carries nothing th
   assert.equal(claudeChildEnvironment({}, ambient).LETAGENTS_SUPERVISOR_ENTRY_ID, "supervised_other");
 });
 
-test("the room server's config carries the coordinates only when the launch hands them over", { skip: supervisedAgentsOnly }, async () => {
+test("the room server's config carries the coordinates only when the launch hands them over", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-claude-room-config-"));
   try {
     const runtime = () => ({ entryPath: "/fake/letagents-mcp.js" }) as never;

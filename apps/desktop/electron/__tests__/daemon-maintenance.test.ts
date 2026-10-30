@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDaemonMaintenance, readDaemonMaintenance, clearDaemonMaintenance, withDaemonMaintenanceOperation } from "../../../../shared/daemon-maintenance.mjs";
 import { forceStopDaemon, performConfirmedMaintenance, type ForceDaemonRestartPort } from "../main/force-daemon-restart.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 function fixture() {
   const events: string[] = [];
@@ -81,7 +80,7 @@ test("force restart retains the hold if a different daemon owns the socket", asy
   await assert.rejects(forceStopDaemon(f.port), /still answers/);
   assert.deepEqual(f.events, ["hold", "SIGTERM"]);
 });
-test("maintenance hold survives reopen, coalesces creation and requires exact resume identity", { skip: supervisedAgentsOnly }, async () => {
+test("maintenance hold survives reopen, coalesces creation and requires exact resume identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-maintenance-")); const path = join(root, "hold.json");
   try {
     assert.equal(await readDaemonMaintenance(path), null);
@@ -94,7 +93,7 @@ test("maintenance hold survives reopen, coalesces creation and requires exact re
     await clearDaemonMaintenance(a.id, path); assert.equal(await readDaemonMaintenance(path), null);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-test("maintenance corruption, readable-by-others and symlinks cannot silently resume supervision", { skip: supervisedAgentsOnly }, async () => {
+test("maintenance corruption, readable-by-others and symlinks cannot silently resume supervision", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-maintenance-")); const path = join(root, "hold.json");
   try {
     await writeFile(path, "broken", { mode: 0o600 });
@@ -107,7 +106,7 @@ test("maintenance corruption, readable-by-others and symlinks cannot silently re
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("maintenance action owns the hold through stop proof and competing resume cannot remove it", { skip: supervisedAgentsOnly }, async () => {
+test("maintenance action owns the hold through stop proof and competing resume cannot remove it", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-maintenance-")); const path = join(root, "hold.json");
   try {
     let retained: unknown;

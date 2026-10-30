@@ -34,7 +34,6 @@ import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordina
 import { launchProgress } from "../launch-progress.js";
 import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -873,7 +872,7 @@ const scratchWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
   resolved_revision: "0".repeat(40), bare_path: "/tmp/work",
 };
 
-test("authorized worker routes reach the real provider MCP configuration on launch and resume", { skip: supervisedAgentsOnly }, async () => {
+test("authorized worker routes reach the real provider MCP configuration on launch and resume", async () => {
   // Exercise default adapter factories, not helpers with a manually supplied
   // URL. Only native process creation is replaced; no credentials or network.
   const { ClaudeCodeProviderAdapter } = await import(new URL("../../electron/main/agents/claude-code-provider-adapter.ts", import.meta.url).href);

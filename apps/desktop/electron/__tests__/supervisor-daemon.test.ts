@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";

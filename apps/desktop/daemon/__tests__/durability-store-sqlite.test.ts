@@ -10,7 +10,6 @@ import test from "node:test";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { AttemptNotFoundError, CorruptAttemptStoreError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-attempt-sqlite-"));
@@ -244,7 +243,7 @@ test("post-commit backup EISDIR is retried without poisoning a valid import", as
   } finally { await env.cleanup(); }
 });
 
-test("SQLite attempt initialization creates no JSON and keeps owner-only database permissions", { skip: supervisedAgentsOnly }, async () => {
+test("SQLite attempt initialization creates no JSON and keeps owner-only database permissions", async () => {
   const env = await fixture();
   try {
     const store = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);

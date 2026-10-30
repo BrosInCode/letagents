@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import {
   boundedCursorRoomTurnPrompt,
   CursorProviderAdapter,
@@ -368,7 +367,7 @@ test("Cursor typed shell completion preserves native exit codes and does not com
   assert.deepEqual(harness.signals, [], "a nonzero shell exit cannot signal the provider");
 });
 
-test("a Cursor turn that finished while its daemon was replaced is answered from its terminal, and the agent answers its next message", { skip: supervisedAgentsOnly, timeout: 60_000 }, async () => {
+test("a Cursor turn that finished while its daemon was replaced is answered from its terminal, and the agent answers its next message", { timeout: 60_000 }, async () => {
   const agent = await cursorDaemonFixture();
   try {
     const first = await agent.begin(1);
@@ -469,7 +468,7 @@ test("Cursor usage rejects another account and discards a read after the exact h
   assert.equal(await adapter.readUsage(handle), null);
 });
 
-test("a Cursor room turn names its staged images in the prompt and may only read their folder", { skip: supervisedAgentsOnly }, async () => {
+test("a Cursor room turn names its staged images in the prompt and may only read their folder", async () => {
   const folder = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-images-"));
   try {
     const harness = createHarness();
@@ -516,7 +515,7 @@ test("a Cursor room turn names its staged images in the prompt and may only read
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 
-test("a staged image folder replaced by a link is never named or opened to the sandbox", { skip: supervisedAgentsOnly }, async () => {
+test("a staged image folder replaced by a link is never named or opened to the sandbox", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-image-link-"));
   try {
     const target = join(root, "home-like");

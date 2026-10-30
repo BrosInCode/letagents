@@ -4,7 +4,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import {
@@ -424,7 +423,7 @@ test("the supervised runtime continuously polls and delivers a later activation"
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("the supervised runtime backs off after a poll error and resumes intake", { skip: supervisedAgentsOnly }, async () => {
+test("the supervised runtime backs off after a poll error and resumes intake", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-retry-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));

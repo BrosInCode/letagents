@@ -22,9 +22,8 @@ import {
   removePostV5DeliveryTables,
   assertRoomScopedV9DeliveryShape,
 } from "./helpers/manifest-store-sqlite-fixture.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
-test("SQLite manifest round-trips the flat wire projection from relational domain tables", { skip: supervisedAgentsOnly }, async () => {
+test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {

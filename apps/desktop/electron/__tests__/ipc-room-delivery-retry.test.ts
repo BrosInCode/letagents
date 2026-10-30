@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 const env = createElectronTestEnv({ prefix: "ipc-room-delivery-retry-" });
 env.resetState({});
@@ -57,7 +56,7 @@ test.after(async () => {
   assert.equal(daemonStartupCalls, 0, "even caught background lifecycle calls must fail the suite");
 });
 
-test("registerDesktopIpcHandlers routes exact room-delivery retries and propagates stale failures", { skip: supervisedAgentsOnly }, async () => {
+test("registerDesktopIpcHandlers routes exact room-delivery retries and propagates stale failures", async () => {
   const original = supervisorDaemonClient.retryRoomDelivery;
   const seen: unknown[] = [];
   try {
@@ -80,7 +79,7 @@ test("registerDesktopIpcHandlers routes exact room-delivery retries and propagat
   }
 });
 
-test("purge IPC never attests an exact worker session when local revocation identity is unavailable", { skip: supervisedAgentsOnly }, async () => {
+test("purge IPC never attests an exact worker session when local revocation identity is unavailable", async () => {
   const originalPurge = supervisorDaemonClient.purgeAgent;
   const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
   const calls: Array<{ sessionId: string | null; grantOnly: boolean }> = [];
@@ -110,7 +109,7 @@ test("purge IPC never attests an exact worker session when local revocation iden
   }
 });
 
-test("purge IPC advances only with the exact session whose end and grant revoke were acknowledged", { skip: supervisedAgentsOnly }, async () => {
+test("purge IPC advances only with the exact session whose end and grant revoke were acknowledged", async () => {
   const originalPurge = supervisorDaemonClient.purgeAgent;
   const originalRevoke = supervisorGrantCoordinator.revokeEntryForPurge;
   const calls: Array<{ sessionId: string | null; grantOnly: boolean }> = [];
@@ -143,7 +142,7 @@ test("purge IPC advances only with the exact session whose end and grant revoke 
   }
 });
 
-test("purge IPC revokes a never-minted entry grant without inventing a worker-session END", { skip: supervisedAgentsOnly }, async () => {
+test("purge IPC revokes a never-minted entry grant without inventing a worker-session END", async () => {
   const originalPurge = supervisorDaemonClient.purgeAgent;
   const originalGrantOnlyRevoke = supervisorGrantCoordinator.revokeEntryForPurgeWithoutWorkerSession;
   const calls: Array<{ sessionId: string | null; grantOnly: boolean }> = [];
@@ -177,7 +176,7 @@ test("purge IPC revokes a never-minted entry grant without inventing a worker-se
   }
 });
 
-test("room-move IPC durably requests rollback and restores source authority when destination preparation fails", { skip: supervisedAgentsOnly }, async () => {
+test("room-move IPC durably requests rollback and restores source authority when destination preparation fails", async () => {
   const daemon = supervisorDaemonClient as unknown as {
     commitRoomMove(input: unknown): Promise<any>;
     rollbackRoomMove(input: unknown): Promise<any>;
@@ -248,7 +247,7 @@ test("send IPC propagates a persistence failure to the caller", { timeout: 2_000
   await assert.rejects(async () => handler({}, "room_1"), /save failed/);
 });
 
-test("full IPC handler registration composes inert rental and daemon observation boundaries", { skip: supervisedAgentsOnly }, async () => {
+test("full IPC handler registration composes inert rental and daemon observation boundaries", async () => {
   const before = rentalRegistrations.length;
   registerDesktopIpcHandlers(fakeIpcMain as never);
   await new Promise<void>((resolve) => setImmediate(resolve));

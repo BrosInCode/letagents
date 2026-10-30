@@ -28,7 +28,6 @@ import {
   listDesktopAgentProviders,
   supervisedDeliveryModeForProvider,
 } from "../main/agents/provider-registry.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 const secretStorage = {
   isEncryptionAvailable: () => true,
@@ -196,7 +195,7 @@ test("unconfigured open model settings report configured=false", async () => {
   assert.equal(status.baseUrl, DEFAULT_OPEN_MODEL_BASE_URL);
 });
 
-test("Open Model preflight checks OpenCode and accepts a per-agent model", { skip: supervisedAgentsOnly }, async (t) => {
+test("Open Model preflight checks OpenCode and accepts a per-agent model", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   const settingsPath = await tempSettingsPath();
