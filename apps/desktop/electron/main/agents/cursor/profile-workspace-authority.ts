@@ -4,6 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { gitSpawnFile } from "../../../../../../shared/git-executable.mjs";
 import { pathEntryExists, readRegularFileNoFollow } from "./profile-filesystem.js";
 import { SUPERVISED_CURSOR_PROJECT_AUTHORITY_FILES } from "./profile-types.js";
 
@@ -88,7 +89,7 @@ export function cursorEffectiveProjectDirectories(workspaceRoot: string): string
     let reportedRoot: string;
     try {
       reportedRoot = execFileSync(
-        "git",
+        gitSpawnFile(),
         ["-C", workspace, "rev-parse", "--show-toplevel"],
         {
           encoding: "utf8",
@@ -155,7 +156,7 @@ export function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
   let output: string;
   try {
     output = execFileSync(
-      "git",
+      gitSpawnFile(),
       ["-C", workspace, "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir"],
       {
         encoding: "utf8",
@@ -255,12 +256,12 @@ function assertCursorSubmoduleGitMetadataTopology(workspace: string, gitDirector
       LC_ALL: "C",
     };
     reportedSuperproject = execFileSync(
-      "git",
+      gitSpawnFile(),
       ["-C", workspace, "rev-parse", "--show-superproject-working-tree"],
       { encoding: "utf8", timeout: 2_000, maxBuffer: 16 * 1024, stdio: ["ignore", "pipe", "pipe"], env: safeGitEnv },
     ).trim();
     configuredWorktree = execFileSync(
-      "git",
+      gitSpawnFile(),
       ["config", "--file", join(gitDirectory, "config"), "--no-includes", "--type=path", "--get", "core.worktree"],
       { encoding: "utf8", timeout: 2_000, maxBuffer: 16 * 1024, stdio: ["ignore", "pipe", "pipe"], env: safeGitEnv },
     ).trim();

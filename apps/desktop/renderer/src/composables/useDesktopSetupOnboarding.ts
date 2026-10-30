@@ -13,6 +13,7 @@ import { setupEntry } from "../domain/desktop-navigation";
 import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mcp-install";
 import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { preserveRoomRepoStatistics } from "../domain/repo-status";
+import { repoPickerErrorMessage } from "../domain/repo-picker-error";
 import { desktopIpc } from "../ipc/index.js";
 
 const defaultMcpInstallRevealDelayMs = 160;
@@ -178,7 +179,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       const result = await desktopIpc.repos.pickRoom();
       if (result.canceled) return false;
       if (result.error || !result.snapshot) {
-        options.authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
+        options.authFeedback.value = repoPickerErrorMessage(result.error, "LetAgents could not open a room from that folder.");
         return false;
       }
       const repoPathLabel = rootPathLabel(result.repoPath);
@@ -200,7 +201,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       firstRunRoomSelected.value = true;
       return true;
     } catch (error) {
-      options.authFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the repo picker.";
+      options.authFeedback.value = repoPickerErrorMessage(error, "LetAgents could not open the repo picker.");
       return false;
     } finally {
       options.loading.value = false;

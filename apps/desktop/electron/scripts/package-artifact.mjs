@@ -379,6 +379,7 @@ const required = [
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
     "shared/credential-paths.mjs",
+    "shared/git-executable.mjs",
     "shared/live-activity-summary.mjs",
     "shared/message-attachments.mjs",
     "shared/message-contracts.mjs",

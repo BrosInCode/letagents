@@ -37,7 +37,7 @@ import {
   type SupervisedWorkspaceGenerationFailpoint,
   type SupervisedWorkspaceGenerationHandle,
 } from "../main/agents/supervised-workspace-generation.js";
-import { GIT_ENV, findWindowsGitExecutable, gitHooksPath } from "../main/agents/supervised-workspace-generation/git.js";
+import { GIT_ENV, gitHooksPath } from "../main/agents/supervised-workspace-generation/git.js";
 import { WINDOWS_FRESH_WORKTREE_NOTE } from "../main/agents/supervised-workspace-generation/worktree-windows.js";
 
 const windows = process.platform === "win32";
@@ -1467,28 +1467,6 @@ windowsTest("a read-only release interrupted after the journal link is gone stil
       chmodSync(target, 0o666);
     }
   });
-});
-
-test("git.exe is found on absolute PATH folders with a .exe or .com PATHEXT name only", () => {
-  const present = new Set([
-    "relative\\bin\\git.exe",
-    "C:\\Shim\\git.cmd",
-    "C:\\Program Files\\Git\\cmd\\git.exe",
-    "C:\\Later\\git.exe",
-  ]);
-  const isFile = (path: string) => present.has(path);
-  assert.equal(findWindowsGitExecutable({
-    PATH: "relative\\bin;C:\\Shim;\"C:\\Program Files\\Git\\cmd\";C:\\Later",
-    PATHEXT: ".BAT;.CMD;.EXE",
-  }, isFile), "C:\\Program Files\\Git\\cmd\\git.exe");
-  assert.throws(
-    () => findWindowsGitExecutable({ PATH: "relative\\bin;C:\\Shim", PATHEXT: ".CMD;.EXE" }, isFile),
-    (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "GIT_EXECUTABLE_NOT_FOUND",
-  );
-  assert.throws(
-    () => findWindowsGitExecutable({ PATH: "C:\\Program Files\\Git\\cmd", PATHEXT: ".CMD" }, isFile),
-    (error: unknown) => error instanceof SupervisedWorkspaceGenerationError && error.code === "GIT_EXECUTABLE_NOT_FOUND",
-  );
 });
 
 /**
