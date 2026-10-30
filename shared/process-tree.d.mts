@@ -13,6 +13,8 @@ type HelperRun = (file: string, args: string[]) => Pick<SpawnSyncReturns<string>
 export interface ProcessTreeHelperOptions {
   /** The helper to use; null means none. Found with `processTreeHelperPath` when not given. */
   helperPath?: string | null;
+  /** Refuse to start outside the job when the helper is missing. Default: in an installed app. */
+  requireHelper?: boolean;
   /** The environment `processTreeHelperPath` reads LETAGENTS_PROCESS_TREE_HELPER from. */
   helperEnv?: NodeJS.ProcessEnv;
   /** Replaces the helper's spawnSync, for tests. */

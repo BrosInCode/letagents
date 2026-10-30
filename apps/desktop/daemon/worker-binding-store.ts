@@ -860,16 +860,19 @@ export class WorkerBindingStore {
       // Windows refuses to replace a file another opener is reading or replacing at the same moment (EPERM,
       // EBUSY). Try again briefly; an opener that won meanwhile has installed the identical redacted proof.
       for (let attempt = 0; ; attempt += 1) {
-        try { await rename(temporary, backup); break; } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (process.platform !== "win32" || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "") || attempt >= 20) throw error;
+        // Checked again right before each try: what the last look saw may have changed during the wait.
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
           const raced = await this.readOwnerOnly(backup);
           if (raced === undefined) throw new Error("Legacy worker binding migration integrity error: exact backup disappeared during redaction.");
           if (isRedactedLegacyBackup(raced, expectedChecksum)) return;
           if (checksumOf(raced) !== expectedChecksum) {
             throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
           }
-          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        try { await rename(temporary, backup); break; } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (process.platform !== "win32" || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "") || attempt >= 20) throw error;
         }
       }
       await protectOwnerPrivate(backup, "file");

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import { spawnTree } from "../../../../../../shared/process-tree.mjs";
+import { PROCESS_TREE_UNKILLABLE_EXIT_CODE, spawnTree } from "../../../../../../shared/process-tree.mjs";
 import { probeScratchWorkspaceGit } from "../../../../../../shared/scratch-workspace-repository.mjs";
 import { synthesizeTerminalPayload, type ProviderTerminalPayload } from "../provider-adapter.js";
 import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, type ProviderProcessExit } from "../provider-evidence.js";
@@ -53,6 +53,12 @@ export type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
   };
 };
 
+/** The helper's unkillable exit code is its own answer, not OpenCode's exit: part of the tree may still run. */
+export function openCodeProcessExit(code: number | null, signal: NodeJS.Signals | null): ProviderProcessExit {
+  if (code !== PROCESS_TREE_UNKILLABLE_EXIT_CODE) return { type: "exit", code, signal };
+  return { type: "error", error: new Error("OpenCode's processes did not end when LetAgents closed their job. They may still be running.") };
+}
+
 export function defaultLaunch(input: {
   binary: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
 }): { child: ChildProcess; exited: Promise<ProviderProcessExit> } {
@@ -64,7 +70,7 @@ export function defaultLaunch(input: {
   });
   const exited = new Promise<ProviderProcessExit>((resolve) => {
     child.once("error", (error) => resolve({ type: "error", error }));
-    child.once("exit", (code, signal) => resolve({ type: "exit", code, signal }));
+    child.once("exit", (code, signal) => resolve(openCodeProcessExit(code, signal)));
   });
   child.unref();
   return { child, exited };

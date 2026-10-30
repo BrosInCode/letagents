@@ -30,7 +30,7 @@ import {
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
 import { defaultInspectDaemonProcess, signalDaemonProcess } from "../main/supervisor-daemon/process-identity.js";
-import { ProviderBatchFileError } from "../../../../shared/provider-executable.mjs";
+import { ProviderBatchFileError, ProviderInstallError } from "../../../../shared/provider-executable.mjs";
 
 const HELPER = "C:\\Program Files\\LetAgents\\resources\\app\\runtime\\letagents-process-tree.exe";
 const LSTART = "Tue Oct 29 01:02:03 2026";
@@ -126,6 +126,16 @@ test("Windows: spawnTree starts the resolved program inside the helper's job, th
   assert.deepEqual(calls[0]!.args, ["spawn", "C:\\Tools\\cursor-agent.exe", 'C:\\Tools\\cursor-agent.exe "two words" "a \\"quote\\""']);
   // The helper's own spawn: hidden, the caller's stdio, cwd, env and detachment; no argv0 or verbatim flag of the program's.
   assert.deepEqual(calls[0]!.options, { detached: true, stdio: ["pipe", "pipe", "pipe", "ipc"], env: windowsEnv, cwd: "C:\\repo", windowsHide: true });
+});
+
+test("Windows: an installed app starts nothing outside the job when its helper is missing", () => {
+  const { calls, spawn } = recordingSpawn();
+  const shimless = { platform: "win32" as const, spawn, helperPath: null, exists };
+  assert.throws(() => spawnTree("codex", ["exec"], { env: windowsEnv }, { ...shimless, requireHelper: true, launchOptions: { readFile: () => "" } }), ProviderInstallError);
+  assert.deepEqual(calls, []);
+  // A development run may not have built it, and a program that is not there still reports ENOENT.
+  spawnTree("nothing-here", ["x"], { env: windowsEnv }, { ...shimless, requireHelper: true });
+  assert.equal(calls.length, 1);
 });
 
 test("Windows: a batch file that is no npm shim is refused, and nothing runs a bare name from the working directory", () => {
