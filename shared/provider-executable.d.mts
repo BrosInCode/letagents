@@ -17,6 +17,7 @@ export interface ProviderLaunchOptions {
   cwd?: string | URL;
   exists?: (filePath: string) => boolean;
   launchOptions?: Omit<CodexLaunchCommandOptions, "platform" | "env"> & {
+    present?: (filePath: string) => boolean;
     realpath?: (filePath: string) => string;
     readdir?: (folder: string) => Array<{ name: string; isDirectory(): boolean; isSymbolicLink(): boolean }>;
   };

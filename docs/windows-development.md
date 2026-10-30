@@ -222,17 +222,20 @@ line breaks. It reads a batch file and never runs it to find out (`shared/provid
   hidden folder counts here, and not for the script). The app also sets
   the `CURSOR_INVOKED_AS` and `NODE_COMPILE_CACHE` values that the launcher sets.
 
-Anything else fails. A file that looks like one of these but differs stops the launch with an error that names the
-file, and never goes to `cmd.exe`. That is also what happens in these three cases:
+A file that looks like one of these but differs stops the launch with an error that names the file, and never goes to
+`cmd.exe`. That is also what happens in these three cases:
 
 - Cursor changes the code in its launcher. Comments may change. LetAgents then needs an update.
 - Two version folders have one date. The script compares only the date, and PowerShell 5.1's sort gives no defined
   order, so what it would run is not known. Delete the older folder, or set `LETAGENTS_CURSOR_AGENT_BIN` to
   `versions\<version>\cursor-agent.cmd`.
-- A package or version folder is a junction or a symbolic link, as `npm link` makes. Set the `LETAGENTS_*_BIN` variable
-  to the real `.exe`.
+- A package or version folder is a junction or a symbolic link, as `npm link` makes. Set `LETAGENTS_OPENCODE_BIN` to
+  the real `.exe`. For Cursor, set `LETAGENTS_CURSOR_AGENT_BIN` to the `cursor-agent.cmd` in the real version folder,
+  not to its `node.exe`.
 
 A batch file that names any other `.exe` from its own folder, such as a shim for a `bun` script, also stops there.
+Any other batch file is refused for a Cursor turn. A version check or another provider's start can still run it through
+`cmd.exe`, which refuses an argument that holds a quote or a line break.
 
 Cursor's launcher also applies a staged update (`versions\promote-staged.cmd`) before it starts. The app does not run
 that script. A staged update waits until you next run `cursor-agent` in a terminal.

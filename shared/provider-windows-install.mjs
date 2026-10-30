@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 // Two provider installs whose entry point on Windows is a batch file that is
@@ -20,11 +20,16 @@ function isFile(filePath) {
   try { return statSync(filePath).isFile(); } catch { return false; }
 }
 
+/** True for an entry of any type, a link that leads nowhere too. */
+function isPresent(entry) {
+  try { lstatSync(entry); return true; } catch { return false; }
+}
+
 /** A provider install this module recognizes but cannot start. Nothing was run. */
 export class ProviderInstallError extends Error {
   constructor(file, reason) {
     super(`LetAgents cannot start ${file}: ${reason} LetAgents did not run it. `
-      + "Reinstall the program, or set its LETAGENTS_*_BIN variable to the program it starts.");
+      + "Reinstall the program, or set its LETAGENTS_*_BIN variable to the program it starts (for Cursor, the cursor-agent.cmd inside a version folder).");
     this.name = "ProviderInstallError";
     this.code = "EPROVIDERINSTALL";
   }
@@ -62,7 +67,7 @@ function assertNoRedirect(launcher, base, relative, files) {
 const NPM_SHIM_HEAD = ["@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0"];
 // A program named from the shim's own folder claims this shape, anywhere in
 // the file and however it is quoted. A script shim's node.exe beside it does not.
-const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)(?!\\*node\.exe(?:["\s]|$))[^"\r\n]*\.exe/im;
+const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)(?!\\*node\.exe(?:["\s]|$))[^"\r\n]*\.exe(?![\w.\\/-])/im;
 const NPM_SHIM_NATIVE_TARGET = /^"%dp0%\\([^"]+\.exe)"   %\*$/i;
 // One path segment, in characters that mean nothing to cmd.exe or to Windows path parsing.
 const NPM_TARGET_SEGMENT = /^[A-Za-z0-9@_+-](?:[A-Za-z0-9@._+-]*[A-Za-z0-9@_+-])?$/;
@@ -227,14 +232,10 @@ function selectedCursorVersion(launcher, root, files) {
   return selected[0];
 }
 
-function isPresent(entry, files) {
-  try { files.realpath(entry); return true; } catch { return false; }
-}
-
 /** What a launcher in `root` runs, as its PowerShell script decides it: node.exe beside it, else the selected version's. */
 function cursorProgram(launcher, root, files) {
   // Test-Path, so anything of that name decides the branch. A folder is then refused as a missing program.
-  const folder = isPresent(join(root, "node.exe"), files) ? "" : join("versions", selectedCursorVersion(launcher, root, files));
+  const folder = files.present(join(root, "node.exe")) ? "" : join("versions", selectedCursorVersion(launcher, root, files));
   const paths = ["node.exe", "index.js"].map((name) => {
     if (!files.exists(join(root, folder, name))) throw new ProviderInstallError(launcher, `${join(root, folder, name)} is missing.`);
     return assertNoRedirect(launcher, root, join(folder, name), files);
@@ -283,6 +284,7 @@ export function windowsInstalledProgram(program, text, options = {}) {
   const files = {
     readFile: options.readFile ?? ((filePath) => readFileSync(filePath, "utf8")),
     exists: options.exists ?? isFile,
+    present: options.present ?? isPresent,
     realpath: options.realpath ?? realpathSync.native,
     readdir: options.readdir ?? ((folder) => readdirSync(folder, { withFileTypes: true })),
   };

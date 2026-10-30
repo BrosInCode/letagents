@@ -57,6 +57,7 @@ class Disk {
       platform: "win32" as const, env, exists: present, electron: true,
       launchOptions: {
         execPath: "C:\\App\\LetAgents.exe", exists: present,
+        present: (path: string) => this.files.has(path) || this.folders.has(path) || this.links.has(path),
         readFile: (path: string) => {
           const text = this.files.get(this.real(path));
           if (text === undefined) throw new Error(`ENOENT ${path}`);
@@ -263,6 +264,12 @@ test("a folder named node.exe beside the launcher takes the script's first branc
   assert.throws(() => providerLaunchCommand("cursor-agent", [], disk.options(cursorEnv, { allowCmd: true })), REFUSED(/cursor-agent\\node\.exe is missing/));
 });
 
+test("a dangling link named node.exe also takes the script's first branch, and fails closed there", () => {
+  const disk = cursorDisk().file(`${INSTALL}\\index.js`);
+  disk.links.set(`${INSTALL}\\node.exe`, "C:\\Temp\\gone.exe");
+  assert.throws(() => providerLaunchCommand("cursor-agent", [], disk.options(cursorEnv, { allowCmd: true })), REFUSED(/cursor-agent\\node\.exe is missing/));
+});
+
 test("every promote hook Cursor's updater writes is accepted, and a launcher with none", () => {
   const cmdHook = CURSOR_CMD.slice(0, CURSOR_CMD.indexOf("@echo off\r\nsetlocal"));
   const ps1Hook = CURSOR_PS1.slice(0, CURSOR_PS1.indexOf("if (-not $env:CURSOR_INVOKED_AS)"));
@@ -347,6 +354,14 @@ test("a script shim is read once, so a read that fails afterwards cannot turn it
   assert.equal(reads, 1);
   assert.equal(launch.file, `${NPM}\\node.exe`);
   assert.equal(launch.windowsVerbatimArguments, undefined);
+});
+
+test("a script path that only holds .exe inside a longer name claims nothing", () => {
+  for (const script of ["node_modules\\foo\\bin\\run.exec.js", "node_modules\\foo.exe\\bin\\cli.js"]) {
+    const shim = `@ECHO off\r\nnode "%~dp0\\${script}" %*\r\n`;
+    const disk = new Disk().file(`${NPM}\\tool.cmd`, shim).file(`${NPM}\\node.exe`);
+    assert.deepEqual(providerLaunchCommand("tool", [], disk.options(npmEnv)).args, [`${NPM}\\${script}`]);
+  }
 });
 
 test("a batch file that claims neither install is still refused as a batch file", () => {
