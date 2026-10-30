@@ -123,16 +123,23 @@ function Set-UserPath([string[]]$Entries, [string]$Remove) {
   $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
   try {
     $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $kept = @($current -split ';' | Where-Object { $_ -and ($Entries -notcontains $_) -and -not ($Remove -and $_ -match $Remove) })
+    # Entries are compared as they expand, so %LOCALAPPDATA%\... is the same folder.
+    $kept = @($current -split ';' | Where-Object {
+      $expanded = [Environment]::ExpandEnvironmentVariables($_)
+      $_ -and ($Entries -notcontains $expanded) -and -not ($Remove -and $expanded -match $Remove)
+    })
     $next = (@($Entries) + $kept) -join ';'
     if ($next -ne $current) {
       $key.SetValue('Path', $next, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-      # Tell Explorer, so terminals started from now on see the new PATH.
-      if (-not ('LetAgentsSetup.Broadcast' -as [type])) {
-        Add-Type -Namespace LetAgentsSetup -Name Broadcast -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
-      }
-      $result = [UIntPtr]::Zero
-      [LetAgentsSetup.Broadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null
+      # Tell Explorer, so terminals started from now on see the new PATH. Only
+      # a convenience: a new sign-in reads it from the registry anyway.
+      try {
+        if (-not ('LetAgentsSetup.Broadcast' -as [type])) {
+          Add-Type -Namespace LetAgentsSetup -Name Broadcast -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
+        }
+        $result = [UIntPtr]::Zero
+        [LetAgentsSetup.Broadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result) | Out-Null
+      } catch { Write-Warning "The new PATH is saved, but Explorer was not told ($($_.Exception.Message)); sign out and in to use it." }
     }
   } finally { $key.Close() }
   $env:Path = ((@($Entries) + @($env:Path -split ';' | Where-Object { $_ -and ($Entries -notcontains $_) })) -join ';')
@@ -245,17 +252,20 @@ function Install-BuildTools {
     if (-not $installed) { throw 'Visual Studio Build Tools did not install the required components.' }
   }
 
-  # build.mjs uses vcvarsall's default toolset. Another MSVC or SDK still
-  # builds, but not the sealed bytes, and the app refuses what it builds.
-  $installation = @($installed)[0]
-  $default = (Get-Content (Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -ErrorAction SilentlyContinue | Select-Object -First 1)
-  $sdk = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include\$SealedWindowsSdk"
-  if ($default -ne $SealedVcTools -or -not (Test-Path $sdk)) {
-    Write-Warning ("The default MSVC is '$default' and SDK $SealedWindowsSdk is " + $(if (Test-Path $sdk) { 'present' } else { 'missing' }) +
-      "; the native seals name MSVC $SealedVcTools with SDK $SealedWindowsSdk. Local builds of the process-tree helper and the" +
-      ' daemon pipe addon will not match their seals: use the CI-built pieces, or reseal in a pull request.')
+  # Ask vcvarsall what build.mjs gets: the same Visual Studio (vswhere
+  # -latest with the x64 tools) and its default MSVC and newest SDK. Another
+  # MSVC or SDK still builds, but not the sealed bytes, which the app needs.
+  $latest = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+  $vcvarsall = Join-Path @($latest)[0] 'VC\Auxiliary\Build\vcvarsall.bat'
+  $selected = & $env:ComSpec /d /c "`"$vcvarsall`" x64 >nul && set VCToolsVersion && set WindowsSDKVersion"
+  $vcTools = ($selected | Where-Object { $_ -like 'VCToolsVersion=*' } | Select-Object -First 1) -replace '^VCToolsVersion=', ''
+  $windowsSdk = ($selected | Where-Object { $_ -like 'WindowsSDKVersion=*' } | Select-Object -First 1) -replace '^WindowsSDKVersion=', '' -replace '\\$', ''
+  if ($vcTools -ne $SealedVcTools -or $windowsSdk -ne $SealedWindowsSdk) {
+    Write-Warning ("Visual Studio's x64 build gets MSVC '$vcTools' and SDK '$windowsSdk'; the native seals name MSVC $SealedVcTools" +
+      " with SDK $SealedWindowsSdk. Local builds of the process-tree helper and the daemon pipe addon will not match their" +
+      ' seals: use the CI-built pieces, or reseal in a pull request.')
   } else {
-    "MSVC $default and SDK $SealedWindowsSdk match the native seals."
+    "MSVC $vcTools and SDK $windowsSdk match the native seals."
   }
 }
 
@@ -273,7 +283,7 @@ function Install-Dependencies {
   foreach ($tree in $trees) {
     $at = Join-Path $Repo $tree
     $stamp = & $stampPath $at
-    if (-not $Force -and (Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq (& $stampOf $at))) {
+    if (-not $Force -and (Test-Path $stamp) -and (([string](Get-Content $stamp -Raw)).Trim() -eq (& $stampOf $at))) {
       Step "$tree is set up for its lock file; skipped (-Force redoes it)"
       continue
     }
@@ -325,6 +335,8 @@ function Install-Providers {
   Set-UserPath @((Join-Path $env:USERPROFILE '.local\bin')) $null
 
   Step 'Cursor agent (official installer, %LOCALAPPDATA%\cursor-agent)'
+  # Its installer rewrites the user PATH expanded unless its folder is on it already.
+  Set-UserPath @((Join-Path $env:LOCALAPPDATA 'cursor-agent')) $null
   if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'cursor-agent\cursor-agent.cmd'))) { & $vendorInstall 'https://cursor.com/install?win32=true' }
 }
 

@@ -60,8 +60,9 @@ before it runs; the Visual Studio bootstrapper changes with each release, so it 
    ```
 
    This sets `LongPathsEnabled` and installs Visual Studio Build Tools 2026 with the MSVC x64 and ARM64 compilers and
-   the Windows 11 SDK 26100, silently (about 9 minutes). It changes no other setting. It then compares the default MSVC
-   and the SDK with the versions the native seals name, and warns when they differ.
+   the Windows 11 SDK 26100, silently (about 9 minutes). It changes no other setting. It then asks `vcvarsall.bat` which MSVC and
+   SDK the native builds get (the same Visual Studio and defaults as `build.mjs`), and warns when they differ from the
+   versions the seals name.
 4. Open a new terminal, so the new `Path` applies.
 5. Clone the repository and switch to `staging`:
 
@@ -97,8 +98,8 @@ Without the script, do the same by hand: the versions and SHA-256 values are at 
 
 The Git for Windows installer asks for elevation (UAC) even with `/CURRENTUSER`. The portable build
 (`PortableGit-<version>-<arch>.7z.exe`, from the same release) is the full Git for Windows with Git Bash, and needs no
-admin. If you use the installer instead, `-Tools` still adds the portable Git first on your `Path`; remove that entry
-if you want the installed one. CI's `shell: bash` is Git Bash: run the commands below in Git Bash
+admin. If you use the installer instead, `-Tools` still adds the portable Git first on your `Path`, and each new run
+of `-Tools` adds it again: remove that entry after each run if you want the installed one. CI's `shell: bash` is Git Bash: run the commands below in Git Bash
 (`%LOCALAPPDATA%\Programs\PortableGit-2.56.0.4\git-bash.exe`, or `bin\bash.exe` from a terminal).
 
 ## Run the Windows CI suites
