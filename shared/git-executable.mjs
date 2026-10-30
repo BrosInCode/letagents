@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { windowsSystemTool } from "./owner-private-fs.mjs";
@@ -57,40 +58,64 @@ export function expandWindowsVariables(value, env) {
   return value.replace(/%([^%;]+)%/g, (whole, name) => lookup(env, name) ?? whole);
 }
 
-function isAbsoluteFolder(entry) {
-  return /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(entry);
+/** A folder as Windows reads it: either slash, optional quotes; null unless it is absolute (a drive or a UNC share). */
+function absoluteFolder(entry) {
+  const folder = String(entry ?? "").trim().replace(/^"(.*)"$/, "$1").replace(/\//g, "\\");
+  return /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(folder) ? folder : null;
 }
 
 /** Each absolute folder of a Windows PATH value. A relative entry (cmd.exe's current-folder rule) is never searched. */
 function pathFolders(value) {
-  return String(value ?? "").split(";")
-    .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
-    .filter(isAbsoluteFolder);
+  return String(value ?? "").split(";").map(absoluteFolder).filter(Boolean);
 }
 
-/** A string value from `reg.exe query`, unexpanded, or null when it is not there. */
+/**
+ * A string value of a registry key, unexpanded, or null when it is not there.
+ * Read with `reg export`, which writes UTF-16, so a folder name outside the
+ * console's code page reads back whole (`reg query` output would not), as
+ * daemon-pipe-native.mjs reads its install folder.
+ */
 export function readRegistryValue(key, name, env = process.env) {
   const reg = windowsSystemTool("reg.exe", env);
-  let output;
+  let folder = null;
   try {
-    output = execFileSync(reg, ["query", key, "/v", name], {
+    folder = mkdtempSync(path.win32.join(tmpdir(), "letagents-git-"));
+    const exported = path.win32.join(folder, "key.reg");
+    execFileSync(reg, ["export", key, exported, "/y"], {
       cwd: path.win32.dirname(reg),
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: "ignore",
       timeout: REGISTRY_TIMEOUT_MS,
       windowsHide: true,
     });
+    return parseRegistryExport(readFileSync(exported), name);
   } catch {
     return null;
+  } finally {
+    // Best effort: a scanner holding the export must not undo what was read.
+    try { if (folder) rmSync(folder, { recursive: true, force: true }); } catch { /* left in the user's temp folder */ }
   }
-  return parseRegistryQuery(output, name);
 }
 
-/** The string value `name` in `reg.exe query` output: `    Path    REG_EXPAND_SZ    C:\\a;%USERPROFILE%\\b`. */
-export function parseRegistryQuery(output, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`^\\s+${escaped}\\s+REG_(?:EXPAND_)?SZ\\s+(.*?)\\s*$`, "im").exec(output);
-  return match ? match[1] : null;
+/**
+ * The string value `name` in a `reg export` file (UTF-16LE with a byte-order
+ * mark): `"Name"="C:\\a"` for REG_SZ, or `"Name"=hex(2):43,00,...` (UTF-16LE
+ * bytes, wrapped over lines ending in a backslash) for REG_EXPAND_SZ.
+ */
+export function parseRegistryExport(bytes, name) {
+  const text = (bytes[0] === 0xff && bytes[1] === 0xfe ? bytes.subarray(2).toString("utf16le") : bytes.toString("utf8"))
+    .replace(/\\\r?\n[ \t]*/g, "");
+  const wanted = name.toLowerCase();
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line.trim());
+    if (!match || match[1].replace(/\\(.)/g, "$1").toLowerCase() !== wanted) continue;
+    const string = /^"((?:[^"\\]|\\.)*)"$/.exec(match[2]);
+    if (string) return string[1].replace(/\\(.)/g, "$1");
+    const expand = /^hex\(2\):([0-9a-fA-F,\s]*)$/.exec(match[2]);
+    if (!expand) return null;
+    const hex = expand[1].replace(/[,\s]/g, "");
+    return Buffer.from(hex, "hex").toString("utf16le").replace(/\0+$/, "");
+  }
+  return null;
 }
 
 /** Every git.exe to try, in order, read lazily: the registry is read only when the PATH has no Git. */
@@ -105,15 +130,15 @@ function* windowsGitCandidates(env, readRegistry) {
   }
   // c. Where Git for Windows installs: for all users, for one user, and where its installer says it did.
   for (const name of ["ProgramFiles", "ProgramW6432"]) {
-    const root = lookup(env, name);
-    if (root && isAbsoluteFolder(root)) yield path.win32.join(root, "Git", "cmd", "git.exe");
+    const root = absoluteFolder(lookup(env, name));
+    if (root) yield path.win32.join(root, "Git", "cmd", "git.exe");
   }
-  const localAppData = lookup(env, "LOCALAPPDATA");
-  if (localAppData && isAbsoluteFolder(localAppData)) yield path.win32.join(localAppData, "Programs", "Git", "cmd", "git.exe");
+  const localAppData = absoluteFolder(lookup(env, "LOCALAPPDATA"));
+  if (localAppData) yield path.win32.join(localAppData, "Programs", "Git", "cmd", "git.exe");
   for (const [key, name] of REGISTRY_INSTALL_PATHS) {
     const value = readRegistry(key, name);
-    const root = value ? expandWindowsVariables(value, env).trim().replace(/^"(.*)"$/, "$1") : null;
-    if (root && isAbsoluteFolder(root)) yield path.win32.join(root, "cmd", "git.exe");
+    const root = value ? absoluteFolder(expandWindowsVariables(value, env)) : null;
+    if (root) yield path.win32.join(root, "cmd", "git.exe");
   }
 }
 

@@ -4,7 +4,7 @@ import { beforeEach, test } from "node:test";
 import {
   expandWindowsVariables,
   gitSpawnFile,
-  parseRegistryQuery,
+  parseRegistryExport,
   resetGitExecutableCacheForTests,
   resolveGitExecutable,
 } from "../../../../shared/git-executable.mjs";
@@ -159,10 +159,42 @@ test("a cached hit belongs to one PATH", () => {
   assert.equal(resolve({ ...ENV, PATH: "D:\\Two" }, fake), second);
 });
 
-test("reg.exe query output and %VAR% expansion", () => {
-  const output = "\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\x\r\n\r\n";
-  assert.equal(parseRegistryQuery(output, "Path"), "%USERPROFILE%\\bin;C:\\x");
-  assert.equal(parseRegistryQuery("    InstallPath    REG_SZ    C:\\Program Files\\Git\r\n", "InstallPath"), "C:\\Program Files\\Git");
-  assert.equal(parseRegistryQuery("ERROR: The system was unable to find the specified registry key or value.", "Path"), null);
+/** A `reg export` file as reg.exe writes it: UTF-16LE with a byte-order mark, CRLF lines. */
+function regExport(lines: string[]): Buffer {
+  return Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${lines.join("\r\n")}\r\n`, "utf16le")]);
+}
+
+/** REG_EXPAND_SZ as reg export writes it: hex(2) UTF-16LE bytes with a final NUL, wrapped with backslashes. */
+function hex2(value: string): string {
+  const bytes = [...Buffer.from(`${value}\0`, "utf16le")].map((byte) => byte.toString(16).padStart(2, "0"));
+  const rows: string[] = [];
+  for (let index = 0; index < bytes.length; index += 25) rows.push(bytes.slice(index, index + 25).join(","));
+  return `hex(2):${rows.join(",\\\r\n  ")}`;
+}
+
+test("reg export values read back whole, outside the console code page too", () => {
+  const user = "C:\\Users\\José\\AppData\\Local\\Programs\\Git\\cmd;%USERPROFILE%\\bin";
+  const file = regExport([
+    "Windows Registry Editor Version 5.00",
+    "",
+    "[HKEY_CURRENT_USER\\Environment]",
+    `"OneDrive"="C:\\\\Users\\\\José\\\\OneDrive"`,
+    `"Path"=${hex2(user)}`,
+    `"TEMP"=${hex2("%USERPROFILE%\\AppData\\Local\\Temp")}`,
+  ]);
+  assert.equal(parseRegistryExport(file, "Path"), user);
+  assert.equal(parseRegistryExport(file, "path"), user);
+  assert.equal(parseRegistryExport(file, "OneDrive"), "C:\\Users\\José\\OneDrive");
+  assert.equal(parseRegistryExport(file, "Missing"), null);
+  const install = regExport(["[HKEY_LOCAL_MACHINE\\SOFTWARE\\GitForWindows]", `"InstallPath"="D:\\\\Programme\\\\Git für Windows"`]);
+  assert.equal(parseRegistryExport(install, "InstallPath"), "D:\\Programme\\Git für Windows");
   assert.equal(expandWindowsVariables("%UserProfile%\\a;%MISSING%\\b", { USERPROFILE: "C:\\Users\\dev" }), "C:\\Users\\dev\\a;%MISSING%\\b");
+});
+
+test("a PATH folder written with forward slashes still counts", () => {
+  const git = "D:\\Tools\\Git\\cmd\\git.exe";
+  assert.equal(resolve({ ...ENV, PATH: "D:/Tools/Git/cmd" }, fakes([git])), git);
+  resetGitExecutableCacheForTests();
+  // Relative entries stay out, in either slash form.
+  assert.equal(resolve({ ...ENV, PATH: "Tools/Git/cmd;./cmd" }, fakes(["Tools\\Git\\cmd\\git.exe", "cmd\\git.exe"])), null);
 });
