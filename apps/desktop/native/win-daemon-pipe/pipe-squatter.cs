@@ -4,6 +4,9 @@
 // and whether that token opens a file. Never shipped.
 //
 //   pipe-squatter.exe squat <config>   serve as this process's own token
+//   pipe-squatter.exe shared <config>  the same, but the pipe allows more
+//                                      instances, so only a server that asks
+//                                      for the first instance is refused
 //   pipe-squatter.exe low <config>     start `squat` at low integrity, wait
 //   pipe-squatter.exe denyonly <config>
 //                                      start `squat` with this user's SID for
@@ -18,7 +21,7 @@ using System.Security.Principal;
 using System.Text;
 
 public static class PipeSquatter {
-    const uint PIPE_ACCESS_DUPLEX = 3, FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
+    const uint PIPE_ACCESS_DUPLEX = 3, FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000, PIPE_UNLIMITED_INSTANCES = 255;
     const int ERROR_PIPE_CONNECTED = 535;
     const uint TOKEN_QUERY = 0x0008, TOKEN_DUPLICATE = 0x0002, TOKEN_ASSIGN_PRIMARY = 0x0001, TOKEN_ADJUST_DEFAULT = 0x0080;
     const int TokenImpersonationLevel = 9, TokenIntegrityLevel = 25;
@@ -100,14 +103,14 @@ public static class PipeSquatter {
         File.Move(path + ".partial", path);
     }
 
-    static int Squat(string[] config) {
+    static int Squat(string[] config, uint maxInstances) {
         string name = config[0], report = config[1], probe = config[2], ready = config[3];
         IntPtr descriptor;
         uint size;
         // Everyone may open it, as a hostile server would allow.
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW("D:(A;;GA;;;WD)", 1, out descriptor, out size)) return 3;
         var attributes = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)), lpSecurityDescriptor = descriptor };
-        IntPtr pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, 0, 1, 4096, 4096, 0, ref attributes);
+        IntPtr pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, 0, maxInstances, 4096, 4096, 0, ref attributes);
         if (pipe == new IntPtr(-1)) {
             Report(report, "{\"created\":false,\"error\":" + Marshal.GetLastWin32Error() + "}");
             return 2;
@@ -169,7 +172,8 @@ public static class PipeSquatter {
 
     public static int Main(string[] args) {
         if (args.Length != 2) return 64;
-        if (args[0] == "squat") return Squat(File.ReadAllLines(args[1]));
+        if (args[0] == "squat") return Squat(File.ReadAllLines(args[1]), 1);
+        if (args[0] == "shared") return Squat(File.ReadAllLines(args[1]), PIPE_UNLIMITED_INSTANCES);
         if (args[0] == "low") return Low(args[1]);
         if (args[0] == "denyonly") return DenyOnly(args[1]);
         return 64;

@@ -16,7 +16,7 @@ import { everyOwnedByCurrentUserSync, isOwnedByCurrentUserSync, ownerPrivatePlat
 import { CURSOR_MCP_CONNECTOR_PARENT, CURSOR_SESSION_ID_PATTERN, MAX_CURSOR_SESSION_ID_LENGTH } from "../cursor-provider-constants.js";
 import { cursorOsSandbox } from "../cursor-sandbox-policy.js";
 import { cursorMcpConnectorRootPattern } from "./turn-wrapper-setup.js";
-import { cursorMcpConnectorListenPath, cursorMcpConnectorProofPath } from "./windows-turn.js";
+import { cursorMcpPipeConnectorArgs } from "./windows-turn.js";
 import {
   applyAttestedCursorPersonalIdentity,
   assertCursorAuthIsNotTeamManaged,
@@ -49,7 +49,6 @@ import {
   CURSOR_AGENT_STATE_AUTH_KEYS,
   CURSOR_CLI_AUTH_KEYS,
   CURSOR_MCP_INSPECTION_PROBE_SOURCE,
-  CURSOR_MCP_PIPE_CONNECTOR_SOURCE,
   CURSOR_MCP_SOCKET_CONNECTOR_SOURCE,
   DARWIN_CURSOR_ENTERPRISE_HOOK_PATH,
   MAX_CURSOR_PROFILE_ENTRIES,
@@ -392,7 +391,7 @@ export function prepareCursorSupervisedProfile(
         command: process.execPath,
         // Windows: the wrapper listens on a named pipe for this socket path.
         args: process.platform === "win32"
-          ? ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, cursorMcpConnectorListenPath(mcpConnectorSocketPath), cursorMcpConnectorProofPath(mcpConnectorSocketPath)]
+          ? cursorMcpPipeConnectorArgs(mcpConnectorSocketPath)
           : ["-e", CURSOR_MCP_SOCKET_CONNECTOR_SOURCE, mcpConnectorSocketPath],
         env: { ELECTRON_RUN_AS_NODE: "1" },
       }
