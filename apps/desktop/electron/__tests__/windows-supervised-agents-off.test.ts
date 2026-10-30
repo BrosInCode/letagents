@@ -20,10 +20,11 @@ mock.module("electron", {
 });
 
 const capabilities = await import("../main/platform-capabilities.js");
-// Everything below runs as if on Windows, whatever machine runs the suite.
+// Everything below runs as on a Windows app with agents switched off, whatever
+// machine runs the suite: the gates must still hold if agents are ever off there.
 const previousDaemonOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
-capabilities.setDesktopPlatformCapabilitiesForTest({ platform: "win32" });
+capabilities.setDesktopPlatformCapabilitiesForTest({ platform: "win32", supervisedAgentsSupported: false });
 test.after(() => {
   capabilities.setDesktopPlatformCapabilitiesForTest(null);
   if (previousDaemonOverride !== undefined) process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousDaemonOverride;
@@ -133,7 +134,8 @@ test("rental channels answer the existing disabled result and start no backgroun
 test("the gate returns the real IpcMain where agents are supported", () => {
   const target = { handle() {}, on() {} };
   assert.equal(gateSupervisedAgentIpc(target as never, { platform: "darwin", env: {} }), target);
-  assert.notEqual(gateSupervisedAgentIpc(target as never, { platform: "win32", env: {} }), target);
+  assert.equal(gateSupervisedAgentIpc(target as never, { platform: "win32", env: {} }), target);
+  assert.notEqual(gateSupervisedAgentIpc(target as never), target);
 });
 
 test("the board of a local-only room reports once and stops instead of retrying", async () => {

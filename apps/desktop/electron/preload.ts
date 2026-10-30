@@ -432,7 +432,7 @@ const api: DesktopApi = {
     runAgentProviderSetup: (providerId, input) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
-  maintenance: process.platform === "darwin" ? {
+  maintenance: process.platform === "darwin" || process.platform === "win32" ? {
     getStatus: () => ipcRenderer.invoke("desktop:maintenance:status"),
     restart: resume => ipcRenderer.invoke("desktop:maintenance:restart", resume),
   } : undefined,

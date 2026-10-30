@@ -55,6 +55,7 @@ import {
   refreshDesktopShellEnvironment,
 } from "../desktop-shell-environment.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
+import { supervisorDaemonAllowed } from "../platform-capabilities.js";
 
 export { listDesktopAgentProviders } from "./provider-registry.js";
 
@@ -422,7 +423,7 @@ export async function runDesktopAgentProviderPreflight(
     // meantime may have memoised answers from the old environment.
     clearProbeCache();
     await refreshDesktopShellEnvironment();
-    if (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1") {
+    if (supervisorDaemonAllowed()) {
       await supervisorDaemonClient.restartForEnvironmentRefresh();
     }
     clearProbeCache();

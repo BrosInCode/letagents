@@ -8,17 +8,18 @@ import { randomUUID } from "node:crypto";
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
-const executable = join(bundle, "Contents", "MacOS", "LetAgents");
+const windows = process.platform === "win32";
+const bundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") : join(root, "release", "LetAgents-darwin", "LetAgents.app");
+const executable = windows ? join(bundle, "LetAgents.exe") : join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
 const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
-// macOS: <home>/.letagents/daemon.sock; connectDaemon is createConnection there.
+// macOS: <home>/.letagents/daemon.sock. Windows: the named pipe for that folder.
 const socketPath = daemonEndpoint(join(home, ".letagents")).connectPath;
 const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
 
 async function assertPackagedDaemonExecutorSeal() {
-  const appRoot = join(bundle, "Contents", "Resources", "app");
+  const appRoot = windows ? join(bundle, "resources", "app") : join(bundle, "Contents", "Resources", "app");
   const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
   const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
   const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
@@ -56,7 +57,7 @@ function request(method, params) {
 function launch() {
   return new Promise((resolveLaunch, reject) => {
     const child = spawn(executable, [], {
-      env: { ...process.env, HOME: home, LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
+      env: { ...process.env, HOME: home, USERPROFILE: home, LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -89,9 +90,11 @@ function launch() {
 async function launchDevelopmentDaemon() {
   const child = spawn(process.execPath, [developmentDaemon], {
     detached: true,
+    windowsHide: true,
     env: {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
       LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT: "packaged-smoke-stale-development-runtime",
     },
     stdio: "ignore",
@@ -128,5 +131,5 @@ try {
 } finally {
   await request("daemon.prepare_handoff").catch(() => undefined);
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }

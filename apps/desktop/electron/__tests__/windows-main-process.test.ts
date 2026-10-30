@@ -31,11 +31,11 @@ const { worktreePathForBranchInPorcelain } = await import("../main/rooms/worktre
 const { parseGitWorktreePorcelain } = await import("../repo-status.js");
 const { windowsSourceEditor } = await import("../main/workspace-file-links.js");
 
-test("supervised agents are off on Windows and stay on for macOS and Linux CI", () => {
+test("supervised agents are on for Windows and macOS, and Linux CI keeps its rule", () => {
   assert.deepEqual(desktopPlatformCapabilities({ platform: "win32", env: {} }), {
     platform: "win32",
-    supervisedAgentsSupported: false,
-    supervisorDaemonAllowed: false,
+    supervisedAgentsSupported: true,
+    supervisorDaemonAllowed: true,
   });
   assert.deepEqual(desktopPlatformCapabilities({ platform: "darwin", env: {} }), {
     platform: "darwin",
@@ -49,12 +49,6 @@ test("supervised agents are off on Windows and stay on for macOS and Linux CI", 
     supervisorDaemonAllowed: false,
   });
   assert.equal(desktopPlatformCapabilities({ platform: "linux", env: { LETAGENTS_ALLOW_NON_DARWIN_DAEMON: "1" } }).supervisorDaemonAllowed, true);
-  // A leaked CI override never switches agents on for Windows.
-  assert.deepEqual(desktopPlatformCapabilities({ platform: "win32", env: { LETAGENTS_ALLOW_NON_DARWIN_DAEMON: "1" } }), {
-    platform: "win32",
-    supervisedAgentsSupported: false,
-    supervisorDaemonAllowed: false,
-  });
 });
 
 test("the unsupported result is typed and names Windows in plain words", () => {

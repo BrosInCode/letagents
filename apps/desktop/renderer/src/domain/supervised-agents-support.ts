@@ -5,13 +5,9 @@ import { isMacPlatform } from "./room-switcher-shortcut";
 
 /**
  * Whether this app may run supervised agents on this computer. The main
- * process reports it in app info (false on Windows; macOS and Linux run agents).
- * Until that arrives the Electron renderer guesses from the browser platform,
- * so no daemon read starts on Windows. Anywhere else (unit tests under Node,
- * with or without a DOM) it starts supported.
+ * process reports it in app info. Until that arrives it starts supported.
  */
-const inElectronRenderer = typeof navigator !== "undefined" && /\bElectron\//.test(navigator.userAgent ?? "");
-const supported = ref(!inElectronRenderer || !isWindowsPlatform());
+const supported = ref(true);
 
 /** Development only: `localStorage["letagents.dev.supervisedAgentsSupported"] = "false"` previews the gated state. */
 const DEV_OVERRIDE_KEY = "letagents.dev.supervisedAgentsSupported";

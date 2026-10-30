@@ -120,8 +120,9 @@ async function removeHold(id, path) {
 }
 
 // Keep this inode forever. Unlinking a flock file can create two owners. Darwin
-// uses the kernel lock; non-Darwin tests model ownership in-process, like the
-// daemon singleton. Product maintenance is currently macOS-only.
+// uses the kernel lock. Elsewhere ownership is modeled in-process: on Windows
+// only the desktop main process takes this lock, and the app's single-instance
+// lock holds that to one process.
 const simulatedClaims = new Set();
 export async function withDaemonMaintenanceOperation(operation, path = daemonMaintenancePath()) {
   const lockPath = `${resolve(path)}.lock`;

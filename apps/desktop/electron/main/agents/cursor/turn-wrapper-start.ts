@@ -243,8 +243,8 @@ ${windows ? String.raw`  // windows-unsandboxed: no operating-system sandbox (ow
     // terminal evidence. The resulting native exit must not erase that exact,
     // actionable reason with a generic exit code.
     if (!exitEvidence) {
-      exitEvidence = { type: "exit", code, signal };
-      exitCode = code === 0 ? 0 : (typeof code === "number" ? code : 1);
+      exitEvidence = ${windows ? `nativeExitEvidence(code, signal)` : `{ type: "exit", code, signal }`};
+      exitCode = ${windows ? `exitEvidence.type === "error" ? 1 : ` : ""}code === 0 ? 0 : (typeof code === "number" ? code : 1);
     } else if (exitEvidence.type === "error") {
       // A provider that handles our fatal TERM and exits zero must not convert
       // the wrapper's already-recorded protocol/containment failure into a

@@ -17,9 +17,7 @@ import nodeTest from "node:test";
  * Skip reason for a test of supervised-agent behaviour, for
  * `test(name, { skip: supervisedAgentsOnly }, fn)`. False off Windows.
  */
-export const supervisedAgentsOnly = process.platform === "win32"
-  ? "supervised agents on Windows are tier 3"
-  : false;
+export const supervisedAgentsOnly: string | false = false;
 
 /**
  * node:test's `test` for a file whose every test runs the daemon or a

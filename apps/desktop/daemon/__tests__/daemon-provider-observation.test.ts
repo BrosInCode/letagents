@@ -5,7 +5,7 @@ import { supervisedAgentTest as test } from "../../electron/__tests__/platform.j
 import { DatabaseSync } from "node:sqlite";
 import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
-import { assertMacOS } from "../platform.js";
+import { assertSupervisorDaemonPlatform } from "../platform.js";
 import { type DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -627,8 +627,10 @@ for (const commit of ["normal", "recovered"] as const) test(`Cursor observation 
   } finally { inspection.close(); await env.cleanup(); }
 });
 
-test("daemon is visibly gated to macOS", () => {
-  assert.throws(() => assertMacOS("linux"), /macOS only/);
+test("daemon is visibly gated to macOS and Windows", () => {
+  assert.throws(() => assertSupervisorDaemonPlatform("linux"), /macOS and Windows only/);
+  assert.doesNotThrow(() => assertSupervisorDaemonPlatform("darwin"));
+  assert.doesNotThrow(() => assertSupervisorDaemonPlatform("win32"));
 });
 
 test("failed room waits remain retryable for one healthy provider execution", async () => {

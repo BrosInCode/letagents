@@ -437,3 +437,14 @@ test("Windows reaping never calls an unkillable Cursor job reaped, whatever a la
   assert.deepEqual(unknown.native.kills, ["SIGKILL"]);
 });
 
+test("the helper's unkillable exit code is a failure of its own, not Cursor's exit code", () => {
+  const evidence = new Function(`${WINDOWS_NATIVE_REAP_SOURCE}\nreturn nativeExitEvidence;`)() as
+    (code: number | null, signal: string | null) => { type: string; code?: number | null; error?: string };
+  const unkillable = evidence(0xE04C5401, null);
+  assert.equal(unkillable.type, "error");
+  assert.match(unkillable.error ?? "", /may still be running/);
+  assert.deepEqual(evidence(7, null), { type: "exit", code: 7, signal: null });
+  assert.deepEqual(evidence(0, null), { type: "exit", code: 0, signal: null });
+  assert.deepEqual(evidence(null, "SIGKILL"), { type: "exit", code: null, signal: "SIGKILL" });
+});
+
