@@ -45,6 +45,39 @@ export const MAC_DESKTOP_BETA: MacDesktopBetaPresentation = {
   },
 }
 
+export type DesktopVisitorPlatform = 'mac' | 'windows' | 'other'
+
+export interface DesktopDownloadLink {
+  platform: 'mac' | 'windows'
+  label: string
+  href: string
+}
+
+/** Reads what the browser says. Only ever orders the links, so a wrong guess costs one extra click. */
+export function detectDesktopVisitorPlatform(
+  browser: { platform?: string; userAgent?: string; userAgentData?: { platform?: string } } | undefined,
+): DesktopVisitorPlatform {
+  const reported = `${browser?.userAgentData?.platform ?? ''} ${browser?.platform ?? ''} ${browser?.userAgent ?? ''}`
+  if (/iphone|ipad|android/i.test(reported)) return 'other'
+  if (/\bwin(dows|32|64)\b/i.test(reported)) return 'windows'
+  if (/mac/i.test(reported)) return 'mac'
+  return 'other'
+}
+
+/** The visitor's own platform leads. A Windows link exists only once a release has an installer. */
+export function desktopDownloadOffer(
+  release: MacDesktopBetaPresentation,
+  platform: DesktopVisitorPlatform,
+): { primary: DesktopDownloadLink; others: DesktopDownloadLink[] } {
+  const appleSilicon: DesktopDownloadLink = { platform: 'mac', label: 'Mac · Apple Silicon', href: release.downloads.arm64 }
+  const intel: DesktopDownloadLink = { platform: 'mac', label: 'Intel Mac', href: release.downloads.x64 }
+  const windows: DesktopDownloadLink | null = release.downloads.windows
+    ? { platform: 'windows', label: 'Windows', href: release.downloads.windows }
+    : null
+  if (windows && platform === 'windows') return { primary: windows, others: [appleSilicon, intel] }
+  return { primary: appleSilicon, others: windows ? [intel, windows] : [intel] }
+}
+
 export async function fetchCurrentMacDesktopBeta(
   fetcher: typeof fetch = fetch,
 ): Promise<MacDesktopBetaPresentation> {

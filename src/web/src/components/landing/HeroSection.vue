@@ -25,32 +25,35 @@
       </div>
 
       <div id="download-mac" class="hero-mac-line" role="group" aria-label="Download the desktop app">
-        <a class="mac-primary-link" :href="macDesktopBeta.downloads.arm64">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <a class="mac-primary-link" :href="downloadOffer.primary.href">
+          <svg v-if="downloadOffer.primary.platform === 'windows'" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M3 5.5 10.5 4.4v7.1H3zM11.5 4.3 21 3v8.5h-9.5zM3 12.5h7.5v7.1L3 18.5zM11.5 12.5H21V21l-9.5-1.3z"/>
+          </svg>
+          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.33c.64-.78 1.08-1.86.96-2.94-.93.04-2.06.62-2.72 1.4-.58.68-1.1 1.79-.96 2.84 1.04.08 2.08-.52 2.72-1.3" />
           </svg>
-          <span>Mac · Apple Silicon</span>
+          <span>{{ downloadOffer.primary.label }}</span>
         </a>
-        <span class="mac-divider" aria-hidden="true">·</span>
-        <a class="mac-secondary-link" :href="macDesktopBeta.downloads.x64">
-          Intel Mac
-        </a>
-        <template v-if="macDesktopBeta.downloads.windows">
+        <template v-for="link in downloadOffer.others" :key="link.href">
           <span class="mac-divider" aria-hidden="true">·</span>
-          <a class="mac-secondary-link" :href="macDesktopBeta.downloads.windows">
-            Windows
-          </a>
+          <a class="mac-secondary-link" :href="link.href">{{ link.label }}</a>
         </template>
         <a class="mac-secondary-link" :href="macDesktopBeta.checksumsUrl">Checksums</a>
       </div>
-      <p v-if="macDesktopBeta.downloads.windows" class="hero-windows-note">{{ WINDOWS_SMARTSCREEN_NOTE }}</p>
+      <p v-if="downloadOffer.primary.platform === 'windows'" class="hero-windows-note">{{ WINDOWS_SMARTSCREEN_NOTE }}</p>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
-import { fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA, WINDOWS_SMARTSCREEN_NOTE } from '@/domain/desktopRelease'
+import { computed, defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
+import {
+  desktopDownloadOffer,
+  detectDesktopVisitorPlatform,
+  fetchCurrentMacDesktopBeta,
+  MAC_DESKTOP_BETA,
+  WINDOWS_SMARTSCREEN_NOTE,
+} from '@/domain/desktopRelease'
 
 withDefaults(defineProps<{ theme?: 'light' | 'dark' }>(), { theme: 'dark' })
 
@@ -63,6 +66,8 @@ const SymbiosisCanvas = defineAsyncComponent({
 const words = ['Talk.', 'Think.', 'Create.', 'Share.', 'Build.', 'Ship.']
 const currentWord = ref(words[0])
 const macDesktopBeta = ref(MAC_DESKTOP_BETA)
+const visitorPlatform = detectDesktopVisitorPlatform(typeof navigator === 'undefined' ? undefined : navigator)
+const downloadOffer = computed(() => desktopDownloadOffer(macDesktopBeta.value, visitorPlatform))
 const wordEl = ref<HTMLSpanElement | null>(null)
 
 let wordIndex = 0
