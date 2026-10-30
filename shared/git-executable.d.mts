@@ -11,7 +11,7 @@ export interface GitExecutableOptions {
 }
 
 export function expandWindowsVariables(value: string, env: NodeJS.ProcessEnv): string;
-export function parseRegistryExport(bytes: Uint8Array, name: string): string | null;
+export function parseRegistryExport(bytes: Buffer, name: string): string | null;
 export function readRegistryValue(key: string, name: string, env?: NodeJS.ProcessEnv): string | null;
 /** POSIX: "git". Windows: the absolute git.exe, or null when Git for Windows is not found. */
 export function resolveGitExecutable(options?: GitExecutableOptions): string | null;

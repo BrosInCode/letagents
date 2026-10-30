@@ -65,9 +65,26 @@ function absoluteFolder(entry) {
   return /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(folder) ? folder : null;
 }
 
-/** Each absolute folder of a Windows PATH value. A relative entry (cmd.exe's current-folder rule) is never searched. */
+/**
+ * Each absolute folder of a Windows PATH value. A `;` inside quotes belongs to
+ * the folder (`"D:\\Portable;Tools\\Git\\cmd"`). A relative entry (cmd.exe's
+ * current-folder rule) is never searched.
+ */
 function pathFolders(value) {
-  return String(value ?? "").split(";").map(absoluteFolder).filter(Boolean);
+  const entries = [];
+  let entry = "";
+  let quoted = false;
+  for (const character of String(value ?? "")) {
+    if (character === '"') quoted = !quoted;
+    if (character === ";" && !quoted) {
+      entries.push(entry);
+      entry = "";
+    } else {
+      entry += character;
+    }
+  }
+  entries.push(entry);
+  return entries.map(absoluteFolder).filter(Boolean);
 }
 
 /**
@@ -106,7 +123,10 @@ export function parseRegistryExport(bytes, name) {
   const text = (bytes[0] === 0xff && bytes[1] === 0xfe ? bytes.subarray(2).toString("utf16le") : bytes.toString("utf8"))
     .replace(/\\\r?\n[ \t]*/g, "");
   const wanted = name.toLowerCase();
+  let sections = 0;
   for (const line of text.split(/\r?\n/)) {
+    // The key's own values come first; a later section is a subkey.
+    if (line.startsWith("[") && ++sections > 1) break;
     const match = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line.trim());
     if (!match || match[1].replace(/\\(.)/g, "$1").toLowerCase() !== wanted) continue;
     const string = /^"((?:[^"\\]|\\.)*)"$/.exec(match[2]);

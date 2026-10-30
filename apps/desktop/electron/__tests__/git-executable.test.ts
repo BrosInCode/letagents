@@ -191,6 +191,9 @@ test("reg export values read back whole, outside the console code page too", () 
   assert.equal(parseRegistryExport(file, "path"), user);
   assert.equal(parseRegistryExport(file, "OneDrive"), "C:\\Users\\José\\OneDrive");
   assert.equal(parseRegistryExport(file, "Missing"), null);
+  // A subkey's value of the same name is not the key's own.
+  const withSubkey = regExport(["[HKEY_LOCAL_MACHINE\\SOFTWARE\\GitForWindows]", `"Other"="x"`, "", "[HKEY_LOCAL_MACHINE\\SOFTWARE\\GitForWindows\\Sub]", `"InstallPath"="E:\\\\Wrong"`]);
+  assert.equal(parseRegistryExport(withSubkey, "InstallPath"), null);
   const install = regExport(["[HKEY_LOCAL_MACHINE\\SOFTWARE\\GitForWindows]", `"InstallPath"="D:\\\\Programme\\\\Git für Windows"`]);
   assert.equal(parseRegistryExport(install, "InstallPath"), "D:\\Programme\\Git für Windows");
   assert.equal(expandWindowsVariables("%UserProfile%\\a;%MISSING%\\b", { USERPROFILE: "C:\\Users\\dev" }), "C:\\Users\\dev\\a;%MISSING%\\b");
@@ -199,6 +202,11 @@ test("reg export values read back whole, outside the console code page too", () 
 test("a PATH folder written with forward slashes still counts", () => {
   const git = "D:\\Tools\\Git\\cmd\\git.exe";
   assert.equal(resolve({ ...ENV, PATH: "D:/Tools/Git/cmd" }, fakes([git])), git);
+  resetGitExecutableCacheForTests();
+  // A ";" inside quotes is part of the folder.
+  resetGitExecutableCacheForTests();
+  const quoted = "D:\\Portable;Tools\\Git\\cmd\\git.exe";
+  assert.equal(resolve({ ...ENV, PATH: "C:\\Windows;\"D:\\Portable;Tools\\Git\\cmd\";C:\\Other" }, fakes([quoted])), quoted);
   resetGitExecutableCacheForTests();
   // Relative entries stay out, in either slash form.
   assert.equal(resolve({ ...ENV, PATH: "Tools/Git/cmd;./cmd" }, fakes(["Tools\\Git\\cmd\\git.exe", "cmd\\git.exe"])), null);
