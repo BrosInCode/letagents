@@ -60,12 +60,21 @@ function assertNoRedirect(launcher, base, relative, files) {
 // What cmd-shim writes for a bin with no shebang, which runs the file as it
 // is (`prog + " " + args + " " + target + " %*"`, with args and target empty):
 const NPM_SHIM_HEAD = ["@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0"];
-const NPM_SHIM_NATIVE_TARGET = /^"%dp0%\\([^"]+\.exe)"\s+%\*$/i;
+// A line that starts a program in the shim's folder claims this shape, on any
+// line of the file. A script shim's `"%dp0%\node.exe"` is not such a claim.
+const NPM_SHIM_NATIVE_CLAIM = /^[ \t]*"%dp0%\\(?!node\.exe")[^"\r\n]+\.exe"[ \t]/im;
+const NPM_SHIM_NATIVE_TARGET = /^"%dp0%\\([^"]+\.exe)"   %\*$/i;
 // One path segment, in characters that mean nothing to cmd.exe or to Windows path parsing.
 const NPM_TARGET_SEGMENT = /^[A-Za-z0-9@_+-](?:[A-Za-z0-9@._+-]*[A-Za-z0-9@_+-])?$/;
 
+/** The lines of a launcher that do anything. A lone CR ends a line for PowerShell, so no line of such a text can be trusted. */
 function significantLines(text) {
-  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (/\r(?!\n)/.test(text)) return [];
+  return text.split(/\r?\n/).map((line) => line.replace(/^[ \t]+|[ \t]+$/g, "")).filter(Boolean);
+}
+
+function isExactly(lines, expected) {
+  return lines.length === expected.length && expected.every((line, index) => lines[index] === line);
 }
 
 /** True for `node_modules\<name>\...\<file>` or `node_modules\@<scope>\<name>\...\<file>`. */
@@ -74,13 +83,14 @@ function namesFileInPackage(segments) {
   return segments[0]?.toLowerCase() === "node_modules" && segments.length > packageDepth;
 }
 
-/** The native program of an npm shim, or null for a file that does not end like one. */
+/** The native program of an npm shim, or null for a file that does not claim to be one. */
 function npmNativeProgram(shim, text, files) {
+  if (!NPM_SHIM_NATIVE_CLAIM.test(text)) return null;
   const lines = significantLines(text);
-  const last = lines.at(-1) ?? "";
-  const target = NPM_SHIM_NATIVE_TARGET.exec(last)?.[1];
-  if (target === undefined) return null;
-  if (!isExactly(lines, [...NPM_SHIM_HEAD, `"%dp0%\\${target}"   %*`])) throw new ProviderInstallError(shim, "its text is not the npm shim for a native program.");
+  const target = NPM_SHIM_NATIVE_TARGET.exec(lines.at(-1) ?? "")?.[1];
+  if (target === undefined || !isExactly(lines.slice(0, -1), NPM_SHIM_HEAD)) {
+    throw new ProviderInstallError(shim, "its text is not the npm shim for a native program.");
+  }
   const segments = target.split("\\");
   if (!namesFileInPackage(segments) || !segments.every((segment) => NPM_TARGET_SEGMENT.test(segment))) {
     throw new ProviderInstallError(shim, `its target ${target} is not a file inside an npm package folder beside it.`);
@@ -165,10 +175,6 @@ exit $LASTEXITCODE
 // The same pattern as the script's, which .NET matches without case.
 const CURSOR_VERSION_FOLDER = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/i;
 
-function isExactly(lines, expected) {
-  return lines.length === expected.length && expected.every((line, index) => lines[index] === line);
-}
-
 /** `lines` without the updater's hook, when they start with one, compared with the launcher's own lines. */
 function matchesLauncher(lines, hooks, expected) {
   const hook = hooks.find((candidate) => isExactly(lines.slice(0, candidate.length), candidate));
@@ -238,9 +244,11 @@ function cursorEnvironment(launcher, env) {
   };
 }
 
-function cursorInstalledProgram(launcher, text, files, env) {
-  const named = /^(?:cursor-agent|agent)\.cmd$/i.test(basename(launcher)) || /cursor-agent\.ps1/i.test(text);
-  if (!named) return null;
+function cursorInstalledProgram(launcher, text, files, env, isNodeShim) {
+  // A launcher's name is a claim only when the file is not a script shim, which npm may well
+  // name cursor-agent.cmd. Text that names the script is a claim whatever else the file holds.
+  const claimed = /cursor-agent\.ps1/i.test(text) || (!isNodeShim && /^(?:cursor-agent|agent)\.cmd$/i.test(basename(launcher)));
+  if (!claimed) return null;
   if (!isCursorLauncherCmd(text)) throw new ProviderInstallError(launcher, "its text is not a Cursor launcher this version of LetAgents knows.");
   const root = dirname(launcher);
   const script = join(root, "cursor-agent.ps1");
@@ -258,7 +266,9 @@ function cursorInstalledProgram(launcher, text, files, env) {
  * The real program behind the batch file `program`, whose text is `text`:
  * `{ file, args, envAdditions }`, or null for a batch file that is neither of
  * these installs. Throws ProviderInstallError for one that claims to be and
- * does not hold up, whether or not the caller allows cmd.exe.
+ * does not hold up, whether or not the caller allows cmd.exe, or the file
+ * also has a line that reads as a script shim (`isNodeShim`): that reading
+ * is loose, so it must not excuse a file from this one.
  */
 export function windowsInstalledProgram(program, text, options = {}) {
   const files = {
@@ -267,5 +277,6 @@ export function windowsInstalledProgram(program, text, options = {}) {
     realpath: options.realpath ?? realpathSync.native,
     readdir: options.readdir ?? ((folder) => readdirSync(folder, { withFileTypes: true })),
   };
-  return npmNativeProgram(program, text, files) ?? cursorInstalledProgram(program, text, files, options.env ?? process.env);
+  return npmNativeProgram(program, text, files)
+    ?? cursorInstalledProgram(program, text, files, options.env ?? process.env, options.isNodeShim === true);
 }

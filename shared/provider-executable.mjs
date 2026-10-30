@@ -63,7 +63,7 @@ function batchProgramOf(program, execPath, env, launchOptions = {}) {
   let text;
   try { text = readFile(program); } catch { return { nodeShim: null, installed: null }; }
   const nodeShim = parseNodeShim(program, text, { execPath, exists: launchOptions.exists });
-  return { nodeShim, installed: nodeShim ? null : windowsInstalledProgram(program, text, { ...launchOptions, env }) };
+  return { nodeShim, installed: windowsInstalledProgram(program, text, { ...launchOptions, env, isNodeShim: nodeShim !== null }) };
 }
 
 /** A Windows batch file that is neither an npm or pnpm shim nor a known install: only cmd.exe could start it. */

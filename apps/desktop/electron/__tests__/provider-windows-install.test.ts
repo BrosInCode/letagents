@@ -168,14 +168,17 @@ test("a link above the shim's own folder is no escape, and a different letter ca
 test("a native-program shim with anything else in it, or with its program gone, fails closed", () => {
   for (const shim of [
     `calc.exe\r\n${OPENCODE_CMD}`,
+    `${OPENCODE_CMD}C:\\Temp\\evil.exe\r\n`,
+    `${OPENCODE_CMD}node "%~dp0\\..\\evil.js" %*\r\n`,
     OPENCODE_CMD.replace("@ECHO off", "@ECHO on"),
     OPENCODE_CMD.replace("SETLOCAL", "SETLOCAL\r\nSET PATH=C:\\evil"),
     OPENCODE_CMD.replace("   %*", " %*"),
     OPENCODE_CMD.replace("   %*", " --flag %*"),
+    OPENCODE_CMD.replace("SETLOCAL\r\n", "SETLOCAL\rcalc.exe\r\n"),
   ]) {
-    const target = /--flag/.test(shim) ? null : /is not the npm shim/;
-    if (target) assert.throws(() => providerLaunchCommand("opencode", [], openCodeDisk(shim).options(npmEnv, { allowCmd: true })), REFUSED(target));
-    else assert.throws(() => providerLaunchCommand("opencode", [], openCodeDisk(shim).options(npmEnv)), ProviderBatchFileError);
+    for (const allowCmd of [false, true]) {
+      assert.throws(() => providerLaunchCommand("opencode", [], openCodeDisk(shim).options(npmEnv, { allowCmd })), REFUSED(/is not the npm shim/), shim);
+    }
   }
   const gone = openCodeDisk();
   gone.files.delete(OPENCODE_EXE);
@@ -274,15 +277,40 @@ test("a Cursor launcher of any other shape fails closed, names the file, and nev
     ["a changed program", CURSOR_CMD, CURSOR_PS1.replace('& "$nodePath" "$scriptPath', '& "C:\\evil.exe" "$scriptPath'), /cursor-agent\.ps1: its text/],
     ["a second run", CURSOR_CMD, `${CURSOR_PS1}calc.exe\r\n`, /cursor-agent\.ps1: its text/],
     ["a half hook", CURSOR_CMD, CURSOR_PS1.replace("& $promoteStaged\r\n", ""), /cursor-agent\.ps1: its text/],
+    ["a script shim line after it", `${CURSOR_CMD}node "%~dp0\\..\\evil.js" %*\r\n`, CURSOR_PS1, /cursor-agent\.cmd: its text/],
+    ["a lone CR in the launcher", CURSOR_CMD.replace("REM Remove trailing backslash\r\n", "REM Remove trailing backslash\rcalc.exe\r\n"), CURSOR_PS1, /cursor-agent\.cmd: its text/],
+    ["a statement after a lone CR in a comment", CURSOR_CMD, CURSOR_PS1.replace("## Enable Node.js compile cache", "# harmless\r$scriptPath = \"C:\\Other\"\r\n## Enable Node.js compile cache"), /cursor-agent\.ps1: its text/],
+    ["a space that is not a space", `\u00a0${CURSOR_CMD}`, CURSOR_PS1, /cursor-agent\.cmd: its text/],
   ];
   for (const [name, launcher, script, message] of cases) {
     for (const allowCmd of [false, true]) {
       assert.throws(() => providerLaunchCommand("cursor-agent", ["-p", "x"], cursorDisk(undefined, launcher, script).options(cursorEnv, { allowCmd })), REFUSED(message), name);
     }
   }
+  // A script-shim line must not excuse a file that names the script, under any name.
+  const shimmed = cursorDisk().file("C:\\npm\\tool.cmd", `${CURSOR_CMD}node "%~dp0\\..\\evil.js" %*\r\n`);
+  assert.throws(() => providerLaunchCommand("C:\\npm\\tool.cmd", [], shimmed.options(cursorEnv)), REFUSED(/tool\.cmd: its text/));
   // A file of another name that points at the same script claims to be this launcher too.
   const other = cursorDisk().file(`${INSTALL}\\wrapper.cmd`, `@echo off\r\ncalc.exe\r\ncall "%~dp0cursor-agent.ps1"\r\n`);
   assert.throws(() => providerLaunchCommand(`${INSTALL}\\wrapper.cmd`, [], other.options(cursorEnv, { allowCmd: true })), REFUSED(/wrapper\.cmd: its text/));
+});
+
+test("a script shim keeps its own path: its node.exe check claims nothing, and npm may name it cursor-agent.cmd", () => {
+  const shim = [
+    "@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0", "",
+    "IF EXIST \"%dp0%\\node.exe\" (", "  SET \"_prog=%dp0%\\node.exe\"", ") ELSE (", "  SET \"_prog=node\"", "  SET PATHEXT=%PATHEXT:;.JS;=;%", ")", "",
+    "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\cursor-agent\\index.js\" %*", "",
+  ].join("\r\n");
+  const disk = new Disk().file(`${NPM}\\cursor-agent.cmd`, shim).file(`${NPM}\\node.exe`);
+  const launch = providerLaunchCommand("cursor-agent", ["-p"], disk.options(npmEnv));
+  assert.equal(launch.file, `${NPM}\\node.exe`);
+  assert.deepEqual(launch.args, [`${NPM}\\node_modules\\cursor-agent\\index.js`, "-p"]);
+  assert.equal(launch.envAdditions, null);
+});
+
+test("a batch file that claims neither install is still refused as a batch file", () => {
+  const disk = new Disk().file(`${NPM}\\sometool.cmd`, "@echo off\r\nC:\\tools\\agent.exe %*\r\n");
+  assert.throws(() => providerLaunchCommand("sometool", [], disk.options(npmEnv)), ProviderBatchFileError);
 });
 
 test("a Cursor install with a part missing or redirected fails closed", () => {
