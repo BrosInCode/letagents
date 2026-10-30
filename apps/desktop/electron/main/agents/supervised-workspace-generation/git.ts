@@ -1,11 +1,12 @@
 /** Running git and other processes for the source authority and the private clone, git control files and file clones. */
 import { spawn } from "node:child_process";
-import { constants as fsConstants, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { constants as fsConstants, mkdtempSync, readdirSync } from "node:fs";
 import { copyFile, lstat, realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, win32 } from "node:path";
 import { assertOwnerPrivateSync, createPrivateDirSync, nullDevice, openNoFollow, ownerPrivatePlatform, protectOwnerPrivateSync, windowsSystemTool } from "../../../../../../shared/owner-private-fs.mjs";
 import { letagentsHomePath } from "../../../../../../shared/letagents-home.mjs";
+import { GIT_NOT_FOUND_MESSAGE, resolveGitExecutable } from "../../../../../../shared/git-executable.mjs";
 import type { SourceGitAuthority } from "./types.js";
 import { fileVersionKey, generationError, limitError } from "./helpers.js";
 
@@ -146,39 +147,16 @@ export function sourceGitEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-let windowsGitCache: { key: string; path: string } | null = null;
-
-/** The Git every command here runs: /usr/bin/git on macOS, git.exe found on PATH on Windows. */
+/**
+ * The Git every command here runs: /usr/bin/git on macOS, and on Windows the
+ * absolute git.exe the shared resolver finds (PATH, the registry's PATH, then
+ * where Git for Windows installs). Never a .cmd or .bat: those run through a shell.
+ */
 export function gitExecutable(): string {
   if (ownerPrivatePlatform() !== "win32") return "/usr/bin/git";
-  const key = `${process.env.PATH ?? ""}\0${process.env.PATHEXT ?? ""}`;
-  if (windowsGitCache?.key !== key) windowsGitCache = { key, path: findWindowsGitExecutable(process.env) };
-  return windowsGitCache.path;
-}
-
-/**
- * The first `git` + PATHEXT extension in an absolute PATH folder, as cmd.exe
- * resolves it. Only .exe and .com count: a .cmd or .bat runs through a shell.
- * A relative PATH entry (cmd.exe's current folder rule) is never searched.
- */
-export function findWindowsGitExecutable(
-  env: NodeJS.ProcessEnv,
-  isFile: (path: string) => boolean = (path) => { try { return statSync(path).isFile(); } catch { return false; } },
-): string {
-  const extensions = (env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
-    .split(";")
-    .map((extension) => extension.trim().toLowerCase())
-    .filter((extension) => extension === ".exe" || extension === ".com");
-  const entries = (env.PATH ?? env.Path ?? "").split(";")
-    .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
-    .filter((entry) => /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(entry));
-  for (const entry of entries) {
-    for (const extension of extensions) {
-      const candidate = win32.join(entry, `git${extension}`);
-      if (isFile(candidate)) return candidate;
-    }
-  }
-  throw generationError("Git for Windows (git.exe) was not found on PATH.", "GIT_EXECUTABLE_NOT_FOUND");
+  const git = resolveGitExecutable({ platform: "win32" });
+  if (git === null) throw generationError(GIT_NOT_FOUND_MESSAGE, "GIT_EXECUTABLE_NOT_FOUND");
+  return git;
 }
 
 export async function readStableGitControlFile(path: string): Promise<string> {

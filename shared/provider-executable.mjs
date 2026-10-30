@@ -46,7 +46,7 @@ function isBareName(command) {
 }
 
 /** Where a program that is on no PATH entry is "spawned": a folder below the Windows folder that nothing makes. */
-function notFoundPath(command, env) {
+export function notFoundPath(command, env) {
   const systemRoot = env.SystemRoot?.trim() || env.windir?.trim() || "C:\\Windows";
   return path.win32.join(systemRoot, "letagents-not-on-path", command);
 }

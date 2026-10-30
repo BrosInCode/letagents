@@ -5,6 +5,7 @@ import { devNull, tmpdir } from 'node:os';
 import nodePath, { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
+import { gitSpawnFile } from './git-executable.mjs';
 import { signalTree, spawnTree } from './process-tree.mjs';
 const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 // Hooks off: os.devNull is /dev/null on POSIX and \\.\nul on Windows. A bare
@@ -15,7 +16,7 @@ const HOOKS_OFF = `core.hooksPath=${devNull}`;
 // the one a capture reads (a base's tree, the start snapshot itself).
 function git(cwd, args, signal, index, input, extra) {
     return new Promise((resolve, reject) => {
-        const child = execFile('git', ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
             cwd, signal, timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 8 * 1024 * 1024, encoding: 'utf8',
             env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...(index ? { GIT_INDEX_FILE: index } : {}), ...extra },
         }, (error, stdout) => error ? reject(error) : resolve(stdout));
@@ -31,7 +32,7 @@ function git(cwd, args, signal, index, input, extra) {
  */
 function remoteGit(cwd, args, signal, extra) {
     return new Promise((resolve, reject) => {
-        const child = spawnTree('git', ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = spawnTree(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
             cwd, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'ignore'],
             env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...extra },
         });

@@ -7,6 +7,9 @@ export function resolveWindowsCommand(command: string, options?: {
   exists?: (filePath: string) => boolean;
 }): string | null;
 
+/** Where a program that is on no PATH entry is "spawned": a folder below the Windows folder that nothing makes. */
+export function notFoundPath(command: string, env: NodeJS.ProcessEnv): string;
+
 export interface ProviderLaunchOptions {
   platform?: NodeJS.Platform;
   /** The environment the program is looked up in. */

@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, stat } from "node:fs/pr
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { gitSpawnFile } from "../../../shared/git-executable.mjs";
 import { withWorkspaceFence } from "./workspace-fence.js";
 
 /** Action commands return void; identity queries must return stdout. */
@@ -20,7 +21,7 @@ const execFileAsync = promisify(execFile);
 export function createGitCommand(stableCwd: string): GitCommand {
   const cwd = resolve(stableCwd);
   return async (args) => {
-    const { stdout } = await execFileAsync("git", args, {
+    const { stdout } = await execFileAsync(gitSpawnFile(), args, {
       cwd,
       maxBuffer: 8 * 1024 * 1024,
     });
