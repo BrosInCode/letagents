@@ -91,7 +91,8 @@ function finalPath(path: string): string {
  * the caller's check then refuses it.
  */
 function sameNameFormAncestor(projectRoot: string, workspace: string): string {
-  if (!relative(projectRoot, workspace).startsWith("..")) return projectRoot;
+  const toWorkspace = relative(projectRoot, workspace);
+  if (!toWorkspace.startsWith("..") && !isAbsolute(toWorkspace)) return projectRoot;
   let rootFinal: string;
   let workspaceFinal: string;
   try {
@@ -159,7 +160,8 @@ export function cursorEffectiveProjectDirectories(workspaceRoot: string): string
     if (process.platform === "win32") projectRoot = sameNameFormAncestor(projectRoot, workspace);
   }
   const suffix = relative(projectRoot, workspace);
-  if (suffix.startsWith("..") || resolve(projectRoot, suffix) !== workspace) {
+  // On Windows `relative` answers with an absolute path for another drive.
+  if (suffix.startsWith("..") || isAbsolute(suffix) || resolve(projectRoot, suffix) !== workspace) {
     throw new Error("Cursor workspace escaped its resolved Git project root.");
   }
   const directories = [projectRoot];

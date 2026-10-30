@@ -5,7 +5,8 @@ locally. Every step here was run on a Windows 11 machine on 2026-10-30; the resu
 [What a run looks like](#what-a-run-looks-like).
 
 Supervised room agents run on Windows. A test that needs something Windows lacks skips itself there with a one-line
-reason; each reason is defined once in `apps/desktop/electron/__tests__/platform.ts`.
+reason. Most reasons are named once in `apps/desktop/electron/__tests__/platform.ts`; some older POSIX-only tests carry
+theirs inline.
 
 ## What you need
 

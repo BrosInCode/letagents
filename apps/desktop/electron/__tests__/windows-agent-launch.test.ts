@@ -10,7 +10,7 @@ import type { ChildProcess, ExecFileOptions, SpawnOptions } from "node:child_pro
 import test from "node:test";
 
 import { execProviderFile, ProviderBatchFileError, providerLaunchCommand } from "../../../../shared/provider-executable.mjs";
-import { spawnTree } from "../../../../shared/process-tree.mjs";
+import { parseWindowsCommandLine, spawnTree, windowsCommandLine } from "../../../../shared/process-tree.mjs";
 import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 import {
   daemonStateDirEnvironment,
@@ -20,6 +20,7 @@ import {
 } from "../main/agents/windows-child-environment.js";
 import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
 import { openCodeMcpLaunch } from "../main/agents/open-model/adapter-launch.js";
+import { windowsCodexArguments } from "../main/agents/codex-home-harness.js";
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
 import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
 import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
@@ -293,4 +294,12 @@ test("Open Model's MCP server is the sealed runtime on Windows, and macOS keeps 
     command: [process.execPath, "/dev/entry.js"],
     environment: {},
   });
+});
+
+test("a Windows Codex's own arguments are read through the helper that started it", () => {
+  const codex = windowsCommandLine("C:\\app\\LetAgents.exe", ["C:\\npm\\codex.js", "app-server", "-c", 'mcp_servers={ "github" = { enabled = false } }']);
+  const helper = windowsCommandLine("C:\\app\\letagents-process-tree.exe", ["spawn", "C:\\app\\LetAgents.exe", codex]);
+  assert.deepEqual(windowsCodexArguments(helper), parseWindowsCommandLine(codex));
+  assert.match(windowsCodexArguments(helper).join(" "), /mcp_servers=\{ "github" = \{ enabled = false \} \}/);
+  assert.deepEqual(windowsCodexArguments(codex), parseWindowsCommandLine(codex));
 });

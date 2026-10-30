@@ -144,15 +144,18 @@ export class ReplyAttachmentSpool {
 
 /** A spool copy is trusted only as a regular, singly linked file the daemon wrote. */
 async function readSpoolCopy(path: string): Promise<Buffer | null> {
-  // Windows has no O_NOFOLLOW, so open() would follow a link planted in place of the copy. Refuse a link first.
-  if (process.platform === "win32") {
-    const found = await lstat(path).catch(() => null);
-    if (!found || found.isSymbolicLink()) return null;
-  }
+  // Windows has no O_NOFOLLOW, so open() would follow a link planted in place of the copy. Refuse a
+  // link first; a link planted after that check opens another file, which the identity check refuses.
+  const found = process.platform === "win32" ? await lstat(path, { bigint: true }).catch(() => null) : undefined;
+  if (found === null || found?.isSymbolicLink()) return null;
   const handle = await open(path, ATTACHMENT_READ_FLAGS).catch(() => null);
   if (!handle) return null;
   try {
     const info = await handle.stat();
+    if (found) {
+      const opened = await handle.stat({ bigint: true });
+      if (opened.ino !== found.ino || opened.dev !== found.dev) return null;
+    }
     if (!info.isFile() || info.nlink !== 1 || info.size > MESSAGE_ATTACHMENT_LIMITS.maxFileBytes) return null;
     return await handle.readFile();
   } finally {

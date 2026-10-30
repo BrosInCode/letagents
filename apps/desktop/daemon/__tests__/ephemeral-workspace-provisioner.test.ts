@@ -319,8 +319,8 @@ test("the repository is private, excludes exactly the daemon's own entries, and 
 
     // A process that died while writing leaves its staging directory; a live one's is left alone.
     const dead = join(workspace.path, `.git.999999.${ids[2]}.tmp`);
-    // This test process is alive. (PID 1 is alive on POSIX only; a Windows process id is never 1.)
-    const live = join(workspace.path, `.git.${process.pid}.${ids[3]}.tmp`);
+    // PID 1 is alive on POSIX; a Windows process id is never 1, and this test process is alive.
+    const live = join(workspace.path, `.git.${process.platform === "win32" ? process.pid : 1}.${ids[3]}.tmp`);
     await mkdir(dead);
     await mkdir(live);
     await provisioner.ensureRepository(workspace.path);

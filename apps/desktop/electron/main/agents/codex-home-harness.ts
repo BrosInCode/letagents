@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { lstatSync, opendirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from "node:path";
 
 import {
   CODEX_OWNER_FEATURE_OVERRIDES,
@@ -15,7 +15,7 @@ import {
   type CodexMcpListRunner,
   type CodexMcpServerEntry,
 } from "../../../../../shared/codex-owner-isolation.mjs";
-import { parseWindowsCommandLine, signalTree, spawnTree, windowsProcessInfo } from "../../../../../shared/process-tree.mjs";
+import { parseWindowsCommandLine, PROCESS_TREE_HELPER_NAME, signalTree, spawnTree, windowsProcessInfo } from "../../../../../shared/process-tree.mjs";
 
 // A launch that keeps the owner's own Codex setup leaves the owner's
 // extensions on: plugins, app connectors, computer and browser use, hooks,
@@ -758,9 +758,21 @@ export type CodexLiveProcess = {
 };
 
 /**
- * Read a running app-server's command line without ever holding the caller
+ * The arguments a Windows Codex was started with. A pid of a launched agent is
+ * the process-tree helper's, and its third argument is Codex's whole command
+ * line: `letagents-process-tree.exe spawn <program> <command line> [wait]`.
+ */
+export function windowsCodexArguments(commandLine: string): string[] {
+  const started = parseWindowsCommandLine(commandLine);
+  if (win32.basename(started[0] ?? "").toLowerCase() !== PROCESS_TREE_HELPER_NAME || started[1] !== "spawn") return started;
+  return parseWindowsCommandLine(started[3] ?? "");
+}
+
+/**
+ * Read a running app-server's command line. On POSIX it never holds the caller
  * up: `ps` runs on its own, and one that has not answered in time is killed
- * and counted as a process that cannot be read. Null when it cannot be read.
+ * and counted as a process that cannot be read. On Windows the helper's answer
+ * is waited for, for at most that time. Null when it cannot be read.
  */
 export function readCodexCommandLine(
   pid: number,
@@ -776,7 +788,7 @@ export function readCodexCommandLine(
       runHelper: (file, args) => spawnSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout }),
     });
     if (!info || info.exited || info.commandLine === null) return Promise.resolve(null);
-    return Promise.resolve(parseWindowsCommandLine(info.commandLine).join(" ").trim() || null);
+    return Promise.resolve(windowsCodexArguments(info.commandLine).join(" ").trim() || null);
   }
   return new Promise((resolve) => {
     let settled = false;

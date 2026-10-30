@@ -863,8 +863,12 @@ export class WorkerBindingStore {
         try { await rename(temporary, backup); break; } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (process.platform !== "win32" || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "") || attempt >= 20) throw error;
-          const raced = await this.readOwnerOnly(backup).catch(() => undefined);
-          if (raced !== undefined && isRedactedLegacyBackup(raced, expectedChecksum)) return;
+          const raced = await this.readOwnerOnly(backup);
+          if (raced === undefined) throw new Error("Legacy worker binding migration integrity error: exact backup disappeared during redaction.");
+          if (isRedactedLegacyBackup(raced, expectedChecksum)) return;
+          if (checksumOf(raced) !== expectedChecksum) {
+            throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
+          }
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
       }

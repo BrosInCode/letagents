@@ -327,11 +327,23 @@ export function linkWindowsCursorLogin(sourceHomeDir: string, homeDir: string, s
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Cursor's saved login must be a regular file.");
   const roaming = join(homeDir, "AppData", "Roaming");
   ensurePrivateProfileTree(homeDir, [join(homeDir, "AppData"), roaming, join(roaming, "Cursor")]);
-  linkSync(source, windowsCursorLoginPath(homeDir));
+  // The profile may be on another volume than APPDATA. A copy then holds until the next link.
+  try { linkSync(source, windowsCursorLoginPath(homeDir)); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+    copyFileSync(source, windowsCursorLoginPath(homeDir));
+  }
 }
 
 export function removeWindowsCursorLogin(homeDir: string, platform: NodeJS.Platform = process.platform): void {
-  if (platform === "win32") removePrivateProfileAuthorityEntry(windowsCursorLoginPath(homeDir));
+  if (platform !== "win32") return;
+  // A junction in the profile must not lead this removal to the owner's own file.
+  for (const folder of [join(homeDir, "AppData"), join(homeDir, "AppData", "Roaming"), join(homeDir, "AppData", "Roaming", "Cursor")]) {
+    if (pathEntryExists(folder) && lstatSync(folder).isSymbolicLink()) {
+      throw new Error("Cursor private profile contains an unexpected link where its login folder belongs.");
+    }
+  }
+  removePrivateProfileAuthorityEntry(windowsCursorLoginPath(homeDir));
 }
 
 function windowsCursorLoginPath(homeDir: string): string {

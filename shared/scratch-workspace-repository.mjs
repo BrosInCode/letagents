@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
 /** Branch the empty repository starts on. It has no commits. */
 export const SCRATCH_WORKSPACE_BRANCH = "main";
@@ -175,7 +175,8 @@ const SYSTEM_GIT = "/usr/bin/git";
 async function resolveGit(path) {
   const windows = process.platform === "win32";
   for (const directory of String(path ?? "").split(windows ? ";" : ":")) {
-    if (!directory) continue;
+    // A relative entry would name Git in the working directory.
+    if (!directory || (windows && !win32.isAbsolute(directory))) continue;
     const candidate = join(directory, windows ? "git.exe" : "git");
     if (await access(candidate, constants.X_OK).then(() => true, () => false)) return candidate;
   }

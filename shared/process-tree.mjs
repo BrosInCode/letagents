@@ -253,8 +253,7 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
   if (platform !== "win32") return spawnProcess(command, args, spawnOptions);
   const env = treeOptions.env ?? spawnOptions.env ?? process.env;
   const launch = providerLaunchCommand(command, args, {
-    // A batch file that is no npm shim still goes through cmd.exe here, as before.
-    platform, env, cwd: spawnOptions.cwd, exists: treeOptions.exists, launchOptions: treeOptions.launchOptions, electron: treeOptions.electron, allowCmd: true,
+    platform, env, cwd: spawnOptions.cwd, exists: treeOptions.exists, launchOptions: treeOptions.launchOptions, electron: treeOptions.electron,
   });
   const resolved = launch.resolved;
   const helper = treeOptions.helperPath === undefined ? processTreeHelperPath({ platform, env: treeOptions.helperEnv }) : treeOptions.helperPath;

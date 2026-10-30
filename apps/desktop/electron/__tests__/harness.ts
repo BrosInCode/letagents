@@ -73,7 +73,8 @@ function isWindowsOpenFileError(error: unknown): boolean {
  * long-lived SQLite connections stay open until the process ends. Then the
  * deletion waits for process exit, after every later `after` hook has run
  * (so none of them finds its database closed), closes the SQLite connections
- * under the folder and deletes it. A failure there still fails the file.
+ * under the folder and deletes it. If a file is still held then, a detached
+ * process removes the folder once this one has ended and released its handles.
  */
 export function removeTestDirectory(folder: string): void {
   try {
