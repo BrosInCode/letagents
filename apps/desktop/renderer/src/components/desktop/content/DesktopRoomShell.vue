@@ -25,6 +25,7 @@
     <DesktopRoomControlRail
       v-model:search-query="searchQuery"
       :action-panel-open="actionPanelOpen"
+      :action-panel-section="actionPanelSection"
       :search-open="searchOpen"
       :room="room"
       :storage="storage"
@@ -169,6 +170,7 @@
         @view-events="openEventsForTask"
         @view-artifacts="openArtifactsForTask"
         @open-thread="openThreadFromBoard"
+        @open-room-settings="openActionPanelAt"
       />
 
       <RoomEventsView
@@ -371,7 +373,7 @@ const emit = defineEmits<DesktopRoomShellEmits>();
 const app = {} as RoomShellContext;
 Object.assign(app, { props, emit });
 const {
-  personActions, activeTab, roomChatView, revealedMessageId, actionPanelOpen, addAgentModalOpen,
+  personActions, activeTab, roomChatView, revealedMessageId, actionPanelOpen, actionPanelSection, addAgentModalOpen,
   selectedAgentDetailRequest, selectedAgentDetailRequestVersion, agentInspectorInitialTab,
   agentInspectorCompact, agentInspectorLiveFeed, agentInspectorWorkResource,
   agentInspectorWorkSourceMessageId, agentInspectorConfigurationResource,
@@ -393,7 +395,7 @@ const {
 const {
   openBoardTask, rememberChatScrollPosition, selectTab, openArtifactsForTask,
   toggleGitHubEventsVisible, setEnvironmentPanelOpen, setRoomStorageMode, forkRoomToLocal,
-  publishLocalRoom, toggleSearchTool, toggleActionPanel, closeActionPanel, openRules,
+  publishLocalRoom, toggleSearchTool, toggleActionPanel, openActionPanelAt, closeActionPanel, openRules,
   openAddAgentModal, revealRoomMessage, revealRecordedWorkMessage, revealSharedLiveRequest,
   openAgentWorktree, copyRoomLink, exportChat,
 } = Object.assign(app, useRoomShellToolActions(app));

@@ -158,7 +158,7 @@
                     ><span class="work-compact-owner"
                       ><span aria-hidden="true">·</span
                       ><ChatAvatar
-                        :name="workOwner(card)"
+                        :name="workOwnerAvatarName(card)"
                         :agent="Boolean(card.agent?.agent_key)"
                         :agent-key="card.agent?.agent_key"
                         :provider="card.agent?.provider"
@@ -167,7 +167,7 @@
                   ></span
                 ><span class="work-row-owner"
                   ><ChatAvatar
-                    :name="workOwner(card)"
+                    :name="workOwnerAvatarName(card)"
                     :agent="Boolean(card.agent?.agent_key)"
                     :agent-key="card.agent?.agent_key"
                     :provider="card.agent?.provider"
@@ -295,6 +295,7 @@ import {
   workKey,
   workMatches,
   workOwner,
+  workOwnerAvatarName,
   workSignal,
   workTone,
   type MyWorkTrackerFilter,

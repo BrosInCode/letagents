@@ -57,7 +57,10 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // Two requests act on one open handle instead of the path, so a folder above
 // the file renamed meanwhile cannot make the answer describe another file:
 //   "object:<path>"  the owner and DACL of the handle, and the file's bytes
-//                    read through it: "ok:<SDDL>|<base64>";
+//                    read through it: "ok:<SDDL>|<base64>"; "error:busy" when
+//                    another process holds the file without sharing it or
+//                    locks a range of it (a sharing violation on the open, a
+//                    lock violation on the read), which is not a refusal;
 //   "owner-alias:<SID>" how Windows writes that SID as an SDDL owner
 //                    ("O:LA", or "O:<SID>" when it has no alias);
 //   "upgrade:<path>" if the handle's owner is this account or Administrators
@@ -70,10 +73,17 @@ const PATHS_VARIABLE = "LETAGENTS_OWNER_PRIVATE_PATHS";
 // load modules, which takes tens of seconds on a machine with many installed
 // (seen on Windows CI in a process started with a reduced environment).
 const ANSWER_FUNCTION = [
+  // An IOException for ERROR_SHARING_VIOLATION (32: the open) or ERROR_LOCK_VIOLATION (33: a read of a locked
+  // range), under the method call's own exception.
+  "function LetAgentsBusy($record) {",
+  "  $e = $record.Exception; while ($e.InnerException) { $e = $e.InnerException }",
+  "  return ($e -is [System.IO.IOException]) -and ($e.HResult -eq -2147024864 -or $e.HResult -eq -2147024863)",
+  "}",
   "function LetAgentsAnswer([string]$p) {",
   "  try {",
   "    if ($p.StartsWith('object:')) {",
-  "      $fs = [System.IO.File]::Open($p.Substring(7), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')",
+  "      try { $fs = [System.IO.File]::Open($p.Substring(7), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete') }",
+  "      catch { if (LetAgentsBusy $_) { return 'error:busy' }; return 'error:' }",
   "      try {",
   // The length is read once: a file that grows meanwhile fails the end-of-file check below.
   `        $length = $fs.Length; if ($length -gt ${OBJECT_LIMIT}) { return 'error:' }`,
@@ -82,7 +92,7 @@ const ANSWER_FUNCTION = [
   "        while ($read -lt $bytes.Length) { $n = $fs.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }",
   "        if ($read -ne $bytes.Length -or $fs.ReadByte() -ne -1) { return 'error:' }",
   "        return 'ok:' + $sddl + '|' + [Convert]::ToBase64String($bytes)",
-  "      } finally { $fs.Dispose() }",
+  "      } catch { if (LetAgentsBusy $_) { return 'error:busy' }; return 'error:' } finally { $fs.Dispose() }",
   "    }",
   "    if ($p.StartsWith('owner-alias:')) { return 'ok:' + [System.Security.AccessControl.RawSecurityDescriptor]::new('O:' + $p.Substring(12)).GetSddlForm([System.Security.AccessControl.AccessControlSections]::Owner) }",
   "    if ($p.StartsWith('upgrade:')) {",
@@ -240,11 +250,14 @@ function chunkPaths(paths) {
   return chunks;
 }
 
-/** The SDDL per path from the PowerShell script's lines; null where the read failed. */
+/** An "object:" answer for a file another process holds without sharing it: never SDDL, so never private. */
+const OBJECT_BUSY_ANSWER = "busy:";
+
+/** The SDDL per path from the PowerShell script's lines; null where the read failed (OBJECT_BUSY_ANSWER where it was busy). */
 export function parseSddlLines(output, count) {
-  const lines = String(output).split(/\r?\n/).filter(line => line.startsWith("ok:") || line === "error:");
+  const lines = String(output).split(/\r?\n/).filter(line => line.startsWith("ok:") || line === "error:" || line === "error:busy");
   if (lines.length !== count) throw privateError("The Windows permissions answer did not match the paths asked.");
-  return lines.map(line => (line.startsWith("ok:") ? line.slice(3).trim() || null : null));
+  return lines.map(line => (line.startsWith("ok:") ? line.slice(3).trim() || null : line === "error:busy" ? OBJECT_BUSY_ANSWER : null));
 }
 
 function assertProtectable(path, sid) {
@@ -340,8 +353,13 @@ export function sddlOwnerAliases(answer, sid) {
   return match && match[1] !== sid ? [match[1]] : [];
 }
 
-/** An "object:" answer: `<SDDL>|<base64 bytes>`, or null. */
+/**
+ * An "object:" answer: `<SDDL>|<base64 bytes>`, or null. A busy file is an
+ * object with `busy` (and no SDDL, so a caller that ignored it would find it
+ * not private).
+ */
 export function parseObjectAnswer(answer) {
+  if (answer === OBJECT_BUSY_ANSWER) return { sddl: "", data: Buffer.alloc(0), busy: true };
   if (typeof answer !== "string") return null;
   const bar = answer.indexOf("|");
   if (bar <= 0 || !/^[A-Za-z0-9+/=]*$/.test(answer.slice(bar + 1))) return null;
@@ -1212,8 +1230,39 @@ function forgetSecret(security, path) {
 
 /** The digest of the bytes checked for this identity, while the verdict lasts; else null. */
 function rememberedDigest(security, path, info) {
+  return rememberedVerdict(security, path, info)?.digest ?? null;
+}
+
+/**
+ * The verdict for this identity while it lasts; with `lapsed`, also after its
+ * five minutes while no renewal has run longer than RENEWAL_GRACE_MS. Else null.
+ */
+function rememberedVerdict(security, path, info, lapsed = false) {
   const verdict = secretVerdicts.get(security)?.get(resolve(path));
-  return verdict && verdict.identity === secretIdentity(info) && Date.now() < verdict.until ? verdict.digest : null;
+  if (!verdict || verdict.identity !== secretIdentity(info)) return null;
+  const now = Date.now();
+  if (now < verdict.until) return verdict;
+  return lapsed && !(verdict.renewingSince <= now - RENEWAL_GRACE_MS) ? verdict : null;
+}
+
+/** How long a lapsed verdict is still used while its renewal runs (a slow reader); after that a read waits for a check. */
+const RENEWAL_GRACE_MS = 10_000;
+
+/** Internal: a renewal's read, which checks the file through its handle even when a verdict is kept. */
+const RENEWAL = Symbol("owner-private renewal");
+
+/**
+ * Check a lapsed verdict's file again in the background, once at a time: a
+ * private answer renews the verdict, any other answer (or a failure) drops it,
+ * so the next read waits for a full check. A renewal that takes longer than
+ * RENEWAL_GRACE_MS stops the lapsed verdict from being used meanwhile.
+ */
+function renewSecret(security, path, verdict, options) {
+  if (verdict.renewingSince !== undefined) return;
+  verdict.renewingSince = Date.now();
+  void readOwnerPrivateFile(path, undefined, { ...options, renewInBackground: false, [RENEWAL]: true }).catch(() => {
+    if (secretVerdicts.get(security)?.get(resolve(path)) === verdict) forgetSecret(security, path);
+  });
 }
 
 function secretRefused(path, cause) {
@@ -1234,6 +1283,11 @@ function secretFailure(path, error, attempt) {
   if (error?.code === "ENOENT") return error;
   if (BUSY_OPEN_CODES.has(error?.code) && attempt < SECRET_ATTEMPTS) return null;
   return error?.code === "EOWNERPRIVATE" ? error : secretRefused(path, error);
+}
+
+/** The reader could not open the file: another process holds it without sharing it (tried again, as a busy open). */
+function busyObject(path) {
+  return Object.assign(new Error(`${path} is open in another process that does not share it`), { code: "EBUSY" });
 }
 
 /** The path's own lstat (bigint), or a throw: a link or anything but a regular file is refused. */
@@ -1329,20 +1383,24 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
     try {
       const info = secretInfo(path, lstatSync(path, { bigint: true }));
       const known = rememberedDigest(security, path, info);
+      // A file renamed into place during the open (ELOOP: the path changed under it) is checked again below.
+      const descriptor = known ? openUnlessReplacedSync(path, options) : null;
       if (known) {
-        const descriptor = openNoFollowSync(path, constants.O_RDONLY, undefined, options);
-        try {
-          if (openedIsChecked(fstatSync(descriptor, { bigint: true }), info)) {
-            const data = readExactlySync(descriptor, Number(info.size));
-            if (data && digest(data) === known) return decoded(data, encoding);
-          }
-        } finally { closeSync(descriptor); }
+        if (descriptor !== null) {
+          try {
+            if (openedIsChecked(fstatSync(descriptor, { bigint: true }), info)) {
+              const data = readExactlySync(descriptor, Number(info.size));
+              if (data && digest(data) === known) return decoded(data, encoding);
+            }
+          } finally { closeSync(descriptor); }
+        }
         // Not what was checked (other bytes under the same identity, or another file): check it again.
         forgetSecret(security, path);
         verdict = "replaced";
       } else {
         if (!security.readObjectsSync) throw secretRefused(path);
         const [object] = security.readObjectsSync([path]);
+        if (object?.busy) throw busyObject(path);
         const isPrivate = Boolean(object) && objectIsPrivateSync(path, object.sddl, currentUserSync(security), options);
         // The bytes checked must be as long as the file seen around the check, or they are not accepted.
         verdict = settleSecret(path, info, isPrivate && BigInt(object.data.length) === info.size);
@@ -1367,7 +1425,15 @@ export function readOwnerPrivateFileSync(path, encoding, options = {}) {
   }
 }
 
-/** As readOwnerPrivateFileSync. POSIX: exactly readFile(path, encoding). */
+/**
+ * As readOwnerPrivateFileSync. POSIX: exactly readFile(path, encoding).
+ *
+ * `renewInBackground` (Windows): a verdict past its five minutes is still
+ * used for an unchanged file (same identity, same bytes) while a background
+ * check through the file's handle renews it, so a caller with a short budget
+ * does not wait for PowerShell. A file that changed is checked before it is
+ * read, as without the option.
+ */
 export async function readOwnerPrivateFile(path, encoding, options = {}) {
   if (!isWindows(options)) return readFile(path, encoding);
   const security = windowsSecurity(options);
@@ -1376,20 +1442,26 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
     let verdict;
     try {
       const info = secretInfo(path, await lstat(path, { bigint: true }));
-      const known = rememberedDigest(security, path, info);
+      const known = options[RENEWAL] ? null : rememberedVerdict(security, path, info, options.renewInBackground === true);
+      const handle = known ? await openUnlessReplaced(path, options) : null;
       if (known) {
-        const handle = await openNoFollow(path, constants.O_RDONLY, undefined, options);
-        try {
-          if (openedIsChecked(await handle.stat({ bigint: true }), info)) {
-            const data = await readExactly(handle, Number(info.size));
-            if (data && digest(data) === known) return decoded(data, encoding);
-          }
-        } finally { await handle.close(); }
+        if (handle !== null) {
+          try {
+            if (openedIsChecked(await handle.stat({ bigint: true }), info)) {
+              const data = await readExactly(handle, Number(info.size));
+              if (data && digest(data) === known.digest) {
+                if (Date.now() >= known.until) renewSecret(security, path, known, options);
+                return decoded(data, encoding);
+              }
+            }
+          } finally { await handle.close(); }
+        }
         forgetSecret(security, path);
         verdict = "replaced";
       } else {
         if (!security.readObjects) throw secretRefused(path);
         const [object] = await security.readObjects([path]);
+        if (object?.busy) throw busyObject(path);
         const isPrivate = Boolean(object) && await objectIsPrivate(path, object.sddl, await currentUser(security), options);
         // The bytes checked must be as long as the file seen around the check, or they are not accepted.
         verdict = settleSecret(path, info, isPrivate && BigInt(object.data.length) === info.size);
@@ -1412,6 +1484,22 @@ export async function readOwnerPrivateFile(path, encoding, options = {}) {
     }
     if (verdict === "exposed" || attempt >= SECRET_ATTEMPTS) throw secretRefused(path);
   }
+}
+
+/**
+ * A no-follow handle on a remembered secret, or null when the path changed
+ * during the open (a writer renamed a new file into place: openNoFollow's
+ * ELOOP). The caller then checks the path again in full, where a real link is
+ * refused (secretInfo); the bounded attempts stop a path that keeps changing.
+ */
+async function openUnlessReplaced(path, options) {
+  try { return await openNoFollow(path, constants.O_RDONLY, undefined, options); }
+  catch (error) { if (error?.code === "ELOOP") return null; throw error; }
+}
+
+function openUnlessReplacedSync(path, options) {
+  try { return openNoFollowSync(path, constants.O_RDONLY, undefined, options); }
+  catch (error) { if (error?.code === "ELOOP") return null; throw error; }
 }
 
 /** The open file must be the one that was checked (same identity, change time included). */

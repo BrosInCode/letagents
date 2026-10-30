@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 
 import { processBirth, processTreeHelperPath } from "../../../../shared/process-tree.mjs";
@@ -19,11 +20,13 @@ import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "../main/agents
 import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.js";
 import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-types.js";
 import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
-import { cursorMcpConnectorRootPattern, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
+import { cursorMcpConnectorRootPattern, WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
 import {
+  assertCursorMcpPipeAddon,
   assertCursorWindowsCommandLines,
   cursorMcpConnectorListenPath,
   cursorMcpConnectorProofPath,
+  cursorMcpPipeConnectorArgs,
   cursorWindowsMcpRuntimeEnv,
   cursorWrapperProgramBootstrap,
   requestCursorWrapperStop,
@@ -70,6 +73,7 @@ test("the macOS wrapper keeps sandbox-exec and has no Windows text", {
   const source = cursorTurnWrapperSource(launchValues, "darwin");
   assert.match(source, /const nativeCommand = sandboxed \? "\/usr\/bin\/sandbox-exec" : bin;/);
   assert.doesNotMatch(source, /windowsTurn/);
+  assert.doesNotMatch(source, /windowsSealConnectorPipe|connector\.server/);
   assert.doesNotThrow(() => new Script(source));
 });
 
@@ -82,6 +86,10 @@ test("the Windows wrapper is valid JavaScript, runs Cursor unsandboxed in the he
   assert.match(source, /server\.listen\(windowsTurn\.connectorListenPath,/);
   // A pipe client is admitted only after it sends the turn's private proof.
   assert.match(source, /net\.createServer\(\{ allowHalfOpen: false \}, \(pending\) => windowsProveConnector\(pending, \(socket\) => \{/);
+  // The wrapper names itself as the pipe's server, and Cursor starts only once the pipe admits this user alone.
+  assert.match(source, /writeFileSync\(path\.join\(connectorRoot, "connector\.server"\), String\(process\.pid\), \{ flag: "wx" \}\);/);
+  assert.match(source, /await windowsSealConnectorPipe\(windowsTurn\.connectorListenPath\);/);
+  assert.ok(source.includes(WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE));
   // The helper's exit alone is not the reap proof: its job must be gone or empty.
   assert.match(source, /\["query", String\(native\.pid\), nativeHelperBirth\]/);
   assert.doesNotMatch(source, /chmodSync\(mcpConnectorSocketPath/);
@@ -103,12 +111,48 @@ test("the Windows connector is a per-turn, per-account named pipe; POSIX keeps t
   assert.equal(pattern.test("C:\\Users\\you\\AppData\\Local\\TempX\\letagents-cursor-mcp-01234567-89ab-cdef-0123-456789abcdef"), false);
 });
 
-test("the pipe connector refuses anything but a LetAgents Cursor pipe and a readable proof", () => {
+test("the pipe connector refuses anything but a LetAgents Cursor pipe, a readable proof and wrapper pid, and the addon's loader", () => {
   const pipe = "\\\\.\\pipe\\letagents-cursor-mcp-0123456789abcdef0123456789abcdef";
-  const run = (...args: string[]) => spawnSync(process.execPath, ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, ...args], { encoding: "utf8" }).status;
-  assert.equal(run("/tmp/letagents-cursor-mcp/stdio.sock", "/tmp/connector.proof"), 64);
-  assert.equal(run(pipe), 64);
-  assert.equal(run(pipe, join(tmpdir(), `missing-${randomUUID()}`, "connector.proof")), 65);
+  const [, source, , , pipeNative] = cursorMcpPipeConnectorArgs(join(tmpdir(), "letagents-cursor-mcp-x", "stdio.sock"));
+  assert.equal(source, CURSOR_MCP_PIPE_CONNECTOR_SOURCE);
+  assert.equal(pipeNative, join(fileURLToPath(new URL("../../../../shared/", import.meta.url)), "daemon-pipe-native.mjs"));
+  assert.equal(existsSync(pipeNative), true);
+  const spawnConnector = (...args: string[]) => spawnSync(process.execPath, ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, ...args], { encoding: "utf8" });
+  const run = (...args: string[]) => spawnConnector(...args).status;
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-connector-"));
+  try {
+    const proof = join(root, "connector.proof");
+    assert.equal(run("/tmp/letagents-cursor-mcp/stdio.sock", proof, pipeNative), 64);
+    assert.equal(run(pipe), 64);
+    assert.equal(run(pipe, proof), 64, "no loader for the addon");
+    assert.equal(run(pipe, proof, join(root, "other.mjs")), 64);
+    assert.equal(run(pipe, join(tmpdir(), `missing-${randomUUID()}`, "connector.proof"), pipeNative), 65);
+    writeFileSync(proof, "ab".repeat(32));
+    assert.equal(run(pipe, proof, pipeNative), 65, "no wrapper pid beside the proof");
+    writeFileSync(join(root, "connector.server"), "not a pid");
+    assert.equal(run(pipe, proof, pipeNative), 65);
+    writeFileSync(join(root, "connector.server"), String(process.pid));
+    const outcome = spawnConnector(pipe, proof, pipeNative);
+    if (process.platform === "win32") {
+      // The addon opens the pipe or says why not; no wrapper serves this one.
+      assert.equal(outcome.status, 1, outcome.stderr);
+      assert.match(outcome.stderr, /could not open its pipe: .*ENOENT|No process serves/);
+    } else {
+      // Where the addon cannot load, the connector fails closed and says so; it never uses libuv's connect.
+      assert.equal(outcome.status, 66, outcome.stderr);
+      assert.match(outcome.stderr, /cannot open its pipe safely on this computer: letagents-daemon-pipe\.node exists only on Windows/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("main refuses a Windows Cursor turn with a reason when the sealed pipe addon is missing", () => {
+  assert.doesNotThrow(() => assertCursorMcpPipeAddon(() => ({ path: "C:\\x.node", sha256: "0".repeat(64) })));
+  assert.throws(
+    () => assertCursorMcpPipeAddon(() => { throw new Error("letagents-daemon-pipe.node was not found"); }),
+    /Cursor on Windows needs letagents-daemon-pipe\.node .* Reinstall LetAgents\. \(letagents-daemon-pipe\.node was not found\)/,
+  );
 });
 
 test("the MCP runtime's Windows home folders stay in the connector root", () => {
@@ -288,7 +332,7 @@ test("Windows: a restricted turn reaches its hosted MCP runtime over the named p
     mcpServers: {
       letagents: {
         command: process.execPath,
-        args: ["-e", CURSOR_MCP_PIPE_CONNECTOR_SOURCE, cursorMcpConnectorListenPath(socketPath), cursorMcpConnectorProofPath(socketPath)],
+        args: cursorMcpPipeConnectorArgs(socketPath),
         env: { ELECTRON_RUN_AS_NODE: "1" },
       },
     },

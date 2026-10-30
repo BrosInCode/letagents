@@ -30,10 +30,22 @@ export interface StatusMapRow {
   unmapped: boolean;
 }
 
-/** Linear `type:<type>` keys read as "Any <type> status" in the editor. */
-export function statusMapRowLabel(name: string): string {
+/** Jira status category keys, by the names Jira shows for them. */
+const jiraStatusCategoryLabels: Record<string, string> = {
+  new: "To Do",
+  indeterminate: "In Progress",
+  done: "Done",
+};
+
+/**
+ * `type:<type>` keys read as "Any <type> status" in the editor (Linear state
+ * types), or "Any status in the <category> category" for Jira status categories.
+ */
+export function statusMapRowLabel(name: string, provider?: TrackerProvider): string {
   const type = /^type:(.+)$/.exec(name)?.[1];
-  return type ? `Any ${type} status` : name;
+  if (!type) return name;
+  const category = provider === "jira" ? jiraStatusCategoryLabels[type.toLowerCase()] : undefined;
+  return category ? `Any status in the ${category} category` : `Any ${type} status`;
 }
 
 /** The map as editor rows: unmapped statuses first, so they are fixed first. */

@@ -1,4 +1,5 @@
-import { computed, nextTick } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { reopenedSettingsPane } from "../../components/desktop/settings/navigation";
 import type { SettingsPaneId } from "../../components/desktop/settings/types";
 import { settingsEntry } from "../../domain/desktop-navigation";
 import { rememberStoredString } from "../../domain/desktop-storage";
@@ -45,15 +46,21 @@ export function useAppSidebarLayout(context: unknown) {
     )?.focus({ preventScroll: true });
   }
 
+  // The last pane is read once each time the active entry changes (see
+  // useAppSettingsPaneWatcher), never while Settings stays open: Settings itself
+  // writes it, and a live read would feed its own choice back as a new initial pane.
+  const settingsReopenPane = ref<SettingsPaneId>(reopenedSettingsPane());
+
   const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
     if (requestedSettingsPane.value) return requestedSettingsPane.value;
-    if (app.activeEntry.value.type !== "system") return "storage:chat";
+    // Plain "Settings" reopens the pane shown last; the first open shows Chat storage.
+    if (app.activeEntry.value.type !== "system") return settingsReopenPane.value;
     if (app.activeEntry.value.id === "system:setup") return "account:connectors-setup";
     if (app.activeEntry.value.id === "system:app-agent") return "system:app-agent";
     if (app.activeEntry.value.id === "system:repos") return "system:runtime";
     if (app.activeEntry.value.id === "system:workers") return "system:agents";
     if (app.activeEntry.value.id === "system:diagnostics") return "system:diagnostics";
-    return "storage:chat";
+    return settingsReopenPane.value;
   });
 
   function openSettingsSurface(): void {
@@ -142,8 +149,16 @@ export function useAppSidebarLayout(context: unknown) {
   }
   return {
     isSettingsSurface, showSidebarResizeHandle, desktopShellStyle, cycleSidebar,
-    settingsPaneForActiveEntry, openSettingsSurface, openTicketTrackersSurface, openUpdatesSurface, startSidebarResize,
+    settingsReopenPane, settingsPaneForActiveEntry, openSettingsSurface, openTicketTrackersSurface, openUpdatesSurface, startSidebarResize,
     handleSidebarResizeKeydown, setSidebarWidth, setAllProjectsCollapsed,
     handleSidebarParentRoomReorder, handleSidebarChildRoomReorder,
   };
+}
+
+/** Takes the pane plain "Settings" reopens at each change of the active entry. Runs after navigation. */
+export function useAppSettingsPaneWatcher(context: unknown) {
+  const app = context as AppContextOf<"useAppNavigation" | "useAppSidebarLayout">;
+  watch(() => app.activeEntry.value.id, () => {
+    app.settingsReopenPane.value = reopenedSettingsPane();
+  }, { flush: "sync" });
 }

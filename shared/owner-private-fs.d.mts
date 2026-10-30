@@ -36,7 +36,8 @@ export interface WindowsSecurity {
   upgradeObject?(path: string): Promise<string | null>;
   upgradeObjectSync?(path: string): string | null;
 }
-export interface SecretObject { sddl: string; data: Buffer }
+/** `busy`: another process held the file without sharing it (a sharing or lock violation); not an answer about privacy. */
+export interface SecretObject { sddl: string; data: Buffer; busy?: boolean }
 /** An "owner-alias:<SID>" answer (`O:LA`, or `O:<SID>`): the SDDL aliases that name that SID. */
 export declare function sddlOwnerAliases(answer: string | null | undefined, sid: string): string[];
 /** An "object:" answer, `<SDDL>|<base64 bytes>`, or null. */
@@ -129,6 +130,11 @@ export declare function assertOwnerPrivateSync(path: string, options?: OwnerPriv
 export interface SecretReadOptions extends OwnerPrivateOptions {
   /** Windows: make a file private, by itself, when only this account, SYSTEM and Administrators can open it (state an older version left). */
   upgradeAdministratorsOnly?: boolean;
+  /**
+   * readOwnerPrivateFile only, Windows: an unchanged file whose five-minute verdict lapsed is still read while a
+   * background check through its handle renews (or drops) the verdict, for callers with a short budget.
+   */
+  renewInBackground?: boolean;
 }
 /**
  * Read a high-value secret (a token, a key). POSIX: exactly readFileSync(path, encoding).
