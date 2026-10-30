@@ -64,7 +64,8 @@ before(() => {
   execFileSync(join(system32, "icacls.exe"), [folder, "/grant", "*S-1-1-0:(OI)(CI)RX"], { stdio: "ignore", windowsHide: true });
   execFileSync(join(system32, "icacls.exe"), [lowFolder, "/grant", "*S-1-1-0:(OI)(CI)M"], { stdio: "ignore", windowsHide: true });
 });
-after(() => { if (folder) rmSync(folder, { recursive: true, force: true }); });
+// A SYSTEM squatter ends on its own once it saw its one client; give Windows time to release its program.
+after(() => { if (folder) rmSync(folder, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); });
 
 async function waitFor<T>(check: () => T | false | null | undefined, what: string, timeoutMs = 30_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -362,7 +363,9 @@ test("a squatter that holds the pipe name first fails the turn closed: Cursor ne
     assert.equal(existsSync(startedPath), false, "Cursor never started");
     assert.equal(existsSync(squatScene.report), false, "nothing connected to the squatter");
   } finally {
+    // Windows ends a process asynchronously: wait, so no later cleanup meets its program still mapped.
     squatter.kill();
+    await squatter.exited;
     rmSync(connectorRoot, { recursive: true, force: true });
     rmSync(runtimeDataRoot, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
