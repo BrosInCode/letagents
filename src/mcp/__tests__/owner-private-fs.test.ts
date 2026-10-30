@@ -1043,6 +1043,8 @@ test("Windows: a lapsed verdict whose renewal hangs is used for ten seconds at m
     Date.now = () => realNow() + offset;
     hang = true;
     assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret");
+    // The renewal runs in the background (an lstat first): wait until it reaches the reader.
+    for (const startedAt = realNow(); objectReads < 2 && realNow() - startedAt < 2_000;) await new Promise(resolvePause => setTimeout(resolvePause, 5));
     assert.equal(objectReads, 2, "the renewal started (and hangs)");
     offset += 9_000;
     assert.equal(await readOwnerPrivateFile(file, "utf8", options), "secret", "still within the grace");

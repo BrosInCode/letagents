@@ -799,6 +799,8 @@ test("Windows: a lapsed proof verdict is used while it is renewed in the backgro
     const startedAt = realNow();
     assert.equal((await exchange(connect(), "ping\n")).data, "pong:ping\n");
     assert.ok(realNow() - startedAt < 1_000, "the lapsed verdict was used, not waited for");
+    // The renewal runs in the background (an lstat first): wait until it reaches the reader.
+    for (const waitStart = realNow(); held.length < 1 && realNow() - waitStart < 2_000;) await new Promise((resolvePause) => setTimeout(resolvePause, 5));
     assert.equal(held.length, 1, "a background check started");
     // A second request meanwhile starts no second check.
     assert.equal((await exchange(connect(), "ping\n")).data, "pong:ping\n");
