@@ -44,7 +44,7 @@ import {
   flush,
   withLoopAlive,
 } from "./cursor-provider-adapter.fixture.js";
-import { needsPosixSignals, needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
+import { needsPosixSignals, needsWindowsFakeCursorAgent, writeFakeProvider, expectedCursorSandbox } from "./platform.js";
 
 test("the supervised native Cursor sandbox blocks late hook reads", {
   skip: process.platform !== "darwin",
@@ -377,7 +377,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         ...(permissionProfileId === "full_access" ? { add: 0, commit: 0, push: 0 } : {}),
       });
       assert.equal(launchArgs.includes("--force"), permissionProfileId !== "read_only");
-      assert.equal(argValue(launchArgs, "--sandbox"), sandbox);
+      assert.equal(argValue(launchArgs, "--sandbox"), expectedCursorSandbox(sandbox));
       assert.equal(existsSync(workspaceFile), workspaceWritable);
       assert.equal(existsSync(outsideFile), permissionProfileId === "full_access");
       assert.equal(existsSync(join(root, "symlink-escape.txt")), false);

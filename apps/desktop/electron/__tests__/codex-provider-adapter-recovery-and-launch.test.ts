@@ -819,7 +819,7 @@ test("Codex custodial polling reads the selected built executable contract witho
       await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
         error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
         && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
-      assert.ok(Date.now() - probeStartedAt < 15_000, "inherited output pipes must not extend the eight-second probe deadline to the descendant's lifetime");
+      assert.ok(Date.now() - probeStartedAt < MCP_RUNTIME_CONTRACT_DEADLINE_MS + 7_000, "inherited output pipes must not extend the probe deadline to the descendant's lifetime");
     } finally {
       const descendantPid = Number(await readFile(descendantPidFile, "utf8").catch(() => "0"));
       if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {

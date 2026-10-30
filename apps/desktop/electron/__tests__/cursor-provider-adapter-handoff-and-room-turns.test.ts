@@ -11,6 +11,7 @@ import {
   type CursorProviderAdapterDependencies,
 } from "../main/agents/cursor-provider-adapter.js";
 import type { NativeExecutionObservation } from "../main/agents/provider-adapter.js";
+import { expectedCursorSandbox } from "./platform.js";
 import {
   argValue,
   wrapperHostedMcpFixture,
@@ -723,7 +724,7 @@ test("room scratch Cursor turns use their exact workspace without Git generation
 
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), scratchWorkspace);
-  assert.equal(argValue(launch.args, "--sandbox"), "enabled");
+  assert.equal(argValue(launch.args, "--sandbox"), expectedCursorSandbox("enabled"));
   assert.equal(launch.mcpRuntimeCwd, scratchWorkspace);
   assert.equal(launch.workspaceGenerationManifestPath, undefined);
   assert.deepEqual(harness.workspaceGenerationEvents, []);

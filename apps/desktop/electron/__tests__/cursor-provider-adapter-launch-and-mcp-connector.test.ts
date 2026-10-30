@@ -52,7 +52,7 @@ import {
   cursorTmp,
   endsWithPath,
 } from "./cursor-provider-adapter.fixture.js";
-import { macOsSandboxOnly, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
+import { macOsSandboxOnly, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider, expectedCursorSandbox } from "./platform.js";
 import { CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../main/agents/cursor-provider-constants.js";
 
 /** A turn's private local-worker root: under /tmp on POSIX (/private/tmp on macOS), under the temporary folder on Windows. */
@@ -74,7 +74,7 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.equal(args.includes("--approve-mcps"), false, "legacy Cursor has no sealed profile to scope approval, so it never blanket-approves MCPs");
   assert.ok(args.join(" ").includes(`--workspace ${WA_CURSOR_CWD}`));
   assert.ok(args.join(" ").includes("--mode ask"), "native policy flag passed verbatim");
-  assert.ok(args.join(" ").includes("--sandbox enabled"));
+  assert.ok(args.join(" ").includes(`--sandbox ${expectedCursorSandbox("enabled")}`));
   assert.equal(args.includes("--resume"), false);
   const prompt = args[args.length - 1]!;
   assert.ok(prompt.includes("Cursor worker"), "prompt is provider-labelled and positional");
@@ -426,7 +426,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     assert.equal(launch.args.includes("--approve-mcps"), true, "the sealed HOME letagents MCP is approved so complete_room_turn loads and the turn can attest; cursor-agent has no headless per-server approval, and the native sandbox denies every workspace .cursor/mcp.json read, so this approves exactly that one server");
     assert.equal(launch.args.includes("--disable-project-configs"), true, "native project permissions stay disabled");
     assert.equal(launch.args.includes("--disable-auto-update"), true, "native background updater stays disabled");
-    assert.equal(argValue(launch.args, "--sandbox"), "enabled", "supervised read-only turns keep Cursor's native sandbox enabled");
+    assert.equal(argValue(launch.args, "--sandbox"), expectedCursorSandbox("enabled"), "supervised read-only turns keep Cursor's native sandbox enabled");
     assert.equal(launch.cwd, "/private/cursor/wa-cursor-1", "project MCP discovery is isolated from --workspace");
     assert.equal(argValue(launch.args, "--workspace"), WA_CURSOR_CWD);
     assert.equal(launch.args.includes("--resume"), false, "the first durable turn establishes the native session");

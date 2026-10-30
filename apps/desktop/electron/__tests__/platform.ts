@@ -228,3 +228,8 @@ export const CHILD_PROCESS_TIMEOUT_MS = process.platform === "win32" ? 90_000 : 
 export const needsPosixSignals: string | false = process.platform === "win32"
   ? "needs a native process that handles SIGTERM, which Windows does not deliver"
   : false;
+
+/** The value Cursor's own --sandbox flag gets: Windows runs Cursor unsandboxed, and Cursor refuses "enabled" there. */
+export function expectedCursorSandbox(mode: string): string {
+  return process.platform === "win32" ? "disabled" : mode;
+}

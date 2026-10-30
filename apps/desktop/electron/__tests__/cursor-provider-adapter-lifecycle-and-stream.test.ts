@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies } from "../main/agents/cursor-provider-adapter.js";
+import { expectedCursorSandbox } from "./platform.js";
 import type {
   ProviderSpawnRequest,
   ProviderStreamEvent,
@@ -82,7 +83,7 @@ test("daemon Cursor restart-resume preserves exact write authority and sandbox f
     const launch = harness.launches[0]!;
     assert.equal(argValue(launch.args, "--resume"), `sess-restart-${permissionProfileId}`);
     assert.equal(launch.args.includes("--force"), true);
-    assert.equal(argValue(launch.args, "--sandbox"), sandbox);
+    assert.equal(argValue(launch.args, "--sandbox"), expectedCursorSandbox(sandbox));
     assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_PERMISSION_PROFILE_ID, permissionProfileId);
     assert.equal(launch.fullAccess === true, permissionProfileId === "full_access");
     if (permissionProfileId === "full_access") assert.equal(argValue(launch.args, "--workspace"), request.cwd);
@@ -142,7 +143,7 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
   }));
   for (let index = 0; index < 100 && readOnlyHarness.launches.length === 0; index += 1) await flush();
   const readOnlyArgs = readOnlyHarness.launches[0]!.args;
-  assert.equal(readOnlyArgs.some((arg, index) => arg === "--sandbox" && readOnlyArgs[index + 1] === "enabled"), true);
+  assert.equal(readOnlyArgs.some((arg, index) => arg === "--sandbox" && readOnlyArgs[index + 1] === expectedCursorSandbox("enabled")), true);
   for (let index = 0; index < 100 && !readOnlyHarness.children[0]?.isReleased; index += 1) await flush();
   readOnlyHarness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
@@ -167,7 +168,7 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
     const turn = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: `inbox-${permissionProfileId}` }));
     for (let index = 0; index < 100 && harness.launches.length === 0; index += 1) await flush();
     assert.ok(harness.launches[0]?.args.includes("--force"));
-    assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), sandbox);
+    assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), expectedCursorSandbox(sandbox));
     assert.match(harness.launches[0]!.args.at(-1) ?? "", /You may edit files and run local commands/);
     if (permissionProfileId === "full_access") {
       assert.match(harness.launches[0]!.args.at(-1) ?? "", /filesystem and network operations outside the working directory/);
