@@ -295,6 +295,90 @@ Mac, 4 virtual CPUs, 6 GB):
   (see [Known failures](#known-failures)).
 - In a VM, run nothing else heavy at the same time: two test runs sharing 4 CPUs make the timing tests fail.
 
+### Run commands from the Mac with no windows
+
+`prlctl exec "<vm>" --current-user <command>` starts the command on the VM's desktop, and Windows opens a console
+window for it. The window stays open until the command ends. OpenSSH runs commands in session 0, which has no
+desktop, so no window opens and the output still comes back to the Mac.
+
+In the VM, in an elevated PowerShell (or as SYSTEM from the Mac, with `prlctl exec "<vm>" powershell ...`, without
+`--current-user`):
+
+1. Install and start the server once, so it writes `sshd_config` and its host keys:
+
+   ```powershell
+   Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'
+   Set-Service sshd -StartupType Automatic
+   Start-Service sshd
+   ```
+
+2. Put these lines at the top of `C:\ProgramData\ssh\sshd_config`. The first value wins, so they must stay above the
+   `Match` block. Both `no` lines are needed: `KbdInteractiveAuthentication` can also accept a password.
+
+   ```text
+   PasswordAuthentication no
+   KbdInteractiveAuthentication no
+   PubkeyAuthentication yes
+   ```
+
+3. Allow only the Mac's address on the VM network (`10.211.55.2` here; on the Mac, see `ifconfig bridge100`):
+
+   ```powershell
+   Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -Profile Any -RemoteAddress 10.211.55.2
+   ```
+
+On the Mac:
+
+1. Make a key for the VM only: `ssh-keygen -t ed25519 -f ~/.ssh/letagents_windows_vm`.
+2. For a user in Administrators, the server reads `C:\ProgramData\ssh\administrators_authorized_keys`, not the user's
+   own `.ssh` folder. Put the `.pub` line in that file, then limit it (the server ignores it otherwise):
+
+   ```powershell
+   icacls.exe "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
+   ```
+
+3. Read `C:\ProgramData\ssh\ssh_host_ed25519_key.pub` through `prlctl exec`, and add it to `~/.ssh/known_hosts` with
+   the VM's address, so the first connection needs no trust prompt.
+4. Add the host to `~/.ssh/config`:
+
+   ```text
+   Host windows-vm
+     HostName 10.211.55.3
+     User <windows user>
+     IdentityFile ~/.ssh/letagents_windows_vm
+     IdentitiesOnly yes
+     StrictHostKeyChecking yes
+   ```
+
+5. Restart the server (`Restart-Service sshd`), then test it:
+
+   ```bash
+   ssh windows-vm 'whoami & node -v'
+   ```
+
+Close standard input for unattended commands (`ssh windows-vm '...' </dev/null`). The remote shell is `cmd.exe`, so put
+long Git Bash commands in a script file and run that:
+
+```bash
+ssh windows-vm '<PortableGit>\bin\bash.exe -lc "bash //Mac/Home/Downloads/run.sh"' </dev/null
+```
+
+An SSH session is not the same as a `prlctl --current-user` session:
+
+| | `ssh windows-vm` | `prlctl exec --current-user` |
+|---|---|---|
+| Window on the VM desktop | none | one for each command |
+| Elevation | elevated (High integrity) | not elevated (Medium integrity) |
+| Symbolic links | allowed, as on CI | `EPERM` without Developer Mode |
+| Mac folders | `\\Mac\Home\...` (`Z:` is not mapped) | `Z:\...` |
+| Programs with a window | cannot show (session 0) | show on the desktop |
+
+- Use `prlctl exec --current-user` for anything that must show on the desktop, such as the desktop app or a sign-in
+  in a browser.
+- The Mac key gives administrator access to the VM with no UAC prompt. The firewall rule limits it to the Mac. Keep
+  this for a local test VM, and do not use it on a machine that holds real data.
+- Windows can give the VM a new address. If `ssh` times out, check `prlctl list -i "<vm>"`, and update `HostName`.
+
 ## Known failures
 
 Seen on 2026-10-30. None of these fails on CI, which runs elevated, without Claude Code, on x64 hardware.
