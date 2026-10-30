@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, parse } from "node:path";
 
 import { terminateCodexProcessTree } from "./codex-executable.mjs";
-import { isProcessTree, signalTree, spawnTree } from "./process-tree.mjs";
+import { isProcessTree, PROCESS_TREE_UNKILLABLE_EXIT_CODE, signalTree, spawnTree } from "./process-tree.mjs";
 
 // A Codex app-server that LetAgents launches works for a room, not as the
 // owner, yet it shares the owner's CODEX_HOME so Codex sign-in keeps working.
@@ -109,7 +109,18 @@ export function codexMcpServerDisableOverride(serverNames) {
   return `mcp_servers={ ${names.map((name) => `${JSON.stringify(name)} = { enabled = false }`).join(", ")} }`;
 }
 
-export function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TIMEOUT_MS) {
+export async function runCodexMcpList(codexBin, args, options, timeoutMs = MCP_LIST_TIMEOUT_MS) {
+  try {
+    return await listOnce(codexBin, args, options, timeoutMs);
+  } catch (error) {
+    // The helper's own answer, not Codex's: it could not prove the job empty after the listing ended. A listing
+    // changes nothing and a second one starts its own job, so it is asked once more; its answer stands.
+    if (error?.code !== PROCESS_TREE_UNKILLABLE_EXIT_CODE) throw error;
+    return listOnce(codexBin, args, options, timeoutMs);
+  }
+}
+
+function listOnce(codexBin, args, options, timeoutMs) {
   return new Promise((resolve, reject) => {
     // An npm-installed `codex` is a Node wrapper around the native binary, and a
     // timeout must stop both: run it in its own process group (execFile ignores
