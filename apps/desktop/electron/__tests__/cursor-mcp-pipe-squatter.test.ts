@@ -108,8 +108,12 @@ function scene(serverPid = process.pid): Scene {
   return { connectorRoot, socketPath, pipe, proof: readFileSync(join(connectorRoot, "connector.proof"), "utf8").trim(), report, ready, config };
 }
 
-/** Run the squatter as this user ("squat"), at low integrity ("low"), or with this user's SID for deny only ("denyonly"). */
-async function squat(state: Scene, mode: "squat" | "low" | "denyonly") {
+/**
+ * Run the squatter as this user ("squat", or "shared" for a pipe that allows
+ * more instances), at low integrity ("low"), or with this user's SID for deny
+ * only ("denyonly").
+ */
+async function squat(state: Scene, mode: "squat" | "shared" | "low" | "denyonly") {
   const child = spawn(squatterExe, [mode, state.config], { stdio: ["ignore", "inherit", "inherit"], windowsHide: true });
   const exited = new Promise((resolve) => child.once("exit", resolve));
   await waitFor(() => existsSync(state.ready) || existsSync(state.report), "the squatter's pipe");
@@ -324,8 +328,14 @@ test("a squatter that holds the pipe name first fails the turn closed: Cursor ne
   };
   writeFileSync(join(folder, `probe-${rounds}.txt`), "probe\n");
   writeFileSync(squatScene.config, [squatScene.pipe, squatScene.report, join(folder, `probe-${rounds}.txt`), squatScene.ready].join("\r\n"));
-  const squatter = await squat(squatScene, "squat");
+  // Its pipe allows more instances, so only libuv's first-instance flag keeps the wrapper from joining it.
+  const squatter = await squat(squatScene, "shared");
   try {
+    // The control: a server that does not ask for the first instance adds one beside the squatter's.
+    const joined = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command",
+      `try { $s = [System.IO.Pipes.NamedPipeServerStream]::new('${squatScene.pipe.slice("\\\\.\\pipe\\".length)}', 'InOut', -1); $s.Dispose(); 'joined' } catch { $_.Exception.Message }`],
+    { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+    assert.equal(joined.stdout.trim(), "joined", joined.stderr);
     const child = defaultLaunchTurn({
       cursorBin,
       args: ["-p", "--output-format", "stream-json", "squatted pipe"],
@@ -348,8 +358,7 @@ test("a squatter that holds the pipe name first fails the turn closed: Cursor ne
     assert.notDeepEqual(exit, { type: "exit", code: 0, signal: null }, child.stderrTail());
     const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8")) as Record<string, unknown>;
     assert.equal(terminal.type, "not_started", JSON.stringify(terminal));
-    // EADDRINUSE, or EBUSY when the squatter allows only its one instance.
-    assert.match(String(terminal.error), /listen (EADDRINUSE|EBUSY)/);
+    assert.match(String(terminal.error), /listen EADDRINUSE/);
     assert.equal(existsSync(startedPath), false, "Cursor never started");
     assert.equal(existsSync(squatScene.report), false, "nothing connected to the squatter");
   } finally {

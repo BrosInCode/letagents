@@ -582,6 +582,11 @@ function readNativeHelperBirth(pid) {
 // (Identification only, no data written): it sets the DACL, reads it back
 // and answers "ok:" only when it is exactly that DACL. Only .NET calls, no
 // cmdlet (a cmdlet loads modules, which can take tens of seconds).
+// Before the seal, a handle another ordinary account opens is a read-only
+// client that the wrapper closes unproven, without a byte. Only SYSTEM,
+// Administrators and this user can open one with WRITE_DAC; they can change
+// the DACL at any time anyway (as owner, or by taking ownership), so the seal
+// does not hold against them, and the connector's checks do not need it to.
 const WINDOWS_CONNECTOR_PIPE_SEAL_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   "$answer = 'error:'",
