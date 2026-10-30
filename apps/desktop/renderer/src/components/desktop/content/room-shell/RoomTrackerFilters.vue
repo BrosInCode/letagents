@@ -2,7 +2,7 @@
   <section
     v-if="visible"
     class="room-settings-section"
-    data-section="ticket-filters"
+    data-section="tickets"
     aria-labelledby="room-settings-heading-ticket-filters"
     data-testid="room-tracker-filters"
   >
@@ -11,20 +11,13 @@
       <div
         v-for="filter in filters"
         :key="filter.id"
-        class="room-settings-row"
+        class="room-settings-row room-tracker-filter-row"
         data-inline="true"
         :data-testid="`room-tracker-filter-${filter.id}`"
       >
-        <div class="room-settings-row-copy">
-          <p :id="`room-tracker-filter-title-${filter.id}`" class="room-settings-row-title">
-            {{ providerLabel(filter.provider) }} · {{ filter.connection_label }}
-          </p>
-          <p class="room-settings-mono" :title="filter.filter">{{ filter.filter || "All tickets" }}</p>
-          <p
-            class="room-settings-row-description"
-            :data-tone="filter.last_error ? 'error' : undefined"
-          >{{ filterStatus(filter) }}</p>
-        </div>
+        <p :id="`room-tracker-filter-title-${filter.id}`" class="room-settings-row-title">
+          {{ providerLabel(filter.provider) }} · {{ filter.connection_label }}
+        </p>
         <div class="room-settings-row-action">
           <DesktopSwitch
             :labelledby="`room-tracker-filter-title-${filter.id}`"
@@ -41,11 +34,18 @@
             @click="remove(filter)"
           >Remove</button>
         </div>
+        <div class="room-settings-row-copy room-tracker-filter-detail">
+          <p class="room-settings-mono" :title="filter.filter">{{ filter.filter || "All tickets" }}</p>
+          <p
+            class="room-settings-row-description"
+            :data-tone="filter.last_error ? 'error' : undefined"
+          >{{ filterStatus(filter) }}</p>
+        </div>
       </div>
 
       <form
         v-if="canManage && connections.length"
-        class="room-settings-row"
+        class="room-settings-row room-tracker-filter-form"
         data-testid="room-tracker-filter-form"
         @submit.prevent="save"
       >
@@ -100,8 +100,11 @@ import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { desktopIpc } from "../../../../ipc/index";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import { relativeTime } from "../room-board/formatters";
+import { ticketSettingsSummary } from "../room-board/ticket-settings";
 
 const props = defineProps<{ roomIdentifier: string }>();
+// The Room settings rail lists Tickets only while this block shows (null hides it).
+const emit = defineEmits<{ summary: [summary: string | null] }>();
 
 const filters = ref<RoomTrackerFilterView[]>([]);
 const connections = ref<TrackerConnectionView[]>([]);
@@ -116,6 +119,11 @@ let generation = 0;
 // A room without filters, seen by someone with no tracker connection, shows
 // nothing new (ticket connectors invariant 1).
 const visible = computed(() => filters.value.length > 0 || connections.value.length > 0);
+watch(
+  () => ticketSettingsSummary(filters.value.length, connections.value.length),
+  (summary) => emit("summary", summary),
+  { immediate: true },
+);
 const selectedProvider = computed<TrackerProvider | null>(() =>
   connections.value.find((connection) => connection.id === connectionId.value)?.provider ?? null);
 const placeholder = computed(() => selectedProvider.value === "linear"
@@ -229,6 +237,13 @@ onBeforeUnmount(() => { generation++; });
 </script>
 
 <style scoped>
-.room-tracker-filter-fields { flex-wrap: wrap; gap: 6px; }
-.room-tracker-filter-fields input { min-width: 220px; }
+/* The form stacks: its copy reads full width above the fields. */
+.room-tracker-filter-form { grid-template-columns: minmax(0, 1fr); align-items: start; }
+.room-tracker-filter-fields { flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
+.room-tracker-filter-fields input { flex: 1; min-width: 220px; }
+/* A saved filter: title and controls on one line, its filter and status below at full width. */
+.room-tracker-filter-row { align-items: center; }
+.room-tracker-filter-detail { grid-column: 1 / -1; }
+.room-tracker-filter-form .room-settings-row-description,
+.room-tracker-filter-detail .room-settings-row-description { max-width: none; }
 </style>

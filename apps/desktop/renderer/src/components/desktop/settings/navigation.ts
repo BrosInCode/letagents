@@ -1,4 +1,5 @@
 import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
+import { ref } from "vue";
 import type { LegacySettingsPaneId, SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
 
 export const settingsNavGroups: SettingsNavGroup[] = [
@@ -90,4 +91,15 @@ export function filterSettingsNavigation(query: string): SettingsNavGroup[] {
       matches([group.label, item.title, child.title, child.description]));
     return children.length ? children : matches([group.label, item.title, item.description]) ? [item] : [];
   }) })).filter(group => group.items.length);
+}
+
+/**
+ * The pane Settings showed last in this window. Settings reopens there when
+ * nothing asks for a particular pane; null until Settings first opens.
+ */
+export const lastSettingsPane = ref<SettingsPaneId | null>(null);
+
+/** The pane plain "Settings" opens: the last one shown, else Chat storage. */
+export function reopenedSettingsPane(): SettingsPaneId {
+  return lastSettingsPane.value ?? "storage:chat";
 }

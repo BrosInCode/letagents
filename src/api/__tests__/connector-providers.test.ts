@@ -89,7 +89,8 @@ test("Jira lists assigned issues over two search pages and maps statuses", async
   assert.deepEqual(items.map((item) => [item.key, item.raw_status, item.ticket_state, item.unmapped]), [
     ["HT-1234", "In Progress", "in_progress", false],
     ["HT-1240", "Code Review", "in_review", false],
-    ["HT-1251", "Blocked", "in_progress", true],
+    // Not named in the map: its status category (indeterminate) maps it.
+    ["HT-1251", "Blocked", "in_progress", false],
     ["HT-1260", "To Do", "todo", false],
     ["HT-1261", "Done", "done", false],
   ]);

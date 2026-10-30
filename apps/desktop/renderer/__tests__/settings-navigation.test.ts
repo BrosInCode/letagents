@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   filterSettingsNavigation,
+  lastSettingsPane,
   legacySettingsPaneRedirects,
+  reopenedSettingsPane,
   resolveSettingsPane,
   settingsNavGroups,
   settingsSectionFor,
@@ -63,4 +65,16 @@ test("settings search reaches nested recovery and publishing panes without dupli
   assert.deepEqual(ids("github issues"), ["account:connectors"]);
   assert.deepEqual(ids("remote"), ["account:connectors-remote"]);
   assert.deepEqual(ids("connectors"), ["account:connectors"]);
+});
+
+test("plain Settings reopens the pane shown last, and Chat storage the first time", () => {
+  const previous = lastSettingsPane.value;
+  try {
+    lastSettingsPane.value = null;
+    assert.equal(reopenedSettingsPane(), "storage:chat");
+    lastSettingsPane.value = "account:connectors";
+    assert.equal(reopenedSettingsPane(), "account:connectors");
+  } finally {
+    lastSettingsPane.value = previous;
+  }
 });

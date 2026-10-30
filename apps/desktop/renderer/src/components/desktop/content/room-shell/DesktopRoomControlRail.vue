@@ -18,6 +18,7 @@
       :github-events-visible="githubEventsVisible"
       :storage-busy="storageBusy"
       :storage-feedback="storageFeedback"
+      :initial-section="actionPanelSection"
       @copy-room-link="emit('copyRoomLink')"
       @open-rules="emit('openRules')"
       @toggle-sound="emit('toggleSound')"
@@ -94,6 +95,8 @@ import { useDesktopRoomHistorySearch } from "./useDesktopRoomHistorySearch";
 
 const props = defineProps<{
   actionPanelOpen: boolean;
+  /** The settings section to scroll to when the panel opens. */
+  actionPanelSection?: string | null;
   searchOpen: boolean;
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;

@@ -143,8 +143,9 @@ runs no sync and looks as before.
 
 ### Add a filter
 
-1. Open the room's settings. The **Ticket filters** section shows when the
-   room has a filter or when you have a tracker connection.
+1. Open the room's settings and choose **Tickets** (the **Ticket filters**
+   section). It shows when the room has a filter or when you have a tracker
+   connection. On the Board tab, **Manager** also links to it.
 2. Choose the connection.
 3. Type the filter:
    - Jira: JQL without `ORDER BY`, for example `project = HT AND statusCategory != Done`.

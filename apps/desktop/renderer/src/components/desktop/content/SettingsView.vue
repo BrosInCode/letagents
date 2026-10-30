@@ -222,6 +222,7 @@ import type {
   SettingsPaneId,
 } from "../settings/types";
 import {
+  lastSettingsPane,
   resolveSettingsPane,
   settingsNavGroups,
   settingsSectionFor,
@@ -348,6 +349,8 @@ watch(
     activePane.value = resolveSettingsPane(nextPane);
   },
 );
+// Plain "Settings" reopens here next time.
+watch(activePane, (pane) => { lastSettingsPane.value = pane; }, { immediate: true });
 
 const connectorsPage = ref<InstanceType<typeof ConnectorsPage>>();
 const connectorsApi = {
