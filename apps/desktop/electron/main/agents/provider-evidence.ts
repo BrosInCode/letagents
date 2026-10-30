@@ -30,13 +30,14 @@ export function redactCredentialText(value: string): { value: string; redacted: 
  * exit types (e.g. CodexAppServerExit) are structural supersets of this.
  */
 export type ProviderProcessExit =
-  | { type: "error"; error: Error }
+  /** `treeMayRun`: the helper's process is gone, but the tree in its job may not be, so its absence proves no exit. */
+  | { type: "error"; error: Error; treeMayRun?: boolean }
   | { type: "exit"; code: number | null; signal: NodeJS.Signals | null };
 
 /** The exit of a provider in the helper's job. Its unkillable code is the helper's own answer: part of the tree may still run. */
 export function providerTreeExit(provider: string, code: number | null, signal: NodeJS.Signals | null): ProviderProcessExit {
   if (code !== PROCESS_TREE_UNKILLABLE_EXIT_CODE) return { type: "exit", code, signal };
-  return { type: "error", error: new Error(`${provider}'s processes did not end when LetAgents closed their job. They may still be running.`) };
+  return { type: "error", treeMayRun: true, error: new Error(`${provider}'s processes did not end when LetAgents closed their job. They may still be running.`) };
 }
 
 /** A control channel whose loss is disconnect evidence (RPC socket, stdio). */

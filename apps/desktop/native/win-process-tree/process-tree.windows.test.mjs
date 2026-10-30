@@ -60,9 +60,7 @@ function setup() {
     'else if (mode === "leave-on-go") { grandchild.unref(); const done = () => fs.existsSync(grandchildFile) && fs.existsSync(childFile + ".go") ? process.exit(0) : setTimeout(done, 20); done(); }',
     "else setInterval(() => {}, 1000);",
   ].join("\n"));
-  // The top: a batch file (not an npm shim), so it runs under cmd.exe.
-  const shim = fixture("start-child.cmd", `@echo off\r\n"${process.execPath}" "${child}" %*\r\n`);
-  return { shim };
+  return { child };
 }
 
 async function waitFor(check, what, timeoutMs = 20_000) {
@@ -92,11 +90,11 @@ function gone(pid, birth) {
 }
 
 async function startTree(mode = "wait") {
-  const { shim } = setup();
+  const { child } = setup();
   const id = Math.random().toString(36).slice(2);
   const childFile = join(folder, `child-${id}.pid`);
   const grandchildFile = join(folder, `grandchild-${id}.pid`);
-  const tree = spawnTree(shim, [childFile, grandchildFile, mode], { stdio: "ignore" }, helper);
+  const tree = spawnTree(process.execPath, [child, childFile, grandchildFile, mode], { stdio: "ignore" }, helper);
   const childPid = await waitFor(() => readPid(childFile), "the child's pid");
   const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
   const births = {
@@ -108,7 +106,7 @@ async function startTree(mode = "wait") {
 }
 
 function assertAllGone({ tree, childPid, grandchildPid, births }) {
-  assert.ok(gone(childPid, births.child), "the node under the .cmd shim survived");
+  assert.ok(gone(childPid, births.child), "the node under the helper survived");
   assert.ok(gone(grandchildPid, births.grandchild), "the grandchild survived");
   assert.equal(windowsTreeSize(tree.pid, births.helper, helper), 0, "the job still holds processes");
 }
@@ -117,8 +115,8 @@ test("each process of a three-deep tree has a Windows birth; the helper reports 
   const started = await startTree();
   try {
     for (const birth of Object.values(started.births)) assert.ok(isWindowsBirth(birth), String(birth));
-    // The helper, cmd.exe, node and the grandchild node.
-    assert.ok(windowsTreeSize(started.tree.pid, started.births.helper, helper) >= 3);
+    // The node and the grandchild node, with the helper when its job counts it.
+    assert.ok(windowsTreeSize(started.tree.pid, started.births.helper, helper) >= 2);
     const info = windowsProcessInfo(started.grandchildPid, helper);
     assert.equal(info.parentPid, started.childPid);
     assert.match(info.image, /node\.exe$/i);
@@ -129,7 +127,7 @@ test("each process of a three-deep tree has a Windows birth; the helper reports 
   }
 });
 
-test("a tree this process holds ends whole on any signal (.cmd shim, node, child)", { skip }, async () => {
+test("a tree this process holds ends whole on any signal (node, child)", { skip }, async () => {
   const started = await startTree();
   assert.equal(signalTree(started.tree.pid, "SIGTERM", helper), true);
   await exited(started.tree);
@@ -323,11 +321,11 @@ test("a kill whose bounded wait runs out reports the tree unkillable; the held p
 
 test("a helper whose own bounded wait runs out exits with the unkillable code", { skip }, async () => {
   // The program exits by itself and leaves a grandchild whose exit is held: the helper ends it and waits 1 s.
-  const { shim } = setup();
+  const { child } = setup();
   const id = Math.random().toString(36).slice(2);
   const childFile = join(folder, `child-${id}.pid`);
   const grandchildFile = join(folder, `grandchild-${id}.pid`);
-  const tree = spawnTree(shim, [childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 1_000 });
+  const tree = spawnTree(process.execPath, [child, childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, { ...helper, unkillableAfterMs: 1_000 });
   const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
   const grandchildBirth = processBirth(grandchildPid, helper);
   const holder = await holdExit(grandchildPid, HOLD_MS);
@@ -344,11 +342,11 @@ test("a helper whose own bounded wait runs out exits with the unkillable code", 
 test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
   // The program exits by itself, so the helper ends its job and waits (5 s) on the held grandchild;
   // a kill then finds the job listing nothing, and must not call that a clean stop.
-  const { shim } = setup();
+  const { child } = setup();
   const id = Math.random().toString(36).slice(2);
   const childFile = join(folder, `child-${id}.pid`);
   const grandchildFile = join(folder, `grandchild-${id}.pid`);
-  const tree = spawnTree(shim, [childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, helper);
+  const tree = spawnTree(process.execPath, [child, childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, helper);
   const treeBirth = processBirth(tree.pid, helper);
   const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
   const grandchildBirth = processBirth(grandchildPid, helper);

@@ -352,15 +352,15 @@ export abstract class OpenModelAdapterBase {
 
   protected observeTerminal(handle: OpenModelHandle, exited: Promise<ProviderProcessExit>): void {
     void exited.then((exit) => {
-      this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false), exit.type === "exit");
+      this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false), exit.type === "exit", exit.type === "error" && exit.treeMayRun === true);
     });
   }
 
-  protected finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean): void {
+  protected finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean, treeMayRun = false): void {
     if (handle.terminal) return;
     if (this.handles.get(handle.workAttemptId) === handle) {
       const actual = this.deps.getProcessIdentity(handle.pid);
-      const evidence = processExited || actual === null ? "process_exit"
+      const evidence = treeMayRun ? null : processExited || actual === null ? "process_exit"
         : typeof actual === "string" && !sameProcessBirthIdentity(actual, handle.providerConnection.processIdentity!) ? "process_birth_changed" : null;
       if (evidence && handle.observedTurn && !handle.observedTurn.terminal) {
         handle.observedTurn.terminal = "lost";

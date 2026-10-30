@@ -4511,7 +4511,7 @@ test("Open Model completed shell tools use native metadata exit codes and never 
 });
 
 test("Open Model generic process errors are degraded; actual exit or independently proven disappearance is hard evidence", async () => {
-  for (const kind of ["error", "error_with_death", "exit"] as const) {
+  for (const kind of ["error", "error_with_death", "exit", "unkillable"] as const) {
     const harness = createHarness();
     let settleExit!: (exit: ProviderProcessExit) => void;
     const exited = new Promise<ProviderProcessExit>((resolve) => { settleExit = resolve; });
@@ -4524,12 +4524,14 @@ test("Open Model generic process errors are degraded; actual exit or independent
     const handle = await adapter.spawn(spawnRequest());
     const observations: NativeExecutionObservation[] = [];
     adapter.onExecution(handle, (event) => observations.push(event));
-    if (kind === "error_with_death") gone = true;
-    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null } : { type: "error", error: new Error("private transport failure") });
+    if (kind === "error_with_death" || kind === "unkillable") gone = true;
+    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null }
+      : { type: "error", error: new Error("private transport failure"), ...(kind === "unkillable" ? { treeMayRun: true } : {}) });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), kind !== "error");
-    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), kind !== "error");
-    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), kind === "error");
+    const proven = kind === "error_with_death" || kind === "exit";
+    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), proven);
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), proven);
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), !proven);
     assert.doesNotMatch(JSON.stringify(observations), /private transport failure/);
   }
 });
