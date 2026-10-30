@@ -157,6 +157,11 @@ test("a cached hit belongs to one PATH", () => {
   const fake = fakes([first, second]);
   assert.equal(resolve({ ...ENV, PATH: "D:\\One" }, fake), first);
   assert.equal(resolve({ ...ENV, PATH: "D:\\Two" }, fake), second);
+  // Each PATH keeps its own hit: switching back reads no registry and checks only the cached path.
+  fake.checks.length = 0;
+  assert.equal(resolve({ ...ENV, PATH: "D:\\One" }, fake), first);
+  assert.deepEqual(fake.checks, [first]);
+  assert.deepEqual(fake.reads, []);
 });
 
 /** A `reg export` file as reg.exe writes it: UTF-16LE with a byte-order mark, CRLF lines. */

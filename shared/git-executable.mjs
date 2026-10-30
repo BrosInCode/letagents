@@ -37,7 +37,8 @@ const REGISTRY_INSTALL_PATHS = [
 ];
 const REGISTRY_TIMEOUT_MS = 5_000;
 
-let cached = null;
+// One hit per PATH: the desktop runs git with its imported PATH and with its own process PATH.
+const cached = new Map();
 
 function isFile(filePath) {
   try { return statSync(filePath).isFile(); } catch { return false; }
@@ -153,12 +154,13 @@ export function resolveGitExecutable(options = {}) {
   const exists = options.exists ?? isFile;
   const readRegistry = options.readRegistry ?? ((key, name) => readRegistryValue(key, name, env));
   const key = String(env.PATH ?? env.Path ?? lookup(env, "PATH") ?? "");
-  if (cached?.key === key && exists(cached.path)) return cached.path;
-  cached = null;
+  const hit = cached.get(key);
+  if (hit !== undefined && exists(hit)) return hit;
+  cached.delete(key);
   for (const candidate of windowsGitCandidates(env, readRegistry)) {
     // Built only as <folder>\git.exe; the check keeps a batch file out whatever changes above.
     if (/\.exe$/i.test(candidate) && exists(candidate)) {
-      cached = { key, path: candidate };
+      cached.set(key, candidate);
       return candidate;
     }
   }
@@ -178,5 +180,5 @@ export function gitSpawnFile(options = {}) {
 }
 
 export function resetGitExecutableCacheForTests() {
-  cached = null;
+  cached.clear();
 }
