@@ -91,3 +91,24 @@ export function filterSettingsNavigation(query: string): SettingsNavGroup[] {
     return children.length ? children : matches([group.label, item.title, item.description]) ? [item] : [];
   }) })).filter(group => group.items.length);
 }
+
+/**
+ * The pane Settings showed last in this window. Settings reopens there when
+ * nothing asks for a particular pane; null until Settings first opens. Not
+ * reactive on purpose: Settings writes it, and nothing may react to that write
+ * while Settings is open.
+ */
+export const lastSettingsPane: { value: SettingsPaneId | null } = { value: null };
+
+/**
+ * The pane plain "Settings" opens: the last one shown, else Chat storage. A
+ * hidden pane (setup) reopens at the pane it belongs to.
+ */
+export function reopenedSettingsPane(): SettingsPaneId {
+  const last = lastSettingsPane.value;
+  if (!last) return "storage:chat";
+  const hidden = Object.values(settingsSubsections)
+    .flatMap((items) => items ?? [])
+    .find((item) => item.id === last && item.hidden);
+  return hidden ? hidden.parent ?? "storage:chat" : last;
+}

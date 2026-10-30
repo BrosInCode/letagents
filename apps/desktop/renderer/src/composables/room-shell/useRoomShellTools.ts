@@ -12,7 +12,7 @@ import type { RoomShellContextOf } from "./context";
 /** Tabs, tool panels, room storage, message reveal, and room links. */
 export function useRoomShellToolActions(context: unknown) {
   const {
-    actionPanelOpen, activeTab, activityHistoryRequest, addAgentModalOpen, agentInspectorCompact,
+    actionPanelOpen, actionPanelSection, activeTab, activityHistoryRequest, addAgentModalOpen, agentInspectorCompact,
     agentInspectorInitialTab, artifactTimelineTaskFilterId, boardSelectedTaskId,
     copyRoomLinkToClipboard, emit, environmentPanelOpen, githubEventsVisible, props,
     pushActionToast, refreshedEnvironmentRepoStatus, revealedMessageId, roomActiveTabStorageKey,
@@ -148,13 +148,22 @@ export function useRoomShellToolActions(context: unknown) {
   function toggleActionPanel(): void {
     const nextOpen = !actionPanelOpen.value;
     actionPanelOpen.value = nextOpen;
+    actionPanelSection.value = null;
     if (nextOpen) {
       app.closeSearch();
     }
   }
 
+  /** Opens Room settings scrolled to one section, for example "tickets". */
+  function openActionPanelAt(section: string): void {
+    actionPanelSection.value = section;
+    actionPanelOpen.value = true;
+    app.closeSearch();
+  }
+
   function closeActionPanel(): void {
     actionPanelOpen.value = false;
+    actionPanelSection.value = null;
   }
 
   function openRules(): void {
@@ -230,7 +239,7 @@ export function useRoomShellToolActions(context: unknown) {
     openBoardTask, rememberChatScrollPosition, selectTab, rememberRoomActiveTab,
     openArtifactsForTask, toggleGitHubEventsVisible, setEnvironmentPanelOpen,
     refreshEnvironmentRepoStatus, setRoomStorageMode, forkRoomToLocal, publishLocalRoom,
-    toggleSearchTool, toggleActionPanel, closeActionPanel, openRules, openAddAgentModal,
+    toggleSearchTool, toggleActionPanel, openActionPanelAt, closeActionPanel, openRules, openAddAgentModal,
     revealRoomMessage, revealRecordedWorkMessage, revealWakeMessage, revealSharedLiveRequest,
     openAgentWorktree, copyRoomLink, exportChat,
   };

@@ -102,7 +102,9 @@
       :active-section="activeGovernanceSection"
       :selected-candidate-id="selectedCandidateId"
       :live-agents="liveBoardManagerAgents"
+      :show-ticket-settings="showTicketSettings"
       @close="closeGovernance"
+      @open-ticket-settings="openTicketSettings"
       @update:active-section="activeGovernanceSection = $event"
       @update:selected-candidate-id="selectedCandidateId = $event"
       @assign-manager="handleAssignManager"
@@ -129,6 +131,7 @@ import {
   type BoardEmptyStateAction,
 } from "./room-board/board-presentation";
 import { activeBoardManagerAgents } from "./room-board/governance-presentation";
+import { boardMayShowTicketSettings, roomShowsTicketSettings } from "./room-board/ticket-settings";
 import RoomBoardCreateTaskDialog from "./room-board/RoomBoardCreateTaskDialog.vue";
 import RoomBoardEmptyState from "./room-board/RoomBoardEmptyState.vue";
 import RoomBoardGovernancePanel from "./room-board/RoomBoardGovernancePanel.vue";
@@ -162,6 +165,8 @@ const emit = defineEmits<{
   "view-events": [taskId: string];
   "view-artifacts": [taskId: string];
   "open-thread": [threadRootId: string];
+  /** Opens Room settings at one section. */
+  "open-room-settings": [section: "tickets"];
 }>();
 
 const {
@@ -243,6 +248,23 @@ watch(() => props.governanceSection, (section) => {
   emit("update:governance-section", null);
   void openGovernance();
 }, { immediate: true });
+
+// Board manager links to the room's ticket filters only where Room settings shows them.
+const showTicketSettings = ref(false);
+let ticketSettingsCheck = 0;
+watch(() => [governanceOpen.value, props.roomIdentifier, props.ticketKeys] as const, async ([open, roomIdentifier, ticketKeys]) => {
+  // Hidden until this room's answer arrives; a later check makes an earlier one stale.
+  const check = ++ticketSettingsCheck;
+  showTicketSettings.value = false;
+  if (!open || !ticketKeys || !boardMayShowTicketSettings(props.tasks)) return;
+  const shows = await roomShowsTicketSettings(roomIdentifier);
+  if (check === ticketSettingsCheck) showTicketSettings.value = shows;
+}, { immediate: true });
+
+function openTicketSettings(): void {
+  closeGovernance();
+  emit("open-room-settings", "tickets");
+}
 
 const liveBoardManagerAgents = computed(() => activeBoardManagerAgents(props.presence));
 const boardManagerMode = computed(() => props.boardSettings?.managerMode || "manager_optional");

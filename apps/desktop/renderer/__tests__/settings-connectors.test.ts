@@ -45,6 +45,9 @@ test("the status map editor lists unmapped statuses first, as in progress", () =
 test("Linear type keys and connection states read in plain words", () => {
   assert.equal(statusMapRowLabel("type:started"), "Any started status");
   assert.equal(statusMapRowLabel("In Review"), "In Review");
+  assert.equal(statusMapRowLabel("type:indeterminate", "jira"), "Any status in the In Progress category");
+  assert.equal(statusMapRowLabel("type:new", "jira"), "Any status in the To Do category");
+  assert.equal(statusMapRowLabel("type:started", "linear"), "Any started status");
   assert.deepEqual(connectionStateLabel(connection({ status: "needs_reauth" })), { label: "Reconnect", state: "failed" });
   assert.deepEqual(connectionStateLabel(connection()), { label: "Connected", state: "connected" });
 });

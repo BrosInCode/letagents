@@ -1,4 +1,4 @@
-import { taskMatchesSource } from "./ticket-ref";
+import { taskMatchesSource, ticketRefParts, ticketStateLabel } from "./ticket-ref";
 import { compareText } from "../../../../domain/formatters";
 import type { DesktopTaskSummary, WorkerSnapshot } from "../../../../../../electron/ipc-types";
 import { TASK_STATUS_ORDER } from "../../../../domain/tasks";
@@ -90,6 +90,10 @@ export function taskMatchesBoardSearch(
     task.assigneeAgentKey || "",
     task.createdBy || "",
     ...task.workflowRefs.map((ref) => `${ref.provider} ${ref.kind} ${ref.label}`),
+    // An imported card: its ticket ref (`jira:SCRUM-1`), its key, and its ticket state.
+    task.externalRef || "",
+    ticketRefParts(task.externalRef)?.providerLabel || "",
+    ticketStateLabel(task.ticketState) || "",
   ].join(" ").toLowerCase();
   return haystack.includes(query);
 }

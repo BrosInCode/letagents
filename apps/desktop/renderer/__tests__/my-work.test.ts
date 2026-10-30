@@ -33,6 +33,8 @@ import {
   roomsWithChangedTasks,
   workGroup,
   workMatches,
+  workOwner,
+  workOwnerAvatarName,
   workSignal,
   safeWorkUrl,
 } from "../../../../shared/ui/my-work/model";
@@ -618,4 +620,15 @@ test("refresh preserves every loaded page past 100 cards, stable order and retry
   await state.reload();
   assert.equal(state.error.value, "");
   scope.stop();
+});
+
+test("the owner falls back to the ticket's tracker assignee, then Unassigned", () => {
+  assert.equal(workOwner(card()), "Ada");
+  const trackerOnly = card({ agent: null, ticket_assignee_label: "Emmy" });
+  assert.equal(workOwner(trackerOnly), "Tracker: Emmy");
+  assert.equal(workOwnerAvatarName(trackerOnly), "Emmy");
+  const nobody = card({ agent: null, ticket_assignee_label: null });
+  assert.equal(workOwner(nobody), "Unassigned");
+  assert.equal(workOwnerAvatarName(nobody), "Unassigned");
+  assert.equal(trackerOnly.work_state, "in_review", "the stored work state is not changed");
 });
