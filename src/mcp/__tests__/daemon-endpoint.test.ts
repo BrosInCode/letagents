@@ -946,14 +946,17 @@ async function holdInAnotherProcess(path: string, mode: "exclusive" | "range"): 
   const child = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
     env: { ...process.env, LETAGENTS_TEST_PROOF: path }, stdio: ["pipe", "pipe", "inherit"], windowsHide: true,
   });
+  // Set up at the start: a holder that exits early must not leave the release waiting for an exit already past.
+  const exited = new Promise<number | null>((resolveExit) => child.once("exit", resolveExit));
+  // Ending the input of a holder that already exited is EPIPE, not a test failure.
+  child.stdin.on("error", () => undefined);
   await new Promise<void>((resolveLocked, reject) => {
     let output = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { output += chunk; if (output.includes("locked")) resolveLocked(); });
-    child.once("exit", (code) => reject(new Error(`the lock holder exited (${code}) before it locked`)));
+    void exited.then((code) => reject(new Error(`the lock holder exited (${code}) before it locked`)));
   });
   return async () => {
-    const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
     child.stdin.end("\n");
     await exited;
   };
