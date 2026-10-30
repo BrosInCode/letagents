@@ -182,16 +182,16 @@ test("the read-only rules folder lets the account list and read it, change it ba
 });
 
 test("Windows: a batch file that is no npm shim is refused, never handed to cmd.exe, unless the caller allows it", () => {
-  const batch = (allowCmd?: boolean) => providerLaunchCommand("cursor-agent", ["-p", "line one\nline \"two\""], {
-    platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\cursor-agent.cmd", allowCmd,
+  const batch = (allowCmd?: boolean) => providerLaunchCommand("sometool", ["-p", "line one\nline \"two\""], {
+    platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\sometool.cmd", allowCmd,
     launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
   });
   assert.throws(() => batch(), (error: Error & { code?: string }) => error.code === "EPROVIDERBATCH" && !error.message.includes("line one"));
   assert.throws(() => batch(false), ProviderBatchFileError);
   // spawnTree's earlier path for such a file: cmd.exe, which itself refuses a quote or a line break.
   assert.throws(() => batch(true), /cannot pass an argument with a line break/);
-  const plain = providerLaunchCommand("cursor-agent", ["-p", "hello"], {
-    platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\cursor-agent.cmd", allowCmd: true,
+  const plain = providerLaunchCommand("sometool", ["-p", "hello"], {
+    platform: "win32", env: windowsEnv, exists: (file) => file === "C:\\npm\\sometool.cmd", allowCmd: true,
     launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
   });
   assert.equal(plain.windowsVerbatimArguments, true);
@@ -236,20 +236,20 @@ test("Cursor on Windows takes its program from the shared resolver: no cmd.exe, 
   const at = (files: string[]) => (file: string) => files.includes(file);
   const shim = SHIM.replace("@anthropic-ai\\claude-code\\cli.js", "cursor-agent\\index.js");
   const native = cursorWindowsProgram("cursor-agent", { env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.exe"]) });
-  assert.deepEqual(native, { file: "C:\\npm\\cursor-agent.exe", args: [] });
+  assert.deepEqual(native, { file: "C:\\npm\\cursor-agent.exe", args: [], environment: {} });
   const besideNode = cursorWindowsProgram("cursor-agent", {
     env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.cmd"]), electron: true,
     launchOptions: { execPath: ELECTRON, readFile: () => shim, exists: at(["C:\\npm\\node.exe"]) },
   });
-  assert.deepEqual(besideNode, { file: "C:\\npm\\node.exe", args: ["C:\\npm\\node_modules\\cursor-agent\\index.js"] });
+  assert.deepEqual(besideNode, { file: "C:\\npm\\node.exe", args: ["C:\\npm\\node_modules\\cursor-agent\\index.js"], environment: {} });
   assert.throws(() => cursorWindowsProgram("cursor-agent", {
     env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.cmd"]), electron: true,
     launchOptions: { execPath: ELECTRON, readFile: () => shim, exists: () => false },
   }), /runs Node\.js, and no node\.exe is beside it/);
-  assert.throws(() => cursorWindowsProgram("cursor-agent", {
-    env: windowsEnv, exists: at(["C:\\npm\\cursor-agent.cmd"]),
+  assert.throws(() => cursorWindowsProgram("sometool", {
+    env: windowsEnv, exists: at(["C:\\npm\\sometool.cmd"]),
     launchOptions: { execPath: ELECTRON, readFile: () => "@echo off\r\nC:\\tools\\agent.exe %*\r\n", exists: () => false },
-  }), /C:\\npm\\cursor-agent\.cmd is a batch file that only cmd\.exe can run/);
+  }), /C:\\npm\\sometool\.cmd is a batch file that only cmd\.exe can run/);
   assert.throws(() => cursorWindowsProgram("cursor-agent", { env: windowsEnv, exists: () => false }), /'cursor-agent' was not found on this computer/);
 });
 

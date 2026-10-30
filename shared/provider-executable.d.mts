@@ -16,10 +16,13 @@ export interface ProviderLaunchOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string | URL;
   exists?: (filePath: string) => boolean;
-  launchOptions?: Omit<CodexLaunchCommandOptions, "platform" | "env">;
+  launchOptions?: Omit<CodexLaunchCommandOptions, "platform" | "env"> & {
+    realpath?: (filePath: string) => string;
+    readdir?: (folder: string) => Array<{ name: string; isDirectory(): boolean; isSymbolicLink(): boolean }>;
+  };
   /** Whether this process is Electron (default: `process.versions.electron` is set). */
   electron?: boolean;
-  /** Start a batch file that is no npm shim through cmd.exe instead of throwing ProviderBatchFileError. */
+  /** Start a batch file that is no npm shim or known install through cmd.exe instead of throwing ProviderBatchFileError. */
   allowCmd?: boolean;
 }
 
@@ -28,11 +31,17 @@ export class ProviderBatchFileError extends Error {
   constructor(program: string);
 }
 
+/** A provider install LetAgents recognizes but cannot start, with `allowCmd` too. Nothing was run. */
+export class ProviderInstallError extends Error {
+  readonly code: "EPROVIDERINSTALL";
+  constructor(file: string, reason: string);
+}
+
 export interface ProviderLaunchCommand extends CodexLaunchCommand {
   /** Windows: the program found for the command, or null. POSIX: the command. */
   resolved: string | null;
   /** What the child's environment needs on top of the caller's. */
-  envAdditions: { ELECTRON_RUN_AS_NODE: "1" } | null;
+  envAdditions: Readonly<Record<string, string>> | null;
 }
 
 export function providerLaunchCommand(

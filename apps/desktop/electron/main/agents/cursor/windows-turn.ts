@@ -33,12 +33,14 @@ import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "./profile-types.js";
 export interface CursorWindowsTurnValues {
   /** letagents-process-tree.exe: its exit proves Cursor's job is empty. */
   helper: string;
-  /** The program Cursor's launcher runs (cursor-agent.exe, or node.exe for a Node shim). */
+  /** The program Cursor's launcher runs (cursor-agent.exe, or a node.exe for a Node shim or Cursor's own install). */
   application: string;
   /** The quoted command line up to Cursor's own arguments. */
   head: string;
   /** The quoted adapter arguments (policy flags, workspace, prompt). */
   tail: string;
+  /** What Cursor's launcher would have set in Cursor's environment. */
+  environment: Readonly<Record<string, string>>;
   /** The named pipe the wrapper listens on for Cursor's one MCP connection, or "". */
   connectorListenPath: string;
   /** The parent of Cursor's per-turn data folder (cursorTemporaryRoot). */
@@ -73,16 +75,18 @@ export function cursorMcpConnectorListenPath(
 /**
  * The program Cursor's command runs on Windows, without cmd.exe, as the
  * shared provider resolver finds it (shared/provider-executable.mjs): a
- * native program as it is, an npm shim as the Node program it runs. One that
+ * native program as it is, an npm shim as the Node program it runs, the
+ * official install's launcher as its own node.exe and index.js. One that
  * only cmd.exe can run is refused: the room message holds line breaks and
  * quotes that cmd.exe cannot pass on. So is a Node launcher with no node.exe
  * of its own inside the packaged app, where this process is Electron, not
- * Node: the wrapper starts Cursor with its own environment.
+ * Node: the wrapper starts Cursor with its own environment. `environment` is
+ * what the launcher would have added to Cursor's.
  */
 export function cursorWindowsProgram(
   cursorBin: string,
   options: { env?: NodeJS.ProcessEnv; cwd?: string } & Pick<ProviderLaunchOptions, "exists" | "launchOptions" | "electron"> = {},
-): { file: string; args: string[] } {
+): { file: string; args: string[]; environment: Readonly<Record<string, string>> } {
   const env = options.env ?? process.env;
   let launch: ReturnType<typeof providerLaunchCommand>;
   try {
@@ -95,18 +99,18 @@ export function cursorWindowsProgram(
     throw new Error(`Cursor's launcher ${resolved ?? cursorBin} is a batch file that only cmd.exe can run, and cmd.exe cannot pass a room message to it. Set LETAGENTS_CURSOR_AGENT_BIN to the program it starts.`);
   }
   if (!launch.resolved) throw new Error(`Cursor's command '${cursorBin}' was not found on this computer.`);
-  if (launch.envAdditions) {
+  if (launch.envAdditions?.ELECTRON_RUN_AS_NODE) {
     throw new Error(`Cursor's launcher ${launch.resolved} runs Node.js, and no node.exe is beside it. Install Node.js or set LETAGENTS_CURSOR_AGENT_BIN to Cursor's own program.`);
   }
-  return { file: launch.file, args: launch.args };
+  return { file: launch.file, args: launch.args, environment: launch.envAdditions ?? {} };
 }
 
 /** Cursor's program and the quoted command line that the wrapper hands to the process-tree helper. */
 export function cursorWindowsNativeLaunch(
   cursorBin: string,
   args: readonly string[],
-  options: { env?: NodeJS.ProcessEnv; cwd?: string; helper?: string | null } = {},
-): Pick<CursorWindowsTurnValues, "helper" | "application" | "head" | "tail"> {
+  options: { env?: NodeJS.ProcessEnv; cwd?: string; helper?: string | null } & Pick<ProviderLaunchOptions, "exists" | "launchOptions" | "electron"> = {},
+): Pick<CursorWindowsTurnValues, "helper" | "application" | "head" | "tail" | "environment"> {
   const helper = options.helper === undefined ? processTreeHelperPath() : options.helper;
   if (!helper) {
     throw new Error("Cursor on Windows needs letagents-process-tree.exe, which ends Cursor's process tree. Reinstall LetAgents.");
@@ -117,6 +121,7 @@ export function cursorWindowsNativeLaunch(
     application: program.file,
     head: [program.file, ...program.args].map(quoteWindowsArgument).join(" "),
     tail: args.map(quoteWindowsArgument).join(" "),
+    environment: program.environment,
   };
 }
 

@@ -56,6 +56,7 @@ const windowsValues = {
   application: "C:\\Users\\you\\AppData\\Local\\cursor-agent\\cursor-agent.exe",
   head: "\"C:\\Users\\you\\AppData\\Local\\cursor-agent\\cursor-agent.exe\"",
   tail: "-p \"room message\"",
+  environment: { CURSOR_INVOKED_AS: "cursor-agent.cmd" },
   connectorListenPath: "\\\\.\\pipe\\letagents-cursor-mcp-0123456789abcdef0123456789abcdef",
   temporaryRoot: "C:\\Users\\you\\AppData\\Local\\Temp",
 };
@@ -82,6 +83,8 @@ test("the Windows wrapper is valid JavaScript, runs Cursor unsandboxed in the he
   assert.doesNotThrow(() => new Script(source));
   assert.match(source, /const sandboxed = false;/);
   assert.match(source, /const nativeCommand = windowsTurn\.helper;/);
+  // Only Cursor's own process gets what its launcher would have set.
+  assert.match(source, /Object\.assign\(nativeEnv, windowsTurn\.environment\);/);
   assert.match(source, /\["spawn", windowsTurn\.application, windowsNativeCommandLine\(cursorArgs\)\]/);
   assert.match(source, /server\.listen\(windowsTurn\.connectorListenPath,/);
   // A pipe client is admitted only after it sends the turn's private proof.

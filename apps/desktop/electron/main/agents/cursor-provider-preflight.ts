@@ -1,8 +1,8 @@
-import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { execProviderFile } from "../../../../../shared/provider-executable.mjs";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderPreflight,
@@ -365,7 +365,7 @@ function execFileWithTimeout(
   options: ExecOptions = {},
 ): Promise<ExecResult> {
   return new Promise((resolveResult) => {
-    const child = execFile(
+    const child = execProviderFile(
       command,
       args,
       {
