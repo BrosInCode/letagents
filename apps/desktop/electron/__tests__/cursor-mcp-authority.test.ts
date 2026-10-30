@@ -10,11 +10,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createServer } from "node:net";
 import test from "node:test";
 
 import { assertCursorSupervisedMcpAuthority } from "../main/agents/cursor-mcp-authority.js";
+import { needsPosixProcessGroups, writeFakeProvider } from "./platform.js";
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -28,8 +29,7 @@ test("Cursor MCP inspection strips supervised turn authority from its native env
   const executable = join(root, "fake-cursor-agent");
   const expectedServerName = "letagents_supervised_deadbeef";
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const forbidden = [
+    const cursorBin = writeFakeProvider(executable, `const forbidden = [
   "CURSOR_API_KEY",
   "CURSOR_AUTH_TOKEN",
   "LETAGENTS_TOKEN",
@@ -45,10 +45,9 @@ if (forbidden.some((key) => process.env[key] !== undefined)) process.exit(3);
 if (process.env.LETAGENTS_API_URL !== "https://letagents.invalid") process.exit(4);
 process.stdout.write(${JSON.stringify(`${expectedServerName}: ready\n`)});
 `);
-    chmodSync(executable, 0o700);
 
     await assertCursorSupervisedMcpAuthority({
-      cursorBin: executable,
+      cursorBin,
       cwd: root,
       writableProfileRoot: root,
       expectedServerName,
@@ -77,11 +76,10 @@ test("macOS Cursor MCP inspection cannot mutate the real profile outside its dis
 }, async () => {
   const inspectionRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-write-sandbox-"));
   const realProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-real-profile-"));
-  const executable = join(inspectionRoot, "fake-cursor-agent");
+  let executable = join(inspectionRoot, "fake-cursor-agent");
   const forbiddenWrite = join(realProfileRoot, "mcp.json");
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const { writeFileSync } = require("node:fs");
+    executable = writeFakeProvider(executable, `const { writeFileSync } = require("node:fs");
 try {
   writeFileSync(${JSON.stringify(forbiddenWrite)}, "mutated");
   process.exit(6);
@@ -107,12 +105,11 @@ test("macOS Cursor MCP inspection cannot signal an unrelated same-UID process", 
   skip: process.platform !== "darwin",
 }, async () => {
   const inspectionRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-signal-sandbox-"));
-  const executable = join(inspectionRoot, "fake-cursor-agent");
+  let executable = join(inspectionRoot, "fake-cursor-agent");
   const victim = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { stdio: "ignore" });
   const victimClosed = new Promise<void>((resolve) => victim.once("close", () => resolve()));
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-try {
+    executable = writeFakeProvider(executable, `try {
   process.kill(${victim.pid}, "SIGTERM");
   process.exit(7);
 } catch (error) {
@@ -140,7 +137,7 @@ test("macOS Cursor MCP inspection cannot reach the network", {
   skip: process.platform !== "darwin",
 }, async () => {
   const inspectionRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-network-sandbox-"));
-  const executable = join(inspectionRoot, "fake-cursor-agent");
+  let executable = join(inspectionRoot, "fake-cursor-agent");
   let connections = 0;
   const server = createServer((socket) => {
     connections += 1;
@@ -153,8 +150,7 @@ test("macOS Cursor MCP inspection cannot reach the network", {
     });
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    writeFileSync(executable, `#!/usr/bin/env node
-const { connect } = require("node:net");
+    executable = writeFakeProvider(executable, `const { connect } = require("node:net");
 const socket = connect({ host: "127.0.0.1", port: ${address.port} });
 socket.once("connect", () => process.exit(7));
 const timer = setTimeout(() => process.exit(8), 1_000);
@@ -184,7 +180,7 @@ test("macOS packaged-bridge validation reads only its runtime and cannot use net
   const inspectionRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-real-bridge-"));
   const runtimeRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-runtime-"));
   const forbiddenRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-forbidden-"));
-  const executable = join(inspectionRoot, "fake-cursor-agent");
+  let executable = join(inspectionRoot, "fake-cursor-agent");
   const runtimeFile = join(runtimeRoot, "server.js");
   const allowedWrite = join(inspectionRoot, "cache-write");
   const forbiddenWrite = join(forbiddenRoot, "forbidden-write");
@@ -207,8 +203,7 @@ test("macOS packaged-bridge validation reads only its runtime and cannot use net
     writeFileSync(forbiddenRead, "credential-must-not-be-readable");
     writeFileSync(forbiddenExecutable, `#!/bin/sh\nprintf ran > ${JSON.stringify(forbiddenExecutionMarker)}\n`);
     chmodSync(forbiddenExecutable, 0o700);
-    writeFileSync(executable, `#!/usr/bin/env node
-const { readFileSync, writeFileSync } = require("node:fs");
+    executable = writeFakeProvider(executable, `const { readFileSync, writeFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const { connect } = require("node:net");
 writeFileSync(${JSON.stringify(allowedWrite)}, "cached");
@@ -254,7 +249,7 @@ socket.once("error", () => {
 
 test("Cursor MCP attestation rejects unbounded or redirected writable roots before launch", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-root-bounds-"));
-  const redirected = join(dirname(root), `${root.split("/").at(-1)}-redirected`);
+  const redirected = join(dirname(root), `${basename(root)}-redirected`);
   try {
     await assert.rejects(assertCursorSupervisedMcpAuthority({
       cursorBin: process.execPath,
@@ -279,15 +274,13 @@ test("Cursor MCP wrapper drains trailing registry entries before making the exac
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-drain-"));
   const executable = join(root, "fake-cursor-agent");
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    const cursorBin = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
 process.stdout.write("letagents: ready\\nunapproved: ready\\n");
 `);
-    chmodSync(executable, 0o700);
 
     await assert.rejects(assertCursorSupervisedMcpAuthority({
-      cursorBin: executable,
+      cursorBin,
       cwd: root,
       writableProfileRoot: root,
       env: { ...process.env },
@@ -302,15 +295,13 @@ test("Cursor MCP wrapper retries a transient birth observation only after its ex
   const executable = join(root, "fake-cursor-agent");
   let identityReads = 0;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    const cursorBin = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
 process.stdout.write("letagents: ready\\n");
 `);
-    chmodSync(executable, 0o700);
 
     await assertCursorSupervisedMcpAuthority({
-      cursorBin: executable,
+      cursorBin,
       cwd: root,
       writableProfileRoot: root,
       env: { ...process.env },
@@ -328,15 +319,14 @@ process.stdout.write("letagents: ready\\n");
 });
 
 test("Cursor MCP timeout returns boundedly when an exact prepared wrapper cannot process termination IPC", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
   timeout: 7_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-stopped-wrapper-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   let wrapperPid: number | null = null;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-process.stdout.write("letagents: ready\\n");
+    executable = writeFakeProvider(executable, `process.stdout.write("letagents: ready\\n");
 `);
     chmodSync(executable, 0o700);
 
@@ -371,10 +361,10 @@ process.stdout.write("letagents: ready\\n");
 });
 
 test("Cursor MCP wrapper bounds an output flood internally and rejects after cooperative group retirement", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-output-flood-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const descendantPidPath = join(root, "descendant.pid");
   const descendantReadyPath = join(root, "descendant.ready");
   const descendantSource = [
@@ -384,8 +374,7 @@ test("Cursor MCP wrapper bounds an output flood internally and rejects after coo
   ].join("\n");
   let descendantPid: number | null = null;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { existsSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
@@ -429,10 +418,10 @@ floodAfterDescendantReady();
 });
 
 test("successful Cursor MCP attestation starts cleanup at native exit and drains inherited descendant pipes", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-success-reap-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const descendantPidPath = join(root, "descendant.pid");
   const descendantReadyPath = join(root, "descendant.ready");
   const descendantSource = [
@@ -442,8 +431,7 @@ test("successful Cursor MCP attestation starts cleanup at native exit and drains
   ].join("\n");
   let descendantPid: number | null = null;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { existsSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
@@ -486,23 +474,23 @@ finishAfterDescendantReady();
 });
 
 test("forced MCP group reaping preserves success only after isolated evidence pipes already closed", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   await exerciseSuccessfulMcpWithStubbornDescendant({ inheritOutput: false, expectSuccess: true });
 });
 
 test("forced MCP group reaping rejects when a stubborn descendant prevents evidence-pipe close", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   await exerciseSuccessfulMcpWithStubbornDescendant({ inheritOutput: true, expectSuccess: false });
 });
 
 test("Cursor MCP attestation fails boundedly when an escaped descendant retains native evidence pipes", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
   timeout: 8_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-escaped-pipes-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const descendantPidPath = join(root, "descendant.pid");
   const descendantReadyPath = join(root, "descendant.ready");
   const descendantSource = [
@@ -512,8 +500,7 @@ test("Cursor MCP attestation fails boundedly when an escaped descendant retains 
   ].join("\n");
   let descendantPid: number | null = null;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { existsSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
@@ -562,21 +549,19 @@ finishAfterDescendantReady();
 });
 
 test("Cursor MCP attestation never signals a process group after its wrapper PGID is recycled", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-recycled-group-"));
   const executable = join(root, "fake-cursor-agent");
   let identityReads = 0;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    const cursorBin = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
 process.stdout.write("letagents: ready\\n");
 `);
-    chmodSync(executable, 0o700);
 
     await assertCursorSupervisedMcpAuthority({
-      cursorBin: executable,
+      cursorBin,
       cwd: root,
       writableProfileRoot: root,
       env: { ...process.env },
@@ -596,15 +581,14 @@ process.stdout.write("letagents: ready\\n");
 });
 
 test("Cursor MCP attestation rejects boundedly when post-close group retirement remains ambiguous", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
   timeout: 7_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-ambiguous-retire-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   let identityReads = 0;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-process.stdout.write("letagents: ready\\n");
+    executable = writeFakeProvider(executable, `process.stdout.write("letagents: ready\\n");
 `);
     chmodSync(executable, 0o700);
 
@@ -629,16 +613,15 @@ process.stdout.write("letagents: ready\\n");
 });
 
 test("Cursor MCP cancellation uses its exact IPC capability even when later PID evidence is recycled", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-recycled-wrapper-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const readyPath = join(root, "ready");
   let wrapperPid: number | null = null;
   let identityReads = 0;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const { writeFileSync } = require("node:fs");
+    executable = writeFakeProvider(executable, `const { writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
 writeFileSync(${JSON.stringify(readyPath)}, "ready");
@@ -682,10 +665,10 @@ setInterval(() => {}, 1_000);
 });
 
 test("Cursor MCP attestation cancellation reaps a TERM-resistant MCP descendant", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-attestation-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const descendantPidPath = join(root, "descendant.pid");
   const descendantReadyPath = join(root, "descendant.ready");
   const descendantSource = [
@@ -696,8 +679,7 @@ test("Cursor MCP attestation cancellation reaps a TERM-resistant MCP descendant"
   ].join("\n");
   let descendantPid: number | null = null;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);
@@ -742,7 +724,7 @@ async function exerciseSuccessfulMcpWithStubbornDescendant(input: {
   expectSuccess: boolean;
 }): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-stubborn-success-"));
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const descendantPidPath = join(root, "descendant.pid");
   const descendantReadyPath = join(root, "descendant.ready");
   const descendantSource = [
@@ -756,8 +738,7 @@ async function exerciseSuccessfulMcpWithStubbornDescendant(input: {
     const descendantStdio = input.inheritOutput
       ? '["ignore", "inherit", "inherit"]'
       : '"ignore"';
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const { existsSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] !== "--disable-project-configs" || args[1] !== "mcp" || args[2] !== "list") process.exit(2);

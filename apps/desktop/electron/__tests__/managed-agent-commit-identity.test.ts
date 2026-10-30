@@ -42,6 +42,8 @@ const FAKE_GIT_ENV = {
 };
 
 let serial = 0;
+/** A path inside a Git config file: Git reads a backslash there as an escape, so Windows paths use forward slashes. */
+const configPath = (path: string) => path.replaceAll("\\", "/");
 const settingsPath = () => join(env.tempDir, `identity-${serial++}.json`);
 const fixture = (name: string) => {
   const path = join(env.tempDir, `${name}-${serial++}`);
@@ -170,7 +172,7 @@ test("an email from a conditional include is kept; an unconditional include is t
   const work = realpathSync(fixture("work"));
   const included = join(fixture("included"), "work.gitconfig");
   writeFileSync(included, "[user]\n\temail = work@example.invalid\n");
-  const { gitEnv } = gitHome(`[user]\n\temail = owner@example.invalid\n[includeIf "gitdir:${work}/"]\n\tpath = ${included}\n`);
+  const { gitEnv } = gitHome(`[user]\n\temail = owner@example.invalid\n[includeIf "gitdir:${configPath(work)}/"]\n\tpath = ${configPath(included)}\n`);
   gitRepo(gitEnv, "https://github.com/fake-org/work.git", work);
   const facts = await readGitCommitIdentityFacts(work, gitEnv);
   assert.deepEqual(facts?.identity.find((setting) => setting.key === "user.email"), {
@@ -182,7 +184,7 @@ test("an email from a conditional include is kept; an unconditional include is t
   assert.deepEqual(await identityFor(work, gitEnv), {}, "includeIf identity");
   assert.deepEqual(await identityFor(gitRepo(gitEnv), gitEnv), FAKE_GIT_ENV, "other repositories still use the global email");
 
-  const { gitEnv: plain } = gitHome(`[include]\n\tpath = ${included}\n`);
+  const { gitEnv: plain } = gitHome(`[include]\n\tpath = ${configPath(included)}\n`);
   assert.deepEqual(await identityFor(gitRepo(plain), plain), FAKE_GIT_ENV);
 });
 
@@ -248,7 +250,7 @@ test("any author or committer setting from a repository, worktree or conditional
   const included = join(fixture("author-included"), "work.gitconfig");
   writeFileSync(included, "[author]\n\tname = Work Persona\n");
   const { gitEnv: conditional } = gitHome(
-    `[user]\n\temail = owner@example.invalid\n[includeIf "gitdir:${work}/"]\n\tpath = ${included}\n`);
+    `[user]\n\temail = owner@example.invalid\n[includeIf "gitdir:${configPath(work)}/"]\n\tpath = ${configPath(included)}\n`);
   gitRepo(conditional, "https://github.com/fake-org/work.git", work);
   assert.deepEqual(await identityFor(work, conditional), {}, "includeIf author.name");
   assert.deepEqual(await identityFor(gitRepo(conditional), conditional), FAKE_GIT_ENV, "other repositories");

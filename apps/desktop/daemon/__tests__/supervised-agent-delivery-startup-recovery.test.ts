@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -21,6 +21,7 @@ import {
   recordExecution,
 } from "./helpers/supervised-agent-delivery-fixture.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("daemon socket restores and skips only exact pre-turn authority without replacing the provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-restore-socket-"));
@@ -274,7 +275,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
     daemon = null;
   } finally {
     await daemon?.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -327,7 +328,7 @@ test("exact native failure settles once, advances FIFO, and survives cleanup err
         } finally { await delivery.fenceAndDrain(); await store.close(); }
       }
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("native failure cannot invent a dispatch checkpoint or use another continuation", async () => {
@@ -350,7 +351,7 @@ test("native failure cannot invent a dispatch checkpoint or use another continua
         assert.equal(await store.nativeFailure(receipt.inbox_item_id), null);
       } finally { await delivery.fenceAndDrain(); await store.close(); }
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("a saved reply or Cursor completion proposal wins a late exact native failure", async () => {
@@ -379,7 +380,7 @@ test("a saved reply or Cursor completion proposal wins a late exact native failu
         assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
       } finally { await delivery.fenceAndDrain(); await store.close(); }
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("startup recovery republishes a durable publishing outcome without rerunning its provider turn", async () => {
@@ -395,7 +396,7 @@ test("startup recovery republishes a durable publishing outcome without rerunnin
     assert.equal(turns, 0); assert.deepEqual(published, [item.reply_client_message_id]);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("startup recovery treats a dispatching durable terminal outcome as republish-only", async () => {
@@ -409,7 +410,7 @@ test("startup recovery treats a dispatching durable terminal outcome as republis
     assert.equal(turns, 0); assert.deepEqual(published, [item.reply_client_message_id]);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("startup recovery reports a saved no-reply completion without running the provider", async () => {
@@ -433,7 +434,7 @@ test("startup recovery reports a saved no-reply completion without running the p
   } finally {
     await delivery?.fenceAndDrain();
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -457,7 +458,7 @@ test("startup recovery blocks ambiguous awaiting and retryable work instead of a
     await retryDelivery.pump(agent);
     assert.equal((await retryStore.receipts(agent.agentId))[0]?.state, "blocked");
     await retryStore.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("startup recovery reattaches only a persisted exact provider turn and blocks ambiguity without rerunning", async () => {
@@ -486,7 +487,7 @@ test("startup recovery reattaches only a persisted exact provider turn and block
     await ambiguousDelivery.pump(agent);
     assert.equal((await ambiguousStore.receipts(agent.agentId))[0]?.state, "blocked");
     await ambiguousStore.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("startup recovery rejects an exact turn after its provider continuation is replaced", async () => {
@@ -515,7 +516,7 @@ test("startup recovery rejects an exact turn after its provider continuation is 
     assert.equal(blocked.state, "blocked");
     assert.match(blocked.last_error ?? "", /different or unverifiable provider authority/i);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("a saved turn is recovered as one whose process has ended only when a later runtime recovers it and that process's terminal is on record", async () => {
@@ -546,7 +547,7 @@ test("a saved turn is recovered as one whose process has ended only when a later
       "a process with no recorded terminal may still be running the turn");
     assert.equal((await recover("own-runtime", "generation-1", true)).originProcessEnded, undefined,
       "a runtime is never told that its own process has ended");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("a turn of a session an ended Open Model process ran is read in that session by its replacement; no other mismatch of authority is", async () => {
@@ -598,7 +599,7 @@ test("a turn of a session an ended Open Model process ran is read in that sessio
       assert.equal(refused.receipt.state, "blocked", name);
       assert.match(refused.receipt.last_error ?? "", /different or unverifiable provider authority/i, name);
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("same-continuation successor recovery preserves the provider turn's origin generation", async () => {
@@ -639,7 +640,7 @@ test("same-continuation successor recovery preserves the provider turn's origin 
         originExecutionGenerationId,
       );
     } finally { inspection.close(); }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("startup recovery retries exactly once when wrapper evidence proves native dispatch never began", async () => {
@@ -678,7 +679,7 @@ test("startup recovery retries exactly once when wrapper evidence proves native 
     assert.equal(receipt.attempt_count, 1, "the never-dispatched wrapper did not consume a model attempt");
     assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 1);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 for (const admitted of [false, true]) test(`persistent undispatched wrapper failures are bounded (turn admitted: ${admitted})`, async () => {
@@ -711,7 +712,7 @@ for (const admitted of [false, true]) test(`persistent undispatched wrapper fail
     assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3,
       "the exhausted failure is journaled atomically with its block");
     assert.match(receipt.last_error ?? "", /failed 3 times/);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("failed Cursor idle compensation spends only recovery budget and retains exact authority", async () => {
@@ -742,7 +743,7 @@ test("failed Cursor idle compensation spends only recovery budget and retains ex
       const events = inspection.prepare("SELECT idempotency_key FROM supervised_agent_inbox_events WHERE phase='retry_scheduled'").all();
       assert.deepEqual(events.map((event) => event.idempotency_key), [1, 2, 3].map((ordinal) => `retry_failure:result_recovery:${ordinal}`));
     } finally { inspection.close(); }
-  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await store.close(); await removeTestDirectory(root); }
 });
 
 test("a checkpointed terminal provider rejection settles failed and advances FIFO without replay", async () => {
@@ -838,6 +839,6 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
     );
     await store.close();
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

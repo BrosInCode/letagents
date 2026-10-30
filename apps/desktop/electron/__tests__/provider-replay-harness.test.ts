@@ -760,10 +760,12 @@ test("the Codex recorder records nothing when it is imported, and its cleanup st
   const emptyHome = mkdtempSync(join(tmpdir(), "letagents-replay-home-"));
   const digest = agentHomeDigest({ HOME: emptyHome, CODEX_HOME: join(emptyHome, "another", "codex-home") });
   assert.match(digest ?? "", /^[0-9a-f]{12}$/);
+  // The redactor reads the paths of a recording in their POSIX form (it turns a Windows path under the home into the bare home).
+  const recorded = emptyHome.replaceAll("\\", "/");
   const hidden = new ReplayRedactor({
-    workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: emptyHome, username: "",
+    workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: recorded, username: "",
     personalNames: [], hostnames: [], secrets: [digest!], ownerSetupNames: [], accountMethods: [],
-  }).redactFrame({ id: 1, result: { codexHome: join(emptyHome, ".letagents", `codex-agent-home-${digest}`) } });
+  }).redactFrame({ id: 1, result: { codexHome: `${recorded}/.letagents/codex-agent-home-${digest}` } });
   assert.deepEqual(hidden, { id: 1, result: { codexHome: "/home/replay-user/.letagents/codex-agent-home-<redacted>" } });
   // The usual arrangement has the plain name, and nothing to keep out.
   assert.equal(agentHomeDigest({ HOME: emptyHome }), null);

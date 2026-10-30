@@ -42,7 +42,9 @@ import {
   withLoopAlive,
   runTurnWithWrapperTerminal,
   unprovenAuthorityTerminal,
+  cursorTmp,
 } from "./cursor-provider-adapter.fixture.js";
+import { needsFolderFsync, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
 
 test("Cursor keeps a durable no-reply journal until fallible workspace receipt cleanup succeeds in run and recovery", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-cleanup-order-"));
@@ -230,7 +232,7 @@ test(`a successor still refuses a wrapper journal whose remote authority was nev
 });
 }
 
-test("Cursor recommits a visible settlement before cleanup after a failed directory sync", async (t) => {
+test("Cursor recommits a visible settlement before cleanup after a failed directory sync", { skip: needsFolderFsync }, async (t) => {
   for (const phase of ["cleaned", "aborted", "before-loan", "fresh-aborted"] as const) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-settlement-sync-")));
     const originalSync = fs.fsyncSync;
@@ -582,7 +584,7 @@ test("Cursor recovery rejects a terminal snapshot cross-wired to another session
   }
 });
 
-test("the production Cursor wrapper remains native group leader and writes restart-readable terminal evidence", async () => {
+test("the production Cursor wrapper remains native group leader and writes restart-readable terminal evidence", { skip: needsPosixProcessGroups }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-"));
   try {
     const configDir = join(root, "config");
@@ -590,9 +592,8 @@ test("the production Cursor wrapper remains native group leader and writes resta
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(join(root, "npm-cache"), { recursive: true });
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -649,7 +650,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("terminal evidence honestly scopes reaping when a detached native child outlives revoked turn authority", async () => {
+test("terminal evidence honestly scopes reaping when a detached native child outlives revoked turn authority", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-detached-residual-"));
   const profileRoot = join(root, "private-profile");
   const configDir = join(profileRoot, "config");
@@ -657,12 +658,11 @@ test("terminal evidence honestly scopes reaping when a detached native child out
   const tempDir = join(profileRoot, "tmp");
   const statusPath = join(tempDir, "detached-status.json");
   const pidPath = join(tempDir, "detached.pid");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   mkdirSync(tempDir, { recursive: true });
-  writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+  executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -750,17 +750,17 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("SIGTERM at every async wrapper startup boundary cannot publish not_started beside later native work", async () => {
+test("SIGTERM at every async wrapper startup boundary cannot publish not_started beside later native work", { skip: needsWindowsFakeCursorAgent }, async () => {
   for (const stage of ["mcp_listen", "authority_listen", "agent_listen"] as const) {
-    const root = mkdtempSync("/tmp/letagents-cursor-startup-barrier-");
+    const root = mkdtempSync(join(cursorTmp, "letagents-cursor-startup-barrier-"));
     const barrierPath = join(root, stage);
     const statePath = join(root, "turn.jsonl");
     const nativeMarker = join(root, "native-launched");
-    const executable = join(root, "fake-cursor-agent");
-    const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
-    const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+    let executable = join(root, "fake-cursor-agent");
+    const connectorRoot = join(cursorTmp, `letagents-cursor-mcp-${randomUUID()}`);
+    const runtimeDataRoot = mkdtempSync(join(cursorTmp, "letagents-cursor-data-"));
     writeFileSync(statePath, "");
-    writeFileSync(executable, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(nativeMarker)}, "launched\\n");\nsetInterval(() => {}, 1000);\n`);
+    executable = writeFakeProvider(executable, `require("node:fs").writeFileSync(${JSON.stringify(nativeMarker)}, "launched\\n");\nsetInterval(() => {}, 1000);\n`);
     chmodSync(executable, 0o700);
     const mcpRuntimeEnv = wrapperMcpRuntimeEnv(connectorRoot, `cursor:startup-race-${stage}`);
     let child: CursorCliChild | null = null;
@@ -814,18 +814,17 @@ test("SIGTERM at every async wrapper startup boundary cannot publish not_started
   }
 });
 
-test("inherited native evidence pipes fail closed on a hard deadline after authority retirement", async () => {
-  const root = mkdtempSync("/tmp/letagents-cursor-evidence-deadline-");
+test("inherited native evidence pipes fail closed on a hard deadline after authority retirement", { skip: needsWindowsFakeCursorAgent }, async () => {
+  const root = mkdtempSync(join(cursorTmp, "letagents-cursor-evidence-deadline-"));
   const statePath = join(root, "turn.jsonl");
   const writableRoot = join(root, "writable");
   const escapedPidPath = join(writableRoot, "escaped.pid");
-  const executable = join(root, "fake-cursor-agent");
-  const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
-  const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+  let executable = join(root, "fake-cursor-agent");
+  const connectorRoot = join(cursorTmp, `letagents-cursor-mcp-${randomUUID()}`);
+  const runtimeDataRoot = mkdtempSync(join(cursorTmp, "letagents-cursor-data-"));
   writeFileSync(statePath, "");
   mkdirSync(writableRoot);
-  writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+  executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const escaped = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
   detached: true,
@@ -886,19 +885,18 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the live adapter never publishes buffered results when the wrapper evidence deadline fails", async () => {
+test("the live adapter never publishes buffered results when the wrapper evidence deadline fails", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-evidence-deadline-"));
   const profileRoot = join(root, "private-profile");
   const configDir = join(profileRoot, "config");
   const homeDir = join(profileRoot, "home");
   const tempDir = join(profileRoot, "tmp");
   const escapedPidPath = join(tempDir, "escaped.pid");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   mkdirSync(tempDir, { recursive: true });
-  writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+  executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {

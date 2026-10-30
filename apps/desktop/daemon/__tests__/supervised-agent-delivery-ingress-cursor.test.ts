@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +27,7 @@ import {
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("daemon delivery refuses mcp_polling ingress for every provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
@@ -48,7 +49,7 @@ test("daemon delivery refuses mcp_polling ingress for every provider", async () 
     assert.equal(polls, 0);
   } finally {
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -65,7 +66,7 @@ test("daemon delivery treats an absent mode as historical mcp_polling", async ()
     assert.equal(polls, 0);
   } finally {
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -166,7 +167,7 @@ test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async
     assert.equal(polls, 1);
   } finally {
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -202,7 +203,7 @@ test("idle-only stop refuses both sides of native turn admission without abortin
     assert.equal(internals.stoppingAgents.has(agent.agentId), false);
     await store.close();
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -240,7 +241,7 @@ test("idle reservation keeps delayed and new delivery starts fenced until replac
     proceed.resolve();
     await delivery.stop(agent.agentId);
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -279,7 +280,7 @@ test("Cursor delivery exposes the exact-agent lifecycle settlement barrier to th
   } finally {
     await delivery.fenceAndDrain().catch(() => undefined);
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -322,7 +323,7 @@ test("Cursor recovery receives the same exact-agent lifecycle settlement barrier
   } finally {
     await delivery.fenceAndDrain().catch(() => undefined);
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -420,7 +421,7 @@ test("ingress keeps observing and queues routed work without a provider handle",
     assert.equal((await store.ingressHealth(agent.agentId))?.state, "observing");
   } finally {
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -447,7 +448,7 @@ test("new-source custody is selected before the asynchronous poll and never refr
     assert.deepEqual(observed, [{ custody: "original-grant", origin: agent.apiUrl, session: agent.agentSessionId, ids: ["msg_1"] }]);
     await delivery.poll(ingress);
     assert.equal(selections, 2); assert.equal(observed.length, 1, "a later current grant cannot reattribute existing work");
-  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await removeTestDirectory(root); }
 });
 
 test("throwing source observation hooks cannot block native delivery", async () => {
@@ -470,7 +471,7 @@ test("throwing source observation hooks cannot block native delivery", async () 
       await delivery.poll(agent);
       assert.equal(selections, 1); assert.equal(notifications, failure === "notification" ? 1 : 0);
       assert.equal(turns, 1); assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
-    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { await delivery.fenceAndDrain(); await store.close(); await removeTestDirectory(root); }
   }
 });
 
@@ -684,7 +685,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     );
   } finally {
     await daemon?.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -848,7 +849,7 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
   } finally {
     releasePreparedStore.resolve();
     await daemon?.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -978,7 +979,7 @@ test(`a Cursor turn that finished without proof its authority ended is settled a
     assert.equal(turns, 2, "no turn was run twice");
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 }
@@ -1129,7 +1130,7 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
         daemon = null;
       }
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("a worker bearer rotation after Cursor native release keeps the turn alive through its init checkpoint", async () => {
@@ -1299,7 +1300,7 @@ test("a worker bearer rotation after Cursor native release keeps the turn alive 
     releaseInit.resolve();
     lateResult.resolve({ turnId: providerTurnId, outcome: "reply", text: "cleanup" });
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1424,6 +1425,6 @@ test("a crashed Cursor turn settles as interrupted instead of blocking the FIFO 
     assert.equal(await internals.supervisedInbox.nativeFailure(receipt!.inbox_item_id), "interrupted");
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

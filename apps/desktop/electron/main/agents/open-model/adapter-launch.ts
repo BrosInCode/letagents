@@ -20,6 +20,24 @@ import { OpenModelAdapterTurnWait } from "./adapter-turn-wait.js";
 import { OpenModelHandle } from "./handle.js";
 import { protectOwnerPrivate } from "../../../../../../shared/owner-private-fs.mjs";
 import { ProviderInstallError } from "../../../../../../shared/provider-executable.mjs";
+import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
+import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
+
+/**
+ * What OpenCode starts as this agent's LetAgents MCP server. Windows runs the
+ * sealed bundled runtime, as Codex, Claude Code and Cursor do: npx is a .cmd
+ * file there, which needs a shell, and it would run an unpinned package whose
+ * daemon client nothing checked. There is no npx fallback on Windows.
+ */
+export function openCodeMcpLaunch(
+  devEntryPath?: string,
+  platform: NodeJS.Platform = process.platform,
+  resolveRuntime: () => LetAgentsMcpRuntime = () => resolveLetAgentsMcpRuntime({ env: desktopRuntimeEnvironment() }),
+): { command: string[]; environment: Record<string, string> } {
+  if (devEntryPath) return { command: [process.execPath, devEntryPath], environment: {} };
+  if (platform !== "win32") return { command: ["npx", ...LETAGENTS_NPX_ARGS], environment: {} };
+  return { command: [process.execPath, resolveRuntime().entryPath], environment: { ELECTRON_RUN_AS_NODE: "1" } };
+}
 
 export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
   protected async assertPriorStartupProcessGone(authPath: string): Promise<void> {
@@ -114,13 +132,15 @@ export abstract class OpenModelAdapterLaunch extends OpenModelAdapterTurnWait {
       encoding: "utf8",
       mode: 0o600,
     });
-    const mcpCommand = req.devMcpServerEntryPath
-      ? [process.execPath, req.devMcpServerEntryPath]
-      : ["npx", ...LETAGENTS_NPX_ARGS];
-    const mcpEnvironment = supervisedOpenCodeMcpEnvironment(
-      req,
-      process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
-    );
+    const mcpLaunch = openCodeMcpLaunch(req.devMcpServerEntryPath, process.platform, this.deps.resolveMcpRuntime);
+    const mcpCommand = mcpLaunch.command;
+    const mcpEnvironment = {
+      ...supervisedOpenCodeMcpEnvironment(
+        req,
+        process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
+      ),
+      ...mcpLaunch.environment,
+    };
     const limits = await resolveOpenModelLimits(credential, this.deps.fetch);
     // The effort was chosen from this model's list, but the saved model can
     // change after that. An effort the endpoint does not list now is left

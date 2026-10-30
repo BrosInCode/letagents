@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../../daemon-state-database.js";
@@ -17,6 +17,7 @@ import type { ExecutionDelegationHostAuthority, RemoteExecutionDelegationRevisio
 import { executionRuntimeStorageIdentity, executionStorageIdentity } from "../../execution-shadow-store.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../../execution-storage-schema.js";
 import { validateLegacyLifecycleProjectionLedgerSchema } from "../../lifecycle-projection-ledger.js";
+import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
 
 export const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
@@ -281,7 +282,7 @@ export async function fixture(): Promise<{ root: string; databasePath: string; l
     root,
     databasePath: join(root, "daemon-state.sqlite"),
     legacyPath: join(root, "daemon-manifest.json"),
-    cleanup: () => rm(root, { recursive: true, force: true }),
+    cleanup: () => removeTestDirectory(root),
   };
 }
 

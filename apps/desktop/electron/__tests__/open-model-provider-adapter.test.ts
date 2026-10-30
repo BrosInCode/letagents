@@ -100,6 +100,7 @@ function createHarness() {
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: () => ({ entryPath: join(tmpdir(), "letagents-mcp-entry.js"), readRoots: [] }),
     launch(input) {
       launches.push(input);
       const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
@@ -449,8 +450,8 @@ test("Open Model preserves GitHub CLI config discovery while isolating OpenCode 
     process.env.GITHUB_TOKEN = "github-token-must-not-be-inherited";
     for (const [explicit, xdg, expected] of [
       ["/tmp/custom-gh", "/tmp/user-config", "/tmp/custom-gh"],
-      [null, "/tmp/user-config", "/tmp/user-config/gh"],
-      [null, null, "/tmp/github-user-home/.config/gh"],
+      [null, "/tmp/user-config", join("/tmp/user-config", "gh")],
+      [null, null, join("/tmp/github-user-home", ".config", "gh")],
     ]) {
       if (explicit) process.env.GH_CONFIG_DIR = explicit; else delete process.env.GH_CONFIG_DIR;
       if (xdg) process.env.XDG_CONFIG_HOME = xdg; else delete process.env.XDG_CONFIG_HOME;

@@ -4,6 +4,7 @@ import type { ProviderAdapterCapabilities } from "../provider-adapter.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import type { HardControlEvidence } from "../../../../shared/execution-protocol.js";
 import type { OpenCodePermissionRequest } from "../opencode-server-client.js";
+import type { LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 
 export const START_TIMEOUT_MS = 30_000;
 export const TURN_TIMEOUT_MS = 30 * 60_000;
@@ -16,6 +17,8 @@ export const NO_REPLY_SENTINEL = "LETAGENTS_NO_ROOM_REPLY";
 export const SESSION_ORDERING_SCAN_LIMIT = 4_096;
 
 export interface OpenModelProviderAdapterDependencies {
+  /** Tests only: the sealed MCP runtime that Windows starts. */
+  resolveMcpRuntime?: () => LetAgentsMcpRuntime;
   launch(input: {
     binary: string;
     args: string[];

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,7 @@ import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
  * A real daemon on its own socket and database. An agent's tools hold the
@@ -92,7 +93,7 @@ async function withDaemon(run: (context: {
     await run({ socketPath: paths.socketPath, manifestPath: paths.manifestPath, generation, signed, configuration, setSharing, outsider: outsider.privateKey });
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 }
 
@@ -223,6 +224,6 @@ test("a schema 50 database gains the live sharing column off for every existing 
       } finally { inspection.close(); }
     } finally { await migrated.close(); }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

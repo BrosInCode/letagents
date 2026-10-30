@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { codexAccountUsage, inspectorUsageSchema, ProviderUsageTracker, readCodexUsageTail } from "../main/agents/provider-usage.js";
 const at = "2026-10-10T20:00:00.000Z";
@@ -149,7 +149,7 @@ test("Cursor reads only exact session context from its native SQLite/protobuf st
   const { createHash } = await import("node:crypto");
   const { mkdir, symlink } = await import("node:fs/promises");
   const root = await mkdtemp(join(tmpdir(), "cursor-usage-"));
-  const workspace = "/tmp/cursor-usage-workspace", id = "36786173-8026-471a-b132-102fa5079aea", rootId = "a".repeat(64);
+  const workspace = resolve("/tmp/cursor-usage-workspace"), id = "36786173-8026-471a-b132-102fa5079aea", rootId = "a".repeat(64);
   const dir = join(root, "cursor", "chats", createHash("md5").update(workspace).digest("hex"), id);
   await mkdir(dir, { recursive: true });
   const db = new DatabaseSync(join(dir, "store.db"));
@@ -174,7 +174,7 @@ test("Cursor reads only exact session context from its native SQLite/protobuf st
     db.prepare("UPDATE meta SET value=?").run(metadata("another-session"));
     assert.equal(readCursorContext(root, workspace, id), null);
     assert.equal(readCursorContext(root, workspace, "../escape"), null);
-    assert.equal(readCursorContext(root, "/different-workspace", id), null);
+    assert.equal(readCursorContext(root, resolve("/different-workspace"), id), null);
     await writeFile(join(root, "letagents-cursor-identity.json"), '{"userId":12345}');
     assert.equal(readCursorUsageOwner(root), 12345);
     await symlink(root, join(root, "redirected"));

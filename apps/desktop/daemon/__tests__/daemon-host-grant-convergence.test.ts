@@ -28,6 +28,7 @@ import {
   provisionedWorkspace,
   fakeGit,
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
 test("host grant renewal retries transient failures, rotates the bearer in place, and rejects stale Electron rollback", async () => {
   const env = await fixture();
@@ -711,7 +712,7 @@ test("new turn-control admissions are bounded per agent while recovery retries r
   const env = await fixture();
   let nowMs = 10_000;
   const paths = {
-    lockPath: join(env.root, "rate.lock"), socketPath: join(env.root, "rate.sock"),
+    lockPath: join(env.root, "rate.lock"), ...testNamedDaemonEndpoint(env.root, "rate"),
     manifestPath: join(env.root, "rate.sqlite"), auditPath: join(env.root, "rate-audit.jsonl"),
     attemptsPath: join(env.root, "rate-attempts.sqlite"), attemptsRoot: join(env.root, "rate-attempts"),
     workspaceRoot: env.root, workerBindingsPath: join(env.root, "rate-bindings.json"),
@@ -733,7 +734,7 @@ test("new turn-control admissions are bounded per agent while recovery retries r
 test("retirement cancels queued paced work at once instead of admitting it during the retire window", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "pace.lock"), socketPath: join(env.root, "pace.sock"),
+    lockPath: join(env.root, "pace.lock"), ...testNamedDaemonEndpoint(env.root, "pace"),
     manifestPath: join(env.root, "pace.sqlite"), auditPath: join(env.root, "pace-audit.jsonl"),
     attemptsPath: join(env.root, "pace-attempts.sqlite"), attemptsRoot: join(env.root, "pace-attempts"),
     workspaceRoot: env.root, workerBindingsPath: join(env.root, "pace-bindings.json"),
@@ -1410,7 +1411,7 @@ test("restart treats every exact predecessor correction row state as applied evi
 
     daemon = new ProductionSupervisorDaemon({
       lockPath: join(env.root, "legacy-turn-controls.lock"),
-      socketPath: join(env.root, "legacy-turn-controls.sock"),
+      ...testNamedDaemonEndpoint(env.root, "legacy-turn-controls"),
       manifestPath,
       auditPath: join(env.root, "legacy-turn-controls.audit.jsonl"),
     }, "darwin", undefined, false);
@@ -1451,7 +1452,7 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "delivery-cutover.lock"),
-    socketPath: join(env.root, "delivery-cutover.sock"),
+    ...testNamedDaemonEndpoint(env.root, "delivery-cutover"),
     manifestPath: join(env.root, "delivery-cutover.sqlite"),
     auditPath: join(env.root, "delivery-cutover.audit.jsonl"),
   };

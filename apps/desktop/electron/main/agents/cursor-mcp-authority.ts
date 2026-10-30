@@ -441,7 +441,8 @@ export async function runCursorSandboxedInspection(input: {
     throw new Error("Supervised Cursor MCP attestation refuses a redirected writable profile root.");
   }
   const writableRoot = realpathSync(logicalWritableRoot);
-  if (writableRoot === "/") {
+  // A filesystem root: "/" on POSIX, a drive root on Windows.
+  if (dirname(writableRoot) === writableRoot) {
     throw new Error("Supervised Cursor MCP attestation refuses an unbounded writable root.");
   }
   const inspectionEnv = cursorMcpInspectionEnv(input.env);

@@ -1,13 +1,14 @@
 import "../../electron/__tests__/isolated-home.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { link, mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readdir, readFile, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { MESSAGE_ATTACHMENT_LIMITS, validRecordedReplyAttachments } from "../../../../shared/message-attachments.mjs";
 import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "letagents-reply-spool-"));
@@ -19,7 +20,7 @@ async function setup() {
   const input = (files: string[], mcpRequestId = "request-1") => ({
     workspacePath: workspace, inboxItemId: "inbox-1", agentId: "agent-1", providerTurnId: "turn-1", mcpRequestId, files,
   });
-  return { root, workspace, spool, input, cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { root, workspace, spool, input, cleanup: () => removeTestDirectory(root) };
 }
 
 test("the spool copies workspace files at call time and journals only their identity", async () => {

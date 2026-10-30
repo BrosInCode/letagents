@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { createRequire, syncBuiltinESMExports } from "node:module";
+import { fileURLToPath } from "node:url";
 
 type TrackedSqliteDatabase = { close: () => void; isOpen?: boolean };
 
@@ -17,6 +18,11 @@ type TrackedSqliteDatabase = { close: () => void; isOpen?: boolean };
  */
 const openSqliteDatabases = new Map<TrackedSqliteDatabase, string>();
 
+function databaseFilePath(name: string): string {
+  if (!name.startsWith("file:")) return name;
+  try { return fileURLToPath(name.split("?")[0]!); } catch { return name; }
+}
+
 function trackSqliteDatabases(): void {
   const sqlite = createRequire(import.meta.url)("node:sqlite") as {
     DatabaseSync: new (...args: unknown[]) => TrackedSqliteDatabase;
@@ -27,7 +33,8 @@ function trackSqliteDatabases(): void {
     construct(target, args, newTarget) {
       const database = Reflect.construct(target, args, newTarget) as TrackedSqliteDatabase;
       if (typeof args[0] === "string" && args[0] !== ":memory:") {
-        openSqliteDatabases.set(database, resolve(args[0]));
+        // The daemon opens its state by a file: URL; the folder it lives in is what matters.
+        openSqliteDatabases.set(database, resolve(databaseFilePath(args[0])));
       }
       return database;
     },

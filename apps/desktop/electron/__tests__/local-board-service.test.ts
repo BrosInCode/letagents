@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-// The control plane serves this board socket on Windows too (a named pipe),
-// but the desktop refuses local-room boards there until supervised agents run
-// on Windows (#1797's gate), so every test here still skips on Windows.
 import test from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 import { randomUUID } from "node:crypto";
 import { createElectronTestEnv } from "./harness.js";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
 import { runWithLocalBoardOwner, requestLocalBoard, onLocalBoardChanged } from "../../../../shared/local-board-owner.mjs";
 
@@ -110,7 +108,9 @@ test("standalone worker identity is checked at the owner, after request delivery
   const worker = { session_id: "worker-session", session_token: "private-test-token", room_id: room,
     agent_key: "local/worker", agent_instance_id: `worker_${"a".repeat(32)}`, actor_label: "Canonical worker", ended_at: null };
   const state = { agent_sessions: { [worker.session_id]: worker } };
-  await writeFile(env.statePath!, JSON.stringify(state));
+  // The owner reads this file only when it is private to the account (Windows: an explicit ACL).
+  const writeState = async (value: unknown) => { await writeFile(env.statePath!, JSON.stringify(value)); await protectOwnerPrivate(env.statePath!, "file", { force: true }); };
+  await writeState(state);
   const extra = { domain: "mcp", statePath: env.statePath, worker };
   const task = await mutate("addLocalTask", [room, { title: "Worker task" }], extra) as { id: string };
   await assert.rejects(mutate("updateLocalTask", [room, task.id, { status: "accepted" }], {
@@ -119,7 +119,7 @@ test("standalone worker identity is checked at the owner, after request delivery
   await assert.rejects(mutate("updateLocalTask", [room, task.id, { status: "accepted" }], {
     ...extra, worker: { ...worker, agent_instance_id: "not-the-registered-instance" },
   }), /authority ended|connection was replaced/);
-  beforeMutation = async () => { await writeFile(env.statePath!, JSON.stringify({ agent_sessions: {} })); };
+  beforeMutation = async () => { await writeState({ agent_sessions: {} }); };
   try {
     await assert.rejects(mutate("updateLocalTask", [room, task.id, { status: "accepted" }], extra), /authority ended/);
   } finally { beforeMutation = null; }

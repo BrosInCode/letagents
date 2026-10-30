@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
+import { PIPE_ALLOWANCE_MS } from "./platform.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
 import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
@@ -322,7 +323,8 @@ function installFetchRouter(): {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+// A board read on a Windows pipe first proves the account's ACLs, which takes seconds on a slow machine.
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000 + 4 * PIPE_ALLOWANCE_MS): Promise<void> {
   const startedAt = Date.now();
   while (!predicate()) {
     if (Date.now() - startedAt > timeoutMs) {

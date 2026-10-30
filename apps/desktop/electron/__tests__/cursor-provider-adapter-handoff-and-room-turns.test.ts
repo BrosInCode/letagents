@@ -2,7 +2,7 @@ import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -22,6 +22,8 @@ import {
   flush,
   waitFor,
   withLoopAlive,
+  WA_CURSOR_CWD,
+  cursorTmp,
 } from "./cursor-provider-adapter.fixture.js";
 
 test("daemon-owned Cursor re-attests effective MCP authority before every native launch", async () => {
@@ -690,9 +692,9 @@ test("writable Cursor turns launch only in their private generation and retire i
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), "/private/letagents-generation/live/project");
   assert.equal(launch.mcpRuntimeCwd, "/private/letagents-generation/live/project");
-  assert.equal(launch.allowedReadSubpaths?.includes("/private/source/.git/objects"), true);
-  assert.equal(launch.allowedWriteSubpaths?.includes("/tmp/wa-cursor-1"), false);
-  assert.match(launch.workspaceGenerationManifestPath ?? "", /^\/tmp\/letagents-test-generation-/);
+  assert.equal(launch.allowedReadSubpaths?.includes(resolve("/private/source/.git/objects")), true, "the sandbox path is absolute for this platform");
+  assert.equal(launch.allowedWriteSubpaths?.includes(WA_CURSOR_CWD), false);
+  assert.ok((launch.workspaceGenerationManifestPath ?? "").startsWith(join(cursorTmp, "letagents-test-generation-")));
 
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,

@@ -4,7 +4,7 @@
 // A -> correction -> B ordering through the real socket/inbox/pump boundary.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,8 +16,9 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
-import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 const TEST_OID = "a".repeat(40);
 type DaemonInternals = {
@@ -45,7 +46,7 @@ function holdDeliveryCleanup(daemon: SupervisorDaemon, inboxItemId: string): () 
   return release;
 }
 
-async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 20_000): Promise<void> {
+async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 20_000 * WAIT_SCALE): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -345,7 +346,7 @@ test("a crash after native Stop quarantines exact A until operator resolution at
     assert.equal(calls.filter((call) => call.startsWith("control:")).length, 2, "each exact action signals native Stop once");
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -523,7 +524,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
   } finally {
     releaseCleanup();
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -669,6 +670,6 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
   } finally {
     releaseCleanup();
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

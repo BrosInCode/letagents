@@ -1,9 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertOwnerPrivateFile } from "./harness.js";
 import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
 import {
   ClaudeCodeProviderAdapter,
@@ -326,7 +327,7 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
         },
       },
     });
-    assert.equal((await stat(config.path)).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(config.path, root);
     await config.dispose();
     await assert.rejects(access(config.path));
   } finally {

@@ -18,6 +18,7 @@ import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHos
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
@@ -26,7 +27,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
   await writeFile(join(workspacePath, 'app.ts'), 'original\n'); git('add', '.'); git('commit', '-qm', 'base');
   const location = { path: workspacePath, revision: git('rev-parse', 'HEAD') };
-  t.after(() => rm(workspacePath, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(workspacePath));
   const path = join(directory, "state.sqlite");
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL");
@@ -60,7 +61,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
     publish: async (input: RoomWorkPublishInput): Promise<RoomWorkPublishResult> => { sent.push(input); return "acknowledged"; },
   };
   let publisher = new RoomWorkPublisher(openDaemonStateObservationDatabase(path), options);
-  t.after(async () => { publisher.close(); db.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { publisher.close(); db.close(); await removeTestDirectory(directory); });
   let sequence = 0;
   const native = (id: number) => ({ turnId: `turn-${id}`, providerContinuationId: "conversation", providerTurnId: `native-${id}` });
   function fact(id: number, extra: Record<string, unknown> = {}) {
@@ -886,7 +887,7 @@ for (const change of ['binary', 'rename', 'mode', 'empty deletion'] as const) {
 /** A bare remote with a `staging` branch, a teammate who lands files on it, and clones for the agent. */
 async function remoteFixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'publisher-base-update-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(root));
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
     GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
   const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -1170,7 +1171,7 @@ test('a remote that does not answer delays neither the start of a turn nor its c
   const f = await fixture(t);
   // The recorded remote accepts the connection and never says anything.
   const sockets: Socket[] = [];
-  const silent = createServer(socket => { sockets.push(socket); }).listen(0, '127.0.0.1');
+  const silent = createServer(socket => { sockets.push(socket); socket.on('error', () => { /* The killed Git resets the connection; Windows reports it. */ }); }).listen(0, '127.0.0.1');
   await once(silent, 'listening');
   t.after(() => { for (const socket of sockets) socket.destroy(); silent.close(); });
   f.options.workspaceLocation = async () => ({ ...f.location, remote: `git://127.0.0.1:${(silent.address() as AddressInfo).port}/repository` });

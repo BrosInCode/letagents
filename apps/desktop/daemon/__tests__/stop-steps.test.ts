@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import type { ProviderActionPort } from "../provider-action-port.js";
 import { runEveryStopStep } from "../stop-steps.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("every step of a stop runs, in order, whatever an earlier one reports, and the first failure is reported at the end", async () => {
   const first = new Error("first"), later = new Error("later");
@@ -95,7 +96,7 @@ async function runningDaemon() {
     succeed: async () => { await (await start()).stop(); },
     cleanup: async () => {
       await daemon.stop().catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
+      await removeTestDirectory(root);
     },
   };
 }

@@ -31,6 +31,7 @@ import {
   primeDaemonBareRepository,
   fakeGit,
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
 for (const providerId of ["open-model", "claude-code", "codex"] as const) {
 test(`explicit runtime recovery retires proven-dead ${providerId} without replacing the durable agent`, async () => {
@@ -568,7 +569,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
 test("runtime recovery atomically fails a pre-join room move without losing its activating authority evidence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "move-recovery.lock"), socketPath: join(env.root, "move-recovery.sock"),
+    lockPath: join(env.root, "move-recovery.lock"), ...testNamedDaemonEndpoint(env.root, "move-recovery"),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "move-recovery-audit.jsonl"),
     attemptsPath: join(env.root, "move-recovery-attempts.json"), attemptsRoot: join(env.root, "move-recovery-attempt-data"), workspaceRoot: env.root,
   };

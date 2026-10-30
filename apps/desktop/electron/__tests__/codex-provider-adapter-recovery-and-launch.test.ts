@@ -1,7 +1,7 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
-import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { realpathSync, writeFileSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { CodexProviderAdapter, codexMcpWorkplaceConfigOverrides } from "../main/
 import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext } from "../main/agents/codex-supervisor-bridge-context.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { assertOwnerPrivateFile } from "./harness.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
 
 test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
@@ -836,7 +837,7 @@ test("Codex custodial polling reads the selected built executable contract witho
     const handle = await adapter.spawn(request);
     assert.equal(handle.observedState(), "idle");
     assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
-    assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(JSON.stringify(await realpath(entry))), "launch uses the resolver's canonical executable");
+    assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(JSON.stringify(realpathSync(entry))), "launch uses the resolver's canonical executable");
     await writeFile(entry, [
       "if (process.env.LETAGENTS_API_URL !== 'letagents-local://rooms' || process.env.LETAGENTS_TOKEN || process.env.LETAGENTS_SUPERVISOR_ENTRY_ID) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
@@ -884,7 +885,7 @@ test("Codex supervisor bridge context is owner-only, atomic, and contains no wor
     assert.equal(JSON.parse(encoded).execution_generation_id, "generation_resumed");
     assert.doesNotMatch(encoded, /session_token|session-secret|authorization/i);
     assert.doesNotMatch(encoded, /socket_path/, "repo-controlled context cannot select the credential transport");
-    assert.equal((await lstat(path)).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(path, root);
     assert.deepEqual(await readdir(root), [CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE], "atomic rewrite leaves no temporary context");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -894,7 +895,8 @@ test("Codex supervisor bridge context is owner-only, atomic, and contains no wor
 test("Codex dev MCP entry override adds exact command/args/cwd overrides when devMcpServerEntryPath is supplied", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-entry-"));
   try {
-    const quotedDirectory = join(root, 'path with spaces and "quotes"');
+    // Windows cannot name a folder with a double quote.
+    const quotedDirectory = join(root, process.platform === "win32" ? "path with spaces and 'quotes'" : 'path with spaces and "quotes"');
     await mkdir(quotedDirectory);
     const entryPath = join(quotedDirectory, "server.js");
     await writeFile(entryPath, "// stub");

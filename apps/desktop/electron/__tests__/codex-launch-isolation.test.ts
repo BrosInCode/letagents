@@ -4,11 +4,12 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import type { TestContext } from "node:test";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
+import { needsProcessTreeHelper, needsPs, WINDOWS_TEST_HELPER, writeFakeProvider } from "./platform.js";
 
 const env = createElectronTestEnv({
   prefix: "letagents-codex-launch-isolation-",
@@ -21,6 +22,7 @@ const scratchHome = join(env.tempDir, "scratch-home");
 mkdirSync(scratchHome, { recursive: true });
 writeFileSync(join(scratchHome, ".gitconfig"), "[user]\n\tname = Fake Owner\n\temail = owner@example.invalid\n");
 process.env.HOME = scratchHome;
+if (process.platform === "win32") process.env.USERPROFILE = scratchHome; // Windows reads the home folder from here
 process.env.GIT_CONFIG_NOSYSTEM = "1";
 writeFileSync(process.env.LETAGENTS_AGENT_COMMIT_IDENTITY_PATH!, JSON.stringify({
   version: 1,
@@ -75,10 +77,8 @@ function writeSkill(directory: string, name: string, marker = name): string {
 /** A stand-in Codex binary: lists MCP servers and records every invocation. */
 function fakeCodex(): { bin: string; report: string; calls: () => Array<{ args: string[]; cwd: string; env: Record<string, string | null>; letagents: string[] }> } {
   const directory = fixture("fake-codex");
-  const bin = join(directory, "codex");
   const report = join(directory, "calls.jsonl");
-  writeFileSync(bin, [
-    "#!/usr/bin/env node",
+  const bin = writeFakeProvider(join(directory, "codex"), [
     "const { appendFileSync } = require('node:fs');",
     "const args = process.argv.slice(2);",
     "const pick = (key) => process.env[key] ?? null;",
@@ -87,7 +87,7 @@ function fakeCodex(): { bin: string; report: string; calls: () => Array<{ args: 
     "  CODEX_HOME: pick('CODEX_HOME'), GIT_AUTHOR_NAME: pick('GIT_AUTHOR_NAME'), GIT_AUTHOR_EMAIL: pick('GIT_AUTHOR_EMAIL'),",
     "  GIT_COMMITTER_NAME: pick('GIT_COMMITTER_NAME'), GIT_COMMITTER_EMAIL: pick('GIT_COMMITTER_EMAIL'),",
     "}, letagents: Object.keys(process.env).filter((key) => key.startsWith('LETAGENTS_') && !key.startsWith('LETAGENTS_AGENT_COMMIT')).sort() }) + '\\n');",
-    "const inProject = process.cwd() !== '/';",
+    "const inProject = require('node:path').parse(process.cwd()).root !== process.cwd();",
     "const overrides = args.join(' ');",
     "if (args[0] === 'mcp') {",
     "  if (process.env.FAKE_CODEX_MCP_FAIL === '1') { process.stderr.write('config is broken\\n'); process.exit(3); }",
@@ -118,7 +118,7 @@ function fakeCodex(): { bin: string; report: string; calls: () => Array<{ args: 
     "  });",
     "}",
     "",
-  ].join("\n"), { mode: 0o755 });
+  ].join("\n"));
   return {
     bin,
     report,
@@ -187,7 +187,7 @@ test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex
   assert.ok(files.includes(grouped));
   assert.ok(files.includes(agents));
   assert.ok(files.includes(join(codexHome, "skills", "linked", "SKILL.md")));
-  assert.ok(files.includes(realpathSync(linkedTarget)));
+  assert.ok(files.includes(realpathSync.native(linkedTarget)));
   assert.equal(files.some((file) => file.includes(".system")), false);
   const deepest = writeSkill(join(codexHome, "skills", "d1", "d2", "d3", "d4", "d5", "d6"), "deepest");
   const tooDeep = writeSkill(join(codexHome, "skills", "e1", "e2", "e3", "e4", "e5", "e6", "e7"), "too-deep");
@@ -279,7 +279,7 @@ test("a managed Codex launch turns off the owner's extensions and commits as the
   const server = codex.calls().find((call) => call.args[0] === "app-server");
   assert.deepEqual(lists.map((list) => list.args.slice(0, 3)), [["mcp", "list", "--json"], ["mcp", "list", "--json"]]);
   // Once in the project and once outside any project, to compare the LetAgents server.
-  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(project), "/"].sort());
+  assert.deepEqual(lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(project), parse(project).root].sort());
   for (const list of lists) {
     assert.deepEqual(overridesOf(list.args), [
       'model="caller-model"',
@@ -826,7 +826,7 @@ async function homeHarnessDecision(project: {
         })),
       };
     },
-    projectFolderEntries: (folder: string) => { foldersAsked.push(folder); return project.folders?.[folder] ?? []; },
+    projectFolderEntries: (folder: string) => { foldersAsked.push(folder); return project.folders?.[folder] ?? project.folders?.[folder.replaceAll("\\", "/")] ?? []; },
   });
   return { overrides, listed, inspected, foldersAsked };
 }
@@ -928,7 +928,7 @@ test("a project whose Codex config sets anything else, or that ships command rul
   const layers = [{ dotCodexFolder: "/work/.codex", config: {} }, { dotCodexFolder: "/work/attempt/.codex", config: {} }];
   // Every project layer Codex applies is looked at, a parent folder's included, in both folders Codex acts on.
   assert.deepEqual((await homeHarnessDecision({ layers })).foldersAsked,
-    ["/work/.codex/rules", "/work/.codex/agents", "/work/attempt/.codex/rules", "/work/attempt/.codex/agents"]);
+    [join("/work", ".codex", "rules"), join("/work", ".codex", "agents"), join("/work", "attempt", ".codex", "rules"), join("/work", "attempt", ".codex", "agents")]);
   // What a refusal says is true of any entry, a README included: the folder is named as the owner knows it,
   // with what is in it and what Codex reads from there, and nothing in it is called a rule or a role.
   const refusedFolder = (reads: string, folder: string, state: string) => ({
@@ -945,7 +945,7 @@ test("a project whose Codex config sets anything else, or that ships command rul
     // The folder itself, when it cannot be listed.
     ["/work/attempt/.codex/rules", [""], ".codex/rules", "cannot be listed"],
     // A layer above the agent's folder, with no repository known around it, keeps its full path.
-    ["/work/.codex/rules", ["nested"], "/work/.codex/rules", "has entries LetAgents cannot check (nested)"],
+    ["/work/.codex/rules", ["nested"], join("/work", ".codex", "rules"), "has entries LetAgents cannot check (nested)"],
   ] as Array<[string, string[], string, string]>) {
     await assert.rejects(homeHarnessDecision({ layers, folders: { [folder]: entries.map((entry) => entry ? `${folder}/${entry}` : folder) } }),
       refusedFolder(rules, shown, state), `${folder}: ${entries.join(", ")}`);
@@ -1112,8 +1112,8 @@ test("a managed launch with the owner's own setup adds none of the overrides tha
   assert.equal(realpathSync(on.server!.cwd), realpathSync(on.project));
 
   // Both lists are still read, and Codex is asked once what the project adds, from outside any project.
-  assert.deepEqual(on.lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(on.project), "/"].sort());
-  assert.deepEqual(on.inspections.map((call) => call.cwd), ["/"]);
+  assert.deepEqual(on.lists.map((list) => realpathSync(list.cwd)).sort(), [realpathSync(on.project), parse(on.project).root].sort());
+  assert.deepEqual(on.inspections.map((call) => call.cwd), [parse(on.project).root]);
   for (const call of [...on.lists, ...on.inspections]) {
     assert.equal(overridesOf(call.args).some(isIsolation), false, "asked with the owner's extensions left on, as the launch will run");
     assert.ok(overridesOf(call.args).includes('model="caller-model"'));
@@ -1295,9 +1295,7 @@ test("a running Codex is known to have its owner's setup by what it was started 
 test("a listing that Codex never answers is killed, and the check of a running agent says it timed out", { timeout: 30_000 }, async () => {
   // A stand-in Codex that never answers anything: the real listing is what gives up on it.
   const dir = fixture("live-check-hang");
-  const bin = join(dir, "codex");
-  writeFileSync(bin, "#!/bin/sh\nexec /bin/sleep 600\n");
-  chmodSync(bin, 0o755);
+  const bin = writeFakeProvider(join(dir, "codex"), "setInterval(() => {}, 1000);\n");
   const started = Date.now();
   await assert.rejects(
     assertLiveCodexProjectUnchanged(bin, { commandLine: "codex app-server --listen ws://127.0.0.1:1", cwd: dir }, { ...process.env }, {
@@ -1337,15 +1335,18 @@ test("only so many running agents are checked against their projects at once", {
   })));
 });
 
-test("a running Codex's command line is read without ever holding the caller up", { timeout: 30_000 }, async (t) => {
-  // This test's own process, read with the real `ps`.
-  const own = await readCodexCommandLine(process.pid);
+test("a running Codex's command line is read without ever holding the caller up", { skip: needsProcessTreeHelper, timeout: 30_000 }, async () => {
+  // This test's own process, read with the real `ps` (on Windows with the process-tree helper).
+  const helperPath = WINDOWS_TEST_HELPER;
+  const own = await readCodexCommandLine(process.pid, { helperPath });
   assert.ok(own && own.includes("node"), "a readable process is read");
-  assert.equal(await readCodexCommandLine(0), null);
-  assert.equal(await readCodexCommandLine(-1), null);
-  assert.equal(await readCodexCommandLine(2 ** 31 - 2), null, "a process that does not exist cannot be read");
+  assert.equal(await readCodexCommandLine(0, { helperPath }), null);
+  assert.equal(await readCodexCommandLine(-1, { helperPath }), null);
+  assert.equal(await readCodexCommandLine(2 ** 31 - 2, { helperPath }), null, "a process that does not exist cannot be read");
   assert.equal(await readCodexCommandLine(process.pid, { ps: join(fixture("no-ps"), "missing") }), null, "nor can anything be read without the tool");
+});
 
+test("a stand-in ps that never returns is killed, and the caller is answered in time", { skip: needsPs, timeout: 30_000 }, async (t) => {
   // A stand-in `ps` that never returns: the caller is answered in time, and the stand-in is killed.
   const dir = fixture("ps-hang");
   const pidFile = join(dir, "pid");

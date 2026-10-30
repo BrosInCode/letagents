@@ -33,6 +33,7 @@ import {
   committedSourceRepository,
   primeDaemonBareRepository,
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
 for (const modeCase of ["mcp_polling", "daemon_inbox", "custodial_polling_v1"] as const) {
 const custodial = modeCase === "custodial_polling_v1";
@@ -1152,7 +1153,7 @@ test("Pause and Stop fence room-move reconciliation while the activating turn re
     const id = `room_move_lifecycle_${desiredState}`;
     const paths = {
       lockPath: join(env.root, `${desiredState}.lock`),
-      socketPath: join(env.root, `${desiredState}.sock`),
+      ...testNamedDaemonEndpoint(env.root, desiredState),
       manifestPath: join(env.root, `${desiredState}.sqlite`),
       auditPath: join(env.root, `${desiredState}-audit.jsonl`),
       workerBindingsPath: join(env.root, `${desiredState}-bindings.json`),

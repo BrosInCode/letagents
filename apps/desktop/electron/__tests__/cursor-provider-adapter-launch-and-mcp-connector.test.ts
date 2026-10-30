@@ -25,6 +25,7 @@ import {
   defaultLaunchTurn,
 } from "../main/agents/cursor-provider-adapter.js";
 import { boundedClaudeRoomTurnPrompt } from "../main/agents/claude-code-provider-adapter.js";
+import { cursorMcpConnectorListenPath } from "../main/agents/cursor/windows-turn.js";
 import { cursorSupervisedMcpServerName } from "../main/agents/cursor-managed-profile.js";
 import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
@@ -47,7 +48,16 @@ import {
   verifyMcpConnectorRetirement,
   verifyMcpRuntimeSignalFence,
   runSupervisedWorkerSocketProbe,
+  WA_CURSOR_CWD,
+  cursorTmp,
+  endsWithPath,
 } from "./cursor-provider-adapter.fixture.js";
+import { macOsSandboxOnly, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
+
+/** A turn's private local-worker root: under /tmp on POSIX (/private/tmp on macOS), under the temporary folder on Windows. */
+const RUNTIME_DATA_DIR = process.platform === "win32"
+  ? new RegExp(`^${cursorTmp.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}\\\\letagents-cursor-data-[A-Za-z0-9]{6}$`, "i")
+  : /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/;
 
 test("spawn runs one per-turn child with verbatim policy flags and the prompt as a positional argument", async () => {
   const harness = createHarness();
@@ -61,7 +71,7 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.ok(args.includes("--trust"), "headless workspace-trust suppression is adapter-owned");
   assert.equal(args.includes("--disable-project-configs"), false, "legacy Cursor keeps project config enabled");
   assert.equal(args.includes("--approve-mcps"), false, "legacy Cursor has no sealed profile to scope approval, so it never blanket-approves MCPs");
-  assert.ok(args.join(" ").includes("--workspace /tmp/wa-cursor-1"));
+  assert.ok(args.join(" ").includes(`--workspace ${WA_CURSOR_CWD}`));
   assert.ok(args.join(" ").includes("--mode ask"), "native policy flag passed verbatim");
   assert.ok(args.join(" ").includes("--sandbox enabled"));
   assert.equal(args.includes("--resume"), false);
@@ -80,7 +90,7 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "session id captured from the stream");
 });
 
-test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", () => {
+test("Cursor resume ownership rejects occupied or unsafe structures without changing native state", { skip: macOsSandboxOnly }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "cursor-resume-ownership-")));
   const id = randomUUID();
   try {
@@ -110,8 +120,14 @@ test("Cursor resume ownership rejects occupied or unsafe structures without chan
 test("supervised Cursor room turns say there is no network and git fails from the sandbox only for sandboxed writes", () => {
   const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
   const sandboxed = boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_1", "sandboxed_write");
-  assert.match(sandboxed, limit);
-  assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
+  if (process.platform === "win32") {
+    // Windows has no sandbox: its prompt names that, not the macOS sandbox's git failure.
+    assert.match(sandboxed, /This computer runs Windows, where no operating-system sandbox limits your commands\./);
+    assert.doesNotMatch(sandboxed, limit);
+  } else {
+    assert.match(sandboxed, limit);
+    assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
+  }
   assert.doesNotMatch(boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_2", "full_access"), limit);
   assert.doesNotMatch(boundedClaudeRoomTurnPrompt(roomTurnRequest()), limit);
 });
@@ -154,7 +170,7 @@ test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags",
       testAgentUpstreamEndpoint: "https://api2.cursor.sh",
       testControlPlaneUpstreamEndpoint: "https://api2.cursor.sh",
       testStartupBarrier: {
-        path: "/tmp/letagents-cursor-startup-barrier-Abc123/mcp_listen",
+        path: join(cursorTmp, "letagents-cursor-startup-barrier-Abc123", "mcp_listen"),
         stage: "mcp_listen",
       },
     }),
@@ -166,7 +182,7 @@ test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags",
     cwd: process.cwd(),
     restrictRemoteAuthority: true,
     providerAuthorization: "Bearer sandbox-allow-list-test",
-    mcpConnectorSocketPath: `/tmp/letagents-cursor-mcp-${randomUUID()}/stdio.sock`,
+    mcpConnectorSocketPath: join(cursorTmp, `letagents-cursor-mcp-${randomUUID()}`, "stdio.sock"),
     mcpRuntimeEntryPath: "/usr/bin/true",
     mcpRuntimeCwd: process.cwd(),
     mcpRuntimeEnv: {},
@@ -190,20 +206,23 @@ test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags",
     }),
     /ownership access must match the exact supervised resume session/,
   );
-  assert.throws(
-    () => defaultLaunchTurn({
-      ...supervisedBoundary,
-      allowedReadSubpaths: [process.cwd()],
-    }),
-    /non-empty read and write sandbox allow-lists/,
-  );
-  assert.throws(
-    () => defaultLaunchTurn({
-      ...supervisedBoundary,
-      allowedWriteSubpaths: [process.cwd()],
-    }),
-    /non-empty read and write sandbox allow-lists/,
-  );
+  // Windows has no sandbox, so no allow-lists to require (turn-launcher.ts).
+  if (process.platform !== "win32") {
+    assert.throws(
+      () => defaultLaunchTurn({
+        ...supervisedBoundary,
+        allowedReadSubpaths: [process.cwd()],
+      }),
+      /non-empty read and write sandbox allow-lists/,
+    );
+    assert.throws(
+      () => defaultLaunchTurn({
+        ...supervisedBoundary,
+        allowedWriteSubpaths: [process.cwd()],
+      }),
+      /non-empty read and write sandbox allow-lists/,
+    );
+  }
   assert.throws(
     () => defaultLaunchTurn({
       ...supervisedBoundary,
@@ -408,7 +427,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     assert.equal(launch.args.includes("--disable-auto-update"), true, "native background updater stays disabled");
     assert.equal(argValue(launch.args, "--sandbox"), "enabled", "supervised read-only turns keep Cursor's native sandbox enabled");
     assert.equal(launch.cwd, "/private/cursor/wa-cursor-1", "project MCP discovery is isolated from --workspace");
-    assert.equal(argValue(launch.args, "--workspace"), "/tmp/wa-cursor-1");
+    assert.equal(argValue(launch.args, "--workspace"), WA_CURSOR_CWD);
     assert.equal(launch.args.includes("--resume"), false, "the first durable turn establishes the native session");
     assert.equal(launch.env?.HOME, "/private/cursor/wa-cursor-1/home");
     assert.equal(launch.env?.CURSOR_API_KEY, undefined);
@@ -430,7 +449,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     assert.equal(launch.env?.LETAGENTS_EXECUTION_PROFILE, undefined);
     assert.equal(launch.env?.LETAGENTS_PERMISSION_PROFILE_ID, undefined);
     const firstRuntimeDataDir = launch.env?.CURSOR_DATA_DIR;
-    assert.match(firstRuntimeDataDir ?? "", /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/);
+    assert.match(firstRuntimeDataDir ?? "", RUNTIME_DATA_DIR);
     assert.equal(existsSync(firstRuntimeDataDir!), true, "the live turn owns one private local-worker root");
     harness.children[0]!.emit({
       type: "result", subtype: "success", is_error: false,
@@ -456,7 +475,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     assert.ok(harness.profilePreparations.every(input => input.apiBaseUrl === "letagents-local://rooms"));
     assert.equal(resumeLaunch.mcpRuntimeEnv?.LETAGENTS_API_URL, "letagents-local://rooms");
     const resumeRuntimeDataDir = resumeLaunch.env?.CURSOR_DATA_DIR;
-    assert.match(resumeRuntimeDataDir ?? "", /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/);
+    assert.match(resumeRuntimeDataDir ?? "", RUNTIME_DATA_DIR);
     assert.notEqual(resumeRuntimeDataDir, firstRuntimeDataDir, "each resumed turn gets a fresh worker socket namespace");
     assert.equal(argValue(resumeLaunch.args, "--resume"), "sess-cursor-1");
     harness.children[1]!.emit({
@@ -531,7 +550,13 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
     ).mcpServers[serverName];
     assert.deepEqual(server.env, { ELECTRON_RUN_AS_NODE: "1" });
     assert.equal(JSON.stringify(server).includes("LETAGENTS_SUPERVISOR_"), false);
-    assert.equal(server.args.at(-1), harness.launches[0]!.mcpConnectorSocketPath);
+    // Windows: the connector gets the named pipe the wrapper listens on, then its proof file and the pipe addon.
+    assert.equal(
+      process.platform === "win32" ? server.args[2] : server.args.at(-1),
+      process.platform === "win32"
+        ? cursorMcpConnectorListenPath(harness.launches[0]!.mcpConnectorSocketPath!)
+        : harness.launches[0]!.mcpConnectorSocketPath,
+    );
     assert.deepEqual(
       Object.fromEntries(Object.entries(harness.launches[0]!.mcpRuntimeEnv ?? {})
         .filter(([key]) => key.startsWith("LETAGENTS_SUPERVISOR_")
@@ -555,11 +580,11 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
     );
     assert.equal(harness.launches[0]!.env?.LETAGENTS_SUPERVISOR_ENTRY_ID, undefined);
     assert.ok(
-      harness.launches[0]!.deniedReadPaths?.some((path) => path.endsWith("/workspace/.cursor/hooks.json")),
+      harness.launches[0]!.deniedReadPaths?.some((path) => endsWithPath(path, "/workspace/.cursor/hooks.json")),
       "the final native process receives exact project hook read denials",
     );
     assert.ok(
-      harness.launches[0]!.deniedReadSubpaths?.some((path) => path.endsWith("/home/.cursor/plugins")),
+      harness.launches[0]!.deniedReadSubpaths?.some((path) => endsWithPath(path, "/home/.cursor/plugins")),
       "the final native process cannot load profile-persisted plugins",
     );
     assert.equal(
@@ -586,23 +611,23 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
   }
 });
 
-test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it",
+test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it", { skip: needsWindowsFakeCursorAgent },
   () => verifyMcpConnectorRetirement());
 
 test("MCP retirement escalates a live exact runtime despite slow process-table scans", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, () => verifyMcpConnectorRetirement(true));
 
 test("MCP retirement preserves the grace window after its leader exits before a descendant", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, () => verifyMcpConnectorRetirement(false, true));
 
 test("the production wrapper refuses a recycled MCP runtime process group before signaling", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, () => verifyMcpRuntimeSignalFence("recycled"));
 
 test("MCP cleanup retries distinguish unavailable identity from lost process-group signal authority", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async (t) => {
   await t.test("TERM identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_identity"));
   await t.test("KILL identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_kill_identity"));
@@ -611,7 +636,7 @@ test("MCP cleanup retries distinguish unavailable identity from lost process-gro
 });
 
 test("the wrapper retries a timed-out process-group probe with a longer bound and never reports closed without an answer", {
-  skip: process.platform === "win32",
+  skip: needsPosixProcessGroups,
 }, async (t) => {
   await t.test("a timeout then an answer proves the group closed", () => verifyMcpRuntimeSignalFence("group_timeout_then_empty"));
   await t.test("a timeout on every try leaves the group unproven", () => verifyMcpRuntimeSignalFence("group_timeout_always"));
@@ -623,12 +648,11 @@ test("the exact live Cursor connector rejects a swapped runtime with a missing o
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-live-contract-${completionContract}-`));
     const configDir = join(root, "config");
     const homeDir = join(root, "home");
-    const cursorBin = join(root, "fake-cursor-agent");
+    let cursorBin = join(root, "fake-cursor-agent");
     const connectorRoots: string[] = [];
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
-    writeFileSync(cursorBin, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    cursorBin = writeFakeProvider(cursorBin, `const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -692,12 +716,11 @@ test("the exact live Cursor connector rejects bounded capability-attestation flo
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-live-flood-${floodMode}-`));
     const configDir = join(root, "config");
     const homeDir = join(root, "home");
-    const cursorBin = join(root, "fake-cursor-agent");
+    let cursorBin = join(root, "fake-cursor-agent");
     const connectorRoots: string[] = [];
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
-    writeFileSync(cursorBin, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    cursorBin = writeFakeProvider(cursorBin, `const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -764,15 +787,14 @@ attestFixtureMcp().then(() => {
   }
 });
 
-test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", async () => {
+test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-delayed-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const cursorBin = join(root, "fake-cursor-agent");
+  let cursorBin = join(root, "fake-cursor-agent");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
-  writeFileSync(cursorBin, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+  cursorBin = writeFakeProvider(cursorBin, `const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -827,8 +849,8 @@ test("supervised Cursor binds its private worker socket only inside its per-turn
   // `sandboxed = process.platform === "darwin"` gate in the adapter).
   skip: process.platform !== "darwin",
 }, async () => {
-  const dataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
-  const outsideRoot = mkdtempSync("/tmp/letagents-cursor-outside-");
+  const dataRoot = mkdtempSync(join(cursorTmp, "letagents-cursor-data-"));
+  const outsideRoot = mkdtempSync(join(cursorTmp, "letagents-cursor-outside-"));
   try {
     const result = await runSupervisedWorkerSocketProbe({ label: "solo", dataRoot, outsideRoot });
     assert.equal(result.inside, "OK",
@@ -849,8 +871,8 @@ test("concurrent supervised Cursor turns keep isolated worker-socket namespaces 
   // the OTHER turn's data root, so a pass proves one supervised turn can never
   // bind inside a peer's private namespace. One worker starts late to show the
   // static rule does not depend on startup timing.
-  const dataRootA = mkdtempSync("/tmp/letagents-cursor-data-");
-  const dataRootB = mkdtempSync("/tmp/letagents-cursor-data-");
+  const dataRootA = mkdtempSync(join(cursorTmp, "letagents-cursor-data-"));
+  const dataRootB = mkdtempSync(join(cursorTmp, "letagents-cursor-data-"));
   try {
     const [a, b] = await Promise.all([
       runSupervisedWorkerSocketProbe({ label: "concurrent-a", dataRoot: dataRootA, outsideRoot: dataRootB, probeBeforeBindMs: 300 }),
@@ -866,18 +888,17 @@ test("concurrent supervised Cursor turns keep isolated worker-socket namespaces 
   }
 });
 
-test("the exact live Cursor connector times out and reaps native work when Cursor never connects", async () => {
+test("the exact live Cursor connector times out and reaps native work when Cursor never connects", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-no-connector-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const cursorBin = join(root, "fake-cursor-agent");
+  let cursorBin = join(root, "fake-cursor-agent");
   const nativePidPath = join(root, "tmp", "native.pid");
   const connectorRoots: string[] = [];
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   mkdirSync(dirname(nativePidPath), { recursive: true });
-  writeFileSync(cursorBin, `#!/usr/bin/env node
-const fs = require("node:fs");
+  cursorBin = writeFakeProvider(cursorBin, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -936,14 +957,14 @@ setInterval(() => {}, 1000);
   }
 });
 
-test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", async () => {
+test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", { skip: needsWindowsFakeCursorAgent }, async () => {
   // The verify-phase timeout is the only bound between wrapper start and
   // connector listen; this pins it so a mutation that drops the deadline
   // (reintroducing an unbounded startup wait) fails loudly.
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-wedged-runtime-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const cursorBin = join(root, "fake-cursor-agent");
+  let cursorBin = join(root, "fake-cursor-agent");
   const nativePidPath = join(root, "tmp", "native.pid");
   const wedgedRuntime = join(root, "wedged-runtime.cjs");
   const wedgedPidPath = join(root, "wedged-runtime.pid");
@@ -956,8 +977,7 @@ require("node:fs").writeFileSync(${JSON.stringify(wedgedPidPath)}, String(proces
 process.stdin.on("data", () => {});
 setInterval(() => {}, 1000);
 `);
-  writeFileSync(cursorBin, `#!/usr/bin/env node
-const fs = require("node:fs");
+  cursorBin = writeFakeProvider(cursorBin, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");

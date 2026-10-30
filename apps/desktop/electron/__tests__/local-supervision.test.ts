@@ -6,9 +6,11 @@ registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { assertOwnerPrivateFile, createElectronTestEnv } from "./harness.js";
-import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { testDaemonEndpoint } from "./platform.js";
 
 const environment = createElectronTestEnv({ prefix: "local-supervision-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
@@ -211,7 +213,9 @@ test("separate local writers racing to claim a task create exactly one work leas
       try { await claimLocalTaskWorkLease(${JSON.stringify(roomId)}, ${JSON.stringify(task.id)}, ${JSON.stringify(identity)}); }
       catch (error) { process.stderr.write(String(error)); process.exitCode = 2; }
       process.stdin.destroy();
-    `], { stdio: ["pipe", "pipe", "pipe"] });
+    `], { stdio: ["pipe", "pipe", "pipe"],
+      // A Windows pipe client finds the proof file from the state folder it names.
+      env: { ...process.env, [DAEMON_STATE_DIR_ENV]: environment.tempDir } });
     let errors = "";
     child.stderr.on("data", chunk => { errors += String(chunk); });
     return { child, ready: new Promise<void>((resolve, reject) => {
@@ -563,7 +567,10 @@ test("daemon restart restores local authority and the unread cursor without clou
   const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
   const roomId = "github.com/example/restart-messages";
   await createLocalRoom({ roomIdentifier: roomId });
-  const paths = { lockPath: join(environment.tempDir, "d.lock"), socketPath: join(environment.tempDir, "d.sock"),
+  // Its own folder: the board service above already holds this test's endpoint.
+  const daemonRoot = join(environment.tempDir, "daemon-root");
+  await mkdir(daemonRoot, { recursive: true }); await protectOwnerPrivate(daemonRoot, "directory", { force: true });
+  const paths = { lockPath: join(daemonRoot, "d.lock"), ...testDaemonEndpoint(daemonRoot),
     manifestPath: join(environment.tempDir, "daemon.sqlite"), auditPath: join(environment.tempDir, "audit.log"),
     attemptsPath: join(environment.tempDir, "attempts.sqlite"), attemptsRoot: join(environment.tempDir, "attempts"),
     workspaceRoot: join(environment.tempDir, "workspaces") };

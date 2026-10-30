@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -22,6 +22,7 @@ import {
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("SupervisorDaemon stop fences and drains its production-owned delivery before releasing stores", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-delivery-drain-"));
@@ -72,7 +73,7 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
     daemon = null;
   } finally {
     await daemon?.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -133,7 +134,7 @@ test("SupervisorDaemon stop detaches an unresolved provider turn without retaini
   } finally {
     late.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
     await daemon?.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -150,7 +151,7 @@ test("handoff during a provider turn drains it and prevents post-turn publicatio
     assert.equal(published, 0);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("handoff drains a non-Cursor turn through its late exact checkpoint and the successor recovers it", async () => {
@@ -218,7 +219,7 @@ test("handoff drains a non-Cursor turn through its late exact checkpoint and the
     await successor?.fenceAndDrain().catch(() => undefined);
     await retiring?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -263,7 +264,7 @@ test("handoff waits for pre-native provider cleanup before releasing the deliver
       "proven-not-dispatched handoff cleanup returns the FIFO head to pending",
     );
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("Cursor Stop and handoff retain an atomically prepared turn until idle compensation", async () => {
@@ -389,7 +390,7 @@ test("Cursor Stop and handoff retain an atomically prepared turn until idle comp
       await successor.fenceAndDrain();
       await store.close();
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("Cursor handoff restores a claimed FIFO head when retirement wins before provider entry", async () => {
@@ -427,7 +428,7 @@ test("Cursor handoff restores a claimed FIFO head when retirement wins before pr
       "a clean pre-entry handoff cannot leave a no-turn dispatching claim",
     );
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("Cursor handoff restores an evidence-free pre-native retry backoff", async () => {
@@ -459,7 +460,7 @@ test("Cursor handoff restores an evidence-free pre-native retry backoff", async 
       "clean retirement during pre-native backoff cannot become a blocked startup ambiguity",
     );
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("Cursor handoff detaches immediately after the exact durable wrapper milestone", async () => {
@@ -504,7 +505,7 @@ test("Cursor handoff detaches immediately after the exact durable wrapper milest
     await store.close();
   } finally {
     late?.resolve({ turnId: "cursor:durable-wrapper", outcome: "reply", text: "cleanup" });
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -569,7 +570,7 @@ test("handoff retires an unresolved provider turn without stopping it, and late 
     late?.resolve({ turnId: "cleanup", outcome: "reply", text: "cleanup" });
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -615,7 +616,7 @@ test("a late provider rejection after handoff is observed and cannot commit", as
     process.off("unhandledRejection", observeUnhandled);
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -635,7 +636,7 @@ test("handoff during publication aborts and drains the publication without ackno
     assert.equal(aborted, true);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "publishing");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("a stale generation after a provider await cannot publish or acknowledge", async () => {
@@ -654,7 +655,7 @@ test("a stale generation after a provider await cannot publish or acknowledge", 
       providerContinuationId: "thread", providerConnection: agent.providerConnection, handle: agent.handle,
     });
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("a desired stop, API-origin rotation, or handle replacement after a provider await cannot publish", async () => {
@@ -676,7 +677,7 @@ test("a desired stop, API-origin rotation, or handle replacement after a provide
       assert.equal(published, 0, stale);
       assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching", stale);
       await store.close();
-    } finally { await rm(root, { recursive: true, force: true }); }
+    } finally { await removeTestDirectory(root); }
   }
 });
 
@@ -693,7 +694,7 @@ test("handoff tracks a retry paused after its receipt read and leaves the blocke
     await drain; await assert.rejects(retry, (error: unknown) => error instanceof Error);
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "blocked");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("retry acknowledges durable scheduling without waiting for a long provider turn, and duplicate retry is fenced", async () => {
@@ -717,7 +718,7 @@ test("retry acknowledges durable scheduling without waiting for a long provider 
     await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
     await delivery.fenceAndDrain();
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("daemon socket retry accepts only the exact blocked binding and reports committed no-reply settlement", async t => {
@@ -843,6 +844,6 @@ test("daemon socket retry accepts only the exact blocked binding and reports com
   } finally {
     release?.resolve({ turnId: "cleanup", outcome: "no_reply", text: null });
     await daemon?.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

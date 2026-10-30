@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmod, lstat, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,13 +15,35 @@ import { compactDaemonStateDatabase } from "../daemon-state-maintenance.js";
 import { cloneStateDatabaseForCompaction } from "../state-recovery-backup.js";
 import { requestStateRecoveryKey, withProtectedStateUpgrade } from "../state-recovery-key.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";
+import { assertKilledBySelf, CHILD_PROCESS_TIMEOUT_MS } from "../../electron/__tests__/platform.js";
+import { forgetOwnerPrivateCache, protectOwnerPrivate, windowsSystemTool } from "../../../../shared/owner-private-fs.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+
+/** A new temporary folder. The recovery code accepts only an owner-private parent; on Windows a temp folder inherits other entries, so its access list is set. */
+async function privateTempDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  if (process.platform === "win32") await protectOwnerPrivate(directory, "directory", { force: true });
+  return directory;
+}
+
+/** Gives a path an access that is not the owner's: group and other read on POSIX, an Everyone entry on Windows. */
+async function loosen(path: string, folder: boolean): Promise<void> {
+  if (process.platform !== "win32") { await chmod(path, folder ? 0o755 : 0o644); return; }
+  execFileSync(windowsSystemTool("icacls.exe"), [path, "/grant", folder ? "*S-1-1-0:(OI)(CI)R" : "*S-1-1-0:R"], { stdio: "ignore", windowsHide: true });
+  forgetOwnerPrivateCache();
+}
+async function tighten(path: string, folder: boolean): Promise<void> {
+  if (process.platform !== "win32") { await chmod(path, folder ? 0o700 : 0o600); return; }
+  execFileSync(windowsSystemTool("icacls.exe"), [path, "/remove:g", "*S-1-1-0"], { stdio: "ignore", windowsHide: true });
+  forgetOwnerPrivateCache();
+}
 
 const ERROR = /Encrypted daemon recovery snapshot could not be verified safely\./;
 const OLD = new Date("2026-08-30T00:00:00.000Z");
 const secret = "worker-bearer-do-not-copy-to-plaintext-recovery";
 
 async function fixture(t: test.TestContext) {
-  const directory = await mkdtemp(join(tmpdir(), "letagents-encrypted-state-"));
+  const directory = await privateTempDirectory("letagents-encrypted-state-");
   const path = join(directory, "daemon.sqlite");
   const database = new DatabaseSync(path);
   database.exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA user_version=17;
@@ -35,7 +57,7 @@ async function fixture(t: test.TestContext) {
   database.prepare("INSERT INTO retained_worker_bindings VALUES(?,?)").run("agent", secret);
   database.prepare("INSERT INTO supervised_worker_mint_states VALUES(?,?)").run("mint", Buffer.from(secret));
   const key = randomBytes(32);
-  t.after(async () => { try { database.close(); } catch { /* test may close */ } await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { try { database.close(); } catch { /* test may close */ } await removeTestDirectory(directory); });
   let freshBackup: StateRecoveryBackup | null = null;
   const prepare = async () => freshBackup = await prepareStateRecoveryBackup(path, 18, async () => ({ key: Buffer.from(key), sealedKey: "electron-sealed-one-time-key" }), { now: OLD });
   const validate = async () => {
@@ -71,7 +93,8 @@ test("encrypted consistent snapshot includes WAL rows and roundtrips SQLite iden
   const result = await env.prepare();
   assert.equal(result?.sourceVersion, 17);
   assert.equal(result?.targetVersion, 18);
-  assert.equal((await lstat(env.backup)).mode & 0o777, 0o600);
+  // Windows has no mode bits; decrypting below reads the file only when its access list is the owner's alone.
+  if (process.platform !== "win32") assert.equal((await lstat(env.backup)).mode & 0o777, 0o600);
   assert.equal((await readFile(env.backup)).includes(Buffer.from(secret)), false);
   assert.deepEqual((await readdir(env.directory)).filter((name) => name.includes("recovery")), ["daemon.sqlite.recovery.enc"]);
   const restored = await decryptStateRecoveryBackup(env.backup, env.key);
@@ -256,11 +279,11 @@ test("all prepare/read/clear paths reject symlinks without touching their target
 
 test("insecure directory or recovery file permissions fail closed", async (t) => {
   const env = await fixture(t);
-  await chmod(env.directory, 0o755);
+  await loosen(env.directory, true);
   await assert.rejects(env.prepare(), ERROR);
-  await chmod(env.directory, 0o700);
+  await tighten(env.directory, true);
   await env.prepare();
-  await chmod(env.backup, 0o644);
+  await loosen(env.backup, false);
   await assert.rejects(decryptStateRecoveryBackup(env.backup, env.key), ERROR);
   await assert.rejects(cleanupStateRecoveryBackup(env.path, env.database, { clear: true }), ERROR);
 });
@@ -320,7 +343,7 @@ test("a copied metadata object is not fresh authentication proof", async (t) => 
 });
 
 async function realStateFixture(t: test.TestContext) {
-  const directory = await mkdtemp(join(tmpdir(), "letagents-recovery-startup-"));
+  const directory = await privateTempDirectory("letagents-recovery-startup-");
   const path = join(directory, "daemon.sqlite");
   const database = new DatabaseSync(path);
   new DaemonStateSchema().createSchema(database);
@@ -339,7 +362,7 @@ async function realStateFixture(t: test.TestContext) {
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
   database.close();
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(directory));
   let keyRequests = 0;
   const key = randomBytes(32);
   const getBackupKey = async () => { keyRequests++; return { key: Buffer.from(key), sealedKey: "electron-sealed" }; };
@@ -431,7 +454,7 @@ test("post-commit/pre-receipt crash retains one unverified snapshot without fake
 
 
 async function fragmentedStateFixture(t: test.TestContext) {
-  const directory = await mkdtemp(join(tmpdir(), "letagents-compact-state-"));
+  const directory = await privateTempDirectory("letagents-compact-state-");
   const path = join(directory, "daemon.sqlite");
   const initial = new DatabaseSync(path);
   initial.exec("PRAGMA page_size=8192; CREATE TABLE page_size_seed(x); DROP TABLE page_size_seed");
@@ -458,7 +481,7 @@ async function fragmentedStateFixture(t: test.TestContext) {
     COMMIT; PRAGMA wal_checkpoint(TRUNCATE); DELETE FROM maintenance_padding;
     INSERT INTO maintenance_auto(value) VALUES('committed only in WAL');`);
   assert.ok(Number(database.prepare("PRAGMA freelist_count").get()!.freelist_count) * 8192 > 64 * 1024 * 1024);
-  t.after(async () => { try { database.close(); } catch {} await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { try { database.close(); } catch {} await removeTestDirectory(directory); });
   return { database, path };
 }
 
@@ -539,9 +562,8 @@ test("process death during compact database replacement rolls back the SQLite ba
       if (remainingPages > 0 && remainingPages < totalPages) process.kill(process.pid, 'SIGKILL');
     }});
     process.exit(99);
-  `, path], { encoding: "utf8", timeout: 15_000 });
-  assert.equal(child.error, undefined);
-  assert.equal(child.signal, "SIGKILL", child.stderr);
+  `, path], { encoding: "utf8", timeout: CHILD_PROCESS_TIMEOUT_MS });
+  assertKilledBySelf(child);
   assert.equal(database.prepare("PRAGMA page_count").get()!.page_count, originalPageCount);
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM maintenance_auto").get()!.n, 1);
   assert.equal(database.prepare("SELECT rowid FROM maintenance_child").get()!.rowid, 77);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -19,6 +19,8 @@ import type {
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt-native-resolution",
@@ -31,12 +33,12 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ProviderPermissionObservation } from "../../shared/provider-permissions.js";
-import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 const execFileAsync = promisify(execFile);
 
-async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 4_000): Promise<void> {
+async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 4_000 * WAIT_SCALE): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -959,7 +961,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
     capturedSpawns.length = 0;
     const paths1 = {
-      lockPath: join(root, "d1.lock"), socketPath: join(root, "d1.sock"), manifestPath: join(root, "manifest1.json"), auditPath: join(root, "audit1.jsonl"),
+      lockPath: join(root, "d1.lock"), ...testNamedDaemonEndpoint(root, "d1"), manifestPath: join(root, "manifest1.json"), auditPath: join(root, "audit1.jsonl"),
       attemptsPath: join(root, "attempts1.json"), attemptsRoot: join(root, "attempts1"), workspaceRoot: root,
     };
     const codexEntry: DaemonManifestEntry = {
@@ -978,7 +980,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
 
     capturedSpawns.length = 0;
     const cursorPaths = {
-      lockPath: join(root, "dc.lock"), socketPath: join(root, "dc.sock"), manifestPath: join(root, "manifestc.json"), auditPath: join(root, "auditc.jsonl"),
+      lockPath: join(root, "dc.lock"), ...testNamedDaemonEndpoint(root, "dc"), manifestPath: join(root, "manifestc.json"), auditPath: join(root, "auditc.jsonl"),
       attemptsPath: join(root, "attemptsc.json"), attemptsRoot: join(root, "attemptsc"), workspaceRoot: root,
     };
     const cursorEntry: DaemonManifestEntry = {
@@ -1007,7 +1009,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     // Case 2: a stale generic Claude policy is narrowed to the selected supervised approval profile.
     capturedSpawns.length = 0;
     const paths2 = {
-      lockPath: join(root, "d2.lock"), socketPath: join(root, "d2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
+      lockPath: join(root, "d2.lock"), ...testNamedDaemonEndpoint(root, "d2"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
       attemptsPath: join(root, "attempts2.json"), attemptsRoot: join(root, "attempts2"), workspaceRoot: root,
     };
     const claudeEntry: DaemonManifestEntry = {
@@ -1030,7 +1032,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     // not the interactive-worker generic ask-before-write default.
     capturedSpawns.length = 0;
     const paths3 = {
-      lockPath: join(root, "d3.lock"), socketPath: join(root, "d3.sock"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
+      lockPath: join(root, "d3.lock"), ...testNamedDaemonEndpoint(root, "d3"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
       attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
     };
     const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
@@ -1060,7 +1062,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
     capturedSpawns.length = 0;
     const paths4 = {
-      lockPath: join(root, "d4.lock"), socketPath: join(root, "d4.sock"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
+      lockPath: join(root, "d4.lock"), ...testNamedDaemonEndpoint(root, "d4"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
       attemptsPath: join(root, "attempts4.json"), attemptsRoot: join(root, "attempts4"), workspaceRoot: root,
     };
     const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
@@ -1077,7 +1079,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = savedUrl;
     if (savedEntry === undefined) delete process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY;
     else process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = savedEntry;
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1304,7 +1306,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("resume:")));
   } finally {
     await daemon.stop();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1413,7 +1415,7 @@ test("an mcp-polling provider cannot receive Inspector control without an exact 
         "a native-correction provider must not enqueue a daemon-inbox correction row",
       );
     } finally { await inbox.close(); }
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1590,7 +1592,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
     assert.match(appliedDuplicate.error ?? "", /room_id is required|causal target/i);
   } finally {
     await daemon.stop();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1662,7 +1664,7 @@ test("operator-applied legacy native correction settles its interrupted FIFO row
     await daemon?.stop().catch(() => undefined);
     await store.close().catch(() => undefined);
     await inbox.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1745,7 +1747,7 @@ test("operator resolution remains available after the controlled runtime is deta
   } finally {
     await daemon?.stop().catch(() => undefined);
     await store.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 

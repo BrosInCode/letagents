@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import {
@@ -144,6 +144,11 @@ export class ReplyAttachmentSpool {
 
 /** A spool copy is trusted only as a regular, singly linked file the daemon wrote. */
 async function readSpoolCopy(path: string): Promise<Buffer | null> {
+  // Windows has no O_NOFOLLOW, so open() would follow a link planted in place of the copy. Refuse a link first.
+  if (process.platform === "win32") {
+    const found = await lstat(path).catch(() => null);
+    if (!found || found.isSymbolicLink()) return null;
+  }
   const handle = await open(path, ATTACHMENT_READ_FLAGS).catch(() => null);
   if (!handle) return null;
   try {

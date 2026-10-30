@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { lstatSync, opendirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
@@ -15,7 +15,7 @@ import {
   type CodexMcpListRunner,
   type CodexMcpServerEntry,
 } from "../../../../../shared/codex-owner-isolation.mjs";
-import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
+import { parseWindowsCommandLine, signalTree, spawnTree, windowsProcessInfo } from "../../../../../shared/process-tree.mjs";
 
 // A launch that keeps the owner's own Codex setup leaves the owner's
 // extensions on: plugins, app connectors, computer and browser use, hooks,
@@ -159,7 +159,8 @@ function pathInRepository(cwd: string, path: string): string {
   }
   for (const top of tops) {
     const shown = pathFrom(top, path);
-    if (shown) return shown;
+    // A path in the repository is named as Git names it, with "/" on Windows too.
+    if (shown) return process.platform === "win32" ? shown.replaceAll("\\", "/") : shown;
   }
   return path;
 }
@@ -581,7 +582,7 @@ export function assertLayersAddNoCommandRules(
     if (!entries.length) continue;
     // A folder in the user's own home is named from there, never by its full path.
     const fromHome = pathFrom(homedir(), path);
-    const shown = fromHome ? join("~", fromHome) : path;
+    const shown = fromHome ? join("~", fromHome).replaceAll(sep, "/") : path;
     throw new Error(
       `Codex also reads command rules from ${shown}, a folder of this computer's own Codex settings that applies to every Codex on it, and that folder is not empty (${shownFirstNames(path, entries)}). `
       + "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
@@ -763,9 +764,20 @@ export type CodexLiveProcess = {
  */
 export function readCodexCommandLine(
   pid: number,
-  tool: { ps?: string; timeoutMs?: number } = {},
+  tool: { ps?: string; timeoutMs?: number; helperPath?: string | null } = {},
 ): Promise<string | null> {
   if (!Number.isSafeInteger(pid) || pid <= 0) return Promise.resolve(null);
+  // Windows has no `ps`: the process-tree helper reads the command line, which is split into the
+  // arguments the process was given and joined with spaces, as `ps` shows them. Unreadable is null.
+  if (process.platform === "win32" && tool.ps === undefined) {
+    const timeout = tool.timeoutMs ?? COMMAND_LINE_TIMEOUT_MS;
+    const info = windowsProcessInfo(pid, {
+      ...(tool.helperPath === undefined ? {} : { helperPath: tool.helperPath }),
+      runHelper: (file, args) => spawnSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true, timeout }),
+    });
+    if (!info || info.exited || info.commandLine === null) return Promise.resolve(null);
+    return Promise.resolve(parseWindowsCommandLine(info.commandLine).join(" ").trim() || null);
+  }
   return new Promise((resolve) => {
     let settled = false;
     let output = "";

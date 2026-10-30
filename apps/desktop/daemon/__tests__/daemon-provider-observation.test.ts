@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { assertSupervisorDaemonPlatform } from "../platform.js";
+import { systemProcessIdentity } from "../process-identity.js";
+import { assertOwnerPrivate } from "../../electron/__tests__/platform.js";
 import { type DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
@@ -103,7 +105,7 @@ test("reverse drain socket and daemon restart preserve stop intent without a suc
   let starts = 0;
   let attaches = 0;
   let stops = 0;
-  const birth = execFileSync("/bin/ps", ["-p", String(process.pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+  const birth = systemProcessIdentity.readBirthIdentity(process.pid).trim();
   const connection = { kind: "codex_app_server" as const, pid: process.pid, processIdentity: birth, url: "ws://127.0.0.1:7123" };
   const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "codex", {
     preflightCustodialPolling: async () => {},
@@ -181,7 +183,7 @@ for (const scenario of ["activation", "pre_activation_forward"] as const) test(s
   const oldProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   await new Promise<void>((resolve, reject) => { oldProcess.once("spawn", resolve); oldProcess.once("error", reject); });
   const oldPid = oldProcess.pid!;
-  const birth = (pid: number) => execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+  const birth = (pid: number) => systemProcessIdentity.readBirthIdentity(pid).trim();
   const oldConnection = { kind: "codex_app_server" as const, pid: oldPid, processIdentity: birth(oldPid), url: "ws://127.0.0.1:7123" };
   const pollingProcess = scenario === "pre_activation_forward"
     ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }) : null;
@@ -243,7 +245,9 @@ for (const scenario of ["activation", "pre_activation_forward"] as const) test(s
     assert.equal((response.result as { status: string }).status, "installed");
   };
   try {
-    assert.equal((await stat(env.paths.socketPath)).mode & 0o777, 0o600, "activation uses the owner-only control endpoint");
+    // A Windows pipe has no mode: its client proof file, which only the owner can read, is the owner-only part.
+    if (env.paths.peerProofPath) await assertOwnerPrivate(env.paths.peerProofPath, "file");
+    else assert.equal((await stat(env.paths.socketPath)).mode & 0o777, 0o600, "activation uses the owner-only control endpoint");
     internals.liveHandles.set(env.id, env.handle);
     await internals.supervisedInbox.bootstrapCursor({ agent_id: env.id, room_id: entry.room_id, last_observed_message_id: "100" });
     const reverse = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", {

@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { leasedBranchRef } from "../../../../shared/agent-branch.mjs";
 import { AutomaticPermissionReviewer } from "../automatic-permission-review.js";
+import { needsPosixFilePathReports } from "../../electron/__tests__/platform.js";
 import { requestCommandReview } from "../command-review-http.js";
 import type { ClaudeNativePermissionRequest, OpenCodeNativePermissionRequest } from "../../shared/provider-permissions.js";
 import type { DaemonManifestEntry } from "../types.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 async function workspaceFixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-auto-review-")));
@@ -24,7 +26,8 @@ async function workspaceFixture() {
   await writeFile(join(root, "outside", "kept.txt"), "kept\n");
   await symlink(join(root, "outside", "kept.txt"), join(workspace, "linked-file.txt"));
   await link(join(root, "outside", "kept.txt"), join(workspace, "second-name.txt"));
-  execFileSync("mkfifo", [join(workspace, "pipe")]);
+  // Windows has no FIFO in a folder; a named pipe there is not a file in the project.
+  if (process.platform !== "win32") execFileSync("mkfifo", [join(workspace, "pipe")]);
   const entry = { id: "agent", room_id: "room", provider: "open-model", permission_profile_id: "auto_review",
     delivery_mode: "daemon_inbox", workspace_path: workspace } as DaemonManifestEntry;
   const asked: Array<{ commands: readonly string[]; project: string }> = [];
@@ -40,7 +43,7 @@ async function workspaceFixture() {
     ({ id: "permission", sessionID: "session", permission, patterns, metadata, always: [], tool: { messageID: "message", callID: "call" } });
   const review = (native: OpenCodeNativePermissionRequest, from: DaemonManifestEntry = entry) =>
     reviewer.review({ entry: from, request: native, signal: new AbortController().signal });
-  return { root, workspace, entry, asked, verdict, reviewer, request, review, close: () => rm(root, { recursive: true, force: true }) };
+  return { root, workspace, entry, asked, verdict, reviewer, request, review, close: () => removeTestDirectory(root) };
 }
 
 test("automatic review applies only to a trusted local Open Model agent on Auto, or a Claude agent that asks", async () => {
@@ -66,7 +69,7 @@ test("automatic review applies only to a trusted local Open Model agent on Auto,
   } finally { await f.close(); }
 });
 
-test("an edit runs only when every file is an ordinary file inside the project", async () => {
+test("an edit runs only when every file is an ordinary file inside the project", { skip: needsPosixFilePathReports }, async () => {
   const f = await workspaceFixture();
   try {
     const inside = join(f.workspace, "src", "a.ts");
@@ -119,7 +122,7 @@ test("an edit runs only when every file is an ordinary file inside the project",
       // A link to a file, a second name for a file that also lives outside, and a folder.
       ["linked-file.txt"], ["second-name.txt"], ["src"],
       // Something that is not a file: what is written to it goes to whatever reads it.
-      ["pipe"],
+      ...(process.platform === "win32" ? [] : [["pipe"]]),
       [".env"], [".env.local"], ["config/.env"], [".git/config"], [".git/hooks/pre-commit"],
       ["secrets/prod.json"], ["deploy/id_rsa"], ["certs/server.pem"], [".npmrc"], [".ssh/config"],
       ["src/a.ts", ".env"], ["src/a.ts", "src/A.ts"],
@@ -212,8 +215,20 @@ const own = (task: string) => leasedBranchRef(task, AGENT_KEY);
 /** The parts of a command as OpenCode lists them: each simple command's words, without its redirects. */
 const parts = (command: string) => command.split(/\s*(?:&&|\|\||;|\||\n)\s*/).map((part) => part.replace(/\s*2>&1/g, "").trim()).filter(Boolean);
 /** Run a command as the agent would, with a fixed test identity. */
-const sh = (cwd: string, command: string) => execFileSync("/bin/sh", ["-c", command], { cwd, stdio: "pipe", env: { ...process.env,
-  GIT_AUTHOR_NAME: "QA", GIT_AUTHOR_EMAIL: "qa@example.test", GIT_COMMITTER_NAME: "QA", GIT_COMMITTER_EMAIL: "qa@example.test" } }).toString();
+const SH_ENV = { ...process.env,
+  GIT_AUTHOR_NAME: "QA", GIT_AUTHOR_EMAIL: "qa@example.test", GIT_COMMITTER_NAME: "QA", GIT_COMMITTER_EMAIL: "qa@example.test" };
+/** The words of one simple command, with single and double quotes removed. A backslash is a path separator, not an escape. */
+function words(command: string): string[] {
+  return [...command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]!);
+}
+// Windows has no /bin/sh. Every command here is a chain of `git` commands joined by `&&`, so each one runs on its own.
+const sh = (cwd: string, command: string) => process.platform !== "win32"
+  ? execFileSync("/bin/sh", ["-c", command], { cwd, stdio: "pipe", env: SH_ENV }).toString()
+  : command.split(" && ").map((step) => {
+    const [program, ...args] = words(step);
+    assert.equal(program, "git", step);
+    return execFileSync("git", args, { cwd, stdio: "pipe", env: SH_ENV }).toString();
+  }).join("");
 
 /** A project cloned from a bare `origin` whose default branch is `main`, as LetAgents prepares one. */
 async function repositoryFixture(f: Awaited<ReturnType<typeof workspaceFixture>>, agentKey: string | null = AGENT_KEY) {

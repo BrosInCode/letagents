@@ -24,7 +24,7 @@ import {
   eventually,
   daemonRequest,
   provisionedWorkspace,
-  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint, REQUEST_ARRIVAL_MS } from "./helpers/daemon-fixture.js";
 
 test("daemon restart without Electron credential delivery retains inbox work and projects a safe waiting state", async () => {
   const env = await fixture();
@@ -894,7 +894,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     const handoff = first.waitForHandoff();
     handoffRequested = true;
     const prepare = daemonRequest(paths.socketPath, "daemon.prepare_handoff");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
     releaseCommit();
     assert.equal((await prepare).ok, true);
     await within(handoff, "commit-boundary retirement persistence", 1_000);
@@ -966,7 +966,7 @@ test("pause and stop at the normal post-dispatch commit fence the exact returned
       } });
       await commitStarted;
       const control = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: desiredState });
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
       releaseCommit();
       assert.equal((await control).ok, true);
       await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === desiredState, `${desiredState} commit fence`);
@@ -1098,7 +1098,7 @@ test("pause during post-install worker bind fences the exact provider before del
     })).ok, true);
     await bindStarted;
     const pause = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: "paused" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
     releaseBind();
     assert.equal((await pause).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "paused", "post-bind pause fence");

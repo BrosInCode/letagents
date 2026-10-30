@@ -20,6 +20,7 @@ import {
   spawnRequest,
   flush,
 } from "./codex-provider-adapter.fixture.js";
+import { OS_BIRTH } from "./platform.js";
 
 test("spawn fails clearly when the configured LetAgents MCP workplace is absent", async () => {
   const harness = createHarness({ workplacePresent: false });
@@ -165,7 +166,7 @@ test("stop refuses signals without the exact process birth before dispatch or es
 });
 
 test("Codex exact-reference stop validates the complete recorded owner before signalling", async () => {
-  const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
+  const harness = createHarness({ processIdentity: OS_BIRTH.first });
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
   const ref: ProviderContinuationRef = {
@@ -188,7 +189,7 @@ test("Codex exact-reference stop validates the complete recorded owner before si
   }
   assert.deepEqual(harness.signals, []);
   assert.equal(handle.observedState(), "idle");
-  for (const identity of [undefined, "unreadable birth", "Mon Aug 99 25:00:00 2026", null, "Mon Aug 31 09:00:00 2026"] as const) {
+  for (const identity of [undefined, "unreadable birth", "Mon Aug 99 25:00:00 2026", null, OS_BIRTH.second] as const) {
     const freshAdapter = new CodexProviderAdapter({ dependencies: { ...harness.dependencies, getProcessIdentity: () => identity } });
     if (identity === undefined || identity === "unreadable birth" || identity === "Mon Aug 99 25:00:00 2026") {
       assert.equal(harness.launches[0]!.alive, true);
@@ -206,7 +207,7 @@ test("Codex exact-reference stop validates the complete recorded owner before si
 });
 
 test("Codex exact-reference stop proves OS death even with a cached protocol terminal", async () => {
-  const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
+  const harness = createHarness({ processIdentity: OS_BIRTH.first });
   const signalProcess = harness.dependencies.signalProcess;
   harness.dependencies.signalProcess = (pid, signal) => {
     signalProcess(pid, signal);
@@ -231,7 +232,7 @@ test("Codex exact-reference stop proves OS death even with a cached protocol ter
 
 test("Codex exact-reference stop rechecks birth at escalation and never trusts a signal as death", async () => {
   for (const evidence of ["unknown", "malformed", "replaced", "absent", "still_alive", "force"] as const) {
-    const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
+    const harness = createHarness({ processIdentity: OS_BIRTH.first });
     const signalProcess = harness.dependencies.signalProcess;
     const getProcessIdentity = harness.dependencies.getProcessIdentity;
     let signalled = false;
@@ -240,7 +241,7 @@ test("Codex exact-reference stop rechecks birth at escalation and never trusts a
       if (signalled && ++readsAfterSignal === 2) {
         if (evidence === "unknown") harness.setIdentityObservable(false);
         if (evidence === "malformed") harness.launches[0]!.processIdentity = "unreadable birth";
-        if (evidence === "replaced") harness.launches[0]!.processIdentity = "Mon Aug 31 09:00:00 2026";
+        if (evidence === "replaced") harness.launches[0]!.processIdentity = OS_BIRTH.second;
       }
       return getProcessIdentity(pid);
     };

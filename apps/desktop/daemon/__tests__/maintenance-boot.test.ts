@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,8 +8,9 @@ import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import { createDaemonMaintenance, clearDaemonMaintenance, daemonMaintenancePath, readDaemonMaintenance } from "../../../../shared/daemon-maintenance.mjs";
-import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 function request(path: string, method: string, params?: unknown): Promise<{ ok: boolean; result: any; error?: string }> {
   return new Promise((resolve, reject) => {
@@ -26,7 +27,7 @@ function snapshot(path: string): string {
   } finally { db.close(); }
 }
 
-test("maintenance cold boot preserves all durable rows and refuses work until explicit resume", { timeout: 15_000 }, async () => {
+test("maintenance cold boot preserves all durable rows and refuses work until explicit resume", { timeout: 15_000 * WAIT_SCALE }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
   const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"), attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root };
   const entry: DaemonManifestEntry = { id: "agent", room_id: "room", display_name: "Preserved", provider: "cursor", model: null, charter: "saved input", desired_state: "running", observed_state: "failed", condition: "coordination_blocked", permission_profile_id: "sandboxed_write", created_by: "fixture", created_at: "2026-01-01T00:00:00.000Z" };
@@ -80,5 +81,5 @@ test("maintenance cold boot preserves all durable rows and refuses work until ex
       finally { db.close(); }
     } finally { await resumed.stop(); }
     assert.equal(await readFile(savedFile, "utf8"), "user work");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });

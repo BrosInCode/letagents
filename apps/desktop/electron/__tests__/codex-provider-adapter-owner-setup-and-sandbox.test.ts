@@ -23,6 +23,7 @@ import {
   turnOf,
   scratchCodexHome,
 } from "./codex-provider-adapter.fixture.js";
+import { OS_BIRTH } from "./platform.js";
 
 test("managed launch receipt freezes the exact generated tool policy and is never invented on attach", async () => {
   const harness = createHarness();
@@ -224,7 +225,7 @@ test("a process whose record cannot say how it was started is not asked to read 
 
 test("repairing a conversation never lets a Codex that has its owner's setup reload a project that changed since it started", async () => {
   const repair = async (spawn: Partial<ProviderSpawnRequest>, change: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}, reattachedAs?: boolean) => {
-    const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+    const harness = createHarness({ exitOnSignal: true, processIdentity: OS_BIRTH.first, ...harnessOptions });
     let adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const request = spawnRequest(spawn);
     let handle = await adapter.spawn(request);

@@ -72,6 +72,41 @@ export function sandboxPathVariants(path: string): string[] {
   return [...new Set([resolve(path), canonicalizeAuthorityPath(path)])];
 }
 
+/**
+ * The system's own final spelling of a path. Git and Node's realpathSync disagree on Windows where a
+ * folder has an 8.3 short name (RUNNER~1): Git reports the long name. Two paths to compare, one of
+ * them from Git, are compared in this form. Elsewhere it is realpathSync.
+ */
+function finalPath(path: string): string {
+  return process.platform === "win32" ? realpathSync.native(path) : realpathSync(path);
+}
+
+/**
+ * Windows: Git reports the long name of a folder (runneradmin) where the
+ * workspace, canonicalized by Node's own realpath, may still hold its 8.3
+ * short name (RUNNER~1). When the two roots differ only that
+ * way, the project root is the workspace's own ancestor with the same
+ * number of folders left over, in the workspace's own spelling. A root that
+ * is not an ancestor by the system's final names is returned as it was, and
+ * the caller's check then refuses it.
+ */
+function sameNameFormAncestor(projectRoot: string, workspace: string): string {
+  if (!relative(projectRoot, workspace).startsWith("..")) return projectRoot;
+  let rootFinal: string;
+  let workspaceFinal: string;
+  try {
+    rootFinal = realpathSync.native(projectRoot);
+    workspaceFinal = realpathSync.native(workspace);
+  } catch {
+    return projectRoot;
+  }
+  const rest = relative(rootFinal, workspaceFinal);
+  if (rest.startsWith("..") || isAbsolute(rest)) return projectRoot;
+  let ancestor = workspace;
+  for (const _component of rest.split(/[\\/]+/).filter(Boolean)) ancestor = dirname(ancestor);
+  return ancestor;
+}
+
 /** Cursor uses Git's resolved top-level, then walks root -> selected workspace. */
 export function cursorEffectiveProjectDirectories(workspaceRoot: string): string[] {
   const workspace = cursorExactWorkspaceDirectory(workspaceRoot);
@@ -121,6 +156,7 @@ export function cursorEffectiveProjectDirectories(workspaceRoot: string): string
       throw new Error(`Cursor resolved Git root is not a real directory: ${logicalProjectRoot}`);
     }
     projectRoot = realpathSync(logicalProjectRoot);
+    if (process.platform === "win32") projectRoot = sameNameFormAncestor(projectRoot, workspace);
   }
   const suffix = relative(projectRoot, workspace);
   if (suffix.startsWith("..") || resolve(projectRoot, suffix) !== workspace) {
@@ -199,8 +235,8 @@ export function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
     throw new Error("Cursor supervised Git marker may not be a symlink.");
   }
   if (markerStat.isDirectory()) {
-    const markerDirectory = realpathSync(gitMarker);
-    for (const root of canonicalRoots) {
+    const markerDirectory = finalPath(gitMarker);
+    for (const root of canonicalRoots.map(finalPath)) {
       const suffix = relative(markerDirectory, root);
       if (suffix.startsWith("..") || resolve(markerDirectory, suffix) !== root) {
         throw new Error("Cursor Git metadata escaped the selected repository marker.");
@@ -211,7 +247,7 @@ export function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
     const markerMatch = /^gitdir:\s*(.+)$/i.exec(markerText);
     if (!markerMatch) throw new Error("Cursor linked-worktree Git marker is invalid.");
     const markerGitDirectory = realpathSync(resolve(dirname(gitMarker), markerMatch[1]!));
-    if (markerGitDirectory !== gitDirectory) {
+    if (finalPath(markerGitDirectory) !== finalPath(gitDirectory!)) {
       throw new Error("Cursor linked-worktree Git metadata topology is invalid.");
     }
     if (dirname(dirname(gitDirectory)) === commonDirectory
@@ -220,14 +256,14 @@ export function cursorGitMetadataReadRoots(workspaceRoot: string): string[] {
         gitDirectory,
         readRegularFileNoFollow(join(gitDirectory, "gitdir"), 16 * 1024).toString("utf8").trim(),
       );
-      if (realpathSync(backlinkPath) !== realpathSync(gitMarker)) {
+      if (finalPath(backlinkPath) !== finalPath(gitMarker)) {
         throw new Error("Cursor linked-worktree Git metadata does not point back to the selected worktree.");
       }
       const commondirPath = realpathSync(resolve(
         gitDirectory,
         readRegularFileNoFollow(join(gitDirectory, "commondir"), 16 * 1024).toString("utf8").trim(),
       ));
-      if (commondirPath !== commonDirectory) {
+      if (finalPath(commondirPath) !== finalPath(commonDirectory!)) {
         throw new Error("Cursor linked-worktree common Git metadata is inconsistent.");
       }
     } else if (gitDirectory === commonDirectory) {
@@ -277,11 +313,12 @@ function assertCursorSubmoduleGitMetadataTopology(workspace: string, gitDirector
     throw new Error("Cursor submodule superproject is not a real directory.");
   }
   const superproject = realpathSync(resolve(reportedSuperproject));
-  if (superproject === workspace || !pathIsWithin(superproject, workspace)) {
+  const finalWorkspace = finalPath(workspace);
+  if (finalPath(superproject) === finalWorkspace || !pathIsWithin(finalPath(superproject), finalWorkspace)) {
     throw new Error("Cursor submodule escaped its reported superproject.");
   }
   const resolvedWorktree = realpathSync(resolve(gitDirectory, configuredWorktree));
-  if (resolvedWorktree !== workspace) {
+  if (finalPath(resolvedWorktree) !== finalWorkspace) {
     throw new Error("Cursor submodule Git metadata does not point back to the selected workspace.");
   }
   const superprojectMetadataRoots = cursorGitMetadataReadRoots(superproject);

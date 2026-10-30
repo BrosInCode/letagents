@@ -22,6 +22,7 @@ import {
   daemonRequest,
   flushActivity,
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testNamedDaemonEndpoint, assertOwnerPrivate } from "../../electron/__tests__/platform.js";
 
 test("generation handoff reattaches the same provider and publishes its supervised native stream to the exact worker endpoint", async () => {
   const env = await fixture();
@@ -298,7 +299,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     assert.equal(published.body.status, "working");
     assert.equal(typeof published.body.sequence, "number");
     assert.ok(published.body.sequence > 0);
-    assert.equal((await stat(paths.manifestPath)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(paths.manifestPath, "file");
     await assert.rejects(() => readFile(paths.workerBindingsPath, "utf8"), { code: "ENOENT" });
     assert.doesNotMatch(JSON.stringify((await daemonRequest(paths.socketPath, "manifest.list")).result), /session-secret/);
     const nativeCanary = "canary-not-a-real-native-secret-123456789";
@@ -704,7 +705,7 @@ test("ambiguous destination join retries when the server commits before the resp
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "room-move-lost-response.lock"),
-    socketPath: join(env.root, "room-move-lost-response.sock"),
+    ...testNamedDaemonEndpoint(env.root, "room-move-lost-response"),
     manifestPath: join(env.root, "room-move-lost-response.sqlite"),
     auditPath: join(env.root, "room-move-lost-response-audit.jsonl"),
     workerBindingsPath: join(env.root, "room-move-lost-response-bindings.json"),
@@ -783,7 +784,7 @@ test("handoff drains an admitted room join and leaves its ambiguity for the succ
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "move-handoff.lock"),
-    socketPath: join(env.root, "move-handoff.sock"),
+    ...testNamedDaemonEndpoint(env.root, "move-handoff"),
     manifestPath: join(env.root, "move-handoff.sqlite"),
     auditPath: join(env.root, "move-handoff-audit.jsonl"),
     workerBindingsPath: join(env.root, "move-handoff-bindings.json"),
@@ -902,7 +903,7 @@ test("shutdown wakes a room move queued behind unrelated entry work without wait
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "queued-move.lock"),
-    socketPath: join(env.root, "queued-move.sock"),
+    ...testNamedDaemonEndpoint(env.root, "queued-move"),
     manifestPath: join(env.root, "queued-move.sqlite"),
     auditPath: join(env.root, "queued-move-audit.jsonl"),
   };
@@ -978,7 +979,7 @@ test("a restarted joining-destination mismatch requires source compensation inst
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "ambiguous.lock"),
-    socketPath: join(env.root, "ambiguous.sock"),
+    ...testNamedDaemonEndpoint(env.root, "ambiguous"),
     manifestPath: join(env.root, "ambiguous.sqlite"),
     auditPath: join(env.root, "ambiguous-audit.jsonl"),
     workerBindingsPath: join(env.root, "ambiguous-bindings.json"),
@@ -1066,7 +1067,7 @@ test("alias room move journals its canonical destination before local membership
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "room-move-alias.lock"),
-    socketPath: join(env.root, "room-move-alias.sock"),
+    ...testNamedDaemonEndpoint(env.root, "room-move-alias"),
     manifestPath: join(env.root, "room-move-alias.sqlite"),
     auditPath: join(env.root, "room-move-alias-audit.jsonl"),
     workerBindingsPath: join(env.root, "room-move-alias-bindings.json"),
@@ -1204,7 +1205,7 @@ test("room-move rollback replays every external and local crash edge across daem
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "room-move.lock"),
-    socketPath: join(env.root, "room-move.sock"),
+    ...testNamedDaemonEndpoint(env.root, "room-move"),
     manifestPath: join(env.root, "room-move.sqlite"),
     auditPath: join(env.root, "room-move-audit.jsonl"),
     workerBindingsPath: join(env.root, "room-move-bindings.json"),

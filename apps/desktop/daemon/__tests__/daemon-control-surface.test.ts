@@ -1,6 +1,6 @@
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -26,6 +26,7 @@ import {
   provisionedWorkspace,
   fakeGit,
   entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery is fenced, durable, and idempotent${predecessors ? " with retired predecessors" : ""}`, async () => {
   const env = await fixture();
@@ -342,7 +343,7 @@ test("daemon tool runtime loader requires a sealed package tree outside explicit
       "a changed dependency is rejected before the privileged executor import",
     );
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 

@@ -380,12 +380,14 @@ test("application registers startup preparation before rental recovery without d
     assert.equal(calls.pop(), "allow-quit");
     assert.deepEqual(calls, ["register"]);
     await ready();
-    assert.deepEqual(calls, process.platform === "darwin"
+    // macOS and Windows start the supervisor daemon at launch; Linux does not.
+    const daemonStarts = process.platform === "darwin" || process.platform === "win32";
+    assert.deepEqual(calls, daemonStarts
       ? ["register", "startup-registered", "rental-start", "window"]
       : ["register", "rental-start", "window"]);
     releasePreparation();
     releaseDaemon();
-    if (process.platform === "darwin") {
+    if (daemonStarts) {
       await reconciled;
       assert.deepEqual(calls.slice(-2), ["native-start", "grants"]);
     }

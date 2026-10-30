@@ -51,7 +51,8 @@ type ExecOptions = {
   timeoutMs?: number;
 };
 
-const COMMAND_TIMEOUT_MS = 8_000;
+// A first start on Windows is slow: the scanner reads a large provider binary (10-18 s measured for OpenCode's in an emulated VM).
+const COMMAND_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 8_000;
 
 export type DesktopCursorPreflightOptions = {
   /**

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse, resolve } from "node:path";
+import { basename, dirname, join, parse, resolve, sep } from "node:path";
 
 import { CODEX_OWNER_FEATURE_OVERRIDES, codexHomeDirectory } from "../../../../../shared/codex-owner-isolation.mjs";
 import {
@@ -812,7 +812,7 @@ function writableRootsRefusal(
   // A folder as its owner wrote it, so that it can be found in the config: from the user folder when it is named below it.
   const shownFolder = (folder: string) => {
     const fromHome = pathFrom(resolve(userHome), resolve(folder));
-    return (fromHome === null ? folder : join("~", fromHome)).replace(/[^\x20-\x7e]/g, "?").slice(0, 240);
+    return (fromHome === null ? folder : join("~", fromHome).replaceAll(sep, "/")).replace(/[^\x20-\x7e]/g, "?").slice(0, 240);
   };
   /** How a root and a folder lie: the root is the folder, holds it, or is in it. Null when they are apart. */
   const lies = (root: string, folder: string): "is" | "holds" | "is in" | null => {

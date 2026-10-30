@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -16,6 +16,8 @@ import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
 import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { windowsSystemTool } from "../../../../shared/owner-private-fs.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
  * A real daemon on its own socket and database. Everything a local process
@@ -134,7 +136,7 @@ async function withDaemon(run: (context: {
     await run({ socketPath: paths.socketPath, generation, signed, configuration, setOwnSetup, storedPolicy, forceStoredKey, setRunning, roster, outsider: outsider.privateKey });
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 }
 
@@ -495,10 +497,15 @@ test("a policy an unsigned creation stored keeps nothing of a project running on
       await mkdir(join(home, ".claude"), { recursive: true });
       await mkdir(join(project, ".claude"), { recursive: true });
       await writeFile(join(home, ".claude", ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true }));
+      // A program that makes a file, the same on every platform: /usr/bin/touch does not exist on Windows.
+      const touch = join(scratch, "touch.mjs");
+      await writeFile(touch, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], '');\n");
+      const slashed = (path: string) => path.replaceAll("\\", "/");
       await writeFile(join(project, ".claude", "settings.json"), JSON.stringify({
-        enableAllProjectMcpServers: true, hooks: { SessionStart: [{ hooks: [{ type: "command", command: `/usr/bin/touch ${hookRan}` }] }] },
+        enableAllProjectMcpServers: true,
+        hooks: { SessionStart: [{ hooks: [{ type: "command", command: `"${slashed(process.execPath)}" "${slashed(touch)}" "${slashed(hookRan)}"` }] }] },
       }));
-      await writeFile(join(project, ".mcp.json"), JSON.stringify({ mcpServers: { repo_only: { command: "/usr/bin/touch", args: [serverRan] } } }));
+      await writeFile(join(project, ".mcp.json"), JSON.stringify({ mcpServers: { repo_only: { command: process.execPath, args: [touch, serverRan] } } }));
       const roomConfig = join(scratch, "room.json");
       await writeFile(roomConfig, JSON.stringify({ mcpServers: {} }));
       const args = claudeCliLaunchArgs({ approvalProfileLabel: null, homeHarness: true, ownerMcpStartupMs: 5_000, cwd: project,
@@ -507,7 +514,7 @@ test("a policy an unsigned creation stored keeps nothing of a project running on
       const claude = installedClaude(home);
       if (!claude) return;
       const child = spawn(claude, args, {
-        cwd: project, stdio: ["pipe", "pipe", "ignore"], detached: true,
+        cwd: project, stdio: ["pipe", "pipe", "ignore"], detached: process.platform !== "win32",
         // Nothing listens on the discard port, and the key is not a key.
         env: claudeChildEnvironment({ env: claudeOwnerSetupStartEnvironment(5_000, true), ownerSetup: true }, {
           PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude"), ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
@@ -532,10 +539,16 @@ test("a policy an unsigned creation stored keeps nothing of a project running on
           "the project's hook did not run and its server did not start");
       } finally {
         clearTimeout(timer);
-        try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* Already gone. */ }
+        if (process.platform === "win32") {
+          // There are no process groups: end the whole tree, then wait, as Windows will not delete a folder a process still holds.
+          if (child.pid) spawnSync(windowsSystemTool("taskkill.exe"), ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+          if (child.exitCode === null && child.signalCode === null) await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 10_000).unref(); });
+        } else {
+          try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* Already gone. */ }
+        }
       }
     });
   } finally {
-    await rm(scratch, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });

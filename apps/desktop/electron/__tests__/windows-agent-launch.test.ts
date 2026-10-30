@@ -19,6 +19,7 @@ import {
   windowsSystemEnvironment,
 } from "../main/agents/windows-child-environment.js";
 import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
+import { openCodeMcpLaunch } from "../main/agents/open-model/adapter-launch.js";
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
 import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
 import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
@@ -278,4 +279,18 @@ test("Windows: a missing program named by path is ENOENT as it is, never a batch
   const missing = providerLaunchCommand("C:\\x\\agent.cmd", ["-p", "line\n\"two\""], { platform: "win32", env: windowsEnv, exists: () => false });
   assert.deepEqual(missing, { file: "C:\\x\\agent.cmd", args: ["-p", "line\n\"two\""], resolved: null, envAdditions: null });
   assert.throws(() => cursorWindowsProgram("C:\\x\\agent.cmd", { env: windowsEnv, exists: () => false }), /'C:\\x\\agent\.cmd' was not found on this computer/);
+});
+
+test("Open Model's MCP server is the sealed runtime on Windows, and macOS keeps npx", () => {
+  const runtime = { entryPath: "C:\\LetAgents\\resources\\app\\runtime\\letagents\\node_modules\\letagents\\dist\\mcp\\server.js", readRoots: [] };
+  assert.deepEqual(openCodeMcpLaunch(undefined, "win32", () => runtime), {
+    command: [process.execPath, runtime.entryPath],
+    environment: { ELECTRON_RUN_AS_NODE: "1" },
+  });
+  assert.throws(() => openCodeMcpLaunch(undefined, "win32", () => { throw new Error("no runtime"); }), /no runtime/);
+  assert.deepEqual(openCodeMcpLaunch(undefined, "darwin", () => assert.fail("macOS does not read the runtime")).command.slice(0, 2), ["npx", "-y"]);
+  assert.deepEqual(openCodeMcpLaunch("/dev/entry.js", "win32", () => assert.fail("a development entry wins")), {
+    command: [process.execPath, "/dev/entry.js"],
+    environment: {},
+  });
 });

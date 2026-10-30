@@ -147,7 +147,10 @@ export async function ensureScratchWorkspaceRepository(workspace, options = {}) 
       try {
         await rename(staging, target);
       } catch (error) {
-        if (!["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR"].includes(error?.code)) throw error;
+        // Windows reports a folder renamed onto a non-empty folder as EPERM or EACCES. Either way the
+        // check below decides: only a verified repository counts, so a real failure still ends in the error after the loop.
+        const lost = ["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR", ...(process.platform === "win32" ? ["EPERM", "EACCES"] : [])];
+        if (!lost.includes(error?.code)) throw error;
       }
       // Whoever won, only a verified repository counts.
       if (await isRepository(target)) {
@@ -164,11 +167,16 @@ export async function ensureScratchWorkspaceRepository(workspace, options = {}) 
 
 const SYSTEM_GIT = "/usr/bin/git";
 
-/** The first executable `git` on a `PATH`, as a shell would find it. */
+/**
+ * The first executable `git` on a `PATH`, as a shell would find it. On Windows
+ * a PATH is split at `;` and the program is `git.exe`: no shell runs it, so a
+ * `git.cmd` or a script is never found.
+ */
 async function resolveGit(path) {
-  for (const directory of String(path ?? "").split(":")) {
+  const windows = process.platform === "win32";
+  for (const directory of String(path ?? "").split(windows ? ";" : ":")) {
     if (!directory) continue;
-    const candidate = join(directory, "git");
+    const candidate = join(directory, windows ? "git.exe" : "git");
     if (await access(candidate, constants.X_OK).then(() => true, () => false)) return candidate;
   }
   return null;
@@ -195,6 +203,14 @@ export async function probeScratchWorkspaceGit(workspace, environment, options =
   const env = {};
   for (const key of ["PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL", "TMPDIR"]) {
     if (environment[key] !== undefined) env[key] = environment[key];
+  }
+  if (process.platform === "win32") {
+    // A Windows environment names its variables in any case ("Path"), and a program needs SystemRoot to start.
+    for (const [name, value] of Object.entries(environment)) {
+      if (value === undefined) continue;
+      if (name.toUpperCase() === "PATH") env.PATH ??= value;
+      if (name.toUpperCase() === "SYSTEMROOT") env.SystemRoot ??= value;
+    }
   }
   const run = (file, args) => new Promise((resolve) => {
     execFile(file, args, { env, timeout, maxBuffer: 16 * 1024 }, (error, stdout) => resolve({ error, stdout: String(stdout ?? "") }));

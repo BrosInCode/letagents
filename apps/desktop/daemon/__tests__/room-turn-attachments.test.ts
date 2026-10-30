@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, stat, symlink, utimes } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -20,6 +20,7 @@ import {
   sniffRoomTurnImageType,
   STAGED_FOLDER_MAX_AGE_MS,
 } from "../room-turn-attachments.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
 const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46]);
@@ -45,7 +46,7 @@ function attachment(id: string, overrides: Record<string, unknown> = {}) {
 
 async function withRoot(run: (root: string) => Promise<void>): Promise<void> {
   const parent = await mkdtemp(join(tmpdir(), "room-turn-attachments-"));
-  try { await run(join(parent, "room-turn-attachments")); } finally { await rm(parent, { recursive: true, force: true }); }
+  try { await run(join(parent, "room-turn-attachments")); } finally { await removeTestDirectory(parent); }
 }
 
 function prepareInput(overrides: Record<string, unknown>, downloads: Download[] = [], bytes: (id: string) => Uint8Array | Error = () => PNG) {
@@ -272,7 +273,7 @@ test("a symlinked staging root is refused, and the turn gets a note instead", as
     const prepared = await new RoomTurnAttachmentStager(root).prepare(prepareInput({ delivery: "file" }));
     assert.deepEqual(prepared.attachments.map(file => file.status), ["unavailable"]);
     assert.deepEqual(await readdir(target), []);
-  } finally { await rm(parent, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(parent); }
 });
 
 test("a sweep removes only old staged folders that no turn still holds", async () => {
