@@ -21,7 +21,8 @@ export type CursorMcpListResult = {
   errorCode: string | null;
 };
 
-const CURSOR_MCP_INSPECTION_TIMEOUT_MS = 8_000;
+// cursor-agent starts Node and its bundle: 8-20 s in an emulated Windows VM.
+const CURSOR_MCP_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 8_000;
 const CURSOR_MCP_INSPECTION_REAP_GRACE_MS = 500;
 const CURSOR_MCP_INSPECTION_PARENT_TERMINAL_GRACE_MS = 3_000;
 const CURSOR_MCP_INSPECTION_GROUP_RETIRE_TIMEOUT_MS = 3_000;

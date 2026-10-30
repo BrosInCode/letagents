@@ -15,8 +15,8 @@ export const CURSOR_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 // Both checks are local-runtime contracts. Keep enough room for Cursor's
 // native handshake without turning a broken runtime into a long launch stall.
-export const CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS = 15_000;
-export const CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS = 15_000;
+export const CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 15_000;
+export const CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
 /** Cursor's sandbox profile names /tmp on macOS; Windows has no /tmp, so its per-user temporary folder stands in. */
 export function cursorMcpConnectorParent(platform: NodeJS.Platform = process.platform): string {
   return platform === "win32" ? tmpdir() : "/tmp";
