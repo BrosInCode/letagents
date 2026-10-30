@@ -21,7 +21,7 @@ import {
 import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
 import { openCodeMcpLaunch } from "../main/agents/open-model/adapter-launch.js";
 import { windowsCodexArguments } from "../main/agents/codex-home-harness.js";
-import { openCodeProcessExit } from "../main/agents/open-model/runtime-launch.js";
+import { providerTreeExit } from "../main/agents/provider-evidence.js";
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
 import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
 import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
@@ -305,8 +305,10 @@ test("a Windows Codex's own arguments are read through the helper that started i
   assert.deepEqual(windowsCodexArguments(codex), parseWindowsCommandLine(codex));
 });
 
-test("the helper's unkillable exit is no exit of OpenCode's", () => {
-  assert.equal(openCodeProcessExit(0xE04C5401, null).type, "error");
-  assert.deepEqual(openCodeProcessExit(1, null), { type: "exit", code: 1, signal: null });
-  assert.deepEqual(openCodeProcessExit(null, "SIGKILL"), { type: "exit", code: null, signal: "SIGKILL" });
+test("the helper's unkillable exit is no exit of the provider's", () => {
+  const unkillable = providerTreeExit("Codex", 0xE04C5401, null);
+  assert.equal(unkillable.type, "error");
+  assert.match(unkillable.type === "error" ? unkillable.error.message : "", /Codex's processes did not end/);
+  assert.deepEqual(providerTreeExit("Codex", 1, null), { type: "exit", code: 1, signal: null });
+  assert.deepEqual(providerTreeExit("Codex", null, "SIGKILL"), { type: "exit", code: null, signal: "SIGKILL" });
 });

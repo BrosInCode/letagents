@@ -1,4 +1,4 @@
-import { processBirth, signalTree } from "../../../../../shared/process-tree.mjs";
+import { processBirth, PROCESS_TREE_UNKILLABLE_EXIT_CODE, signalTree } from "../../../../../shared/process-tree.mjs";
 
 // Shared process-evidence primitives for provider adapters (plan v10 §4.8).
 // Extracted verbatim from the Codex adapter (#765) so the liveness invariants
@@ -32,6 +32,12 @@ export function redactCredentialText(value: string): { value: string; redacted: 
 export type ProviderProcessExit =
   | { type: "error"; error: Error }
   | { type: "exit"; code: number | null; signal: NodeJS.Signals | null };
+
+/** The exit of a provider in the helper's job. Its unkillable code is the helper's own answer: part of the tree may still run. */
+export function providerTreeExit(provider: string, code: number | null, signal: NodeJS.Signals | null): ProviderProcessExit {
+  if (code !== PROCESS_TREE_UNKILLABLE_EXIT_CODE) return { type: "exit", code, signal };
+  return { type: "error", error: new Error(`${provider}'s processes did not end when LetAgents closed their job. They may still be running.`) };
+}
 
 /** A control channel whose loss is disconnect evidence (RPC socket, stdio). */
 export interface ProviderControlChannel {
