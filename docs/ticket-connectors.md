@@ -489,10 +489,11 @@ Every tracker status maps to one of four ticket states: `todo`, `in_progress`,
 
 | Tracker | Default map |
 |---|---|
-| Jira | To Do → todo, In Progress → in_progress, In Review and Code Review → in_review, Done and Closed → done |
+| Jira | To Do → todo, In Progress → in_progress, In Review and Code Review → in_review, Done and Closed → done. Any other status by its status category: To Do (`type:new`) → todo; In Progress (`type:indeterminate`) → in_progress; Done (`type:done`) → done. |
 | Linear | by state type: triage, backlog, unstarted → todo; started → in_progress; completed and canceled → done. The name "In Review" → in_review. |
 
-A status name entry wins over a Linear type entry. Names are not case sensitive.
+A status name entry wins over a type entry (a Linear state type or a Jira
+status category). Names are not case sensitive.
 A status with no entry shows as `in_progress`. The connection remembers it as
 unmapped, and the settings page asks you to choose its column. Edit the map in
 **Status map** and choose **Save status map**.

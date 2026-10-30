@@ -99,7 +99,13 @@ export function filterSettingsNavigation(query: string): SettingsNavGroup[] {
  */
 export const lastSettingsPane = ref<SettingsPaneId | null>(null);
 
-/** The pane plain "Settings" opens: the last one shown, else Chat storage. */
+/**
+ * The pane plain "Settings" opens: the last one shown, else Chat storage. A
+ * hidden pane (setup, reached only from its own entry) is never reopened.
+ */
 export function reopenedSettingsPane(): SettingsPaneId {
-  return lastSettingsPane.value ?? "storage:chat";
+  const last = lastSettingsPane.value;
+  const hidden = Object.values(settingsSubsections).some((items) =>
+    items?.some((item) => item.id === last && item.hidden));
+  return last && !hidden ? last : "storage:chat";
 }

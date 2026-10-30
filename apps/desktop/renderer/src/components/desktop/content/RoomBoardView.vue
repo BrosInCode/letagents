@@ -251,14 +251,14 @@ watch(() => props.governanceSection, (section) => {
 
 // Board manager links to the room's ticket filters only where Room settings shows them.
 const showTicketSettings = ref(false);
+let ticketSettingsCheck = 0;
 watch(() => [governanceOpen.value, props.roomIdentifier, props.ticketKeys] as const, async ([open, roomIdentifier, ticketKeys]) => {
-  if (!open) return;
-  if (!ticketKeys) {
-    showTicketSettings.value = false;
-    return;
-  }
+  // Hidden until this room's answer arrives; a later check makes an earlier one stale.
+  const check = ++ticketSettingsCheck;
+  showTicketSettings.value = false;
+  if (!open || !ticketKeys) return;
   const shows = await roomShowsTicketSettings(roomIdentifier);
-  if (roomIdentifier === props.roomIdentifier) showTicketSettings.value = shows;
+  if (check === ticketSettingsCheck) showTicketSettings.value = shows;
 }, { immediate: true });
 
 function openTicketSettings(): void {

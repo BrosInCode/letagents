@@ -435,6 +435,11 @@ test("rule drafting offers status names only, never type: category entries", () 
   const names = ruleDraftStatusNames("jira", { "To Do": "todo", "type:new": "todo", "Type:Done": "done", Done: "done" });
   assert.deepEqual(names, ["To Do", "Done"]);
   assert.ok(!ruleDraftStatusNames("jira", {}).some((name) => name.startsWith("type:")));
+  // A map holding only categories falls back to the default status names.
+  assert.deepEqual(
+    ruleDraftStatusNames("jira", { "type:new": "todo", "type:indeterminate": "in_progress", "type:done": "done" }),
+    ["To Do", "In Progress", "In Review", "Code Review", "Done", "Closed"],
+  );
 });
 
 test("a stale intent is refused and superseded: the PR merged, a newer suggestion, or the link removed", async () => {

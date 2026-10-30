@@ -74,6 +74,8 @@ test("plain Settings reopens the pane shown last, and Chat storage the first tim
     assert.equal(reopenedSettingsPane(), "storage:chat");
     lastSettingsPane.value = "account:connectors";
     assert.equal(reopenedSettingsPane(), "account:connectors");
+    lastSettingsPane.value = "account:connectors-setup";
+    assert.equal(reopenedSettingsPane(), "storage:chat", "a hidden setup pane is not reopened");
   } finally {
     lastSettingsPane.value = previous;
   }

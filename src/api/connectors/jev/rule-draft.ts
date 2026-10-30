@@ -40,10 +40,11 @@ function options(values: readonly string[], describe: (value: string) => string,
 
 /** The connection's status names: its status map, else the tracker's defaults. At most 30. */
 export function ruleDraftStatusNames(provider: TrackerProvider, statusMap: Record<string, string>): string[] {
-  const names = Object.keys(statusMap).length > 0 ? Object.keys(statusMap) : Object.keys(DEFAULT_STATUS_MAPS[provider]);
   // `type:<type>` entries are categories, not statuses a rule can move a ticket to.
-  return [...new Set(names.map((name) => name.trim()).filter((name) => name && !/^type:/i.test(name)))]
-    .slice(0, RULE_DRAFT_MAX_STATUSES);
+  const statusNames = (map: Record<string, string>) =>
+    [...new Set(Object.keys(map).map((name) => name.trim()).filter((name) => name && !/^type:/i.test(name)))];
+  const names = statusNames(statusMap);
+  return (names.length > 0 ? names : statusNames(DEFAULT_STATUS_MAPS[provider])).slice(0, RULE_DRAFT_MAX_STATUSES);
 }
 
 export function buildRuleDraftQuestions(sentence: string, statusNames: readonly string[]) {

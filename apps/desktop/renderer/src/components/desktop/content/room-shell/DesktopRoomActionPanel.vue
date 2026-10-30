@@ -33,7 +33,7 @@
           type="button"
           :data-testid="`desktop-room-settings-nav-${section.id}`"
           :aria-current="activeSection === section.id ? 'true' : undefined"
-          @click="goToSection(section.id)"
+          @click="stopHoldingSection(); goToSection(section.id)"
         >
           <component :is="section.icon" aria-hidden="true" />
           <span class="room-settings-nav-title">{{ section.title }}</span>
