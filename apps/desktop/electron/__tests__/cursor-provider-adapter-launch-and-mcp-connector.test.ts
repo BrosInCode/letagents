@@ -53,6 +53,7 @@ import {
   endsWithPath,
 } from "./cursor-provider-adapter.fixture.js";
 import { macOsSandboxOnly, needsPosixProcessGroups, needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
+import { CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS } from "../main/agents/cursor-provider-constants.js";
 
 /** A turn's private local-worker root: under /tmp on POSIX (/private/tmp on macOS), under the temporary folder on Windows. */
 const RUNTIME_DATA_DIR = process.platform === "win32"
@@ -356,7 +357,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
       harness.mcpAttestations[1]!.requiredReadableRoots,
       ["/Applications/LetAgents.app/runtime/letagents"],
     );
-    assert.equal(harness.mcpAttestations[1]!.timeoutMs, 15_000);
+    assert.equal(harness.mcpAttestations[1]!.timeoutMs, CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS);
     assert.equal(inspectionEnv.HOME, `${harness.mcpAttestations[0]!.writableProfileRoot}/home`);
     assert.equal(
       inspectionEnv.CURSOR_CONFIG_DIR,

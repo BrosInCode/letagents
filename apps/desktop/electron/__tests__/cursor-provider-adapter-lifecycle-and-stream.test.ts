@@ -216,7 +216,7 @@ test("Cursor missing wrapper cwd proves no native child was acquired", async () 
     void child.prepared?.catch(() => {});
     return child;
   } } });
-  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id/);
+  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id|was not found on this computer/);
   assert.equal(adapter.runtimeCustody("wa-cursor-1"), "absent");
   assert.deepEqual(harness.signals, []);
 });

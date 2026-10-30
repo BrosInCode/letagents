@@ -123,6 +123,14 @@ export const WINDOWS_TEST_HELPER: string | undefined = process.platform === "win
   : undefined;
 
 /** Tests that read a process through the process-tree helper, which the test run has not built. */
+/**
+ * CI builds the helper outside its default path, so only a test file that
+ * calls this uses it (each test file runs in its own process).
+ */
+export function useTestProcessTreeHelper(): void {
+  if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.env.LETAGENTS_PROCESS_TREE_HELPER = WINDOWS_TEST_HELPER;
+}
+
 export const needsProcessTreeHelper: string | false = process.platform === "win32" && !WINDOWS_TEST_HELPER
   ? "needs the built process-tree helper (LETAGENTS_TEST_PROCESS_TREE_HELPER)"
   : false;

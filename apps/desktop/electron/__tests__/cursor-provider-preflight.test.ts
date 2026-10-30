@@ -14,9 +14,11 @@ import test from "node:test";
 
 import type { DesktopAgentProvider, DesktopAgentProviderPreflightInput } from "../ipc-types.js";
 import { createElectronTestEnv } from "./harness.js";
-import { writeFakeProvider } from "./platform.js";
+import { writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import type { DesktopCursorPreflightOptions } from "../main/agents/cursor-provider-preflight.js";
+
+useTestProcessTreeHelper();
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";

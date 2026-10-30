@@ -15,7 +15,9 @@ import { createServer } from "node:net";
 import test from "node:test";
 
 import { assertCursorSupervisedMcpAuthority } from "../main/agents/cursor-mcp-authority.js";
-import { needsPosixProcessGroups, writeFakeProvider } from "./platform.js";
+import { needsPosixProcessGroups, writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
+
+useTestProcessTreeHelper();
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";

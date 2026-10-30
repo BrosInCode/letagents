@@ -22,6 +22,7 @@ import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-
 import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
 import { cursorMcpConnectorRootPattern, WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
 import { linkWindowsCursorLogin, removeWindowsCursorLogin } from "../main/agents/cursor/profile-filesystem.js";
+import { cursorNativeSandboxArgs } from "../main/agents/cursor/launch-arguments.js";
 import {
   assertCursorMcpPipeAddon,
   assertCursorWindowsCommandLines,
@@ -471,4 +472,12 @@ test("only a profile that may see the login gets Cursor's Windows login, and the
     linkWindowsCursorLogin(join(root, "owner"), home, roaming, "darwin");
     assert.equal(existsSync(linked), false, "macOS uses its Keychain");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Cursor's own sandbox flag says disabled on Windows, where Cursor refuses enabled, and nothing else changes", () => {
+  assert.deepEqual(cursorNativeSandboxArgs(["--mode", "ask", "--sandbox", "enabled", "enabled"], "win32"),
+    ["--mode", "ask", "--sandbox", "disabled", "enabled"]);
+  assert.deepEqual(cursorNativeSandboxArgs(["--sandbox", "disabled"], "win32"), ["--sandbox", "disabled"]);
+  assert.deepEqual(cursorNativeSandboxArgs(["--sandbox", "enabled"], "darwin"), ["--sandbox", "enabled"]);
+  assert.deepEqual(cursorNativeSandboxArgs(["--sandbox", "enabled"], "linux"), ["--sandbox", "enabled"]);
 });

@@ -16,6 +16,9 @@ import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProc
 import type { CodexProviderAdapterDependencies } from "./types.js";
 import { recordValue } from "./notifications.js";
 
+// Electron as Node takes 8-13 s to load this runtime in an emulated Windows VM.
+export const MCP_RUNTIME_CONTRACT_DEADLINE_MS = process.platform === "win32" ? 30_000 : 8_000;
+
 export const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   execution: {
     controlProbe: "rpc",
@@ -152,8 +155,7 @@ export function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Prom
       child.stdout?.destroy();
       child.stderr?.destroy();
       if (child.exitCode === null && child.signalCode === null) killedAtDeadline = child.kill("SIGKILL");
-    // Electron as Node takes 8-13 s to load this runtime in an emulated Windows VM.
-    }, process.platform === "win32" ? 30_000 : 8_000);
+    }, MCP_RUNTIME_CONTRACT_DEADLINE_MS);
     deadline.unref();
     child.stdin?.end();
   });

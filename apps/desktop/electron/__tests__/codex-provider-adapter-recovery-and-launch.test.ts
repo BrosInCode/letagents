@@ -11,6 +11,7 @@ import { ProviderContinuationMissingError } from "../main/agents/provider-adapte
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { assertOwnerPrivateFile } from "./harness.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
+import { MCP_RUNTIME_CONTRACT_DEADLINE_MS } from "../main/agents/codex/launch-contract.js";
 
 test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
   for (const failureTiming of ["before", "during-callback"] as const) {
@@ -803,7 +804,7 @@ test("Codex custodial polling reads the selected built executable contract witho
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       writeFileSync(probeReleaseFile, "release");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8_200);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, MCP_RUNTIME_CONTRACT_DEADLINE_MS + 200);
       await delayedProbeAssertion;
     }
 

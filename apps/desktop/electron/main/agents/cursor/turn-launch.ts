@@ -30,6 +30,7 @@ import {
   cursorLaunchPolicyArgs,
   requireCursorSessionId,
   usesExactScratchWorkspace,
+  cursorNativeSandboxArgs,
 } from "./launch-arguments.js";
 import type { CursorProviderAdapter } from "./provider-adapter.js";
 import { prepareSupervisedTurn, throwIfCursorTurnLaunchAborted } from "./supervised-turn-preparation.js";
@@ -240,10 +241,10 @@ export async function beginTurn(
       // exact enabled/disabled native choice in policyArgs. Only restricted
       // profiles also use the independent OS workspace/process/network boundary.
       ...(handle.deliveryMode === "daemon_inbox" && handle.spawnRequest.permissionProfileId === "read_only"
-        ? ["--sandbox", "enabled"]
+        ? cursorNativeSandboxArgs(["--sandbox", "enabled"])
         : []),
       "--workspace", providerWorkspace,
-      ...handle.policyArgs,
+      ...cursorNativeSandboxArgs(handle.policyArgs),
       ...(nativeResumeSession ? [`--resume=${nativeResumeSession}`] : []),
       // A Windows generation is a fresh Git worktree: say so before the turn's prompt.
       workspaceGeneration?.workspaceNote ? `${workspaceGeneration.workspaceNote}\n\n${prompt}` : prompt,

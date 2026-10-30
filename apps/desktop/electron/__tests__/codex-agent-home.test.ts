@@ -11,7 +11,9 @@ import test, { type TestContext } from "node:test";
 
 import { protectOwnerPrivateSync } from "../../../../shared/owner-private-fs.mjs";
 import { createElectronTestEnv } from "./harness.js";
-import { needsModeBits, needsPosixAgentHomeLinks, writeFakeProvider } from "./platform.js";
+import { needsModeBits, needsPosixAgentHomeLinks, writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
+
+useTestProcessTreeHelper();
 
 const env = createElectronTestEnv({
   prefix: "letagents-codex-agent-home-",
