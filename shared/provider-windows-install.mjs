@@ -62,7 +62,7 @@ function assertNoRedirect(launcher, base, relative, files) {
 const NPM_SHIM_HEAD = ["@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0"];
 // A program named from the shim's own folder claims this shape, anywhere in
 // the file and however it is quoted. A script shim's node.exe beside it does not.
-const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)(?!\\*node\.exe)[^"\r\n]*\.exe/i;
+const NPM_SHIM_NATIVE_CLAIM = /%(?:~dp0|dp0%)(?!\\*node\.exe(?:["\s]|$))[^"\r\n]*\.exe/im;
 const NPM_SHIM_NATIVE_TARGET = /^"%dp0%\\([^"]+\.exe)"   %\*$/i;
 // One path segment, in characters that mean nothing to cmd.exe or to Windows path parsing.
 const NPM_TARGET_SEGMENT = /^[A-Za-z0-9@_+-](?:[A-Za-z0-9@._+-]*[A-Za-z0-9@_+-])?$/;

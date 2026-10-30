@@ -130,6 +130,8 @@ test("a native-program shim that names a path out of its package fails closed, a
     "node_modules\\opencode-ai\\bin\\opencode..exe\\x..\\a.exe",
     "C:\\Windows\\System32\\calc.exe",
     "\\\\server\\share\\evil.exe",
+    "node.exe-evil.exe",
+    "node.exe\\evil.exe",
   ]) {
     const shim = OPENCODE_CMD.replace("node_modules\\opencode-ai\\bin\\opencode.exe", target);
     for (const allowCmd of [false, true]) {
