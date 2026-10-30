@@ -13,7 +13,7 @@ behaviour skip themselves on Windows through one helper (`apps/desktop/electron/
 | Tool | Version | Where | Admin |
 | --- | --- | --- | --- |
 | Node.js (with npm) | 22.23.4, **x64** | `%LOCALAPPDATA%\Programs\node-v22.23.4-win-x64` | no |
-| Git for Windows (portable, with Git Bash) | 2.56.0.4 | `%LOCALAPPDATA%\Programs\Git` | no |
+| Git for Windows (portable, with Git Bash) | 2.56.0.4 | `%LOCALAPPDATA%\Programs\PortableGit-2.56.0.4` | no |
 | GitHub CLI | 2.103.3 | `%LOCALAPPDATA%\Programs\gh-2.103.3` | no |
 | Visual Studio Build Tools 2026 | 18.11.3, MSVC 14.51.36231, Windows SDK 10.0.26100.0 | `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools` | **yes** |
 | `LongPathsEnabled` = 1 | | `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem` | **yes** |
@@ -23,15 +23,22 @@ behaviour skip themselves on Windows through one helper (`apps/desktop/electron/
   with `22` on `windows-latest`). An arm64 Node looks for arm64 builds that have no seal, and the app refuses them.
 - MSVC 14.51.36231 with SDK 10.0.26100.0 is what the seals name (CI image `windows-2025-vs2026`). With it,
   `build.mjs --check` makes the sealed bytes. Another MSVC builds other bytes: `--check` only warns, but the app and the
-  tests refuse that helper and that addon.
+  tests refuse that helper and that addon. `-BuildTools` installs the current Build Tools 2026 release, so once
+  Microsoft ships a newer MSVC (and CI's image moves to it), a fresh install has the newer one: the script then warns.
+  Use the CI-built pieces until the seals are renewed.
+- Windows puts the machine `Path` before the user `Path`. If an MSI-installed Node, Git or `gh` is on the machine
+  `Path` (for example `C:\Program Files\nodejs`), new terminals start that one instead; `-Tools` warns when it finds
+  one.
 - No Python and no node-gyp: no dependency builds native code at install time. The only install scripts are esbuild's
   (it picks its prebuilt binary) and Electron's download.
 
 ## Set up
 
 The script `scripts/windows/setup-dev.ps1` does every step below. It is safe to run again: each part checks what is
-there and skips it. Every download is checked against a pinned SHA-256, and each program in it against its Authenticode signer,
-before it runs (the Visual Studio bootstrapper changes with each release, so it is checked by its signer only).
+there and skips it. Each tool goes into its own versioned folder, so the script never removes another installation.
+Every download of `-Tools` is checked against a pinned SHA-256, and each program in it against its Authenticode signer,
+before it runs; the Visual Studio bootstrapper changes with each release, so it is checked by its signer only.
+`-Providers` is the exception: see [Provider CLIs](#provider-clis).
 
 1. Get the script. Without Git yet, download `scripts/windows/setup-dev.ps1` from GitHub (the raw file of `staging`).
 2. Install the per-user tools (no admin). In PowerShell:
@@ -42,15 +49,19 @@ before it runs (the Visual Studio bootstrapper changes with each release, so it 
 
    This puts Node, `%APPDATA%\npm`, Git's `cmd` folder and `gh` first on your user `Path`, and
    sets `core.autocrlf=false` and `core.longpaths=true` in your global Git config. It removes older entries of the same
-   tools (and a MinGit) from the user `Path`.
-3. Install the build tools (admin). In PowerShell started with **Run as administrator**:
+   tools (and a MinGit) from the user `Path`, and keeps every other entry as it is stored (`%VAR%` entries stay
+   unexpanded).
+3. Install the build tools (admin). In PowerShell started with **Run as administrator** (it starts in
+   `C:\Windows\System32`, so go to the script's folder first):
 
    ```powershell
+   cd <the folder that holds setup-dev.ps1>
    powershell -NoProfile -ExecutionPolicy Bypass -File setup-dev.ps1 -BuildTools
    ```
 
    This sets `LongPathsEnabled` and installs Visual Studio Build Tools 2026 with the MSVC x64 and ARM64 compilers and
-   the Windows 11 SDK 26100, silently (about 9 minutes). It changes no other setting.
+   the Windows 11 SDK 26100, silently (about 9 minutes). It changes no other setting. It then compares the default MSVC
+   and the SDK with the versions the native seals name, and warns when they differ.
 4. Open a new terminal, so the new `Path` applies.
 5. Clone the repository and switch to `staging`:
 
@@ -68,7 +79,9 @@ before it runs (the Visual Studio bootstrapper changes with each release, so it 
 
    For each of `.`, `apps/desktop`, `src/web` and `apps/desktop/electron/runtime/letagents` it runs
    `npm ci --ignore-scripts --no-audit` and `npm audit signatures`. Only then does it run the lifecycle scripts
-   (`npm rebuild` in the root, `apps/desktop` and `src/web`) and download Electron (`install-electron`).
+   (`npm rebuild` in the root, `apps/desktop` and `src/web`) and download Electron (`install-electron`). It then
+   writes `node_modules\.letagents-dev-setup` in each tree, and a later run skips a tree whose lock file and Node are
+   unchanged. Add `-Force` to set every tree up again.
 7. Install the provider CLIs (no admin), if you work on agents:
 
    ```powershell
@@ -84,9 +97,9 @@ Without the script, do the same by hand: the versions and SHA-256 values are at 
 
 The Git for Windows installer asks for elevation (UAC) even with `/CURRENTUSER`. The portable build
 (`PortableGit-<version>-<arch>.7z.exe`, from the same release) is the full Git for Windows with Git Bash, and needs no
-admin. Use the installer instead if you prefer; then put its `cmd` folder on your `Path` and leave out `-Tools`'s Git
-part. CI's `shell: bash` is Git Bash: run the commands below in Git Bash
-(`%LOCALAPPDATA%\Programs\Git\git-bash.exe`, or `bin\bash.exe` from a terminal).
+admin. If you use the installer instead, `-Tools` still adds the portable Git first on your `Path`; remove that entry
+if you want the installed one. CI's `shell: bash` is Git Bash: run the commands below in Git Bash
+(`%LOCALAPPDATA%\Programs\PortableGit-2.56.0.4\git-bash.exe`, or `bin\bash.exe` from a terminal).
 
 ## Run the Windows CI suites
 
@@ -99,7 +112,8 @@ again: they are read from the new home, and without them Git for Windows' own de
 which fails `workspace-change-capture` ("turn capture reuses four bounded buffers": `0 !== 4`). CI does the same.
 
 ```bash
-export HOME="C:/Users/$USERNAME/letagents-test-home" USERPROFILE="C:/Users/$USERNAME/letagents-test-home"
+scratch="$(cygpath -m "$USERPROFILE")/letagents-test-home"
+export HOME="$scratch" USERPROFILE="$scratch"
 mkdir -p "$HOME"
 git config --global core.autocrlf false
 git config --global core.longpaths true
@@ -129,11 +143,16 @@ Process-tree helper (`process-tree-windows`):
 ```bash
 node apps/desktop/native/win-process-tree/build.mjs --check
 node --test --test-timeout=120000 apps/desktop/native/win-process-tree/seal.test.mjs apps/desktop/native/win-process-tree/process-tree.windows.test.mjs
+rm apps/desktop/native/win-process-tree/build/x64/letagents-process-tree.exe
 ```
+
+The last line removes the helper from its default build folder, where the app's code finds it: CI builds it in its own
+job, so the desktop suites run without it.
 
 Desktop (`desktop-tests-windows`):
 
 ```bash
+node apps/desktop/native/win-daemon-pipe/build.mjs --check
 npm --prefix apps/desktop run typecheck
 npm --prefix apps/desktop run build
 npm --prefix apps/desktop run test:renderer
@@ -178,12 +197,17 @@ does. Sign in to LetAgents in the app as usual.
 
 `-Providers` installs each from its official source. Nothing signs in.
 
-| CLI | How | Version tested | Program the app starts |
+| CLI | How | Version | Program the app starts |
 | --- | --- | --- | --- |
-| Claude Code | `https://claude.ai/install.ps1` (checks the binary's SHA-256 against its manifest) | 2.1.312 | `%USERPROFILE%\.local\bin\claude.exe` |
-| Codex | `npm install --global @openai/codex` | 0.166.0 | the npm shim's `node` + `codex.js` |
-| OpenCode | `npm install --global opencode-ai` | 1.19.5 | refused in dev mode, see below |
-| Cursor agent | `https://cursor.com/install?win32=true` | 2026.10.22-27dcf5f | refused, see below |
+| Claude Code | `https://claude.ai/install.ps1` | latest (2.1.312 tested) | `%USERPROFILE%\.local\bin\claude.exe` |
+| Codex | `npm install --global @openai/codex@0.166.0` | 0.166.0 | the npm shim's `node` + `codex.js` |
+| OpenCode | `npm install --global opencode-ai@<letagentsRuntime.openCodeVersion>` | 1.18.20 today | refused in dev mode, see below |
+| Cursor agent | `https://cursor.com/install?win32=true` | latest (2026.10.22-27dcf5f tested) | refused, see below |
+
+Codex and OpenCode come from npm at pinned versions; npm checks each package against the registry's integrity value,
+and their install scripts run (OpenCode's picks its binary). Claude Code and the Cursor agent come from the vendors'
+own install scripts, fetched over HTTPS and run as published, with no pin: Claude's script checks the binary's SHA-256
+against its release manifest, and Cursor's checks nothing. Read them first if your policy needs it.
 
 The app finds each program on `PATH` through `shared/provider-executable.mjs`. It starts a native program, or an npm
 shim as the `node` and script it runs; it refuses any other batch file, because `cmd.exe` would re-read the prompt's
@@ -193,6 +217,7 @@ quotes and line breaks. Two of the installs above are such batch files:
   script. The packaged app uses its own `resources\app\runtime\opencode.exe`, so only dev mode is affected. For
   dev mode, set `LETAGENTS_OPENCODE_BIN` to
   `%LOCALAPPDATA%\Programs\node-v22.23.4-win-x64\node_modules\opencode-ai\bin\opencode.exe`.
+  (In the test, `opencode-ai` 1.19.5 was installed; 1.18.20 has the same `.exe` bin.)
 - Cursor: the official installer makes `%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd`, which runs PowerShell, which
   runs a `node.exe` and `index.js` in `versions\<version>`. There is no single program to name in
   `LETAGENTS_CURSOR_AGENT_BIN`, so Cursor cannot start from LetAgents on Windows yet.
@@ -211,7 +236,8 @@ Measured on 2026-10-30 on the ARM64 VM (Windows 11 build 26300, not elevated, De
 
 | Step | Result | Time |
 | --- | --- | --- |
-| `-Tools` (first run / again) | Node, Git, `gh` installed and checked | 4 min 21 s / 13 s |
+| `-Tools` (first run / again) | Node, Git, `gh` installed and checked | 4 min 21 s / 5 s |
+| `-Dependencies` again | every tree skipped | 3 s |
 | `-BuildTools` | Build Tools 2026 18.11.3 | about 9 min |
 | `-Dependencies` (4 trees) | 138, 338, 64 and 110 packages, all with verified registry signatures | 5 min 27 s |
 | Process-tree helper `build.mjs --check` | matches its seal `9ee36c1b…` | 24 s |
@@ -287,14 +313,15 @@ Other:
 
 - **`npm run test:mcp` hung twice** in `room-join-runtime.test.ts` (the test process waited with an idle PowerShell
   child of `shared/owner-private-fs.mjs`), both times while other test processes ran in the VM. The file passes alone
-  (8 / 8 in 12 s) and the whole suite passed a third time. `test:mcp` sets no `--test-timeout`, so a hang never ends;
-  run it with `--test-timeout=300000` to get a failure with the test's name instead.
+  (8 / 8 in 12 s) and the whole suite passed a third time. `test:mcp` sets no `--test-timeout`, so a hang never ends.
+  To get a failure with the test's name instead, run
+  `node --import tsx --test --test-timeout=300000 src/mcp/__tests__/*.test.ts`.
 - **`npm run dev:desktop`** stops at once on a fresh Windows clone: `scripts/ensure-desktop-dependencies.mjs` runs
   `npm install --prefix <repo>\apps\desktop` from the repository root, and on Windows (npm 10.9.9) that also adds the
   root package to `apps/desktop` as `"letagents": "file:../.."`, so the script refuses the changed lock file. The same
   command on macOS changes nothing. Until that is fixed, start dev mode with `npm --prefix apps/desktop run dev`, and
   if it ran once, restore the two files with `git checkout -- apps/desktop/package.json apps/desktop/package-lock.json`
-  and remove the `apps\desktop\node_modules\letagents` junction with `rmdir` (not a recursive delete: it points at
-  the repository).
+  and remove the junction with `cmd /c rmdir apps\desktop\node_modules\letagents`. Do not use PowerShell's
+  `rmdir` or `Remove-Item` here: on a junction they can delete what it points at, which is the repository.
 - **`project-bindings-store.test.ts`** "separate desktop processes serialize whole-store updates" failed once
   (`database is locked`); a known Windows flake.
