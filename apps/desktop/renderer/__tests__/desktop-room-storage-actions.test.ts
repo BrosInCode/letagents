@@ -193,6 +193,8 @@ test("room-wide settings are offered only where the server can hold them", async
     assert.ok(cloud.includes(`data-testid="${testId}"`), `a cloud room offers ${testId}`);
   }
   assert.ok(cloud.includes('data-testid="desktop-room-settings-nav-conversation"'));
+  // Tickets joins the rail only after ticket filters load and show (never in a zero-connector room).
+  assert.ok(!cloud.includes('data-testid="desktop-room-settings-nav-tickets"'));
   // Nav titles truncate instead of running under the summary beside them.
   assert.match(cloud, /<span class="room-settings-nav-title">Conversation<\/span>/);
   // "Answer in turns" sits directly after conversation routing, in the same section.

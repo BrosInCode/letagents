@@ -16,7 +16,7 @@ const {
 } = await import("../connectors/jev-link.js");
 const { proposeForClosedPullRequest, jevExceptionProposal } = await import("../connectors/jev/exceptions.js");
 const { askJevNeedsMe } = await import("../connectors/jev/needs-me.js");
-const { draftRuleFromSentence, ruleFromDraftAnswers, buildRuleDraftQuestions } = await import("../connectors/jev/rule-draft.js");
+const { draftRuleFromSentence, ruleFromDraftAnswers, buildRuleDraftQuestions, ruleDraftStatusNames } = await import("../connectors/jev/rule-draft.js");
 const { eventLinkIsConfirmed } = await import("../connectors/rules/engine.js");
 
 const endpoint: JevEndpoint = { provider: "typesafe", apiKey: "test-key", baseUrl: "https://jev.invalid", model: "jev-test", timeoutMs: 4_000 };
@@ -429,6 +429,17 @@ test("rule drafting: choices become a rule validated as a typed rule; nothing is
   }, { connection: { id: "tcon_1", provider: "jira", status_map: {}, jev_linking_enabled: false }, sentence: "When merged, Done" });
   assert.equal(off.draft, null);
   assert.equal(calls, 0, "the switch off means no call");
+});
+
+test("rule drafting offers status names only, never type: category entries", () => {
+  const names = ruleDraftStatusNames("jira", { "To Do": "todo", "type:new": "todo", "Type:Done": "done", Done: "done" });
+  assert.deepEqual(names, ["To Do", "Done"]);
+  assert.ok(!ruleDraftStatusNames("jira", {}).some((name) => name.startsWith("type:")));
+  // A map holding only categories falls back to the default status names.
+  assert.deepEqual(
+    ruleDraftStatusNames("jira", { "type:new": "todo", "type:indeterminate": "in_progress", "type:done": "done" }),
+    ["To Do", "In Progress", "In Review", "Code Review", "Done", "Closed"],
+  );
 });
 
 test("a stale intent is refused and superseded: the PR merged, a newer suggestion, or the link removed", async () => {

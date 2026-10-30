@@ -42,6 +42,10 @@ export const DEFAULT_STATUS_MAPS = {
     "Code Review": "in_review",
     "Done": "done",
     "Closed": "done",
+    // A status not named above maps by its Jira status category.
+    "type:new": "todo",
+    "type:indeterminate": "in_progress",
+    "type:done": "done",
   },
   linear: {
     "In Review": "in_review",

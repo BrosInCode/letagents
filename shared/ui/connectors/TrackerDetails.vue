@@ -68,8 +68,8 @@
     <section class="connector-detail-section">
       <h3>Tickets in your rooms</h3>
       <p>
-        Choose which tickets each room imports in its Board settings. Ticket
-        labels stay separate from your agents’ work status.
+        Choose which tickets each room imports in the room’s settings, under
+        Tickets. Ticket labels stay separate from your agents’ work status.
       </p>
       <p>Connecting a tracker does not import tickets by itself.</p>
     </section>
@@ -103,15 +103,15 @@
         :key="index"
         class="connector-map-row"
       >
-        <span>{{ statusMapRowLabel(row.name) }}</span
+        <span>{{ statusMapRowLabel(row.name, connection.provider) }}</span
         ><FilterDropdown
           :model-value="row.state"
-          :label="`Ticket label for ${statusMapRowLabel(row.name)}`"
+          :label="`Ticket label for ${statusMapRowLabel(row.name, connection.provider)}`"
           :options="stateOptions"
           @update:model-value="row.state = $event as TicketState"
         /><button
           class="connector-icon"
-          :aria-label="`Remove ${row.name}`"
+          :aria-label="`Remove ${statusMapRowLabel(row.name, connection.provider)}`"
           @click="mapping.splice(index, 1)"
         >
           ×
@@ -127,8 +127,13 @@
           Add
         </button>
       </form>
-      <button class="connector-secondary" :disabled="!!busy" @click="saveMap">
-        Save mapping
+      <button
+        class="connector-secondary"
+        :disabled="!!busy"
+        data-testid="connector-save-mapping"
+        @click="saveMap"
+      >
+        {{ busy === "map" ? "Saving…" : mapSaved ? "Saved" : "Save mapping" }}
       </button>
     </ConnectorDisclosure>
     <SettingsConnectorRules
@@ -268,9 +273,13 @@ const stateOptions = ticketStateOptions.map((option) => ({
   id: option.value,
   label: option.label,
 }));
+// The save button reads "Saved" for a moment after a save succeeds.
+const mapSaved = ref(false);
+let mapSavedTimer: ReturnType<typeof setTimeout> | undefined;
 let live = true;
 onBeforeUnmount(() => {
   live = false;
+  clearTimeout(mapSavedTimer);
 });
 watch(
   () => props.connection,
@@ -348,6 +357,11 @@ const saveMap = () =>
     mapping.value = savedMapping.map((row) => ({ ...row }));
     emit("updated", connection);
     feedback.value = "Ticket status mapping saved.";
+    mapSaved.value = true;
+    clearTimeout(mapSavedTimer);
+    mapSavedTimer = setTimeout(() => {
+      mapSaved.value = false;
+    }, 2000);
   });
 const toggleJev = () =>
   run("jev", async () => {

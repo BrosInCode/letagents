@@ -40,6 +40,8 @@ export function useRoomShellState(context: unknown) {
   const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
   const revealedMessageId = ref<string | null>(null);
   const actionPanelOpen = ref(false);
+  /** The Room settings section to show when the panel opens, or null for the top. */
+  const actionPanelSection = ref<string | null>(null);
   const addAgentModalOpen = ref(false);
   const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
   const selectedAgentDetailRequestVersion = ref(0);
@@ -166,7 +168,7 @@ export function useRoomShellState(context: unknown) {
     "Background agent management restarted. Your draft is preserved; reload the current configuration before saving.";
   return {
     pushActionToast, personActions, roomRef, messagesRef, reasoningSessionsRef, activeTab,
-    roomChatView, revealedMessageId, actionPanelOpen, addAgentModalOpen,
+    roomChatView, revealedMessageId, actionPanelOpen, actionPanelSection, addAgentModalOpen,
     selectedAgentDetailRequest, selectedAgentDetailRequestVersion, agentInspectorInitialTab,
     agentInspectorActionState, agentInspectorCompact, agentInspectorRequestState,
     agentInspectorLiveFeed, agentInspectorWorkResource, agentInspectorWorkSourceMessageId,

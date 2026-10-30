@@ -90,6 +90,12 @@ test("default status maps follow the plan and unmapped statuses become in_progre
   assert.deepEqual(mapTicketState(jira, { name: "Code Review" }), { ticket_state: "in_review", unmapped: false });
   assert.deepEqual(mapTicketState(jira, { name: "Closed" }), { ticket_state: "done", unmapped: false });
   assert.deepEqual(mapTicketState(jira, { name: "Blocked" }), { ticket_state: "in_progress", unmapped: true });
+  // A status the map does not name maps by its Jira status category.
+  assert.deepEqual(mapTicketState(jira, { name: "Backlog", type: "new" }), { ticket_state: "todo", unmapped: false });
+  assert.deepEqual(mapTicketState(jira, { name: "Blocked", type: "indeterminate" }), { ticket_state: "in_progress", unmapped: false });
+  assert.deepEqual(mapTicketState(jira, { name: "Won't Fix", type: "done" }), { ticket_state: "done", unmapped: false });
+  // A name entry wins over the category.
+  assert.deepEqual(mapTicketState(jira, { name: "In Review", type: "indeterminate" }), { ticket_state: "in_review", unmapped: false });
   const linear = DEFAULT_STATUS_MAPS.linear;
   assert.deepEqual(mapTicketState(linear, { name: "Todo", type: "unstarted" }), { ticket_state: "todo", unmapped: false });
   assert.deepEqual(mapTicketState(linear, { name: "In Review", type: "started" }), { ticket_state: "in_review", unmapped: false });

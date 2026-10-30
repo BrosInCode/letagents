@@ -196,12 +196,25 @@ export function workGroup(card: MyWorkCard): WorkGroup {
     return "active";
   return "queue";
 }
-export function workOwner(card: MyWorkCard): string {
+function agentOwner(card: MyWorkCard): string | null {
   return (
-    card.agent?.display_name ||
-    card.agent?.label.split("|")[0]?.trim() ||
-    "Unassigned"
+    card.agent?.display_name || card.agent?.label.split("|")[0]?.trim() || null
   );
+}
+/**
+ * Who has the card: its LetAgents assignee, else the ticket's tracker assignee
+ * ("Tracker: Ada"), else "Unassigned". The stored work state is not changed.
+ */
+export function workOwner(card: MyWorkCard): string {
+  const agent = agentOwner(card);
+  if (agent) return agent;
+  return card.ticket_assignee_label
+    ? `Tracker: ${card.ticket_assignee_label}`
+    : "Unassigned";
+}
+/** The name the owner avatar shows: the person, without the "Tracker:" prefix. */
+export function workOwnerAvatarName(card: MyWorkCard): string {
+  return agentOwner(card) || card.ticket_assignee_label || "Unassigned";
 }
 export function workState(state: string): string {
   const label = state.replace(/_/g, " ");

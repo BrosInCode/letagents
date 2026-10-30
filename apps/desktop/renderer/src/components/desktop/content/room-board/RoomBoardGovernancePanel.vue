@@ -116,6 +116,17 @@
         <RoomBoardGovernanceAuditSection :governance="governance" />
       </div>
     </div>
+
+    <div
+      v-if="showTicketSettings"
+      class="desktop-board-governance-ticket-settings"
+      data-testid="board-governance-ticket-settings"
+    >
+      <span>Ticket filters choose which tracker tickets this room imports.</span>
+      <button type="button" class="desktop-board-secondary-action" @click="emit('open-ticket-settings')">
+        Open in Room settings
+      </button>
+    </div>
   </DesktopDialogShell>
 </template>
 
@@ -145,6 +156,8 @@ const props = defineProps<{
   activeSection: DesktopBoardGovernanceSection;
   selectedCandidateId: string | null;
   liveAgents: DesktopAgentPresence[];
+  /** Shown only where Room settings has a Tickets section. */
+  showTicketSettings?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -157,6 +170,7 @@ const emit = defineEmits<{
   "approve-intent": [intentId: string];
   "deny-intent": [intentId: string, reason: string | null];
   retry: [];
+  "open-ticket-settings": [];
 }>();
 
 const managerLabel = computed(() => activeManagerLabel(props.governance));
