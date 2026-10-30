@@ -930,19 +930,45 @@ test("real Windows: an exposed file renamed over the proof is refused, despite t
   } finally { await env.cleanup(); }
 });
 
-/** CreateFile with share mode 0 (libuv's UV_FS_O_EXLOCK, which Node does not export), as daemon/singleton.ts uses. */
-const WINDOWS_EXCLUSIVE_SHARING = 0x10000000;
+/**
+ * Another process (a PowerShell) holds `path` open until the returned release
+ * runs: `exclusive` opens it with FileShare.None (as a scanner that locks the
+ * file does); `range` opens it sharing everything and locks all of it
+ * (FileStream.Lock, LockFileEx).
+ */
+async function holdInAnotherProcess(path: string, mode: "exclusive" | "range"): Promise<() => Promise<void>> {
+  const { spawn } = await import("node:child_process");
+  const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const open = mode === "exclusive"
+    ? "$fs = [System.IO.File]::Open($env:LETAGENTS_TEST_PROOF, 'Open', 'Read', 'None'); "
+    : "$fs = [System.IO.File]::Open($env:LETAGENTS_TEST_PROOF, 'Open', 'Read', 'ReadWrite, Delete'); $fs.Lock(0, $fs.Length); ";
+  const script = `${open}[Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); $null = [Console]::In.ReadLine(); $fs.Dispose()`;
+  const child = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { ...process.env, LETAGENTS_TEST_PROOF: path }, stdio: ["pipe", "pipe", "inherit"], windowsHide: true,
+  });
+  await new Promise<void>((resolveLocked, reject) => {
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { output += chunk; if (output.includes("locked")) resolveLocked(); });
+    child.once("exit", (code) => reject(new Error(`the lock holder exited (${code}) before it locked`)));
+  });
+  return async () => {
+    const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
+    child.stdin.end("\n");
+    await exited;
+  };
+}
 
 test("real Windows: a proof another process holds without sharing it is waited for, then accepted", { skip: process.platform !== "win32" && "a Windows share mode" }, async () => {
   const env = await harness();
-  const { openSync, closeSync, constants } = await import("node:fs");
+  const { openSync, closeSync } = await import("node:fs");
   try {
     await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
       admitted.setEncoding("utf8");
       admitted.on("data", (chunk: string) => admitted.end(`pong:${chunk}`));
     }));
     forgetOwnerPrivateCache();
-    const lock = openSync(env.proofPath, constants.O_RDONLY | WINDOWS_EXCLUSIVE_SHARING);
+    const release = await holdInAnotherProcess(env.proofPath, "exclusive");
     let locked;
     let rotation: unknown;
     try {
@@ -950,7 +976,7 @@ test("real Windows: a proof another process holds without sharing it is waited f
       locked = await exchange(env.connect(), "ping\n");
       // The daemon cannot replace a proof locked this way either: the rename fails, and the error is thrown.
       rotation = await ensureDaemonProof(env.proofPath, { recheckDelayMs: 1 }).then(() => "replaced", (error: unknown) => error);
-    } finally { closeSync(lock); }
+    } finally { await release(); }
     assert.equal(locked.connected, false);
     assert.equal(locked.error?.code, "ENOENT", `a lock is not a refusal: ${locked.error?.message}`);
     assert.equal(isRetryableSupervisorBridgeError(locked.error), true);
@@ -962,27 +988,6 @@ test("real Windows: a proof another process holds without sharing it is waited f
 
 test("real Windows: a proof with a locked byte range is waited for, cold and remembered, then accepted", { skip: process.platform !== "win32" && "a Windows byte-range lock" }, async () => {
   const env = await harness();
-  const { spawn } = await import("node:child_process");
-  const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  // Another process opens the proof sharing it fully, then locks all of it (FileStream.Lock, LockFileEx).
-  const script = "$fs = [System.IO.File]::Open($env:LETAGENTS_TEST_PROOF, 'Open', 'Read', 'ReadWrite, Delete'); "
-    + "$fs.Lock(0, $fs.Length); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); $null = [Console]::In.ReadLine(); $fs.Dispose()";
-  const holdLock = async () => {
-    const child = spawn(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
-      env: { ...process.env, LETAGENTS_TEST_PROOF: env.proofPath }, stdio: ["pipe", "pipe", "inherit"], windowsHide: true,
-    });
-    await new Promise<void>((resolveLocked, reject) => {
-      let output = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { output += chunk; if (output.includes("locked")) resolveLocked(); });
-      child.once("exit", (code) => reject(new Error(`the lock holder exited (${code}) before it locked`)));
-    });
-    return async () => {
-      const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
-      child.stdin.end("\n");
-      await exited;
-    };
-  };
   try {
     await env.listen((socket) => acceptDaemonPeer(socket, env.proof, (admitted) => {
       admitted.setEncoding("utf8");
@@ -990,14 +995,14 @@ test("real Windows: a proof with a locked byte range is waited for, cold and rem
     }));
     // Cold: the reader opens the proof, and its read hits the locked range (ERROR_LOCK_VIOLATION).
     forgetOwnerPrivateCache();
-    let release = await holdLock();
+    let release = await holdInAnotherProcess(env.proofPath, "range");
     const cold = await exchange(env.connect(), "ping\n");
     await release();
     assert.equal(cold.error?.code, "ENOENT", `a locked range is not a refusal: ${cold.error?.message}`);
     assert.equal(isRetryableSupervisorBridgeError(cold.error), true);
     // Remembered: Node's own read of the remembered proof hits the lock.
     assert.equal((await exchange(env.connect(), "ping\n")).data, "pong:ping\n");
-    release = await holdLock();
+    release = await holdInAnotherProcess(env.proofPath, "range");
     const warm = await exchange(env.connect(), "ping\n");
     await release();
     assert.equal(warm.error?.code, "ENOENT", `a locked range is not a refusal: ${warm.error?.code} ${warm.error?.message}`);
