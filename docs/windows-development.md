@@ -240,7 +240,7 @@ They are no security boundary, because whoever can edit such a file can already 
 Cursor's launcher also applies a staged update (`versions\promote-staged.cmd`) before it starts. The app does not run
 that script. A staged update waits until you next run `cursor-agent` in a terminal.
 
-Sign in to each in a terminal before you use it as an agent (supervised agents are off on Windows for now):
+Sign in to each in a terminal before you use it as an agent:
 
 1. Claude Code: run `claude`, then follow the browser sign-in.
 2. Codex: run `codex login`, then follow the browser sign-in.
