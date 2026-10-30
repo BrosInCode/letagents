@@ -313,7 +313,8 @@ An agent cannot type a passphrase. If agents use this key, use an empty passphra
 `ssh-add --apple-use-keychain`. Read the security notes below first.
 
 In the VM, run the blocks below in order in an elevated PowerShell. From the Mac, you can run each block as SYSTEM with
-`prlctl exec "<vm>" powershell -NoProfile -EncodedCommand <base64 of the UTF-16LE text>`, without `--current-user`.
+`prlctl exec "<vm>" powershell -NoProfile -EncodedCommand "$(iconv -f UTF-8 -t UTF-16LE block.ps1 | base64 | tr -d '\n')"`,
+without `--current-user`.
 Keep each command short: 1,700 encoded characters worked and 4,600 failed with "Unable to open new session".
 
 1. Install the server, and limit the firewall rule to the Mac's address on the VM network before anything listens
@@ -374,6 +375,8 @@ On the Mac:
    prlctl exec "<vm>" cmd /c type 'C:\ProgramData\ssh\ssh_host_ed25519_key.pub' | tr -d '\r' | cut -d' ' -f1,2 | sed 's/^/windows-vm /' >> ~/.ssh/known_hosts
    ```
 
+   If you rebuild the VM, its host key changes: run `ssh-keygen -R windows-vm`, then repeat this step.
+
 3. Test the key login:
 
    ```bash
@@ -412,7 +415,8 @@ browser.
 Security notes. Keep this setup for a local test VM:
 
 - The key gives administrator access to the VM with no UAC prompt. The firewall rule checks only the source address,
-  so any program that runs as your Mac user can use a key with no passphrase.
+  so any program that runs as your Mac user can use a key with no passphrase. A key loaded in `ssh-agent` has the same
+  risk while it is loaded.
 - The risk also goes the other way. With the Mac home folder shared, a program in the VM can read the Mac's home
   folder, including `~/.ssh`, and the VM runs `npm` installs and tests. If you do not need the shared folder, turn it
   off in the VM's Parallels settings.
