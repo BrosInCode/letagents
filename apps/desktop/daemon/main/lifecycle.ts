@@ -5,7 +5,7 @@ import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js
 import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import { withProtectedStateUpgrade, type StateRecoveryBootstrap } from "../state-recovery-key.js";
 import { recordedRemote, RoomWorkPublisher } from "../room-work-publisher.js";
-import { assertMacOS } from "../platform.js";
+import { assertSupervisorDaemonPlatform } from "../platform.js";
 import { runEveryStopStep } from "../stop-steps.js";
 import type { BootstrapOperation } from "../worker-authority-coordinator.js";
 import { REPLY_ATTACHMENT_RETENTION_MS } from "./types.js";
@@ -13,7 +13,7 @@ import { SupervisorDaemonOperations } from "./operations.js";
 
 export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperations {
   async start(storage: StateRecoveryBootstrap = {}): Promise<void> {
-    assertMacOS(this.platform);
+    assertSupervisorDaemonPlatform(this.platform);
     await this.singleton.acquire();
     // Copies for replies that never published (no_reply, a lost or refused turn) are not needed after two days.
     const sweepReplyAttachments = () => void this.replyAttachmentSpool.sweep(REPLY_ATTACHMENT_RETENTION_MS).catch(() => undefined);

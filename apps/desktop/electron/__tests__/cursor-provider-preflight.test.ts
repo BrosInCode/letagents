@@ -10,12 +10,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 
 import type { DesktopAgentProvider, DesktopAgentProviderPreflightInput } from "../ipc-types.js";
 import { createElectronTestEnv } from "./harness.js";
+import { writeFakeProvider, useTestProcessTreeHelper } from "./platform.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import type { DesktopCursorPreflightOptions } from "../main/agents/cursor-provider-preflight.js";
+
+useTestProcessTreeHelper();
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -35,14 +38,13 @@ const { tempDir } = createElectronTestEnv({
 });
 const cursorSourceHome = join(tempDir, "cursor-source-home");
 const cursorManagedHome = join(tempDir, "cursor-managed-home");
-const fakeCursorBin = join(tempDir, "cursor-agent-fake.js");
+const fakeCursorBin = join(tempDir, "cursor-agent-fake");
 const fakeCursorMcpMode = join(tempDir, ".fake-cursor-mcp-mode");
 const fakeCursorProbeLog = join(tempDir, ".fake-cursor-probes");
 const runtimePackageRoot = join(tempDir, "runtime", "node_modules", "letagents");
 const runtimeEntry = join(runtimePackageRoot, "dist", "mcp", "server.js");
 process.env.LETAGENTS_CURSOR_SOURCE_HOME = cursorSourceHome;
 process.env.LETAGENTS_CURSOR_MANAGED_HOME = cursorManagedHome;
-process.env.LETAGENTS_CURSOR_AGENT_BIN = fakeCursorBin;
 
 mkdirSync(join(runtimePackageRoot, "dist", "mcp"), { recursive: true });
 writeFileSync(join(runtimePackageRoot, "package.json"), JSON.stringify({
@@ -57,8 +59,7 @@ writeFileSync(join(cursorSourceHome, ".cursor", "mcp.json"), `${JSON.stringify({
     letagents: { command: "npx", args: ["-y", "letagents"] },
   },
 })}\n`);
-writeFileSync(fakeCursorBin, `#!/usr/bin/env node
-const fs = require("node:fs");
+process.env.LETAGENTS_CURSOR_AGENT_BIN = writeFakeProvider(fakeCursorBin, `const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
 if (args[0] === "--version" || args[0] === "--help") {
@@ -96,7 +97,6 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
 console.error("Unexpected cursor-agent args: " + args.join(" "));
 process.exit(2);
 `);
-chmodSync(fakeCursorBin, 0o755);
 
 const { runDesktopCursorProviderPreflight } = await import("../main/agents/cursor-provider-preflight.js");
 const { clearProbeCache } = await import("../main/agents/provider-probe-cache.js");
@@ -440,7 +440,11 @@ test("Cursor preflight blocks unknown permission profiles", async () => {
   assert.match(result.detail ?? "", /unknown_profile/);
 });
 
-test("Cursor preflight reuses its CLI probes inside the window and re-runs them after the cache is cleared", async () => {
+test("Cursor preflight reuses its CLI probes inside the window and re-runs them after the cache is cleared", async (t) => {
+  // The window is 20 s of the clock, and a preflight can take longer than that on a slow machine
+  // (a probe starts a Node process). Hold the clock still: the test is about the cache, not the time.
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const first = workspaceFixture("probe-cache-first");
   const second = workspaceFixture("probe-cache-second");
   writeFileSync(join(second, ".fake-cursor-help"), "Usage: cursor-agent --force --sandbox <mode>\n");

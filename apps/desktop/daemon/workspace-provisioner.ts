@@ -174,7 +174,11 @@ export function repositoryStorageKey(remoteUrl: string): string {
   assertCredentialFreeRemote(remoteUrl);
   const normalized = normalizeRemote(remoteUrl);
   if (!normalized) throw new Error("A remote URL is required for repository storage.");
-  const tail = normalized.split(/[/:]/).filter(Boolean).at(-1) || "repository";
+  // A Windows path separates with a backslash. Without this split the whole
+  // path becomes the label, and a long label overflows the path limit that
+  // git sets on `$GIT_DIR`. The digest below still carries the full identity.
+  const separators = process.platform === "win32" ? /[/\\:]/ : /[/:]/;
+  const tail = normalized.split(separators).filter(Boolean).at(-1) || "repository";
   const label = tail.replace(/[^A-Za-z0-9._-]/g, "-") || "repository";
   const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
   return safeSegment(`${label}-${digest}`, "repository storage key");

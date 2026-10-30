@@ -22,9 +22,9 @@ import {
   removePostV5DeliveryTables,
   assertRoomScopedV9DeliveryShape,
 } from "./helpers/manifest-store-sqlite-fixture.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { assertOwnerPrivate } from "../../electron/__tests__/platform.js";
 
-test("SQLite manifest round-trips the flat wire projection from relational domain tables", { skip: supervisedAgentsOnly }, async () => {
+test("SQLite manifest round-trips the flat wire projection from relational domain tables", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {
@@ -42,8 +42,8 @@ test("SQLite manifest round-trips the flat wire projection from relational domai
     assert.equal((database.prepare("SELECT COUNT(*) AS count FROM activity_events").get() as { count: number }).count, 2);
     assert.equal((database.prepare("SELECT COUNT(*) AS count FROM reconciliation_exit_timestamps").get() as { count: number }).count, 4);
     assert.equal((database.prepare("SELECT terminal_cause FROM reconciliation_notices WHERE agent_id = ?").get(entry.id) as { terminal_cause: string }).terminal_cause, terminal.terminal_cause);
-    assert.equal((await stat(env.root)).mode & 0o777, 0o700);
-    assert.equal((await stat(env.databasePath)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(env.root, "directory");
+    await assertOwnerPrivate(env.databasePath, "file");
 
     await store.close();
     await assert.rejects(() => store.load(), /closed/);

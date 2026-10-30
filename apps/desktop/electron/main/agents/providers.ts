@@ -55,6 +55,7 @@ import {
   refreshDesktopShellEnvironment,
 } from "../desktop-shell-environment.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
+import { supervisorDaemonAllowed } from "../platform-capabilities.js";
 
 export { listDesktopAgentProviders } from "./provider-registry.js";
 
@@ -72,7 +73,8 @@ type ExecOptions = {
   timeoutMs?: number;
 };
 
-const COMMAND_TIMEOUT_MS = 8_000;
+// A first start on Windows is slow: the scanner reads a large provider binary (10-18 s measured for OpenCode's in an emulated VM).
+const COMMAND_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 8_000;
 
 export type DesktopAgentProviderPreflightOptions = {
   /**
@@ -422,7 +424,7 @@ export async function runDesktopAgentProviderPreflight(
     // meantime may have memoised answers from the old environment.
     clearProbeCache();
     await refreshDesktopShellEnvironment();
-    if (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1") {
+    if (supervisorDaemonAllowed()) {
       await supervisorDaemonClient.restartForEnvironmentRefresh();
     }
     clearProbeCache();

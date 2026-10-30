@@ -16,6 +16,9 @@ import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProc
 import type { CodexProviderAdapterDependencies } from "./types.js";
 import { recordValue } from "./notifications.js";
 
+// Electron as Node takes 8-13 s to load this runtime in an emulated Windows VM.
+export const MCP_RUNTIME_CONTRACT_DEADLINE_MS = process.platform === "win32" ? 30_000 : 8_000;
+
 export const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   execution: {
     controlProbe: "rpc",
@@ -138,7 +141,7 @@ export function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Prom
       if (deadlineExpired) {
         // Timeout cleanup can discard unread stdout from a child that already
         // exited successfully while this process's event loop was delayed.
-        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its eight-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
+        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its ${process.platform === "win32" ? "thirty" : "eight"}-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
       }
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
@@ -152,7 +155,7 @@ export function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Prom
       child.stdout?.destroy();
       child.stderr?.destroy();
       if (child.exitCode === null && child.signalCode === null) killedAtDeadline = child.kill("SIGKILL");
-    }, 8_000);
+    }, MCP_RUNTIME_CONTRACT_DEADLINE_MS);
     deadline.unref();
     child.stdin?.end();
   });

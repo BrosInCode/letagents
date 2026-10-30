@@ -537,7 +537,7 @@ test("an agent's activity that a notice overtakes on its way to being written is
 });
 
 test("a daemon whose activity write fails while it stops still closes its socket and stores, reports the failure, and lets its successor take the agent over", async () => {
-  const { createConnection } = await import("node:net");
+  const { connectDaemon } = await import(new URL("../../../../shared/daemon-endpoint.mjs", import.meta.url).href);
   const agent = await codexDaemonFixture();
   try {
     await agent.deliver(1, { answer: "Answer 1." });
@@ -554,7 +554,7 @@ test("a daemon whose activity write fails while it stops still closes its socket
 
     // The stop closed its socket all the same: nothing answers on it.
     assert.equal(await new Promise<boolean>((resolve) => {
-      const socket = createConnection(agent.socketPath);
+      const socket = connectDaemon(agent.socketPath);
       socket.once("connect", () => { socket.destroy(); resolve(true); });
       socket.once("error", () => resolve(false));
     }), false, "the daemon's socket server is closed");

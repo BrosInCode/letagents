@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { createRequire, syncBuiltinESMExports } from "node:module";
+import { fileURLToPath } from "node:url";
 
 type TrackedSqliteDatabase = { close: () => void; isOpen?: boolean };
 
@@ -17,6 +18,11 @@ type TrackedSqliteDatabase = { close: () => void; isOpen?: boolean };
  */
 const openSqliteDatabases = new Map<TrackedSqliteDatabase, string>();
 
+function databaseFilePath(name: string): string {
+  if (!name.startsWith("file:")) return name;
+  try { return fileURLToPath(name.split("?")[0]!); } catch { return name; }
+}
+
 function trackSqliteDatabases(): void {
   const sqlite = createRequire(import.meta.url)("node:sqlite") as {
     DatabaseSync: new (...args: unknown[]) => TrackedSqliteDatabase;
@@ -27,7 +33,8 @@ function trackSqliteDatabases(): void {
     construct(target, args, newTarget) {
       const database = Reflect.construct(target, args, newTarget) as TrackedSqliteDatabase;
       if (typeof args[0] === "string" && args[0] !== ":memory:") {
-        openSqliteDatabases.set(database, resolve(args[0]));
+        // The daemon opens its state by a file: URL; the folder it lives in is what matters.
+        openSqliteDatabases.set(database, resolve(databaseFilePath(args[0])));
       }
       return database;
     },
@@ -66,7 +73,8 @@ function isWindowsOpenFileError(error: unknown): boolean {
  * long-lived SQLite connections stay open until the process ends. Then the
  * deletion waits for process exit, after every later `after` hook has run
  * (so none of them finds its database closed), closes the SQLite connections
- * under the folder and deletes it. A failure there still fails the file.
+ * under the folder and deletes it. If a file is still held then, a detached
+ * process removes the folder once this one has ended and released its handles.
  */
 export function removeTestDirectory(folder: string): void {
   try {
@@ -80,8 +88,17 @@ export function removeTestDirectory(folder: string): void {
     try {
       rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     } catch (error) {
-      process.stderr.write(`test cleanup could not remove ${folder}: ${String(error)}\n`);
-      process.exitCode = 1;
+      // Something still holds a file open (a database a daemon test did not stop). The system releases every
+      // handle when this process ends, so a detached process, which outlives it, removes the folder then.
+      try {
+        spawn(process.execPath, ["-e", `
+          const folder = process.argv[1];
+          setTimeout(() => { try { require("node:fs").rmSync(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch {} }, 1500);
+        `, folder], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      } catch {
+        process.stderr.write(`test cleanup could not remove ${folder}: ${String(error)}\n`);
+        process.exitCode = 1;
+      }
     }
   });
 }

@@ -9,9 +9,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { createElectronTestEnv } from "./harness.js";
+import { PIPE_ALLOWANCE_MS } from "./platform.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
 import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
-import { supervisedAgentsOnly } from "./platform.js";
 
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
@@ -108,10 +108,8 @@ const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: 
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
 }, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
-// The desktop refuses local-room boards on Windows until supervised agents run
-// there (#1797's gate), so the tests that use the board skip on Windows.
-if (!supervisedAgentsOnly) await boardSocket.start();
-test.after(async () => { if (!supervisedAgentsOnly) await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+await boardSocket.start();
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const ROOM = "focus_fallback_room";
 
@@ -325,7 +323,8 @@ function installFetchRouter(): {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+// A board read on a Windows pipe first proves the account's ACLs, which takes seconds on a slow machine.
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000 + 4 * PIPE_ALLOWANCE_MS): Promise<void> {
   const startedAt = Date.now();
   while (!predicate()) {
     if (Date.now() - startedAt > timeoutMs) {
@@ -1320,7 +1319,7 @@ test("failed storage selection cleans up startup and permits a same-room retry",
   }
 });
 
-test("local board follows cross-process commits with no idle, message, or other-room board reads", { skip: supervisedAgentsOnly }, async () => {
+test("local board follows cross-process commits with no idle, message, or other-room board reads", async () => {
   const room = "local_board_events";
   const otherRoom = "local_other_board";
   const exec = promisify(execFile);
@@ -1372,7 +1371,7 @@ test("local board follows cross-process commits with no idle, message, or other-
   }
 });
 
-test("switching rooms fences a board read already in flight", { skip: supervisedAgentsOnly }, async () => {
+test("switching rooms fences a board read already in flight", async () => {
   const oldRoom = "local_board_stale_read";
   const newRoom = "local_board_replacement";
   const task = await localStore.addLocalTask(oldRoom, { title: "Old room task" });

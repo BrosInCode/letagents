@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { ManifestStore } from "../manifest-store.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError } from "../singleton.js";
 import { type DaemonActivityEvent, type DaemonManifestEntry } from "../types.js";
@@ -10,6 +9,7 @@ import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 import {
   SupervisorDaemon,
   noWorkLeaseHttp,
@@ -17,13 +17,12 @@ import {
   within,
   daemonRequest,
   appendNativeActivity,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
 
 test("handoff aborts a hung pre-observation room bootstrap without creating a cursor", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   let mintEntered!: () => void;
@@ -75,7 +74,7 @@ test("handoff aborts a hung pre-observation room bootstrap without creating a cu
 test("handoff drains an observed room tail commit and the successor inherits that exact cursor", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   let commitEntered!: () => void;
@@ -155,7 +154,7 @@ test("handoff drains an observed room tail commit and the successor inherits tha
 test("a host-grant install queued before handoff cannot retain plaintext or report installed after retirement", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   let installAdmitted!: () => void;
@@ -215,7 +214,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "manifest.json"),
     auditPath: join(env.root, "audit.jsonl"),
     workerBindingsPath: join(env.root, "worker-bindings.json"),
@@ -230,7 +229,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
   const bindingCommitGate = new Promise<void>((resolve) => { releaseBindingCommit = resolve; });
   let reachedBindingCommit!: () => void;
   const bindingCommitReached = new Promise<void>((resolve) => { reachedBindingCommit = resolve; });
-  let heldSocket: ReturnType<typeof createConnection> | null = null;
+  let heldSocket: ReturnType<typeof connectDaemon> | null = null;
   try {
     await first.start();
     const store = (first as unknown as { store: ManifestStore }).store;
@@ -259,7 +258,9 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     }).catch(() => null);
     await Promise.all([commitReached, bindingCommitReached]);
 
-    heldSocket = createConnection(paths.socketPath);
+    heldSocket = connectDaemon(paths.socketPath);
+    // A connection that nobody reads never reports that the daemon closed it on Windows.
+    heldSocket.resume();
     await new Promise<void>((resolve, reject) => {
       heldSocket!.once("connect", resolve);
       heldSocket!.once("error", reject);
@@ -384,7 +385,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
 
 test("daemon control surface persists three-axis state, dual-axis liveness, and bounded activity", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   try {
     await daemon.start();
@@ -443,7 +444,7 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
 
 test("daemon stop writes admitted activity before it releases authority, then refuses more", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   const { manifestAdministration } = daemon as unknown as {
     manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
@@ -473,7 +474,7 @@ test("daemon stop writes admitted activity before it releases authority, then re
 
 test("a handoff fence refuses new activity but still writes activity admitted before it", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   const internals = daemon as unknown as {
     handoffScheduled: boolean;
@@ -502,7 +503,7 @@ test("a handoff fence refuses new activity but still writes activity admitted be
 
 test("a batch waiting for the commit lane when a handoff starts still commits its admitted events", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   const internals = daemon as unknown as {
     handoffScheduled: boolean;
@@ -542,7 +543,7 @@ test("a batch waiting for the commit lane when a handoff starts still commits it
 
 test("daemon ingress redacts provider credentials before manifest, DTO, and audit persistence", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   const canary = "canary-not-a-real-credential-123456789";
   const workerBearer = `lasb_${"A".repeat(43)}`;
@@ -622,7 +623,7 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
 
 test("concurrent Claude Code creation ids create independent durable owners", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   let daemon = new SupervisorDaemon(paths, "darwin");
   const candidate = (id: string): DaemonManifestEntry => ({
     ...entry,
@@ -670,7 +671,7 @@ test("concurrent Claude Code creation ids create independent durable owners", as
 
 test("distinct supervised Codex entries coexist in one room", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   let daemon = new SupervisorDaemon(paths, "darwin");
   const candidate = (id: string): DaemonManifestEntry => ({
     ...entry,

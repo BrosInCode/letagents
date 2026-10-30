@@ -18,7 +18,7 @@ import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHos
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
-import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
@@ -27,7 +27,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
   await writeFile(join(workspacePath, 'app.ts'), 'original\n'); git('add', '.'); git('commit', '-qm', 'base');
   const location = { path: workspacePath, revision: git('rev-parse', 'HEAD') };
-  t.after(() => rm(workspacePath, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(workspacePath));
   const path = join(directory, "state.sqlite");
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL");
@@ -61,7 +61,7 @@ async function fixture(t: TestContext, provider: "codex" | "claude-code" | "curs
     publish: async (input: RoomWorkPublishInput): Promise<RoomWorkPublishResult> => { sent.push(input); return "acknowledged"; },
   };
   let publisher = new RoomWorkPublisher(openDaemonStateObservationDatabase(path), options);
-  t.after(async () => { publisher.close(); db.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { publisher.close(); db.close(); await removeTestDirectory(directory); });
   let sequence = 0;
   const native = (id: number) => ({ turnId: `turn-${id}`, providerContinuationId: "conversation", providerTurnId: `native-${id}` });
   function fact(id: number, extra: Record<string, unknown> = {}) {
@@ -812,7 +812,7 @@ for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const
   });
 
   // Intermittent on the Windows runner (1 of 4 runs: one capture instead of three); the publisher is daemon-only.
-  test(`${provider} publishes workspace review after a no-reply turn through the shared path`, { skip: supervisedAgentsOnly }, async t => {
+  test(`${provider} publishes workspace review after a no-reply turn through the shared path`, async t => {
     const f = await fixture(t, provider);
     const reads: string[] = [];
     f.options.workspaceLocation = async workAttemptId => { reads.push(workAttemptId); return f.location; };
@@ -887,7 +887,7 @@ for (const change of ['binary', 'rename', 'mode', 'empty deletion'] as const) {
 /** A bare remote with a `staging` branch, a teammate who lands files on it, and clones for the agent. */
 async function remoteFixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'publisher-base-update-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(root));
   const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
     GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
   const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -901,7 +901,7 @@ async function remoteFixture(t: TestContext) {
   return { root, git, remote, team, land, revision, clone };
 }
 
-test('a base branch update during a turn is not published as the agent\'s contribution', { skip: supervisedAgentsOnly }, async t => {
+test('a base branch update during a turn is not published as the agent\'s contribution', async t => {
   const f = await fixture(t);
   const { git, remote, team, land, revision, clone } = await remoteFixture(t);
   const workspace = clone('agent');
@@ -974,7 +974,7 @@ test('a base branch update during a turn is not published as the agent\'s contri
   assert.deepEqual(paths(settled(4).contribution.changes), ['theirs-5.ts']);
 });
 
-test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', { skip: supervisedAgentsOnly }, async t => {
+test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', async t => {
   const f = await fixture(t);
   const { root, git, remote, land, revision, clone } = await remoteFixture(t);
   await land('theirs.ts');
@@ -1005,7 +1005,7 @@ test('the daemon asks the remote it recorded, not a repository that the workspac
   }
 });
 
-test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', { skip: supervisedAgentsOnly }, async t => {
+test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', async t => {
   const f = await fixture(t);
   const { git, remote, land, revision, clone } = await remoteFixture(t);
   let clock = Date.parse('2026-08-31T12:00:00Z');
@@ -1058,7 +1058,7 @@ test('an answer serves the turns of the next minute only: a base that landed aft
   assert.equal(asked.length, 3);
 });
 
-test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', { skip: supervisedAgentsOnly }, async t => {
+test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', async t => {
   const f = await fixture(t);
   const { git, remote, revision, clone } = await remoteFixture(t);
   let clock = Date.parse('2026-08-31T12:00:00Z');
@@ -1167,11 +1167,11 @@ test('only a recorded remote that is reached over the network is asked', async (
   assert.equal(recordedRemote(identity('letagents-ephemeral:room', '0'.repeat(40))), null);
 });
 
-test('a remote that does not answer delays neither the start of a turn nor its capture for long', { skip: supervisedAgentsOnly }, async t => {
+test('a remote that does not answer delays neither the start of a turn nor its capture for long', async t => {
   const f = await fixture(t);
   // The recorded remote accepts the connection and never says anything.
   const sockets: Socket[] = [];
-  const silent = createServer(socket => { sockets.push(socket); }).listen(0, '127.0.0.1');
+  const silent = createServer(socket => { sockets.push(socket); socket.on('error', () => { /* The killed Git resets the connection; Windows reports it. */ }); }).listen(0, '127.0.0.1');
   await once(silent, 'listening');
   t.after(() => { for (const socket of sockets) socket.destroy(); silent.close(); });
   f.options.workspaceLocation = async () => ({ ...f.location, remote: `git://127.0.0.1:${(silent.address() as AddressInfo).port}/repository` });
@@ -1274,6 +1274,8 @@ test('a background staging pass preserves a workspace captured while its authori
     // First check enters flush; second occurs after stageChanged loaded its v1 row.
     if (++checks === 2) await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
   };
+  // The staging pass needs the first workspace capture's background Git work to have finished. Git starts much slower on Windows.
+  if (process.platform === 'win32') await new Promise((resolve) => setTimeout(resolve, 1500));
   await f.publisher.flush();
   assert.equal(f.row().summary?.version, 3);
   assert.deepEqual(f.sent.at(-1)?.summary, f.row().summary);

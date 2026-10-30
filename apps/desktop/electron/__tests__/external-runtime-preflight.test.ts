@@ -4,8 +4,8 @@ import test from "node:test";
 
 import type { DesktopAgentProvider } from "../ipc-types.js";
 import { missingExternalRuntimePreflight } from "../main/agents/external-runtime-preflight.js";
+import { writeFakeProvider } from "./platform.js";
 import { cachedProbe, clearProbeCache, probeKey } from "../main/agents/provider-probe-cache.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 // Each case below writes its own fake CLI; no case may inherit a probe answer
 // that an earlier case memoised.
@@ -44,21 +44,19 @@ test("missing external runtime preflight fails closed when the registry has no i
   assert.match(result.detail || "", /missing both an install command and an installation guide/i);
 });
 
-test("Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", { skip: supervisedAgentsOnly }, async (t) => {
+test("Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   let environmentCurrent = true;
   const compare = t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => environmentCurrent);
   const refresh = t.mock.method(supervisorDaemonClient, "restartForEnvironmentRefresh", async () => { environmentCurrent = true; return {} as never; });
   const { createElectronTestEnv } = await import("./harness.js");
-  const { writeFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
   const env = createElectronTestEnv({ prefix: "codex-supervised-preflight-", paths: [],
     extraCleanupEnvKeys: ["LETAGENTS_CODEX_BIN", "LETAGENTS_DESKTOP_MCP_CONFIG_HOME", "LETAGENTS_DESKTOP_USER_DATA_DIR"] });
-  const bin = join(env.tempDir, "codex");
-  process.env.LETAGENTS_CODEX_BIN = bin;
+  process.env.LETAGENTS_CODEX_BIN = writeFakeProvider(join(env.tempDir, "codex"),
+    "console.log(process.argv[2] === '--version' ? 'codex-cli 0.153.4' : 'signed in');\n");
   process.env.LETAGENTS_DESKTOP_MCP_CONFIG_HOME = join(env.tempDir, "mcp-config");
   process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = join(env.tempDir, "user-data");
-  await writeFile(bin, "#!/usr/bin/env node\nconsole.log(process.argv[2] === '--version' ? 'codex-cli 0.153.4' : 'signed in');\n", { mode: 0o755 });
   const { runDesktopAgentProviderPreflight } = await import("../main/agents/providers.js");
   const supervised = await runDesktopAgentProviderPreflight("codex", { roomOnly: true });
   assert.equal(supervised.mcpStatus, "not_installed");
@@ -82,7 +80,7 @@ test("Codex supplies its own connection and setup refresh explicitly reconciles 
   assert.equal(refresh.mock.callCount(), 1, "explicit refresh compares the daemon even when Electron PATH is unchanged");
 });
 
-test("Codex preflight reuses its CLI probes inside the window; Check again and a setup action re-run them", { skip: supervisedAgentsOnly }, async (t) => {
+test("Codex preflight reuses its CLI probes inside the window; Check again and a setup action re-run them", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   let duringEnvironmentRefresh: (() => Promise<unknown>) | null = null;
@@ -91,13 +89,17 @@ test("Codex preflight reuses its CLI probes inside the window; Check again and a
     return {} as never;
   });
   const { createElectronTestEnv } = await import("./harness.js");
-  const { readFile, writeFile } = await import("node:fs/promises");
+  const { readFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
   const env = createElectronTestEnv({ prefix: "codex-probe-cache-", paths: [],
     extraCleanupEnvKeys: ["LETAGENTS_CODEX_BIN", "LETAGENTS_DESKTOP_MCP_CONFIG_HOME", "LETAGENTS_DESKTOP_USER_DATA_DIR"] });
   const bin = join(env.tempDir, "codex");
   const probeLog = `${bin}.probes`;
-  process.env.LETAGENTS_CODEX_BIN = bin;
+  process.env.LETAGENTS_CODEX_BIN = writeFakeProvider(bin, [
+    `require("node:fs").appendFileSync(${JSON.stringify(probeLog)}, process.argv.slice(2).join(" ") + "\\n");`,
+    "console.log(process.argv[2] === '--version' ? 'codex-cli 0.153.4' : 'signed in');",
+    "",
+  ].join("\n"));
   process.env.LETAGENTS_DESKTOP_MCP_CONFIG_HOME = join(env.tempDir, "mcp-config");
   process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = join(env.tempDir, "user-data");
   const previousNonDarwin = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -106,12 +108,6 @@ test("Codex preflight reuses its CLI probes inside the window; Check again and a
     if (previousNonDarwin === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previousNonDarwin;
   });
-  await writeFile(bin, [
-    "#!/usr/bin/env node",
-    `require("node:fs").appendFileSync(${JSON.stringify(probeLog)}, process.argv.slice(2).join(" ") + "\\n");`,
-    "console.log(process.argv[2] === '--version' ? 'codex-cli 0.153.4' : 'signed in');",
-    "",
-  ].join("\n"), { mode: 0o755 });
   const probes = async () => (await readFile(probeLog, "utf8").catch(() => ""))
     .split("\n")
     .filter((line) => line === "--version" || line === "login status");

@@ -11,6 +11,12 @@ import { everyOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
 import { createGitCommand, resolveSourceRepositoryIdentity, normalizeRemote, WORKSPACE_MARKER } from "./workspace-provisioner.js";
 
+/**
+ * The same answer as the async `realpath` imported above. On Windows the JavaScript `realpathSync` keeps a short
+ * 8.3 name (RUNNER~1) that `realpath` expands, so the two would disagree on one folder; the native one agrees.
+ */
+const realpathNow: (path: string) => string = process.platform === "win32" ? realpathSync.native : realpathSync;
+
 const id = z.string().min(1).max(256);
 const label = id.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -91,7 +97,7 @@ export function assertHostToolScope(db: DatabaseSync, scope: HostToolScope, entr
     return;
   }
   if (!entry || !project || project.repo !== scope.repository || project.remoteUrl !== scope.remoteUrl
-    || realpathSync(entry.source_repo_path ?? "") !== scope.canonicalSourcePath
+    || realpathNow(entry.source_repo_path ?? "") !== scope.canonicalSourcePath
     || digest([scope.canonicalSourcePath, project.repo, project.remoteUrl]) !== scope.projectId || entry.id !== scope.agentId || entry.created_by !== scope.accountId || entry.provider !== scope.provider
     || entry.source_repo_path !== scope.sourceRepoPath || policy(entry) !== scope.policySha256) {
     throw new Error("The saved tool permission no longer matches this agent's project or access settings.");
@@ -115,7 +121,7 @@ function roomWorkspaceIdentity(entry: DaemonManifestEntry, context: HostToolCont
   if (entry.source_repo_path || entry.work_attempt_id !== context.workAttemptId || entry.workspace_path !== context.workspacePath
     || context.repo !== "room-only" || context.resolvedRevision !== "0".repeat(40)
     || context.remoteUrl !== `letagents-ephemeral:${createHash("sha256").update(context.taskId).digest("hex")}`) return null;
-  const canonical = realpathSync(context.workspacePath);
+  const canonical = realpathNow(context.workspacePath);
   const directory = lstatSync(context.workspacePath);
   const markerPath = join(canonical, WORKSPACE_MARKER);
   const file = lstatSync(markerPath);

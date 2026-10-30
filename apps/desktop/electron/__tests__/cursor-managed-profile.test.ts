@@ -17,7 +17,6 @@ import {
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
@@ -59,6 +58,9 @@ const {
   removeCursorSupervisedProfile,
   relocateCursorConversationNamespace,
 } = await import("../main/agents/cursor-managed-profile.js");
+
+/** A profile path ends with `tail`, written with forward slashes whatever the platform's separator. */
+const endsWithPath = (path: string, tail: string) => path.replaceAll("\\", "/").endsWith(tail);
 
 const prepareCursorSupervisedProfile = (input: CursorSupervisedProfileOptions) =>
   prepareCursorSupervisedProfileImpl({
@@ -425,7 +427,7 @@ test("supervised Cursor refuses project MCP servers before creating its private 
   assert.equal(existsSync(profileRoot), false);
 });
 
-test("supervised Cursor rejects Cursor authority configs inherited from the Git root to a nested workspace", { skip: supervisedAgentsOnly }, () => {
+test("supervised Cursor rejects Cursor authority configs inherited from the Git root to a nested workspace", () => {
   const sourceHome = join(tempDir, "source-home-supervised-parent-authority");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   const repository = join(tempDir, "workspace-supervised-parent-authority");
@@ -463,7 +465,7 @@ test("supervised Cursor rejects Cursor authority configs inherited from the Git 
   unlinkSync(join(repository, ".cursor", "settings.json"));
 });
 
-test("supervised Cursor isolates inherited Claude settings without rejecting the workspace", { skip: supervisedAgentsOnly }, () => {
+test("supervised Cursor isolates inherited Claude settings without rejecting the workspace", () => {
   const sourceHome = join(tempDir, "source-home-supervised-parent-claude-settings");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   const repository = join(tempDir, "workspace-supervised-parent-claude-settings");
@@ -505,16 +507,21 @@ test("supervised Cursor isolates inherited Claude settings without rejecting the
   // auto-approve a repo-planted MCP that cursor-agent discovered below the
   // workspace and spawn its command inside the sandbox.
   const nestedWorkspaceMcp = join(realpathSync(workspace), "deep", "nested", ".cursor", "mcp.json");
-  assert.ok(
-    profile.nativeDeniedReadWriteRegexes?.some((pattern) => new RegExp(pattern).test(nestedWorkspaceMcp)),
-    "a .cursor/mcp.json nested below --workspace must be denied-read",
-  );
+  if (process.platform === "win32") {
+    // Seatbelt regexes exist only for sandbox-exec; Windows has no sandbox to give them to.
+    assert.deepEqual(profile.nativeDeniedReadWriteRegexes, []);
+  } else {
+    assert.ok(
+      profile.nativeDeniedReadWriteRegexes?.some((pattern) => new RegExp(pattern).test(nestedWorkspaceMcp)),
+      "a .cursor/mcp.json nested below --workspace must be denied-read",
+    );
+  }
   assert.deepEqual(JSON.parse(readFileSync(join(repository, ".claude", "settings.local.json"), "utf8")), {
     permissions: { allow: ["Bash(*)"] },
   }, "preparing Cursor leaves Claude's local settings untouched");
 });
 
-test("supervised Cursor accepts a validated Git submodule workspace", { skip: supervisedAgentsOnly }, () => {
+test("supervised Cursor accepts a validated Git submodule workspace", () => {
   const sourceHome = join(tempDir, "source-home-supervised-submodule");
   const childRepository = join(tempDir, "source-supervised-submodule");
   const superproject = join(tempDir, "workspace-supervised-superproject");
@@ -532,7 +539,8 @@ test("supervised Cursor accepts a validated Git submodule workspace", { skip: su
     "submodule", "add", `file://${childRepository}`, "modules/child",
   ], { encoding: "utf8" }).status, 0);
   const workspace = join(superproject, "modules", "child");
-  const gitDirectory = realpathSync(join(superproject, ".git", "modules", "modules", "child"));
+  // Git reports the long name of a folder that has an 8.3 short one (RUNNER~1); the profile holds Git's spelling.
+  const gitDirectory = realpathSync.native(join(superproject, ".git", "modules", "modules", "child"));
 
   const profile = prepareCursorSupervisedProfile({
     workAttemptId: "attempt-submodule",
@@ -626,7 +634,7 @@ test("supervised Cursor rejects unsupported MCP child environment keys", () => {
   }), /Unsupported supervised Cursor MCP environment key/);
 });
 
-test("supervised Cursor rejects workspace permission config and copies global state as auth-only", { skip: supervisedAgentsOnly }, () => {
+test("supervised Cursor rejects workspace permission config and copies global state as auth-only", () => {
   const sourceHome = join(tempDir, "source-home-supervised-authority");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   writeFileSync(join(sourceHome, ".cursor", "cli-config.json"), JSON.stringify({
@@ -709,16 +717,17 @@ test("supervised Cursor rejects workspace permission config and copies global st
   assert.equal(readFileSync(statsigTempVictim, "utf8"), "keep temp target\n", "Statsig temporary symlink targets are untouched");
   assert.equal(existsSync(join(profile.homeDir, ".cursor", "computer-use")), false, "persisted bundled MCP executables are purged per turn");
   assert.equal(existsSync(claudeSettings), false, "persisted Claude-compatible hooks are purged per turn");
-  assert.ok(profile.nativeDeniedReadPaths?.some((path) => path.endsWith("/config/cursor/statsig-cache.json")));
-  assert.ok(profile.nativeDeniedReadSubpaths?.some((path) => path.endsWith("/home/.cursor/computer-use")));
-  assert.ok(profile.nativeDeniedReadMetadataPaths?.some((path) => path.endsWith("/workspace-supervised-authority/.cursor")));
-  assert.ok(profile.nativeDeniedReadMetadataPaths?.some((path) => path.endsWith("/workspace-supervised-authority/.claude")));
-  assert.ok(profile.nativeDeniedReadWriteRegexes?.some((pattern) => pattern.includes("statsig-cache[.]json")));
-  assert.ok(profile.nativeDeniedWritePaths?.some((path) => path.endsWith("/home/.cursor/mcp.json")));
-  assert.equal(profile.nativeDeniedWritePaths?.some((path) => path.endsWith("/config/cursor/cli-config.json")), false);
+  assert.ok(profile.nativeDeniedReadPaths?.some((path) => endsWithPath(path, "/config/cursor/statsig-cache.json")));
+  assert.ok(profile.nativeDeniedReadSubpaths?.some((path) => endsWithPath(path, "/home/.cursor/computer-use")));
+  assert.ok(profile.nativeDeniedReadMetadataPaths?.some((path) => endsWithPath(path, "/workspace-supervised-authority/.cursor")));
+  assert.ok(profile.nativeDeniedReadMetadataPaths?.some((path) => endsWithPath(path, "/workspace-supervised-authority/.claude")));
+  if (process.platform === "win32") assert.deepEqual(profile.nativeDeniedReadWriteRegexes, []);
+  else assert.ok(profile.nativeDeniedReadWriteRegexes?.some((pattern) => pattern.includes("statsig-cache[.]json")));
+  assert.ok(profile.nativeDeniedWritePaths?.some((path) => endsWithPath(path, "/home/.cursor/mcp.json")));
+  assert.equal(profile.nativeDeniedWritePaths?.some((path) => endsWithPath(path, "/config/cursor/cli-config.json")), false);
   assert.ok(profile.nativeDeniedWriteSubpaths?.includes(realpathSync(testRuntimePackageRoot)));
-  assert.ok(profile.nativeAllowedWriteSubpaths?.some((path) => path.endsWith("/supervised-profile-authority")));
-  assert.ok(profile.nativeAllowedReadSubpaths?.some((path) => path.endsWith("/workspace-supervised-authority")));
+  assert.ok(profile.nativeAllowedWriteSubpaths?.some((path) => endsWithPath(path, "/supervised-profile-authority")));
+  assert.ok(profile.nativeAllowedReadSubpaths?.some((path) => endsWithPath(path, "/workspace-supervised-authority")));
 });
 
 test("supervised Cursor fails closed for team-managed login identities", () => {
@@ -739,7 +748,7 @@ test("supervised Cursor fails closed for team-managed login identities", () => {
   }), /Team-managed Cursor accounts are not supported/);
 });
 
-test("a fenced live personal identity replaces stale team metadata and binds the continuation", { skip: supervisedAgentsOnly }, () => {
+test("a fenced live personal identity replaces stale team metadata and binds the continuation", () => {
   const sourceHome = join(tempDir, "source-home-supervised-live-identity");
   const workspace = join(tempDir, "workspace-supervised-live-identity");
   const profileRoot = join(tempDir, "supervised-profile-live-identity");
@@ -791,7 +800,7 @@ test("a fenced live personal identity replaces stale team metadata and binds the
     () => bindCursorSupervisedIdentity(attested, { userId: 100, email: "other@example.test" }),
     /Cursor account changed during this supervised attempt/,
   );
-  assert.ok(attested.nativeDeniedReadPaths?.some((path) => path.endsWith("/config/letagents-cursor-identity.json")));
+  assert.ok(attested.nativeDeniedReadPaths?.some((path) => endsWithPath(path, "/config/letagents-cursor-identity.json")));
 });
 
 test("supervised Cursor purges persisted MCP approvals while preserving auth and resume state", () => {

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { supervisedAgentsOnly } from "./platform.js";
 
 import { createElectronTestEnv } from "./harness.js";
+import { needsSurvivingStderrHolder, writeFakeProvider } from "./platform.js";
 
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-codex-app-server-",
@@ -50,13 +50,8 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
 });
 
-test("Codex app-server launcher uses the managed worktree as its process cwd", { skip: supervisedAgentsOnly }, async () => {
-  const bin = join(tempDir, "codex-reporting-app-server-cwd");
-  writeFileSync(
-    bin,
-    "#!/usr/bin/env node\nprocess.stdout.write(process.cwd());\n",
-    { mode: 0o755 },
-  );
+test("Codex app-server launcher uses the managed worktree as its process cwd", async () => {
+  const bin = writeFakeProvider(join(tempDir, "codex-reporting-app-server-cwd"), "process.stdout.write(process.cwd());\n");
 
   const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
     trustedProjectPath: tempDir,
@@ -70,13 +65,10 @@ test("Codex app-server launcher uses the managed worktree as its process cwd", {
   assert.equal(exit.output?.stdout, realpathSync(tempDir));
 });
 
-test("Codex app-server launcher captures early process output without leaking env secrets", { skip: supervisedAgentsOnly }, async () => {
-  const bin = join(tempDir, "codex-failing-app-server");
+test("Codex app-server launcher captures early process output without leaking env secrets", async () => {
+  const binName = join(tempDir, "codex-failing-app-server");
   const secret = "provider-secret-for-test";
-  writeFileSync(
-    bin,
-    [
-      "#!/usr/bin/env node",
+  const bin = writeFakeProvider(binName, [
       "const secret = process.env.OPENAI_API_KEY || '';",
       "process.stderr.write('fatal app-server key ');",
       "process.stderr.write(secret.slice(0, 7));",
@@ -85,9 +77,7 @@ test("Codex app-server launcher captures early process output without leaking en
       "  process.exit(1);",
       "}, 10);",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
 
   const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
     env: { OPENAI_API_KEY: secret },
@@ -99,16 +89,12 @@ test("Codex app-server launcher captures early process output without leaking en
   assert.doesNotMatch(exit.output?.stderr ?? "", new RegExp(secret));
 });
 
-test("Codex app-server launcher redacts inherited environment secrets", { skip: supervisedAgentsOnly }, async () => {
-  const bin = join(tempDir, "codex-failing-app-server-inherited-env");
+test("Codex app-server launcher redacts inherited environment secrets", async () => {
+  const binName = join(tempDir, "codex-failing-app-server-inherited-env");
   const secret = "inherited-token-secret-for-test";
   const previousToken = process.env.LETAGENTS_TOKEN;
   process.env.LETAGENTS_TOKEN = secret;
-  writeFileSync(
-    bin,
-    "#!/bin/sh\nprintf 'fatal inherited token %s\\n' \"$LETAGENTS_TOKEN\" >&2\nexit 1\n",
-    { mode: 0o755 },
-  );
+  const bin = writeFakeProvider(binName, "process.stderr.write('fatal inherited token ' + process.env.LETAGENTS_TOKEN + '\\n');\nprocess.exit(1);\n");
 
   try {
     const launch = launchCodexAppServer("ws://127.0.0.1:1", bin);
@@ -126,8 +112,8 @@ test("Codex app-server launcher redacts inherited environment secrets", { skip: 
   }
 });
 
-test("Codex app-server launcher strips ambient LetAgents credentials for bounded and custodial polling profiles", { skip: supervisedAgentsOnly }, async () => {
-  const bin = join(tempDir, "codex-reporting-supervised-environment");
+test("Codex app-server launcher strips ambient LetAgents credentials for bounded and custodial polling profiles", async () => {
+  const binName = join(tempDir, "codex-reporting-supervised-environment");
   const boundedReport = join(tempDir, "codex-supervised-environment.json");
   const ordinaryReport = join(tempDir, "codex-ordinary-environment.json");
   const pollingReport = join(tempDir, "codex-polling-environment.json");
@@ -137,8 +123,7 @@ test("Codex app-server launcher strips ambient LetAgents credentials for bounded
   const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
   process.env.LETAGENTS_TOKEN = ownerToken;
   process.env.LETAGENTS_AGENT_SESSION_BEARER = workerBearer;
-  writeFileSync(bin, [
-    "#!/usr/bin/env node",
+  const bin = writeFakeProvider(binName, [
     "const { writeFileSync } = require('node:fs');",
     "writeFileSync(process.env.LAUNCH_ENV_REPORT, JSON.stringify({",
     "  owner: process.env.LETAGENTS_TOKEN ?? null,",
@@ -148,7 +133,7 @@ test("Codex app-server launcher strips ambient LetAgents credentials for bounded
     "  retained: process.env.LETAGENTS_ENV_CANARY ?? null,",
     "}));",
     "",
-  ].join("\n"), { mode: 0o755 });
+  ].join("\n"));
 
   try {
     const bounded = launchCodexAppServer("ws://127.0.0.1:1", bin, {
@@ -203,16 +188,13 @@ test("Codex app-server launcher strips ambient LetAgents credentials for bounded
   }
 });
 
-test("Codex app-server launcher redacts split inherited secrets after parent exit", { skip: supervisedAgentsOnly }, async () => {
-  const bin = join(tempDir, "codex-failing-app-server-late-stderr");
+test("Codex app-server launcher redacts split inherited secrets after parent exit", async () => {
+  const binName = join(tempDir, "codex-failing-app-server-late-stderr");
   const secret = "late-inherited-token-secret-for-test";
   const previousToken = process.env.LETAGENTS_TOKEN;
   const lateTailScript = `setTimeout(() => { process.stderr.write(${JSON.stringify(secret.slice(7) + "\n")}); }, 100);`;
   process.env.LETAGENTS_TOKEN = secret;
-  writeFileSync(
-    bin,
-    [
-      "#!/usr/bin/env node",
+  const bin = writeFakeProvider(binName, [
       "const { spawn } = require('node:child_process');",
       "const secret = process.env.LETAGENTS_TOKEN || '';",
       "process.stderr.write('fatal late token ' + secret.slice(0, 7));",
@@ -222,9 +204,7 @@ test("Codex app-server launcher redacts split inherited secrets after parent exi
       "], { stdio: ['ignore', 'ignore', process.stderr] });",
       "process.exit(1);",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
 
   try {
     const launch = launchCodexAppServer("ws://127.0.0.1:1", bin);
@@ -243,15 +223,12 @@ test("Codex app-server launcher redacts split inherited secrets after parent exi
   }
 });
 
-test("Codex app-server launcher suppresses partial output when stdio does not close", { skip: supervisedAgentsOnly }, async () => {
-  const bin = join(tempDir, "codex-failing-app-server-held-stderr");
+test("Codex app-server launcher suppresses partial output when stdio does not close", { skip: needsSurvivingStderrHolder }, async () => {
+  const binName = join(tempDir, "codex-failing-app-server-held-stderr");
   const secret = "abcdefghijklmnopqrstuvwxyz1234567890";
   const previousToken = process.env.LETAGENTS_TOKEN;
   process.env.LETAGENTS_TOKEN = secret;
-  writeFileSync(
-    bin,
-    [
-      "#!/usr/bin/env node",
+  const bin = writeFakeProvider(binName, [
       "const { spawn } = require('node:child_process');",
       "const secret = process.env.LETAGENTS_TOKEN || '';",
       "process.stderr.write('fatal held token ' + secret.slice(0, 12));",
@@ -260,9 +237,7 @@ test("Codex app-server launcher suppresses partial output when stdio does not cl
       "});",
       "process.exit(1);",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
 
   try {
     const launch = launchCodexAppServer("ws://127.0.0.1:1", bin);

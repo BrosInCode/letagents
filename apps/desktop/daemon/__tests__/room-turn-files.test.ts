@@ -11,7 +11,6 @@ import {
   roomTurnFileKey,
   ROOM_TURN_FILE_MAX_BYTES,
 } from "../room-turn-attachments.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 // Files that are not images: a daemon-owned copy the agent opens itself, never bytes in its prompt.
 
@@ -196,7 +195,7 @@ test("a recent file is downloaded once and kept for later turns, each with its o
   });
 });
 
-test("a kept file that was replaced by a link is never read", { skip: supervisedAgentsOnly }, async () => {
+test("a kept file that was replaced by a link is never read", async () => {
   await withRoot(async (root) => {
     const downloads: Download[] = [];
     const stager = new RoomTurnAttachmentStager(root);

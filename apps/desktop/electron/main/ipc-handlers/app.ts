@@ -38,7 +38,7 @@ import { desktopUpdater } from "../updates.js";
 
 const { app } = electron as typeof import("electron");
 
-/** `supervisedAgentsSupported` is false where agents cannot run (Windows today). */
+/** `supervisedAgentsSupported` is false where agents cannot run. */
 type DesktopAppInfoWithCapabilities = DesktopAppInfo & Pick<DesktopPlatformCapabilities, "supervisedAgentsSupported">;
 
 const reviewSenders = new Set<number>();

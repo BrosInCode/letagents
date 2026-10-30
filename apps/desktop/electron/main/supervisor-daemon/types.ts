@@ -149,6 +149,8 @@ export interface SupervisorDaemonLifecycleOptions {
   stateDir?: string;
   /** Tests only: connect here instead of the state directory's endpoint. */
   socketPath?: string;
+  /** Tests only, with `socketPath`: the proof file for a Windows pipe at that path. Elsewhere it is unused. */
+  peerProofPath?: string | null;
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
   lifecycleLogPath?: string;

@@ -6,7 +6,7 @@ import { createServer as createHttpServer, request as httpRequest } from "node:h
 import { createServer as createHttp2Server } from "node:http2";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 import { CursorProviderAdapter, defaultLaunchTurn } from "../main/agents/cursor-provider-adapter.js";
 import {
   productionPersonalIdentityDependencies,
@@ -17,6 +17,7 @@ import {
   waitForPath,
   withLoopAlive,
 } from "./cursor-provider-adapter.fixture.js";
+import { needsWindowsFakeCursorAgent, writeFakeProvider } from "./platform.js";
 
 test("the production supervised wrapper blocks remote Cursor authority and retires its loopback proxy", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-remote-authority-"));
@@ -50,9 +51,8 @@ test("the production supervised wrapper blocks remote Cursor authority and retir
     const homeDir = join(root, "home");
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-const http = require("node:http");
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `const http = require("node:http");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -163,11 +163,11 @@ Promise.all([
   }
 });
 
-test("terminal evidence waits for in-flight control and agent bearer authority to be destroyed", async () => {
+test("terminal evidence waits for in-flight control and agent bearer authority to be destroyed", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-inflight-authority-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const writableRoot = join(root, "tmp");
   const controlMarker = join(writableRoot, "control-received");
   const agentMarker = join(writableRoot, "agent-received");
@@ -259,8 +259,7 @@ session.once("close", agentDone);
 stream.write("active-run");
 }).catch(() => process.exit(92));
 `;
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -327,11 +326,11 @@ const ready = setInterval(() => {
   }
 });
 
-test("the supervised agent proxy admits HTTP/1 retries and background Runs until the native terminal result", async () => {
+test("the supervised agent proxy admits HTTP/1 retries and background Runs until the native terminal result", {}, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h1-proxy-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const terminalObserved = join(root, "terminal-observed");
   const terminalProbe = join(homeDir, "terminal-probe");
   mkdirSync(configDir, { recursive: true });
@@ -360,8 +359,7 @@ test("the supervised agent proxy admits HTTP/1 retries and background Runs until
   assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
   const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const http = require("node:http");
+    executable = writeFakeProvider(executable, `const http = require("node:http");
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
@@ -437,12 +435,12 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
   }
 });
 
-test("closing an attested Cursor connector revokes the model proxy before a later Run", async () => {
+test("closing an attested Cursor connector revokes the model proxy before a later Run", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-lease-close-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
   const writableRoot = join(root, "tmp");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const attemptPath = join(writableRoot, "late-run.json");
   const attackerPidPath = join(writableRoot, "late-run.pid");
   mkdirSync(configDir, { recursive: true });
@@ -488,8 +486,7 @@ setTimeout(() => {
   request.end("late");
 }, 250);
 `;
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
@@ -553,7 +550,7 @@ test("the supervised agent proxy relays sequential and bounded concurrent HTTP/2
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-agent-h2-proxy-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const slotReleased = join(root, "slot-released");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
@@ -590,8 +587,7 @@ test("the supervised agent proxy relays sequential and bounded concurrent HTTP/2
   assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
   const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const http2 = require("node:http2");
+    executable = writeFakeProvider(executable, `const http2 = require("node:http2");
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
@@ -694,7 +690,7 @@ test(`the supervised agent proxy bounds and cancels held Runs before ${terminalW
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-hold-admit-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   const terminalObserved = join(root, "terminal-observed");
   const heldProbe = join(homeDir, "held-probe");
   mkdirSync(configDir, { recursive: true });
@@ -718,8 +714,7 @@ test(`the supervised agent proxy bounds and cancels held Runs before ${terminalW
   assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
   const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const http2 = require("node:http2");
+    executable = writeFakeProvider(executable, `const http2 = require("node:http2");
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
@@ -830,7 +825,7 @@ test("a held Run whose MCP attestation never completes fails with the exact caus
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-held-timeout-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   let upstreamHits = 0;
@@ -848,8 +843,7 @@ test("a held Run whose MCP attestation never completes fails with the exact caus
   assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
   const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const http = require("node:http");
+    executable = writeFakeProvider(executable, `const http = require("node:http");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -875,7 +869,8 @@ setInterval(() => {}, 1000);
             ...input,
             testAgentUpstreamEndpoint,
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 800,
+            // A node cold start on Windows takes several times longer, and the deadline also covers the wrapper's verify handshake.
+            testMcpCapabilityTimeoutMs: process.platform === "win32" ? 5_000 : 800,
           });
         },
       },
@@ -913,7 +908,7 @@ test("two concurrent supervised agents each hold and admit their own Run indepen
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-concurrent-${label}-`));
     const homeDir = join(root, "home");
     const configDir = join(root, "config");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     let upstreamBody = "";
@@ -932,8 +927,7 @@ test("two concurrent supervised agents each hold and admit their own Run indepen
     const upstreamAddress = upstream.address();
     assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
     const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
-    writeFileSync(executable, `#!/usr/bin/env node
-const http = require("node:http");
+    executable = writeFakeProvider(executable, `const http = require("node:http");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -1012,7 +1006,7 @@ test("the supervised agent proxy rejects a boundary-violating request immediatel
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-boundary-"));
   const configDir = join(root, "config");
   const homeDir = join(root, "home");
-  const executable = join(root, "fake-cursor-agent");
+  let executable = join(root, "fake-cursor-agent");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
   let upstreamBody = "";
@@ -1032,8 +1026,7 @@ test("the supervised agent proxy rejects a boundary-violating request immediatel
   assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
   const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
   try {
-    writeFileSync(executable, `#!/usr/bin/env node
-const http = require("node:http");
+    executable = writeFakeProvider(executable, `const http = require("node:http");
 const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {

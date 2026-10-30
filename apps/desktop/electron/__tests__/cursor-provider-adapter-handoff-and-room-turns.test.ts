@@ -2,16 +2,16 @@ import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import {
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
   type CursorProviderAdapterDependencies,
 } from "../main/agents/cursor-provider-adapter.js";
 import type { NativeExecutionObservation } from "../main/agents/provider-adapter.js";
+import { expectedCursorSandbox } from "./platform.js";
 import {
   argValue,
   wrapperHostedMcpFixture,
@@ -23,6 +23,8 @@ import {
   flush,
   waitFor,
   withLoopAlive,
+  WA_CURSOR_CWD,
+  cursorTmp,
 } from "./cursor-provider-adapter.fixture.js";
 
 test("daemon-owned Cursor re-attests effective MCP authority before every native launch", async () => {
@@ -664,7 +666,7 @@ test("Cursor checkpoints a proven native provider failure and reuses its exact s
   assert.equal((await next).text, "finished");
 });
 
-test("writable Cursor turns launch only in their private generation and retire it before publication", { skip: supervisedAgentsOnly }, async () => {
+test("writable Cursor turns launch only in their private generation and retire it before publication", async () => {
   const harness = createHarness();
   const createGeneration = harness.dependencies.createWorkspaceGeneration;
   harness.dependencies.createWorkspaceGeneration = async (input) => ({
@@ -691,9 +693,9 @@ test("writable Cursor turns launch only in their private generation and retire i
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), "/private/letagents-generation/live/project");
   assert.equal(launch.mcpRuntimeCwd, "/private/letagents-generation/live/project");
-  assert.equal(launch.allowedReadSubpaths?.includes("/private/source/.git/objects"), true);
-  assert.equal(launch.allowedWriteSubpaths?.includes("/tmp/wa-cursor-1"), false);
-  assert.match(launch.workspaceGenerationManifestPath ?? "", /^\/tmp\/letagents-test-generation-/);
+  assert.equal(launch.allowedReadSubpaths?.includes(resolve("/private/source/.git/objects")), true, "the sandbox path is absolute for this platform");
+  assert.equal(launch.allowedWriteSubpaths?.includes(WA_CURSOR_CWD), false);
+  assert.ok((launch.workspaceGenerationManifestPath ?? "").startsWith(join(cursorTmp, "letagents-test-generation-")));
 
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
@@ -722,7 +724,7 @@ test("room scratch Cursor turns use their exact workspace without Git generation
 
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), scratchWorkspace);
-  assert.equal(argValue(launch.args, "--sandbox"), "enabled");
+  assert.equal(argValue(launch.args, "--sandbox"), expectedCursorSandbox("enabled"));
   assert.equal(launch.mcpRuntimeCwd, scratchWorkspace);
   assert.equal(launch.workspaceGenerationManifestPath, undefined);
   assert.deepEqual(harness.workspaceGenerationEvents, []);
@@ -736,7 +738,7 @@ test("room scratch Cursor turns use their exact workspace without Git generation
   assert.deepEqual(harness.workspaceGenerationEvents, []);
 });
 
-test("an ambiguous native release failure reconciles instead of abandoning or redispatching the generation", { skip: supervisedAgentsOnly }, async () => {
+test("an ambiguous native release failure reconciles instead of abandoning or redispatching the generation", async () => {
   const harness = createHarness({ releaseError: new Error("IPC release acknowledgement failed") });
   const adapter = supervisedAdapter(harness);
   const handle = await adapter.spawn(daemonSpawnRequest({

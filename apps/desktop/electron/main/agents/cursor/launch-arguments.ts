@@ -118,6 +118,16 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
   return args;
 }
 
+/**
+ * Cursor's own sandbox exists only on macOS and Linux: on Windows it refuses
+ * `--sandbox enabled` and exits. Windows runs Cursor unsandboxed by the owner's
+ * decision (cursorOsSandbox), so the flag says so there.
+ */
+export function cursorNativeSandboxArgs(args: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== "win32") return [...args];
+  return args.map((arg, index) => (arg === "enabled" && args[index - 1] === "--sandbox" ? "disabled" : arg));
+}
+
 export function cursorSupervisorMcpEnv(
   req: ProviderSpawnRequest,
   providerTurnId?: string | null,

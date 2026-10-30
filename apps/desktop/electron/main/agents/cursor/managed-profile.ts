@@ -29,6 +29,8 @@ import {
   ensurePrivateProfileTree,
   escapeSandboxRegex,
   linkDarwinLoginKeychains,
+  linkWindowsCursorLogin,
+  removeWindowsCursorLogin,
   normalizePath,
   pruneCompletedCursorTurnJournals,
   purgeCursorMcpApprovalState,
@@ -195,6 +197,7 @@ export function prepareCursorManagedProfile(
   });
 
   linkDarwinLoginKeychains(sourceHomeDir, homeDir);
+  linkWindowsCursorLogin(sourceHomeDir, homeDir);
 
   return {
     homeDir,
@@ -427,8 +430,10 @@ export function prepareCursorSupervisedProfile(
   pruneCompletedCursorTurnJournals(configDir);
   if (options.includeAuth !== false && options.exposeLoginCredentials !== false) {
     linkDarwinLoginKeychains(sourceHomeDir, homeDir);
+    linkWindowsCursorLogin(sourceHomeDir, homeDir);
   } else {
     removePrivateProfileTreeEntry(join(homeDir, "Library", "Keychains"));
+    removeWindowsCursorLogin(homeDir);
   }
   const authReadRoots = options.includeAuth === false || options.exposeLoginCredentials === false
     ? []

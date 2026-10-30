@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { leasedBranchRef } from "../../../../shared/agent-branch.mjs";
 import { AutomaticPermissionReviewer } from "../automatic-permission-review.js";
+import { needsPosixFilePathReports } from "../../electron/__tests__/platform.js";
 import { requestCommandReview } from "../command-review-http.js";
 import type { ClaudeNativePermissionRequest, OpenCodeNativePermissionRequest } from "../../shared/provider-permissions.js";
 import type { DaemonManifestEntry } from "../types.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 async function workspaceFixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-auto-review-")));
@@ -24,7 +26,8 @@ async function workspaceFixture() {
   await writeFile(join(root, "outside", "kept.txt"), "kept\n");
   await symlink(join(root, "outside", "kept.txt"), join(workspace, "linked-file.txt"));
   await link(join(root, "outside", "kept.txt"), join(workspace, "second-name.txt"));
-  execFileSync("mkfifo", [join(workspace, "pipe")]);
+  // Windows has no FIFO in a folder; a named pipe there is not a file in the project.
+  if (process.platform !== "win32") execFileSync("mkfifo", [join(workspace, "pipe")]);
   const entry = { id: "agent", room_id: "room", provider: "open-model", permission_profile_id: "auto_review",
     delivery_mode: "daemon_inbox", workspace_path: workspace } as DaemonManifestEntry;
   const asked: Array<{ commands: readonly string[]; project: string }> = [];
@@ -40,7 +43,7 @@ async function workspaceFixture() {
     ({ id: "permission", sessionID: "session", permission, patterns, metadata, always: [], tool: { messageID: "message", callID: "call" } });
   const review = (native: OpenCodeNativePermissionRequest, from: DaemonManifestEntry = entry) =>
     reviewer.review({ entry: from, request: native, signal: new AbortController().signal });
-  return { root, workspace, entry, asked, verdict, reviewer, request, review, close: () => rm(root, { recursive: true, force: true }) };
+  return { root, workspace, entry, asked, verdict, reviewer, request, review, close: () => removeTestDirectory(root) };
 }
 
 test("automatic review applies only to a trusted local Open Model agent on Auto, or a Claude agent that asks", async () => {
@@ -66,7 +69,7 @@ test("automatic review applies only to a trusted local Open Model agent on Auto,
   } finally { await f.close(); }
 });
 
-test("an edit runs only when every file is an ordinary file inside the project", async () => {
+test("an edit runs only when every file is an ordinary file inside the project", { skip: needsPosixFilePathReports }, async () => {
   const f = await workspaceFixture();
   try {
     const inside = join(f.workspace, "src", "a.ts");
@@ -119,7 +122,7 @@ test("an edit runs only when every file is an ordinary file inside the project",
       // A link to a file, a second name for a file that also lives outside, and a folder.
       ["linked-file.txt"], ["second-name.txt"], ["src"],
       // Something that is not a file: what is written to it goes to whatever reads it.
-      ["pipe"],
+      ...(process.platform === "win32" ? [] : [["pipe"]]),
       [".env"], [".env.local"], ["config/.env"], [".git/config"], [".git/hooks/pre-commit"],
       ["secrets/prod.json"], ["deploy/id_rsa"], ["certs/server.pem"], [".npmrc"], [".ssh/config"],
       ["src/a.ts", ".env"], ["src/a.ts", "src/A.ts"],
@@ -212,8 +215,20 @@ const own = (task: string) => leasedBranchRef(task, AGENT_KEY);
 /** The parts of a command as OpenCode lists them: each simple command's words, without its redirects. */
 const parts = (command: string) => command.split(/\s*(?:&&|\|\||;|\||\n)\s*/).map((part) => part.replace(/\s*2>&1/g, "").trim()).filter(Boolean);
 /** Run a command as the agent would, with a fixed test identity. */
-const sh = (cwd: string, command: string) => execFileSync("/bin/sh", ["-c", command], { cwd, stdio: "pipe", env: { ...process.env,
-  GIT_AUTHOR_NAME: "QA", GIT_AUTHOR_EMAIL: "qa@example.test", GIT_COMMITTER_NAME: "QA", GIT_COMMITTER_EMAIL: "qa@example.test" } }).toString();
+const SH_ENV = { ...process.env,
+  GIT_AUTHOR_NAME: "QA", GIT_AUTHOR_EMAIL: "qa@example.test", GIT_COMMITTER_NAME: "QA", GIT_COMMITTER_EMAIL: "qa@example.test" };
+/** The words of one simple command, with single and double quotes removed. A backslash is a path separator, not an escape. */
+function words(command: string): string[] {
+  return [...command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]!);
+}
+// Windows has no /bin/sh. Every command here is a chain of `git` commands joined by `&&`, so each one runs on its own.
+const sh = (cwd: string, command: string) => process.platform !== "win32"
+  ? execFileSync("/bin/sh", ["-c", command], { cwd, stdio: "pipe", env: SH_ENV }).toString()
+  : command.split(" && ").map((step) => {
+    const [program, ...args] = words(step);
+    assert.equal(program, "git", step);
+    return execFileSync("git", args, { cwd, stdio: "pipe", env: SH_ENV }).toString();
+  }).join("");
 
 /** A project cloned from a bare `origin` whose default branch is `main`, as LetAgents prepares one. */
 async function repositoryFixture(f: Awaited<ReturnType<typeof workspaceFixture>>, agentKey: string | null = AGENT_KEY) {
@@ -254,7 +269,11 @@ test("routine work on the agent's own branches runs without review, and anything
       ["gh pr view --comments", ["gh pr view --comments"]], ["gh pr checks 6", ["gh pr checks 6"]], ["gh pr diff 6 --name-only", ["gh pr diff 6 --name-only"]],
       ["gh pr list --state open --json number,title --label bug", ["gh pr list --state open --json number,title --label bug"]],
       ["gh issue view 3 -c", ["gh issue view 3 -c"]], [`gh pr view ${own("task_1")} -q .state`, [`gh pr view ${own("task_1")} -q .state`]],
-    ] as Array<[string, string[]]>) assert.equal(await r.review(command, patterns), "allow", command);
+    ] as Array<[string, string[]]>) {
+      // A jq filter holds a "|", which Windows does not allow in a file name, so the rules read it as one and refuse it there.
+      const asks = process.platform === "win32" && command.includes("--jq");
+      assert.equal(await r.review(command, patterns), asks ? "ask" : "allow", command);
+    }
     assert.deepEqual(r.asked, [], "routine work the rules decide alone is sent nowhere");
 
     for (const command of [
@@ -329,9 +348,11 @@ test("a folder named like the agent's branch cannot make a push from main go to 
     r.verdict.next = "ask";
     const decoy = `${own("t1")}/note.txt`;
     // The edits and the commit are routine and run on main without asking.
-    assert.equal(await r.edit("src/a.ts"), "allow");
+    // (On Windows the edit rule reads no Windows path and asks; the push rules below are the point of this test.)
+    const editAnswer = process.platform === "win32" ? "ask" : "allow";
+    assert.equal(await r.edit("src/a.ts"), editAnswer);
     await writeFile(join(r.workspace, "src", "a.ts"), "export const change = 1;\n");
-    assert.equal(await r.edit(decoy), "allow");
+    assert.equal(await r.edit(decoy), editAnswer);
     await mkdir(join(r.workspace, own("t1")), { recursive: true });
     await writeFile(join(r.workspace, decoy), "x\n");
     const stage = `git add src/a.ts ${decoy} && git commit -m 'Change main'`;
@@ -378,9 +399,11 @@ test("only the reading and checking parts of routine work go to the server, each
   const f = await workspaceFixture();
   try {
     const r = await repositoryFixture(f);
-    const command = `git add src/a.ts && git commit -m 'Add a' && npm test 2>&1 | tail -5 && git push origin HEAD:${own("task_1")}; git log --format='%h %an' -1`;
+    // The rules refuse a "%" in a Windows project's command (cmd.exe would expand it), so Windows reads the log another way.
+    const log = process.platform === "win32" ? "git log -1 --format=%an" : "git log --format='%h %an' -1";
+    const command = `git add src/a.ts && git commit -m 'Add a' && npm test 2>&1 | tail -5 && git push origin HEAD:${own("task_1")}; ${log}`;
     assert.equal(await r.review(command), "allow");
-    assert.deepEqual(r.asked, [["npm test 2>&1", "tail -5", "git log --format='%h %an' -1"]]);
+    assert.deepEqual(r.asked, [["npm test 2>&1", "tail -5", log]]);
     r.verdict.next = "ask";
     assert.equal(await r.review(command), "ask");
     // A command the rules decide no part of is reviewed whole, as before.
@@ -406,9 +429,12 @@ test("a Claude command that only reads runs, and everything else Claude asked ab
     for (const permission_profile_id of ["ask_before_write", "auto_review"]) {
       const claude = { ...f.entry, provider: "claude-code", permission_profile_id } as DaemonManifestEntry;
       const review = (request: ClaudeNativePermissionRequest) => f.reviewer.review({ entry: claude, request, signal });
+      // A shell reads an unquoted backslash as an escape, so a command names a Windows folder with slashes. The rules also refuse a "%" there.
+      const where = process.platform === "win32" ? f.workspace.replaceAll("\\", "/") : f.workspace;
       for (const command of [
-        `ls -la ${f.workspace} && git log --oneline -5 && git status`, `ls -la ${f.workspace} && git -C ${f.workspace} log --oneline -5 && git -C ${f.workspace} status -sb`, "git status --short; echo '---branches---'; git branch -a",
-        "git status --short && echo '---' && sed -n '255,300p' src/a.ts", "git log -1 --format='%an <%ae>' && git log --oneline | head -5",
+        `ls -la ${where} && git log --oneline -5 && git status`, `ls -la ${where} && git -C ${where} log --oneline -5 && git -C ${where} status -sb`, "git status --short; echo '---branches---'; git branch -a",
+        "git status --short && echo '---' && sed -n '255,300p' src/a.ts",
+        process.platform === "win32" ? "git log -1 --format=%an && git log --oneline | head -5" : "git log -1 --format='%an <%ae>' && git log --oneline | head -5",
         "gh pr view 8 --json number,headRefOid,mergeable,state", "grep -rn foo src | head -20", "cat src/a.ts | wc -l",
       ]) {
         assert.equal(await review(bash(command)), "allow", command);
@@ -441,7 +467,7 @@ test("a Claude command that only reads runs, and everything else Claude asked ab
   } finally { await f.close(); }
 });
 
-test("every other kind of request is left for a person", async () => {
+test("every other kind of request is left for a person", { skip: needsPosixFilePathReports }, async () => {
   const f = await workspaceFixture();
   try {
     const edit = { filepath: join(f.workspace, "src", "a.ts"), diff: "+x" };

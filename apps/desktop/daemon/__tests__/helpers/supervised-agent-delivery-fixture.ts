@@ -1,9 +1,8 @@
 // Shared fixtures for the supervised-agent-delivery-*.test.ts files that were split from supervised-agent-delivery.test.ts.
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { type ProviderActionHandle, type ProviderActionPort } from "../../provider-action-port.js";
 import { ManifestStore } from "../../manifest-store.js";
@@ -12,6 +11,8 @@ import { SupervisedAgentInboxStore } from "../../supervised-agent-inbox-store.js
 import { RoomTurnAttachmentStager } from "../../room-turn-attachments.js";
 import { projectDeliveryReceipts } from "../../manifest-view-projection.js";
 import { DAEMON_PROTOCOL_VERSION } from "../../types.js";
+import { connectDaemon } from "../../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
 
 export const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
@@ -107,7 +108,7 @@ export function installCursorCompletionProjectionFixture(store: SupervisedAgentI
 
 export async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let buffer = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
@@ -226,7 +227,7 @@ export async function runNoReplyContinuity(failures: readonly string[], rounds: 
       await delivery.pump(agent);
     }
     return { receipts: await store.receipts(agent.agentId), sources, prompts };
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await removeTestDirectory(root); }
 }
 
 export type ClaudeFacts = { status: number | null; terminalReason: string | null; category: string | null; usageLimit?: true; promptTooLong?: true };
@@ -277,7 +278,7 @@ export async function runFailingLeaseHolder(providerId: string, failures: Readon
       await delivery.pump({ ...agent, provider: providerId });
     }
     return { receipts: await store.receipts(agent.agentId), sources, waits };
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await removeTestDirectory(root); }
 }
 
 /**
@@ -344,7 +345,7 @@ export async function scheduledRetryFixture(providerId = "claude-code") {
       beforePump?.();
       return { pump: delivery.pump(as).catch(() => undefined) };
     },
-    cleanup: async () => { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); },
+    cleanup: async () => { await delivery.fenceAndDrain(); await store.close(); await removeTestDirectory(root); },
   };
 }
 

@@ -1,11 +1,11 @@
 import { prepareRetiredRuntimePlan, archiveRetiredRuntimes } from "../runtime-recovery-journal.js";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
@@ -25,12 +25,12 @@ import {
   TEST_SUPERVISOR,
   provisionedWorkspace,
   fakeGit,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 for (const predecessors of [false, true]) for (const mode of ["resume", "fresh"] as const) test(`operator ${mode} recovery is fenced, durable, and idempotent${predecessors ? " with retired predecessors" : ""}`, async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root };
   const id = `operator_${mode}`;
@@ -343,7 +343,7 @@ test("daemon tool runtime loader requires a sealed package tree outside explicit
       "a changed dependency is rejected before the privileged executor import",
     );
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -714,7 +714,7 @@ test("manifest state subscription returns an initial snapshot and wakes on a com
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
@@ -760,7 +760,7 @@ test("a host approval change wakes a waiting manifest.watch_state before its tim
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
@@ -805,7 +805,7 @@ test("manifest.list scopes to one room on request and still lists everything wit
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
@@ -853,7 +853,7 @@ test("manifest.list scopes to one room on request and still lists everything wit
 test("watch_agent_stream long-polls one agent's ephemeral live feed", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -911,7 +911,7 @@ test("watch_agent_stream long-polls one agent's ephemeral live feed", async () =
 test("watch_agent_stream drains a backlog larger than one batch without gaps", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -962,7 +962,7 @@ test("watch_agent_stream drains a backlog larger than one batch without gaps", a
 test("watch_agent_stream reports bounded-history gaps and never replays a prior generation", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1006,7 +1006,7 @@ test("watch_agent_stream reports bounded-history gaps and never replays a prior 
 test("purgeAgent drops the ephemeral live feed and settles its outstanding waiters", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1058,7 +1058,7 @@ test("purge fences an unattached exact Cursor wrapper before committing profile 
   const env = await fixture();
   const id = "purge_unattached_cursor";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1160,7 +1160,7 @@ test("desired-state compare-and-set cannot resurrect a concurrently stopped laun
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
@@ -1208,7 +1208,7 @@ test("agent inspector detail socket requests require an exact string-or-null sou
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
+    ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"),
     auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"),
@@ -1237,7 +1237,7 @@ test("agent inspector detail socket requests require an exact string-or-null sou
 test("inspector snapshot runtime identity distinguishes reused PIDs and missing birth evidence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };

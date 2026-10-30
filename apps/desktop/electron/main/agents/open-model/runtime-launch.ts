@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { spawnTree } from "../../../../../../shared/process-tree.mjs";
 import { probeScratchWorkspaceGit } from "../../../../../../shared/scratch-workspace-repository.mjs";
 import { synthesizeTerminalPayload, type ProviderTerminalPayload } from "../provider-adapter.js";
-import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, type ProviderProcessExit } from "../provider-evidence.js";
+import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, providerTreeExit, type ProviderProcessExit } from "../provider-evidence.js";
 import type { OpenCodeEvent, OpenCodeRuntimeAuth } from "../opencode-server-client.js";
 import { OpenCodeBoundedTurnError } from "./errors.js";
 import type { OpenModelProviderAdapterDependencies } from "./types.js";
@@ -64,7 +64,7 @@ export function defaultLaunch(input: {
   });
   const exited = new Promise<ProviderProcessExit>((resolve) => {
     child.once("error", (error) => resolve({ type: "error", error }));
-    child.once("exit", (code, signal) => resolve({ type: "exit", code, signal }));
+    child.once("exit", (code, signal) => resolve(providerTreeExit("OpenCode", code, signal)));
   });
   child.unref();
   return { child, exited };

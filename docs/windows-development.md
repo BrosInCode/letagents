@@ -4,9 +4,9 @@ How to set up a Windows 11 PC for LetAgents development, and what to expect when
 locally. Every step here was run on a Windows 11 machine on 2026-10-30; the results are in
 [What a run looks like](#what-a-run-looks-like).
 
-Supervised room agents are still off on Windows (tier 3 of the Windows port is not finished). The desktop app builds
-and starts, and the provider CLIs install, but the app does not start agents yet. The tests of agent
-behaviour skip themselves on Windows through one helper (`apps/desktop/electron/__tests__/platform.ts`).
+Supervised room agents run on Windows. A test that needs something Windows lacks skips itself there with a one-line
+reason. Most reasons are named once in `apps/desktop/electron/__tests__/platform.ts`; some older POSIX-only tests carry
+theirs inline.
 
 ## What you need
 
@@ -243,7 +243,7 @@ They are no security boundary, because whoever can edit such a file can already 
 Cursor's launcher also applies a staged update (`versions\promote-staged.cmd`) before it starts. The app does not run
 that script. A staged update waits until you next run `cursor-agent` in a terminal.
 
-Sign in to each in a terminal before you use it as an agent (supervised agents are off on Windows for now):
+Sign in to each in a terminal before you use it as an agent:
 
 1. Claude Code: run `claude`, then follow the browser sign-in.
 2. Codex: run `codex login`, then follow the browser sign-in.

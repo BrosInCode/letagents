@@ -5,11 +5,11 @@ import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import type { HostApprovalReference } from "../../shared/host-approvals.js";
@@ -27,6 +27,8 @@ import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { systemProcessIdentity } from "../process-identity.js";
+import { needsModeBits, needsPosixFilePathReports, WINDOWS_TEST_HELPER } from "../../electron/__tests__/platform.js";
+
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "../types.js";
@@ -36,6 +38,11 @@ import { CodexRpcClient } from "../../electron/main/agents/codex-rpc-client.js";
 import type { NativeExecutionFact, NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { WAIT_SCALE } from "./helpers/daemon-fixture.js";
+
+// Windows reads when a process started through the process-tree helper; the test run says where the built one is.
+if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.env.LETAGENTS_PROCESS_TREE_HELPER = WINDOWS_TEST_HELPER;
 
 const secret = "PRIVATE-APPROVAL-CONTENT";
 const now = Date.parse("2026-08-31T00:00:00.000Z");
@@ -169,7 +176,7 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     get permissionChanges() { return permissionChanges; },
     get broker() { return broker; },
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
-    async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await rm(root, { recursive: true, force: true }); } };
+    async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await removeTestDirectory(root); } };
 }
 
 function idleInstallation(f: Awaited<ReturnType<typeof fixture>>) {
@@ -261,7 +268,7 @@ test("native permission observations wake delegated decision reconciliation", as
   finally { await f.close(); }
 });
 
-test("approval admission and worker credential writes preserve lock order", { timeout: 5_000 }, async () => {
+test("approval admission and worker credential writes preserve lock order", { timeout: 5_000 * WAIT_SCALE }, async () => {
   const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false,
     notifyStateChanged: () => {} });
   let bindings!: WorkerBindingStore;
@@ -467,7 +474,7 @@ test("Codex file-change approvals stay unavailable without exact native edit ins
   } finally { await f.close(); }
 });
 
-test("exact safe Codex file changes are delegatable while sensitive paths stay host-only", async () => {
+test("exact safe Codex file changes are delegatable while sensitive paths stay host-only", { skip: needsPosixFilePathReports }, async () => {
   for (const scenario of ["safe", "sensitive"] as const) {
     const f = await fixture();
     try {
@@ -512,7 +519,7 @@ test("exact safe Codex file changes are delegatable while sensitive paths stay h
   }
 });
 
-test("proactive admission skips stale peers but surfaces unexpected journal failure", async t => {
+test("proactive admission skips stale peers but surfaces unexpected journal failure", { skip: needsPosixFilePathReports }, async t => {
   const f = await fixture();
   try {
     const first = fileChangeRequest(f.native, f.workspace);
@@ -559,7 +566,7 @@ test("host approval decisions serialize duplicates and conflicts to one native r
   } finally { await f.close(); }
 });
 
-test("host and delegated selections share one request serializer and one native write", async () => {
+test("host and delegated selections share one request serializer and one native write", { skip: needsPosixFilePathReports }, async () => {
   const f = await fixture();
   try {
     const fileChange = fileChangeRequest(f.native, f.workspace);
@@ -1117,7 +1124,7 @@ test("host approval retains an unsent chosen decision for exact recovery without
 
 for (const scenario of ["command", "command_restored_before", "command_restored_pending", "command_applied", "command_denied", "generic_permission", "generic_permission_denied",
   "mcp_tool", "mcp_tool_denied", "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
-  test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 }, () => verifyNativeApproval(scenario));
+  test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 * WAIT_SCALE }, () => verifyNativeApproval(scenario));
 }
 
 async function verifyNativeApproval(scenario: "command" | "command_restored_before" | "command_restored_pending" | "command_applied" | "command_denied" | "generic_permission" | "generic_permission_denied"
@@ -1462,7 +1469,7 @@ for (const provider of ["claude-code", "codex", "open-model"] as const) {
   });
 }
 
-test("room workspace rules require the same durable attempt, room, account, policy and private marker", async () => {
+test("room workspace rules require the same durable attempt, room, account, policy and private marker", { skip: needsModeBits }, async () => {
   const f = await fixture("claude-code", { hostActorId: () => "host-owner" }, true);
   try {
     const [candidate] = await f.broker.list("room");

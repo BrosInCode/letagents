@@ -30,6 +30,7 @@ import {
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
 import { defaultInspectDaemonProcess, signalDaemonProcess } from "../main/supervisor-daemon/process-identity.js";
+import { ProviderBatchFileError, ProviderInstallError } from "../../../../shared/provider-executable.mjs";
 
 const HELPER = "C:\\Program Files\\LetAgents\\resources\\app\\runtime\\letagents-process-tree.exe";
 const LSTART = "Tue Oct 29 01:02:03 2026";
@@ -127,12 +128,21 @@ test("Windows: spawnTree starts the resolved program inside the helper's job, th
   assert.deepEqual(calls[0]!.options, { detached: true, stdio: ["pipe", "pipe", "pipe", "ipc"], env: windowsEnv, cwd: "C:\\repo", windowsHide: true });
 });
 
-test("Windows: a batch file runs through cmd.exe inside the job, never as a bare name from the working directory", () => {
+test("Windows: an installed app starts nothing outside the job when its helper is missing", () => {
+  const { calls, spawn } = recordingSpawn();
+  const shimless = { platform: "win32" as const, spawn, helperPath: null, exists };
+  assert.throws(() => spawnTree("codex", ["exec"], { env: windowsEnv }, { ...shimless, requireHelper: true, launchOptions: { readFile: () => "" } }), ProviderInstallError);
+  assert.deepEqual(calls, []);
+  // A development run may not have built it, and a program that is not there still reports ENOENT.
+  spawnTree("nothing-here", ["x"], { env: windowsEnv }, { ...shimless, requireHelper: true });
+  assert.equal(calls.length, 1);
+});
+
+test("Windows: a batch file that is no npm shim is refused, and nothing runs a bare name from the working directory", () => {
   const { calls, spawn } = recordingSpawn();
   const shimText = "@echo off\r\nsomething that is not an npm shim\r\n";
-  spawnTree("codex", ["exec", "50%"], { env: windowsEnv }, { platform: "win32", spawn, helperPath: HELPER, exists, launchOptions: { readFile: () => shimText } });
-  assert.equal(calls[0]!.args[1], "C:\\Windows\\System32\\cmd.exe");
-  assert.equal(calls[0]!.args[2], '"C:\\Windows\\System32\\cmd.exe" /d /e:on /v:off /s /c ""C:\\Tools\\codex.cmd" "exec" "50%%cd:~0,0%""');
+  assert.throws(() => spawnTree("codex", ["exec", "50%"], { env: windowsEnv }, { platform: "win32", spawn, helperPath: HELPER, exists, launchOptions: { readFile: () => shimText } }), ProviderBatchFileError);
+  assert.deepEqual(calls, []);
   // A relative PATH entry is not searched, and a missing program spawns at a path that cannot exist, so
   // Node reports ENOENT and never runs a program of that name from the working directory (the repository).
   assert.equal(resolveWindowsCommand("tool", { env: { PATH: "relative\\bin" }, exists: () => true }), null);

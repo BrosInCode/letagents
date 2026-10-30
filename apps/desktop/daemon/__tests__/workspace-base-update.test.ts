@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { captureRecordedRemoteTips, captureRemoteTips, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, card, commit, count, environment, fixture, git, lines, listed, recorded, turn, write } from './fixtures/workspace-turns.js';
-import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 // A change card must count what the agent changed. Commits that enter the
 // workspace through a fetch followed by a checkout, merge, rebase or pull are
@@ -264,7 +264,7 @@ test('a base that moves during the turn is counted: only what the remote held be
   assertPlain(none);
 });
 
-test('without an answer from the remote, the card is the plain comparison', { skip: supervisedAgentsOnly }, async t => {
+test('without an answer from the remote, the card is the plain comparison', async t => {
   const f = fixture(t);
   const lonely = join(f.root, 'lonely');
   git(f.root, 'init', '-q', '-b', 'main', lonely);
@@ -382,7 +382,7 @@ test('an independent MCP worker\'s capture follows the same rule', async t => {
   const workspace = f.clone();
   f.landOnStaging();
   const directory = mkdtempSync(join(tmpdir(), 'workspace-base-update-prepared-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  t.after(() => removeTestDirectory(directory));
   const capture = { capture_id: randomUUID(), workspace, base_revision: git(workspace, 'rev-parse', 'HEAD'), baseline: null as string | null, preparation_id: randomUUID() };
   const run = async (operation: 'begin' | 'finish', remoteTips: string[] | null = null) => {
     const worker = new Worker(new URL('../../../../shared/mcp-workspace-capture-worker.mjs', import.meta.url), {

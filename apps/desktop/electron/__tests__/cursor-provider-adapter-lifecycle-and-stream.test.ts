@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import { CursorProviderAdapter, defaultLaunchTurn, type CursorProviderAdapterDependencies } from "../main/agents/cursor-provider-adapter.js";
+import { expectedCursorSandbox } from "./platform.js";
 import type {
   ProviderSpawnRequest,
   ProviderStreamEvent,
@@ -57,7 +57,7 @@ test("daemon Cursor correction refuses an unjournaled side turn and native resum
   assert.equal((await turn).text, "continued safely");
 });
 
-test("daemon Cursor restart-resume preserves exact write authority and sandbox flags", { skip: supervisedAgentsOnly }, async () => {
+test("daemon Cursor restart-resume preserves exact write authority and sandbox flags", async () => {
   for (const [permissionProfileId, sandbox] of [
     ["sandboxed_write", "enabled"],
     ["full_access", "disabled"],
@@ -83,7 +83,7 @@ test("daemon Cursor restart-resume preserves exact write authority and sandbox f
     const launch = harness.launches[0]!;
     assert.equal(argValue(launch.args, "--resume"), `sess-restart-${permissionProfileId}`);
     assert.equal(launch.args.includes("--force"), true);
-    assert.equal(argValue(launch.args, "--sandbox"), sandbox);
+    assert.equal(argValue(launch.args, "--sandbox"), expectedCursorSandbox(sandbox));
     assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_PERMISSION_PROFILE_ID, permissionProfileId);
     assert.equal(launch.fullAccess === true, permissionProfileId === "full_access");
     if (permissionProfileId === "full_access") assert.equal(argValue(launch.args, "--workspace"), request.cwd);
@@ -101,7 +101,7 @@ test("daemon Cursor restart-resume preserves exact write authority and sandbox f
   }
 });
 
-test("daemon Cursor rejects missing supervisor coordinates and preserves selected write authority", { skip: supervisedAgentsOnly }, async () => {
+test("daemon Cursor rejects missing supervisor coordinates and preserves selected write authority", async () => {
   const missingHarness = createHarness();
   const missingAdapter = supervisedAdapter(missingHarness);
   await assert.rejects(
@@ -143,7 +143,7 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
   }));
   for (let index = 0; index < 100 && readOnlyHarness.launches.length === 0; index += 1) await flush();
   const readOnlyArgs = readOnlyHarness.launches[0]!.args;
-  assert.equal(readOnlyArgs.some((arg, index) => arg === "--sandbox" && readOnlyArgs[index + 1] === "enabled"), true);
+  assert.equal(readOnlyArgs.some((arg, index) => arg === "--sandbox" && readOnlyArgs[index + 1] === expectedCursorSandbox("enabled")), true);
   for (let index = 0; index < 100 && !readOnlyHarness.children[0]?.isReleased; index += 1) await flush();
   readOnlyHarness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
@@ -168,7 +168,7 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
     const turn = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: `inbox-${permissionProfileId}` }));
     for (let index = 0; index < 100 && harness.launches.length === 0; index += 1) await flush();
     assert.ok(harness.launches[0]?.args.includes("--force"));
-    assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), sandbox);
+    assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), expectedCursorSandbox(sandbox));
     assert.match(harness.launches[0]!.args.at(-1) ?? "", /You may edit files and run local commands/);
     if (permissionProfileId === "full_access") {
       assert.match(harness.launches[0]!.args.at(-1) ?? "", /filesystem and network operations outside the working directory/);
@@ -208,7 +208,7 @@ test("a successful result is TURN-terminal: the lane goes idle with NO claimed p
   assert.equal(handle.providerContinuationId, "sess-cursor-1", "the session id is the only continuation state");
 });
 
-test("Cursor missing wrapper cwd proves no native child was acquired", { skip: supervisedAgentsOnly }, async () => {
+test("Cursor missing wrapper cwd proves no native child was acquired", async () => {
   const harness = createHarness();
   const adapter = new CursorProviderAdapter({ dependencies: { ...harness.dependencies, launchTurn: input => {
     const child = defaultLaunchTurn({ ...input, deferStart: true });
@@ -217,7 +217,7 @@ test("Cursor missing wrapper cwd proves no native child was acquired", { skip: s
     void child.prepared?.catch(() => {});
     return child;
   } } });
-  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id/);
+  await assert.rejects(adapter.spawn(spawnRequest({ cwd: "/nonexistent-letagents-test/cursor-cwd" })), /did not expose a process id|was not found on this computer/);
   assert.equal(adapter.runtimeCustody("wa-cursor-1"), "absent");
   assert.deepEqual(harness.signals, []);
 });
@@ -345,7 +345,7 @@ test("Cursor Stop joins the bounded turn settlement barrier before retiring its 
   assert.equal(handle.pid, null);
 });
 
-test("Cursor releases native custody after failed checkpoint only when exact workspace retirement is saved", { skip: supervisedAgentsOnly }, async () => {
+test("Cursor releases native custody after failed checkpoint only when exact workspace retirement is saved", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-retired-custody-"));
   const harness = createHarness({ ownsDescendantReaping: true });
   try {

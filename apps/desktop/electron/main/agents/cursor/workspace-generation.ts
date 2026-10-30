@@ -114,8 +114,11 @@ export function recordGenerationSettlement(adapter: CursorProviderAdapter, handl
     const file = openSync(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
     try { writeFileSync(file, contents); fsyncSync(file); } finally { closeSync(file); }
     renameSync(temporary, path);
-    const parent = openSync(dirname(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    try { fsyncSync(parent); } finally { closeSync(parent); }
+    // Windows cannot fsync a folder handle (EPERM); NTFS journals the rename itself.
+    if (process.platform !== "win32") {
+      const parent = openSync(dirname(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    }
   } catch (error) {
     try { unlinkSync(temporary); } catch { /* preserve settlement failure */ }
     throw new CursorRoomTurnRecoveryError(`Cursor conversation settlement could not be saved: ${error instanceof Error ? error.message : String(error)}`);

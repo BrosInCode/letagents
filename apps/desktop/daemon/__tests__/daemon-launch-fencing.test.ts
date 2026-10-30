@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { mapEntry } from "../../electron/main/supervisor-daemon.js";
 import { canReconnectRoomAgent, canRecoverSavedRoomAgent } from "../../renderer/src/domain/room-agent-delivery.js";
@@ -24,13 +24,12 @@ import {
   eventually,
   daemonRequest,
   provisionedWorkspace,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint, REQUEST_ARRIVAL_MS } from "./helpers/daemon-fixture.js";
 
 test("daemon restart without Electron credential delivery retains inbox work and projects a safe waiting state", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.sqlite"), attemptsRoot: join(env.root, "attempt-data"),
     workspaceRoot: env.root, workerBindingsPath: join(env.root, "worker-bindings.json"),
@@ -115,7 +114,7 @@ test("daemon restart without Electron credential delivery retains inbox work and
 test("direct manifest convergence shares the per-entry reconciliation lane", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -165,7 +164,7 @@ test("direct manifest convergence shares the per-entry reconciliation lane", asy
 test("post-launch worker binding retries the exact provider and preserves the real failure", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -304,7 +303,7 @@ test("post-launch worker binding retries the exact provider and preserves the re
 test("handoff during delayed host-grant mint creates no generation and the successor launches once", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -393,7 +392,7 @@ test("handoff during delayed host-grant mint creates no generation and the succe
 test("pause fences a launch waiting on host-grant mint before any generation or provider exists", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -456,7 +455,7 @@ test("pause fences a launch waiting on host-grant mint before any generation or 
 test("stop fences a launch waiting on provider capabilities before generation creation", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -511,7 +510,7 @@ test("provider delivery capabilities block mismatches while legacy omissions rem
   ) => {
     const env = await fixture();
     const paths = {
-      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
       manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
       attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     };
@@ -606,7 +605,7 @@ test("stop during grant mint and pause during capabilities both fence before pro
     const env = await fixture();
     const id = `${desiredState}_during_${boundary}`;
     const paths = {
-      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
       manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
       attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     };
@@ -675,7 +674,7 @@ test("stop during grant mint and pause during capabilities both fence before pro
 test("pause arriving during provider dispatch persists and fences the exact returned handle", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -730,7 +729,7 @@ test("pause arriving during provider dispatch persists and fences the exact retu
 for (const survivesRestart of [true, false]) test(`handoff during provider dispatch ${survivesRestart ? "persists the exact surviving handle for successor attach" : "retains live custody of an admitted non-surviving launch"}`, async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -830,7 +829,7 @@ for (const survivesRestart of [true, false]) test(`handoff during provider dispa
 test("handoff winning the normal post-dispatch commit falls back to exact retirement persistence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -895,7 +894,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     const handoff = first.waitForHandoff();
     handoffRequested = true;
     const prepare = daemonRequest(paths.socketPath, "daemon.prepare_handoff");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
     releaseCommit();
     assert.equal((await prepare).ok, true);
     await within(handoff, "commit-boundary retirement persistence", 1_000);
@@ -926,7 +925,7 @@ test("pause and stop at the normal post-dispatch commit fence the exact returned
     const env = await fixture();
     const id = `${desiredState}_during_provider_commit`;
     const paths = {
-      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
       manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
       attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     };
@@ -967,7 +966,7 @@ test("pause and stop at the normal post-dispatch commit fence the exact returned
       } });
       await commitStarted;
       const control = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: desiredState });
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
       releaseCommit();
       assert.equal((await control).ok, true);
       await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === desiredState, `${desiredState} commit fence`);
@@ -991,7 +990,7 @@ test("fatal returned-handle journal and stop failure rejects handoff before ackn
   const env = await fixture();
   const id = "fatal_unjournaled_dispatch";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1042,7 +1041,7 @@ test("pause during post-install worker bind fences the exact provider before del
   const env = await fixture();
   const id = "pause_during_post_install_bind";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1099,7 +1098,7 @@ test("pause during post-install worker bind fences the exact provider before del
     })).ok, true);
     await bindStarted;
     const pause = daemonRequest(paths.socketPath, "manifest.set_desired_state", { id, desired_state: "paused" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, REQUEST_ARRIVAL_MS));
     releaseBind();
     assert.equal((await pause).ok, true);
     await eventually(async () => ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "paused", "post-bind pause fence");
@@ -1119,7 +1118,7 @@ test("pause during post-install worker bind fences the exact provider before del
 for (const [rotationFailures, rotationStatus, providerName] of [[0, 500, "codex"], [1, 500, "codex"], [18, 500, "codex"], [3, 403, "codex"], [3, 403, "cursor"]] as const) test(`a live daemon rotates its bearer after ${rotationFailures} HTTP ${rotationStatus} responses without replacing ${providerName}`, async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };

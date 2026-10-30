@@ -11,6 +11,7 @@ import { codexReadOnlyProfileId } from "../main/agents/codex-agent-home.js";
 import { type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
 import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import { OS_BIRTH } from "./platform.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
 // separately compiled source tree into Electron's production rootDir.
@@ -836,7 +837,7 @@ export async function codexDaemonFixture(options: {
   // A stop request ends the fake process, so a runtime the daemon decides to
   // replace is really replaced and a test can see it.
   const harness = createHarness({ exitOnSignal: !options.holdExits, exitAfterMs: options.exitAfterMs,
-    ...(options.osProcessBirths ? { processIdentity: "Fri Oct  2 19:00:00 2026" } : {}) });
+    ...(options.osProcessBirths ? { processIdentity: OS_BIRTH.third } : {}) });
   /** The sealed MCP runtime's tools. An app update that changes them changes every agent's launch contract. */
   let sealedRuntime: unknown = custodialRuntimeContract;
   /** Set once a daemon has been restarted: an app-server it re-attaches serves the agent's thread from its first request. */
@@ -1384,7 +1385,7 @@ export const REFUSAL = "This project's Codex config changes your MCP server \"ow
 
 /** A re-attach as the background service makes it after a restart: a fresh adapter, and a ref that carries the daemon's own record. */
 export async function launchedThenRestarted(spawn: Partial<ProviderSpawnRequest>, recordedOwnerSetup: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}) {
-  const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+  const harness = createHarness({ exitOnSignal: true, processIdentity: OS_BIRTH.first, ...harnessOptions });
   const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(spawn));
   const ref = { workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
     ...(recordedOwnerSetup ? { ownerSetup: true as const } : {}) };

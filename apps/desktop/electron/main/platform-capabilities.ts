@@ -1,13 +1,14 @@
 /**
  * What this operating system lets the desktop app do. Supervised agents need
- * the background supervisor daemon. Windows does not have it yet (it needs
- * named pipes, Job Objects and ACLs), so there the app starts with chat, rooms
- * and the board, and agent features answer with an explicit
- * "unsupported on this platform" result.
+ * the background supervisor daemon, which runs on macOS and Windows.
  *
  * Linux is a development and CI platform, not a shipped one. It keeps the
  * macOS behaviour: agent IPC is registered as usual, and the daemon itself
  * still starts only with LETAGENTS_ALLOW_NON_DARWIN_DAEMON=1.
+ *
+ * Tests can force agents off with setDesktopPlatformCapabilitiesForTest. Every
+ * gate that reads these answers then gives an explicit "unsupported on this
+ * platform" result.
  */
 
 export interface DesktopPlatformCapabilities {
@@ -43,15 +44,14 @@ export function desktopPlatformCapabilities(options: PlatformCapabilityOptions =
   const override = options.platform === undefined ? capabilityOverride : null;
   const platform = options.platform ?? override?.platform ?? process.platform;
   const env = options.env ?? process.env;
-  // LETAGENTS_ALLOW_NON_DARWIN_DAEMON lets Linux CI drive the daemon client. It
-  // never applies to Windows: a leaked variable must not start a daemon there.
-  const daemonOverride = platform !== "win32" && env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1";
+  // LETAGENTS_ALLOW_NON_DARWIN_DAEMON lets Linux CI drive the daemon client.
+  const daemonOverride = env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1";
   const supervisorDaemonAllowed = override?.supervisorDaemonAllowed
     ?? override?.supervisedAgentsSupported
-    ?? (platform === "darwin" || daemonOverride);
+    ?? (platform === "darwin" || platform === "win32" || daemonOverride);
   return {
     platform,
-    supervisedAgentsSupported: override?.supervisedAgentsSupported ?? platform !== "win32",
+    supervisedAgentsSupported: override?.supervisedAgentsSupported ?? true,
     supervisorDaemonAllowed,
   };
 }

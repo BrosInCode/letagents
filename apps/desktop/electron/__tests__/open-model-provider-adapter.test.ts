@@ -40,7 +40,9 @@ import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
 import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";
-import { supervisedAgentsOnly } from "./platform.js";
+
+/** Windows starts the sealed MCP runtime; a test has no packaged one. */
+const testMcpRuntime = () => ({ entryPath: join(tmpdir(), "letagents-mcp-entry.js"), readRoots: [] });
 
 type LaunchRecord = {
   binary: string;
@@ -101,6 +103,7 @@ function createHarness() {
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
       const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
@@ -440,7 +443,7 @@ function assistantWithTool(
   };
 }
 
-test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", { skip: supervisedAgentsOnly }, async () => {
+test("Open Model preserves GitHub CLI config discovery while isolating OpenCode child directories", async () => {
   const keys = ["GH_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME", "APPDATA", "GH_TOKEN", "GITHUB_TOKEN"] as const;
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   try {
@@ -450,8 +453,8 @@ test("Open Model preserves GitHub CLI config discovery while isolating OpenCode 
     process.env.GITHUB_TOKEN = "github-token-must-not-be-inherited";
     for (const [explicit, xdg, expected] of [
       ["/tmp/custom-gh", "/tmp/user-config", "/tmp/custom-gh"],
-      [null, "/tmp/user-config", "/tmp/user-config/gh"],
-      [null, null, "/tmp/github-user-home/.config/gh"],
+      [null, "/tmp/user-config", join("/tmp/user-config", "gh")],
+      [null, null, join("/tmp/github-user-home", ".config", "gh")],
     ]) {
       if (explicit) process.env.GH_CONFIG_DIR = explicit; else delete process.env.GH_CONFIG_DIR;
       if (xdg) process.env.XDG_CONFIG_HOME = xdg; else delete process.env.XDG_CONFIG_HOME;
@@ -2878,6 +2881,7 @@ test("Open Model durably fences the crash window between detached launch and PID
   const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
   let launches = 0;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -2925,6 +2929,7 @@ test("Open Model clears its exact intent when the launch is refused before any p
     binary: "opencode",
     runtimeRoot,
     dependencies: {
+      resolveMcpRuntime: testMcpRuntime,
       allocatePort: async () => 43822,
       launch: () => { throw refusal; },
     },
@@ -2946,7 +2951,7 @@ test("Open Model clears its exact intent after a real no-pid launch failure", as
   const missingBinaryAdapter = new OpenModelProviderAdapter({
     binary: join(runtimeRoot, "missing-opencode"),
     runtimeRoot,
-    dependencies: { allocatePort: async () => 43821 },
+    dependencies: { resolveMcpRuntime: testMcpRuntime, allocatePort: async () => 43821 },
     startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
@@ -2991,6 +2996,7 @@ test("Open Model serializes A/B startup ownership for the same runtime path", as
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: {
+      resolveMcpRuntime: testMcpRuntime,
       ...harness.dependencies,
       launch(input) {
         launches += 1;
@@ -3048,6 +3054,7 @@ test("Open Model persists an ambiguous startup birth and fences replacement unti
   let priorIdentity: string | null | undefined = "opencode-birth-6104";
   let failSessionCreation = true;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -3138,6 +3145,7 @@ test("Open Model persists and fences a fresh pid whose birth is initially unveri
   let launches = 0;
   let firstIdentity: string | null | undefined;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -3193,6 +3201,7 @@ test("fresh launch cleanup never signals a recycled or unverifiable pid", async 
   const exited = new Promise<ProviderProcessExit>(() => {});
   const signals: Array<NodeJS.Signals> = [];
   const dependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     getProcessIdentity: () => "replacement-birth",
     signalProcess: (_pid: number, signal: NodeJS.Signals) => { signals.push(signal); },
   };
@@ -4502,7 +4511,7 @@ test("Open Model completed shell tools use native metadata exit codes and never 
 });
 
 test("Open Model generic process errors are degraded; actual exit or independently proven disappearance is hard evidence", async () => {
-  for (const kind of ["error", "error_with_death", "exit"] as const) {
+  for (const kind of ["error", "error_with_death", "exit", "unkillable"] as const) {
     const harness = createHarness();
     let settleExit!: (exit: ProviderProcessExit) => void;
     const exited = new Promise<ProviderProcessExit>((resolve) => { settleExit = resolve; });
@@ -4515,13 +4524,16 @@ test("Open Model generic process errors are degraded; actual exit or independent
     const handle = await adapter.spawn(spawnRequest());
     const observations: NativeExecutionObservation[] = [];
     adapter.onExecution(handle, (event) => observations.push(event));
-    if (kind === "error_with_death") gone = true;
-    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null } : { type: "error", error: new Error("private transport failure") });
+    if (kind === "error_with_death" || kind === "unkillable") gone = true;
+    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null }
+      : { type: "error", error: new Error("private transport failure"), ...(kind === "unkillable" ? { treeMayRun: true } : {}) });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), kind !== "error");
-    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), kind !== "error");
-    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), kind === "error");
+    const proven = kind === "error_with_death" || kind === "exit";
+    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), proven);
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), proven);
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), !proven);
     assert.doesNotMatch(JSON.stringify(observations), /private transport failure/);
+    if (kind === "unkillable") await assert.rejects(adapter.spawn(spawnRequest()), /did not end, so LetAgents will not start another/);
   }
 });
 
@@ -4631,6 +4643,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   let nextPort = 43_821;
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
       let resolveExit!: (exit: ProviderProcessExit) => void;
@@ -4921,7 +4934,7 @@ const OPEN_MODEL_SESSION_AFTER_EXIT = {
 } as const;
 
 for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
-  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, { skip: supervisedAgentsOnly }, async () => {
+  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, async () => {
     const { ACTIVITY_RECORD_CONTINUED_NOTICE } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
     const agent = await openModelDaemonFixture();
     let letConverge = () => {};

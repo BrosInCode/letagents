@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,7 +14,7 @@ import {
   UnusableSourceRepositoryError,
   type GitCommand,
 } from "../workspace-provisioner.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
  * Build a fake GitCommand keyed by the meaningful subcommand. A value throws
@@ -101,7 +101,7 @@ test("returns origin remote + revision for a valid repository", async () => {
 });
 
 
-test("originless local projects provision isolated worktrees without changing the source", { skip: supervisedAgentsOnly }, async () => {
+test("originless local projects provision isolated worktrees without changing the source", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-local-source-")));
   const source = join(root, "project");
   const exec = promisify(execFile);
@@ -153,10 +153,10 @@ test("originless local projects provision isolated worktrees without changing th
     const foreignIdentity = await resolveSourceRepositoryIdentity(foreign, git);
     await assert.rejects(provision(foreignIdentity.revision, foreign), /remote identity does not match/);
     assert.equal(String(await git(["-C", source, "remote"])).trim(), "", "launch never adds an origin to the project");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
-test("originless repositories borrowing objects produce independent private clones", { skip: supervisedAgentsOnly }, async () => {
+test("originless repositories borrowing objects produce independent private clones", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-local-alternates-")));
   const exec = promisify(execFile);
   const git: GitCommand = async (args) => (await exec("git", args, { cwd: root })).stdout;
@@ -179,5 +179,5 @@ test("originless repositories borrowing objects produce independent private clon
     await rename(donor, join(root, "donor-unavailable"));
     assert.equal(String(await git(["-C", result.path, "show", "HEAD:app.txt"])), "borrowed content");
     assert.equal(await readFile(join(source, ".git", "objects", "info", "alternates"), "utf8"), alternates);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });

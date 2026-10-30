@@ -15,7 +15,7 @@ import {
   RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY,
   WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL,
 } from "./worker-binding-retention.js";
-import { privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
+import { ownerPrivatePlatform, privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -857,7 +857,24 @@ export class WorkerBindingStore {
       if (checksumOf(current) !== expectedChecksum) {
         throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
       }
-      await rename(temporary, backup);
+      // Windows refuses to replace a file another opener is reading or replacing at the same moment (EPERM,
+      // EBUSY). Try again briefly; an opener that won meanwhile has installed the identical redacted proof.
+      for (let attempt = 0; ; attempt += 1) {
+        // Checked again right before each try: what the last look saw may have changed during the wait.
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const raced = await this.readOwnerOnly(backup);
+          if (raced === undefined) throw new Error("Legacy worker binding migration integrity error: exact backup disappeared during redaction.");
+          if (isRedactedLegacyBackup(raced, expectedChecksum)) return;
+          if (checksumOf(raced) !== expectedChecksum) {
+            throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
+          }
+        }
+        try { await rename(temporary, backup); break; } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (process.platform !== "win32" || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "") || attempt >= 20) throw error;
+        }
+      }
       await protectOwnerPrivate(backup, "file");
       await this.syncDirectory(dirname(backup));
       const converted = await this.readOwnerOnly(backup);
@@ -1038,6 +1055,8 @@ export class WorkerBindingStore {
     await protectOwnerPrivate(path, "file").catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
   private async syncDirectory(path: string): Promise<void> {
+    // Windows cannot fsync a folder handle; NTFS journals the rename itself.
+    if (ownerPrivatePlatform() === "win32") return;
     const handle = await open(path, "r");
     try { await handle.sync(); } finally { await handle.close(); }
   }

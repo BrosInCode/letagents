@@ -10,7 +10,7 @@ import type { ChildProcess, ExecFileOptions, SpawnOptions } from "node:child_pro
 import test from "node:test";
 
 import { execProviderFile, ProviderBatchFileError, providerLaunchCommand } from "../../../../shared/provider-executable.mjs";
-import { spawnTree } from "../../../../shared/process-tree.mjs";
+import { parseWindowsCommandLine, spawnTree, windowsCommandLine } from "../../../../shared/process-tree.mjs";
 import { daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 import {
   daemonStateDirEnvironment,
@@ -19,6 +19,9 @@ import {
   windowsSystemEnvironment,
 } from "../main/agents/windows-child-environment.js";
 import { minimalOpenCodeEnvironment } from "../main/agents/opencode-launch-contract.js";
+import { openCodeMcpLaunch } from "../main/agents/open-model/adapter-launch.js";
+import { windowsCodexArguments } from "../main/agents/codex-home-harness.js";
+import { providerTreeExit } from "../main/agents/provider-evidence.js";
 import { rentalIsolatedChildEnvironment } from "../main/agents/rental-child-environment.js";
 import { icaclsReadOnlyFolderArguments, sddlIsReadOnlyFolderFor } from "../main/agents/codex-agent-home.js";
 import { cursorWindowsProgram } from "../main/agents/cursor/windows-turn.js";
@@ -278,4 +281,34 @@ test("Windows: a missing program named by path is ENOENT as it is, never a batch
   const missing = providerLaunchCommand("C:\\x\\agent.cmd", ["-p", "line\n\"two\""], { platform: "win32", env: windowsEnv, exists: () => false });
   assert.deepEqual(missing, { file: "C:\\x\\agent.cmd", args: ["-p", "line\n\"two\""], resolved: null, envAdditions: null });
   assert.throws(() => cursorWindowsProgram("C:\\x\\agent.cmd", { env: windowsEnv, exists: () => false }), /'C:\\x\\agent\.cmd' was not found on this computer/);
+});
+
+test("Open Model's MCP server is the sealed runtime on Windows, and macOS keeps npx", () => {
+  const runtime = { entryPath: "C:\\LetAgents\\resources\\app\\runtime\\letagents\\node_modules\\letagents\\dist\\mcp\\server.js", readRoots: [] };
+  assert.deepEqual(openCodeMcpLaunch(undefined, "win32", () => runtime), {
+    command: [process.execPath, runtime.entryPath],
+    environment: { ELECTRON_RUN_AS_NODE: "1" },
+  });
+  assert.throws(() => openCodeMcpLaunch(undefined, "win32", () => { throw new Error("no runtime"); }), /no runtime/);
+  assert.deepEqual(openCodeMcpLaunch(undefined, "darwin", () => assert.fail("macOS does not read the runtime")).command.slice(0, 2), ["npx", "-y"]);
+  assert.deepEqual(openCodeMcpLaunch("/dev/entry.js", "win32", () => assert.fail("a development entry wins")), {
+    command: [process.execPath, "/dev/entry.js"],
+    environment: {},
+  });
+});
+
+test("a Windows Codex's own arguments are read through the helper that started it", () => {
+  const codex = windowsCommandLine("C:\\app\\LetAgents.exe", ["C:\\npm\\codex.js", "app-server", "-c", 'mcp_servers={ "github" = { enabled = false } }']);
+  const helper = windowsCommandLine("C:\\app\\letagents-process-tree.exe", ["spawn", "C:\\app\\LetAgents.exe", codex]);
+  assert.deepEqual(windowsCodexArguments(helper), parseWindowsCommandLine(codex));
+  assert.match(windowsCodexArguments(helper).join(" "), /mcp_servers=\{ "github" = \{ enabled = false \} \}/);
+  assert.deepEqual(windowsCodexArguments(codex), parseWindowsCommandLine(codex));
+});
+
+test("the helper's unkillable exit is no exit of the provider's", () => {
+  const unkillable = providerTreeExit("Codex", 0xE04C5401, null);
+  assert.equal(unkillable.type, "error");
+  assert.match(unkillable.type === "error" ? unkillable.error.message : "", /Codex's processes did not end/);
+  assert.deepEqual(providerTreeExit("Codex", 1, null), { type: "exit", code: 1, signal: null });
+  assert.deepEqual(providerTreeExit("Codex", null, "SIGKILL"), { type: "exit", code: null, signal: "SIGKILL" });
 });

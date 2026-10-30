@@ -17,7 +17,7 @@ export function registerDaemonMaintenanceIpcHandlers(ipcMain: IpcMain): void {
   targetIpcMain.handle("desktop:maintenance:restart", (event, resume: unknown) => {
     assertHostApprovalSender(event);
     if (typeof resume !== "boolean") throw new Error("Invalid maintenance action.");
-    if (process.platform !== "darwin") throw new Error("Service restart currently requires macOS.");
+    if (process.platform !== "darwin" && process.platform !== "win32") throw new Error("Service restart currently requires macOS or Windows.");
     if (operation) return operation;
     operation = performConfirmedMaintenance({
       assertTrusted: () => assertHostApprovalSender(event),

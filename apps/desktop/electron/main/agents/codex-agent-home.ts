@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse, resolve } from "node:path";
+import { basename, dirname, join, parse, resolve, sep } from "node:path";
 
 import { CODEX_OWNER_FEATURE_OVERRIDES, codexHomeDirectory } from "../../../../../shared/codex-owner-isolation.mjs";
 import {
@@ -68,6 +68,8 @@ const READ_ONLY_PROFILE_PREFIX = "letagents_read_only_";
 export const CODEX_BUILT_IN_READ_ONLY_PROFILE = ":read-only";
 const DENY_CHECK_TIMEOUT_MS = 15_000;
 const DENY_CHECK_FOLDER = "codex-deny-check-";
+// Windows keeps a folder busy for a moment after a process that ran in it ends.
+const SCRATCH_REMOVAL = { recursive: true, force: true, maxRetries: process.platform === "win32" ? 20 : 0, retryDelay: 100 };
 const DENY_CHECK_DENIED = "letagents-check-denied-file";
 const DENY_CHECK_OPEN = "letagents-check-open-file";
 /** An address on this machine where nothing listens: what a check that needs no service gives Codex for every address it could call. */
@@ -613,7 +615,7 @@ export async function checkCodexKeepsLinkedSignIn(codexBin: string, env: NodeJS.
     return false;
   } finally {
     listener.close();
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
+    if (scratch) rmSync(scratch, SCRATCH_REMOVAL);
   }
 }
 
@@ -719,7 +721,7 @@ export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.Proces
   } catch {
     return false;
   } finally {
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
+    if (scratch) rmSync(scratch, SCRATCH_REMOVAL);
   }
 }
 
@@ -812,7 +814,7 @@ function writableRootsRefusal(
   // A folder as its owner wrote it, so that it can be found in the config: from the user folder when it is named below it.
   const shownFolder = (folder: string) => {
     const fromHome = pathFrom(resolve(userHome), resolve(folder));
-    return (fromHome === null ? folder : join("~", fromHome)).replace(/[^\x20-\x7e]/g, "?").slice(0, 240);
+    return (fromHome === null ? folder : join("~", fromHome).replaceAll(sep, "/")).replace(/[^\x20-\x7e]/g, "?").slice(0, 240);
   };
   /** How a root and a folder lie: the root is the folder, holds it, or is in it. Null when they are apart. */
   const lies = (root: string, folder: string): "is" | "holds" | "is in" | null => {

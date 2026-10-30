@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mock, type TestContext } from "node:test";
-import { supervisedAgentTest as test } from "./platform.js";
+import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
 import type {

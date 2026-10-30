@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import {
   boundedCursorRoomTurnPrompt,
   CursorProviderAdapter,
@@ -42,7 +41,9 @@ import {
   withLoopAlive,
   cursorDaemonFixture,
   stagedImageAttachments,
+  WA_CURSOR_CWD,
 } from "./cursor-provider-adapter.fixture.js";
+import { writeFakeProvider } from "./platform.js";
 
 test("documented Cursor stream-json shapes project to namespaced response and tool display events", () => {
   assert.deepEqual(cursorLiveDisplayProjections({
@@ -368,7 +369,7 @@ test("Cursor typed shell completion preserves native exit codes and does not com
   assert.deepEqual(harness.signals, [], "a nonzero shell exit cannot signal the provider");
 });
 
-test("a Cursor turn that finished while its daemon was replaced is answered from its terminal, and the agent answers its next message", { skip: supervisedAgentsOnly, timeout: 60_000 }, async () => {
+test("a Cursor turn that finished while its daemon was replaced is answered from its terminal, and the agent answers its next message", { timeout: 60_000 }, async () => {
   const agent = await cursorDaemonFixture();
   try {
     const first = await agent.begin(1);
@@ -415,7 +416,7 @@ test("Cursor usage reads idle sessions without inference, throttles account read
   h.dependencies.now = () => new Date(now).toISOString();
   h.dependencies.readUsageOwner = () => 12345;
   h.dependencies.readUsageContext = (_config, cwd, id) => {
-    assert.equal(cwd, "/tmp/wa-cursor-1"); assert.equal(id, "sess-cursor-usage"); return reading;
+    assert.equal(cwd, WA_CURSOR_CWD); assert.equal(id, "sess-cursor-usage"); return reading;
   };
   h.dependencies.readUsageAccount = async (auth, at) => {
     assert.equal(auth, "Bearer test-provider-authorization"); calls++;
@@ -469,7 +470,7 @@ test("Cursor usage rejects another account and discards a read after the exact h
   assert.equal(await adapter.readUsage(handle), null);
 });
 
-test("a Cursor room turn names its staged images in the prompt and may only read their folder", { skip: supervisedAgentsOnly }, async () => {
+test("a Cursor room turn names its staged images in the prompt and may only read their folder", async () => {
   const folder = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-images-"));
   try {
     const harness = createHarness();
@@ -516,7 +517,7 @@ test("a Cursor room turn names its staged images in the prompt and may only read
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 
-test("a staged image folder replaced by a link is never named or opened to the sandbox", { skip: supervisedAgentsOnly }, async () => {
+test("a staged image folder replaced by a link is never named or opened to the sandbox", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-image-link-"));
   try {
     const target = join(root, "home-like");
@@ -558,7 +559,7 @@ test("under the real sandbox a Cursor turn reads its staged image but cannot wri
     const workspace = join(root, "workspace");
     const sourceHomeDir = join(root, "source-home");
     const stableProfileRoot = join(root, "stable-profile");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     const stagedRoot = join(root, "room-turn-attachments");
     const ownFolder = join(stagedRoot, "turn-own");
     const otherFolder = join(stagedRoot, "turn-other");
@@ -568,8 +569,7 @@ test("under the real sandbox a Cursor turn reads its staged image but cannot wri
     mkdirSync(otherFolder, { recursive: true, mode: 0o700 });
     writeFileSync(join(ownFolder, "1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), { mode: 0o600 });
     writeFileSync(join(otherFolder, "1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]), { mode: 0o600 });
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const path = require("node:path");
 const prompt = process.argv[process.argv.length - 1];
 const image = /- Image 1 \\("screen.png"\\): (.+)$/m.exec(prompt)[1];

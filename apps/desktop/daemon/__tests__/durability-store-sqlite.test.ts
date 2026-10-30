@@ -10,11 +10,12 @@ import test from "node:test";
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { AttemptNotFoundError, CorruptAttemptStoreError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { assertOwnerPrivate } from "../../electron/__tests__/platform.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-attempt-sqlite-"));
-  return { root, json: join(root, "attempts.json"), database: join(root, "daemon-state.sqlite"), cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { root, json: join(root, "attempts.json"), database: join(root, "daemon-state.sqlite"), cleanup: () => removeTestDirectory(root) };
 }
 
 test("corrupt legacy attempt state is quarantined and fails closed on every reopen", async () => {
@@ -244,7 +245,7 @@ test("post-commit backup EISDIR is retried without poisoning a valid import", as
   } finally { await env.cleanup(); }
 });
 
-test("SQLite attempt initialization creates no JSON and keeps owner-only database permissions", { skip: supervisedAgentsOnly }, async () => {
+test("SQLite attempt initialization creates no JSON and keeps owner-only database permissions", async () => {
   const env = await fixture();
   try {
     const store = new WorkDurabilityStore(env.json, join(env.root, "attempt-data"), undefined, join(env.root, "worktrees"), undefined, undefined, undefined, undefined, undefined, env.database);
@@ -252,7 +253,7 @@ test("SQLite attempt initialization creates no JSON and keeps owner-only databas
     await store.close();
     await store.close();
     await assert.rejects(() => access(env.json));
-    assert.equal((await stat(env.database)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(env.database, "file");
     const inspection = new DatabaseSync(env.database);
     assert.equal(String((inspection.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toLowerCase(), "wal");
     assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);

@@ -8,7 +8,12 @@ import {
   installedCodexExecutablePath,
   resolveCodexExecutable,
 } from "../main/agents/codex-executable.js";
-import { supervisedAgentsOnly } from "./platform.js";
+
+// The host's own platform: the resolver reads real files, and on Windows it looks for codex.exe and uses a ";" PATH.
+const platform = process.platform;
+const windows = platform === "win32";
+const codexName = windows ? "codex.exe" : "codex";
+const emptyPath = windows ? "C:\\letagents-no-such-folder" : "/usr/bin:/bin";
 
 async function executable(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -16,33 +21,35 @@ async function executable(path: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
-test("Codex resolution falls back to the official standalone install outside PATH", { skip: supervisedAgentsOnly }, async () => {
+test("Codex resolution falls back to the official standalone install outside PATH", async () => {
   const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-home-"));
-  const installed = join(homeDirectory, ".local", "bin", "codex");
+  const installed = windows
+    ? join(homeDirectory, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin", codexName)
+    : join(homeDirectory, ".local", "bin", "codex");
   await executable(installed);
 
   assert.equal(resolveCodexExecutable({
-    env: { PATH: "/usr/bin:/bin" },
+    env: { PATH: emptyPath },
     homeDirectory,
-    platform: "darwin",
+    platform,
   }), installed);
 });
 
-test("Codex resolution preserves an existing PATH installation", { skip: supervisedAgentsOnly }, async () => {
+test("Codex resolution preserves an existing PATH installation", async () => {
   const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-home-"));
   const pathDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-path-"));
-  const pathCodex = join(pathDirectory, "codex");
+  const pathCodex = join(pathDirectory, codexName);
   await executable(pathCodex);
-  await executable(join(homeDirectory, ".local", "bin", "codex"));
+  await executable(join(homeDirectory, ".local", "bin", codexName));
 
   assert.equal(resolveCodexExecutable({
     env: { PATH: pathDirectory },
     homeDirectory,
-    platform: "darwin",
+    platform,
   }), pathCodex);
 });
 
-test("Codex resolution honors explicit executable and install directory overrides", { skip: supervisedAgentsOnly }, async () => {
+test("Codex resolution honors explicit executable and install directory overrides", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-override-"));
   const configured = join(root, "custom-codex");
   const installDirectory = join(root, "installed");
@@ -50,13 +57,13 @@ test("Codex resolution honors explicit executable and install directory override
   assert.equal(resolveCodexExecutable({
     env: { LETAGENTS_CODEX_BIN: configured, PATH: "" },
     homeDirectory: root,
-    platform: "darwin",
+    platform,
   }), configured);
   assert.equal(installedCodexExecutablePath({
     env: { CODEX_INSTALL_DIR: installDirectory },
     homeDirectory: root,
-    platform: "darwin",
-  }), join(installDirectory, "codex"));
+    platform,
+  }), join(installDirectory, codexName));
 });
 
 test("Codex standalone path matches the official Windows installer default", () => {

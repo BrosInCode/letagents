@@ -34,6 +34,16 @@ import type {
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import { cursorSupervisedMcpServerName, type CursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
+import { cursorMcpPipeConnectorArgs } from "../main/agents/cursor/windows-turn.js";
+import { testDaemonEndpoint, writeFakeProvider } from "./platform.js";
+
+/** Where Cursor's private folders go: /tmp on POSIX (the sandbox profile names it), the temporary folder on Windows. */
+export const cursorTmp = CURSOR_MCP_CONNECTOR_PARENT;
+/** A path ends with `tail`, written with forward slashes whatever this platform's separator. */
+export const endsWithPath = (path: string, tail: string): boolean => path.replaceAll("\\", "/").endsWith(tail);
+/** The working folder of the harness's spawn requests, spelled for this platform. */
+export const WA_CURSOR_CWD = join(cursorTmp, "wa-cursor-1");
 
 export const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
@@ -266,7 +276,8 @@ socket.once("close", () => process.exit(0));
       mcpServers: {
         letagents: {
           command: process.execPath,
-          args: ["-e", connectorSource, mcpConnectorSocketPath],
+          // Windows: the wrapper listens on a named pipe, which only the product's own pipe connector can open.
+          args: process.platform === "win32" ? cursorMcpPipeConnectorArgs(mcpConnectorSocketPath) : ["-e", connectorSource, mcpConnectorSocketPath],
           env: { ELECTRON_RUN_AS_NODE: "1" },
         },
       },
@@ -524,7 +535,7 @@ export function createHarness(options: HarnessOptions = {}) {
     prepareTurnState() {},
     async createWorkspaceGeneration(input) {
       workspaceGenerationEvents.push({ kind: "create", turnIdentity: input.turnIdentity });
-      const manifestPath = `/tmp/letagents-test-generation-${createHash("sha256").update(input.turnIdentity).digest("hex")}.json`;
+      const manifestPath = join(cursorTmp, `letagents-test-generation-${createHash("sha256").update(input.turnIdentity).digest("hex")}.json`);
       const generation = {
         generationId: createHash("sha256").update(input.turnIdentity).digest("hex").slice(0, 32),
         manifestPath,
@@ -577,7 +588,7 @@ export function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): Provider
     workAttemptId: "wa-cursor-1",
     roomId: "github.com/example/repo",
     agentDisplayName: "TidalHare",
-    cwd: "/tmp/wa-cursor-1",
+    cwd: WA_CURSOR_CWD,
     launchPolicy: { mode: "ask", sandbox: "enabled" },
     ...over,
   };
@@ -710,7 +721,7 @@ export async function verifyMcpConnectorRetirement(slowMembershipProbe = false, 
   );
   const stubbornModePath = join(managedProfileRoot, "tmp", "stubborn-native-mode");
   const stubbornPidPath = join(managedProfileRoot, "tmp", "stubborn-native.pid");
-  const cursorBin = join(root, "fake-cursor-agent");
+  let cursorBin = join(root, "fake-cursor-agent");
   mkdirSync(workspace, { recursive: true });
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
   mkdirSync(dirname(runtimeEntry), { recursive: true });
@@ -776,8 +787,7 @@ lines.on("line", async (line) => {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
 });
 `);
-  writeFileSync(cursorBin, `#!/usr/bin/env node
-const fs = require("node:fs");
+  cursorBin = writeFakeProvider(cursorBin, `const fs = require("node:fs");
 const net = require("node:net");
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
@@ -795,7 +805,8 @@ if (configText.includes("LETAGENTS_SUPERVISOR_")
   || Object.keys(process.env).some((key) => key.startsWith("LETAGENTS_SUPERVISOR_"))) process.exit(71);
 const config = JSON.parse(configText);
 const server = Object.values(config.mcpServers)[0];
-const socketPath = server.args[server.args.length - 1];
+// Windows: the connector gets the named pipe, then its proof file and the pipe addon (cursorMcpPipeConnectorArgs).
+const socketPath = process.platform === "win32" ? server.args[2] : server.args[server.args.length - 1];
 const connector = spawn(server.command, server.args, { env: { ...process.env, ...server.env }, stdio: ["pipe", "pipe", "inherit"] });
 note("connector-spawned:" + connector.pid);
 const lines = readline.createInterface({ input: connector.stdout });
@@ -920,7 +931,8 @@ childProcess.spawnSync = function(command, args, options) {
       throw new Error(`${error instanceof Error ? error.message : String(error)}; ${diagnostic}; ${terminals.join(";")}`);
     }
     const firstSocket = first.text!.slice("connector-ok:".length);
-    assert.equal(existsSync(dirname(firstSocket)), false, "fresh-turn connector root is removed at terminal");
+    // The folder the launch made, not dirname of what the fake reports: on Windows that is a pipe name.
+    assert.equal(existsSync(connectorRoots[0]!), false, "fresh-turn connector root is removed at terminal");
     const firstRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
     const firstRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.throws(
@@ -936,7 +948,7 @@ childProcess.spawnSync = function(command, args, options) {
     const second = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-resume" })));
     const secondSocket = second.text!.slice("connector-ok:".length);
     assert.notEqual(secondSocket, firstSocket, "resume receives a new one-turn connector capability");
-    assert.equal(existsSync(dirname(secondSocket)), false, "resume connector root is removed at terminal");
+    assert.equal(existsSync(connectorRoots[1]!), false, "resume connector root is removed at terminal");
     const secondRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
     const secondRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.notEqual(secondRuntimePid, firstRuntimePid);
@@ -1027,7 +1039,7 @@ export async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absen
   | "group_timeout_then_empty" | "group_timeout_always" | "group_alive"): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-recycled-group-"));
   const statePath = join(root, "turn.jsonl");
-  const cursorBin = join(root, "fake-cursor-agent");
+  let cursorBin = join(root, "fake-cursor-agent");
   const preloadPath = join(root, "recycled-group-preload.cjs");
   const runtimePidPath = join(root, "runtime.pid");
   const preloadLoadedPath = join(root, "preload-loaded.log");
@@ -1037,9 +1049,9 @@ export async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absen
   const ambiguousProbePath = join(root, "ambiguous-probe.log");
   const laterProbePath = join(root, "later-probe.log");
   const groupTimeoutsPath = join(root, "group-probe-timeouts.log");
-  const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
+  const connectorRoot = join(cursorTmp, `letagents-cursor-mcp-${randomUUID()}`);
   const connectorSocketPath = join(connectorRoot, "stdio.sock");
-  const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+  const runtimeDataRoot = mkdtempSync(join(cursorTmp, "letagents-cursor-data-"));
   writeFileSync(statePath, "");
   const hostedMcp = wrapperHostedMcpFixture(root, connectorSocketPath, "valid", true);
   const runtimeEntryPath = hostedMcp.mcpRuntimeEntryPath!;
@@ -1171,8 +1183,7 @@ process.kill = function(target, signal) {
   return originalKill(target, signal);
 };
 `);
-  writeFileSync(cursorBin, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+  cursorBin = writeFakeProvider(cursorBin, `const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -1278,15 +1289,14 @@ export async function runSupervisedWorkerSocketProbe(options: {
 }): Promise<{ inside: string; outside: string; stderrTail: string }> {
   const root = mkdtempSync(join(tmpdir(), `letagents-cursor-worker-sock-${options.label}-`));
   const statePath = join(root, "turn.jsonl");
-  const cursorBin = join(root, "fake-cursor-agent");
-  const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
+  let cursorBin = join(root, "fake-cursor-agent");
+  const connectorRoot = join(cursorTmp, `letagents-cursor-mcp-${randomUUID()}`);
   const connectorSocketPath = join(connectorRoot, "stdio.sock");
   const sockprobePath = join(root, "sockprobe.json");
   writeFileSync(statePath, "");
   const hostedMcp = wrapperHostedMcpFixture(root, connectorSocketPath, "valid", true);
   const runtimeEntryPath = hostedMcp.mcpRuntimeEntryPath!;
-  writeFileSync(cursorBin, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+  cursorBin = writeFakeProvider(cursorBin, `const args = process.argv.slice(2);
 ${cursorMcpAttestationFixtureSource}
 const net = require("node:net");
 const fs = require("node:fs");
@@ -1478,22 +1488,22 @@ export async function cursorDaemonFixture() {
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
   const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
   const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
-  const { createConnection } = await import("node:net");
+  const { connectDaemon } = await import(new URL("../../../../shared/daemon-endpoint.mjs", import.meta.url).href);
   const { DatabaseSync } = await import("node:sqlite");
   const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const root = realpathSync(await mkdtemp(join(tmpdir(), "cursor-daemon-")));
   const id = "cursor_agent";
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
   };
   const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolveRequest, reject) => {
-    const socket = createConnection(paths.socketPath);
+    const socket = connectDaemon(paths.socketPath);
     let received = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: Buffer | string) => {
       received += chunk;
       if (!received.includes("\n")) return;
       socket.end();

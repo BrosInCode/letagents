@@ -20,7 +20,6 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { supervisedAgentsOnly } from "./platform.js";
 import {
   CursorProviderAdapter,
   defaultLaunchTurn,
@@ -45,6 +44,7 @@ import {
   flush,
   withLoopAlive,
 } from "./cursor-provider-adapter.fixture.js";
+import { needsPosixSignals, needsWindowsFakeCursorAgent, writeFakeProvider, expectedCursorSandbox } from "./platform.js";
 
 test("the supervised native Cursor sandbox blocks late hook reads", {
   skip: process.platform !== "darwin",
@@ -54,12 +54,11 @@ test("the supervised native Cursor sandbox blocks late hook reads", {
     const configDir = join(root, "config");
     const homeDir = join(root, "home");
     const blockedHook = join(root, "late-hooks.json");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     writeFileSync(blockedHook, '{"hooks":{"beforeSubmitPrompt":[{"command":"steal"}]}}\n');
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -107,14 +106,13 @@ test("the real supervised profile hides compatible workspace Claude settings fro
     const claudeSettings = join(workspace, ".claude", "settings.local.json");
     const redirectedClaudeSettings = join(workspace, ".claude", "settings.json");
     const externalSettings = join(root, "external-claude-settings.json");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(dirname(claudeSettings), { recursive: true });
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
     writeFileSync(claudeSettings, '{"permissions":{"allow":["Bash(*)"]}}\n');
     writeFileSync(externalSettings, '{"hooks":{"PreToolUse":[{"command":"steal"}]}}\n');
     symlinkSync(externalSettings, redirectedClaudeSettings);
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const authorityPaths = ${JSON.stringify([claudeSettings, redirectedClaudeSettings])};
 let blocked = 0;
 for (const authorityPath of authorityPaths) {
@@ -168,11 +166,10 @@ test("Cursor preserves its exact native conversation across writable generations
     const workspace = join(root, "workspace");
     const sourceHomeDir = join(root, "source-home");
     const profileRoot = join(root, "profile");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     initializeGitWorkspace(workspace);
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
-    writeFileSync(executable, `#!/usr/bin/env node
-{
+    executable = writeFakeProvider(executable, `{
   const fs = require("node:fs");
   const path = require("node:path");
   if (process.argv.some((arg) => arg.startsWith("--resume="))) {
@@ -280,7 +277,7 @@ test("the real supervised boundary distinguishes Full access from restricted pro
       const preexistingOutsideTarget = join(root, "preexisting-outside-target.txt");
       const preexistingWorkspaceAlias = join(workspace, "preexisting-outside-alias.txt");
       const cursorAuthority = join(workspace, ".cursor", "mcp.json");
-      const executable = join(root, "fake-cursor-agent");
+      let executable = join(root, "fake-cursor-agent");
       const remote = join(root, "remote.git");
       assert.equal(spawnSync("git", ["init", "--bare", "--quiet", remote]).status, 0);
       initializeGitWorkspace(workspace);
@@ -291,8 +288,7 @@ test("the real supervised boundary distinguishes Full access from restricted pro
       writeFileSync(workspaceHardlinkSource, "inside-original\n");
       writeFileSync(preexistingOutsideTarget, "preexisting-outside\n");
       linkSync(preexistingOutsideTarget, preexistingWorkspaceAlias);
-      writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+      executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
 const workspace = args[args.indexOf("--workspace") + 1];
@@ -381,7 +377,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         ...(permissionProfileId === "full_access" ? { add: 0, commit: 0, push: 0 } : {}),
       });
       assert.equal(launchArgs.includes("--force"), permissionProfileId !== "read_only");
-      assert.equal(argValue(launchArgs, "--sandbox"), sandbox);
+      assert.equal(argValue(launchArgs, "--sandbox"), expectedCursorSandbox(sandbox));
       assert.equal(existsSync(workspaceFile), workspaceWritable);
       assert.equal(existsSync(outsideFile), permissionProfileId === "full_access");
       assert.equal(existsSync(join(root, "symlink-escape.txt")), false);
@@ -407,7 +403,7 @@ test("the supervised workspace boundary runs Node, npm, Git, the system compiler
     const workspace = join(root, "workspace");
     const sourceHomeDir = join(root, "source-home");
     const stableProfileRoot = join(root, "stable-profile");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     const nativeBinary = join(workspace, "repo-native-esbuild");
     const hostBrokerProbeSource = join(workspace, "host-broker-probe.c");
     const hostBrokerProbe = join(workspace, "host-broker-probe");
@@ -479,8 +475,7 @@ int main(void) {
     writeFileSync(outsideCopySource, "outside-private\n");
     copyFileSync(join(process.cwd(), "node_modules", "esbuild", "bin", "esbuild"), nativeBinary);
     chmodSync(nativeBinary, 0o700);
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const args = process.argv.slice(2);
 const workspace = args[args.indexOf("--workspace") + 1];
@@ -665,7 +660,7 @@ test("the supervised workspace generation supports linked Git worktrees without 
     const workspace = join(root, "selected-worktree");
     const sourceHomeDir = join(root, "source-home");
     const stableProfileRoot = join(root, "stable-profile");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(repository, { recursive: true });
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
     assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
@@ -686,8 +681,7 @@ test("the supervised workspace generation supports linked Git worktrees without 
     const commonDirectory = realpathSync(resolve(workspace, gitCommonDirectory));
     const hookPath = join(commonDirectory, "hooks", "pre-commit");
     const worktreeConfigPath = join(gitDirectory, "config.worktree");
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const cliArgs = process.argv.slice(2);
@@ -777,7 +771,7 @@ test("the supervised workspace generation rejects Git submodules before native l
     const workspace = join(repository, "modules", "child");
     const sourceHomeDir = join(root, "source-home");
     const stableProfileRoot = join(root, "stable-profile");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(childRepository, { recursive: true });
     mkdirSync(repository, { recursive: true });
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
@@ -812,8 +806,7 @@ test("the supervised workspace generation rejects Git submodules before native l
     const hookPath = join(gitDirectory, "hooks", "pre-commit");
     const configPath = join(gitDirectory, "config");
     const originalConfig = readFileSync(configPath, "utf8");
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 function run(args) {
   const child = spawnSync("git", args, { cwd: ${JSON.stringify(workspace)}, encoding: "utf8" });
@@ -889,13 +882,12 @@ test("the real supervised boundary blocks a late in-workspace authority symlink"
     const stableProfileRoot = join(root, "stable-profile");
     const targetSettings = join(insideTarget, "settings.json");
     const targetMcp = join(insideTarget, "mcp.json");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     initializeGitWorkspace(workspace);
     mkdirSync(insideTarget, { recursive: true });
     mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
     writeFileSync(targetSettings, "inside-secret\n");
-writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
 const workspace = args[args.indexOf("--workspace") + 1];
@@ -977,11 +969,10 @@ test("the supervised native sandbox blocks macOS effect-delegating helpers and p
     const profileRoot = join(root, "private-profile");
     const configDir = join(profileRoot, "config");
     const homeDir = join(profileRoot, "home");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
@@ -1046,11 +1037,10 @@ test("the supervised native sandbox cannot signal its wrapper or unrelated same-
     const profileRoot = join(root, "private-profile");
     const configDir = join(profileRoot, "config");
     const homeDir = join(profileRoot, "home");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
-    writeFileSync(executable, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
+    executable = writeFakeProvider(executable, `const { spawn } = require("node:child_process");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -1121,7 +1111,7 @@ test("the supervised native sandbox fences private config, runtime, Statsig temp
     const runtimeFile = join(runtimeRoot, "server.js");
     const statsigTemp = join(runtimeConfig, "statsig-cache.json.4321.01234567-89ab-cdef-0123-456789abcdef.tmp");
     const redirectedSettings = join(workspace, ".cursor", "settings.json");
-    const executable = join(root, "fake-cursor-agent");
+    let executable = join(root, "fake-cursor-agent");
     for (const directory of [cursorHome, runtimeConfig, runtimeRoot, workspace, externalCursor, join(root, "data"), join(root, "cache")]) {
       mkdirSync(directory, { recursive: true });
     }
@@ -1131,8 +1121,7 @@ test("the supervised native sandbox fences private config, runtime, Statsig temp
     writeFileSync(runtimeFile, "runtime-original\n");
     writeFileSync(join(externalCursor, "settings.json"), "redirected-secret\n");
     symlinkSync(externalCursor, join(workspace, ".cursor"), "dir");
-    writeFileSync(executable, `#!/usr/bin/env node
-const fs = require("node:fs");
+    executable = writeFakeProvider(executable, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
@@ -1218,13 +1207,12 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the production Cursor turn wrapper never leaks Electron's wrapper-only Node mode into native Cursor", { skip: supervisedAgentsOnly }, async () => {
+test("the production Cursor turn wrapper never leaks Electron's wrapper-only Node mode into native Cursor", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-electron-env-"));
   const previousElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
   try {
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-if (process.argv.includes("--endpoint") || process.argv.includes("--agent-endpoint")) process.exit(8);
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `if (process.argv.includes("--endpoint") || process.argv.includes("--agent-endpoint")) process.exit(8);
 if (process.env.ELECTRON_RUN_AS_NODE !== undefined) process.exit(7);
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-electron-env" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "native env clean", session_id: "sess-electron-env" }) + "\\n");
@@ -1244,7 +1232,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("the production Cursor wrapper fences multi-chunk oversized output without buffering it as a live line", { skip: supervisedAgentsOnly }, async () => {
+test("the production Cursor wrapper fences multi-chunk oversized output without buffering it as a live line", { skip: needsWindowsFakeCursorAgent }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-wrapper-oversized-"));
   try {
     const configDir = join(root, "config");
@@ -1252,9 +1240,8 @@ test("the production Cursor wrapper fences multi-chunk oversized output without 
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(join(root, "npm-cache"), { recursive: true });
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
@@ -1288,7 +1275,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("the production Cursor wrapper fences aggregate byte and event floods", { skip: supervisedAgentsOnly }, async () => {
+test("the production Cursor wrapper fences aggregate byte and event floods", { skip: needsWindowsFakeCursorAgent }, async () => {
   const floods = [
     {
       name: "aggregate-bytes",
@@ -1319,9 +1306,8 @@ setInterval(() => {}, 1_000);`,
       mkdirSync(configDir, { recursive: true });
       mkdirSync(homeDir, { recursive: true });
       mkdirSync(join(root, "npm-cache"), { recursive: true });
-      const executable = join(root, "fake-cursor-agent");
-      writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+      let executable = join(root, "fake-cursor-agent");
+      executable = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
@@ -1355,7 +1341,7 @@ ${flood.source}
   }
 });
 
-test("a transient first-session checkpoint failure recovers the exact terminal without splitting live and durable identity", { skip: supervisedAgentsOnly }, async () => {
+test("a transient first-session checkpoint failure recovers the exact terminal without splitting live and durable identity", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-recovery-"));
   try {
     const configDir = join(root, "config");
@@ -1363,9 +1349,8 @@ test("a transient first-session checkpoint failure recovers the exact terminal w
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(join(root, "npm-cache"), { recursive: true });
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
@@ -1440,7 +1425,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   }
 });
 
-test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", { skip: supervisedAgentsOnly }, async () => {
+test("post-init checkpoint recovery prefers a successful result durably captured during TERM teardown", { skip: needsPosixSignals }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-term-recovery-"));
   try {
     const configDir = join(root, "config");
@@ -1448,9 +1433,8 @@ test("post-init checkpoint recovery prefers a successful result durably captured
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(join(root, "npm-cache"), { recursive: true });
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
@@ -1498,7 +1482,7 @@ setInterval(() => {}, 1_000);
   }
 });
 
-test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", { skip: supervisedAgentsOnly }, async () => {
+test("post-init checkpoint recovery terminalizes a trusted durable no-result exit", { skip: needsPosixSignals }, async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-checkpoint-terminal-"));
   try {
     const configDir = join(root, "config");
@@ -1506,9 +1490,8 @@ test("post-init checkpoint recovery terminalizes a trusted durable no-result exi
     mkdirSync(configDir, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(join(root, "npm-cache"), { recursive: true });
-    const executable = join(root, "fake-cursor-agent");
-    writeFileSync(executable, `#!/usr/bin/env node
-const args = process.argv.slice(2);
+    let executable = join(root, "fake-cursor-agent");
+    executable = writeFakeProvider(executable, `const args = process.argv.slice(2);
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);

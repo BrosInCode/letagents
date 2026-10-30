@@ -1,7 +1,7 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
-import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { realpathSync, writeFileSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,8 +9,9 @@ import { CodexProviderAdapter, codexMcpWorkplaceConfigOverrides } from "../main/
 import { CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE, writeCodexSupervisorBridgeContext } from "../main/agents/codex-supervisor-bridge-context.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import { assertOwnerPrivateFile } from "./harness.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
+import { MCP_RUNTIME_CONTRACT_DEADLINE_MS } from "../main/agents/codex/launch-contract.js";
 
 test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
   for (const failureTiming of ["before", "during-callback"] as const) {
@@ -739,7 +740,7 @@ test("Codex custodial polling fails closed on old runtime contracts and incomple
   }
 });
 
-test("Codex custodial polling reads the selected built executable contract without owner environment or fallback", { skip: supervisedAgentsOnly }, async () => {
+test("Codex custodial polling reads the selected built executable contract without owner environment or fallback", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-codex-contract-"));
   const entry = join(directory, "dist", "mcp", "server.js");
   const previousDev = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
@@ -803,7 +804,7 @@ test("Codex custodial polling reads the selected built executable contract witho
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       writeFileSync(probeReleaseFile, "release");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8_200);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, MCP_RUNTIME_CONTRACT_DEADLINE_MS + 200);
       await delayedProbeAssertion;
     }
 
@@ -818,7 +819,7 @@ test("Codex custodial polling reads the selected built executable contract witho
       await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
         error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
         && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
-      assert.ok(Date.now() - probeStartedAt < 15_000, "inherited output pipes must not extend the eight-second probe deadline to the descendant's lifetime");
+      assert.ok(Date.now() - probeStartedAt < MCP_RUNTIME_CONTRACT_DEADLINE_MS + 7_000, "inherited output pipes must not extend the probe deadline to the descendant's lifetime");
     } finally {
       const descendantPid = Number(await readFile(descendantPidFile, "utf8").catch(() => "0"));
       if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {
@@ -837,7 +838,7 @@ test("Codex custodial polling reads the selected built executable contract witho
     const handle = await adapter.spawn(request);
     assert.equal(handle.observedState(), "idle");
     assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
-    assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(JSON.stringify(await realpath(entry))), "launch uses the resolver's canonical executable");
+    assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(JSON.stringify(realpathSync(entry))), "launch uses the resolver's canonical executable");
     await writeFile(entry, [
       "if (process.env.LETAGENTS_API_URL !== 'letagents-local://rooms' || process.env.LETAGENTS_TOKEN || process.env.LETAGENTS_SUPERVISOR_ENTRY_ID) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
@@ -869,7 +870,7 @@ test("Codex supervised launch fails closed before app-server start when bridge c
   assert.deepEqual(harness.launchOptions, []);
 });
 
-test("Codex supervisor bridge context is owner-only, atomic, and contains no worker credential", { skip: supervisedAgentsOnly }, async () => {
+test("Codex supervisor bridge context is owner-only, atomic, and contains no worker credential", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-supervisor-context-"));
   try {
     const base = {
@@ -885,17 +886,18 @@ test("Codex supervisor bridge context is owner-only, atomic, and contains no wor
     assert.equal(JSON.parse(encoded).execution_generation_id, "generation_resumed");
     assert.doesNotMatch(encoded, /session_token|session-secret|authorization/i);
     assert.doesNotMatch(encoded, /socket_path/, "repo-controlled context cannot select the credential transport");
-    assert.equal((await lstat(path)).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(path, root);
     assert.deepEqual(await readdir(root), [CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE], "atomic rewrite leaves no temporary context");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Codex dev MCP entry override adds exact command/args/cwd overrides when devMcpServerEntryPath is supplied", { skip: supervisedAgentsOnly }, async () => {
+test("Codex dev MCP entry override adds exact command/args/cwd overrides when devMcpServerEntryPath is supplied", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-codex-dev-mcp-entry-"));
   try {
-    const quotedDirectory = join(root, 'path with spaces and "quotes"');
+    // Windows cannot name a folder with a double quote.
+    const quotedDirectory = join(root, process.platform === "win32" ? "path with spaces and 'quotes'" : 'path with spaces and "quotes"');
     await mkdir(quotedDirectory);
     const entryPath = join(quotedDirectory, "server.js");
     await writeFile(entryPath, "// stub");

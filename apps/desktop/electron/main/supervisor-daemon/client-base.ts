@@ -114,7 +114,7 @@ export abstract class SupervisorDaemonClientBase {
     this.stateDir = options.stateDir ?? letagentsHome();
     const endpoint = daemonEndpoint(this.stateDir);
     this.socketPath = options.socketPath ?? endpoint.connectPath;
-    this.peerProofPath = options.socketPath === undefined ? endpoint.proofPath : null;
+    this.peerProofPath = options.socketPath === undefined ? endpoint.proofPath : (options.peerProofPath ?? null);
     // Windows pipe only: check the proof's privacy before the first request needs it.
     if (supervisedAgentsSupported()) prepareDaemonConnection(this.socketPath, { proofPath: this.peerProofPath });
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");

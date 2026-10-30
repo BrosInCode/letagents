@@ -24,7 +24,6 @@ import {
   type ProviderReplayEntry,
   type TranscriptStartEntry,
 } from "./provider-replay/transcript.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 const START: TranscriptStartEntry = {
   type: "transcript_start",
@@ -752,7 +751,7 @@ test("the committed recordings hold no known leak shape and do not change under 
   }
 });
 
-test("the Codex recorder records nothing when it is imported, and its cleanup stops the app-server and removes the workspace", { skip: supervisedAgentsOnly }, async () => {
+test("the Codex recorder records nothing when it is imported, and its cleanup stops the app-server and removes the workspace", async () => {
   // Importing would run a recording if the file did not check how it was started.
   const { agentHomeDigest, discardRecording } = await import("../scripts/record-codex-replay.js");
 
@@ -761,10 +760,12 @@ test("the Codex recorder records nothing when it is imported, and its cleanup st
   const emptyHome = mkdtempSync(join(tmpdir(), "letagents-replay-home-"));
   const digest = agentHomeDigest({ HOME: emptyHome, CODEX_HOME: join(emptyHome, "another", "codex-home") });
   assert.match(digest ?? "", /^[0-9a-f]{12}$/);
+  // The redactor reads the paths of a recording in their POSIX form (it turns a Windows path under the home into the bare home).
+  const recorded = emptyHome.replaceAll("\\", "/");
   const hidden = new ReplayRedactor({
-    workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: emptyHome, username: "",
+    workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: recorded, username: "",
     personalNames: [], hostnames: [], secrets: [digest!], ownerSetupNames: [], accountMethods: [],
-  }).redactFrame({ id: 1, result: { codexHome: join(emptyHome, ".letagents", `codex-agent-home-${digest}`) } });
+  }).redactFrame({ id: 1, result: { codexHome: `${recorded}/.letagents/codex-agent-home-${digest}` } });
   assert.deepEqual(hidden, { id: 1, result: { codexHome: "/home/replay-user/.letagents/codex-agent-home-<redacted>" } });
   // The usual arrangement has the plain name, and nothing to keep out.
   assert.equal(agentHomeDigest({ HOME: emptyHome }), null);

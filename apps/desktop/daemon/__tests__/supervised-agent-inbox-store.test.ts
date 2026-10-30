@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
 
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
@@ -13,6 +12,7 @@ import { ManifestStore } from "../manifest-store.js";
 import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { RETAINED_TERMINAL_TIMELINE_EVENTS, RETAINED_TERMINAL_CONTINUATION_REPAIRS, settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -22,7 +22,7 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervised-inbox-"));
-  return { root, database: join(root, "daemon-state.sqlite"), legacy: join(root, "legacy.json"), cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { root, database: join(root, "daemon-state.sqlite"), legacy: join(root, "legacy.json"), cleanup: () => removeTestDirectory(root) };
 }
 
 function captureReceipt(database: DatabaseSync, item: Awaited<ReturnType<SupervisedAgentInboxStore["checkpointTurnStarted"]>>): string {
@@ -4000,7 +4000,7 @@ test("generation rollover preserves only the exact in-memory credential authorit
   } finally { await env.cleanup(); }
 });
 
-test("legacy import retains token-free recovery evidence", { skip: supervisedAgentsOnly }, async () => {
+test("legacy import retains token-free recovery evidence", async () => {
   const env = await fixture(); try {
     const secret = "legacy-secret-must-not-survive";
     await (await import("node:fs/promises")).writeFile(env.legacy, JSON.stringify({ version: 1, bindings: {

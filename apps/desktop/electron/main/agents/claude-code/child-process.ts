@@ -8,7 +8,7 @@ import { desktopRuntimeEnvironment } from "../../desktop-shell-environment.js";
 import { withoutRoomAuthority } from "../room-authority-environment.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "../rental-child-environment.js";
-import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, errorMessage, type ProviderProcessExit } from "../provider-evidence.js";
+import { defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, errorMessage, type ProviderProcessExit, providerTreeExit } from "../provider-evidence.js";
 import type { ClaudeEvidenceRecord } from "../claude-room-turn-evidence.js";
 import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";
@@ -111,7 +111,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     });
     child.once("exit", (code, signal) => {
       exitedSettled = true;
-      resolve({ type: "exit", code, signal });
+      resolve(providerTreeExit("Claude Code", code, signal));
     });
   });
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -18,7 +18,8 @@ import {
 } from "../execution-approval-projection.js";
 import type { ApprovalReference } from "../execution-approval-journal.js";
 import type { ExecutionApprovalProjectionSource } from "../execution-approval-projection.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { needsPosixFilePathReports } from "../../electron/__tests__/platform.js";
 
 const expectedBase = {
   requestId: "request",
@@ -62,7 +63,7 @@ async function fixture() {
       provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms
     ) VALUES('turn','attempt','agent','room','generation','runtime','continuation','native-turn','active','none',100);
   `);
-  return { database, directory, workspace, cleanup: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
+  return { database, directory, workspace, cleanup: async () => { database.close(); await removeTestDirectory(directory); } };
 }
 
 function code(error: unknown): string | undefined {
@@ -94,7 +95,7 @@ function admitRequest(database: DatabaseSync, source: ExecutionApprovalProjectio
   return { ...expectedBase, requestId, nativeRequestId, requestSha256 };
 }
 
-test("projection persists only canonical workspace-relative counts and survives reopen", { skip: supervisedAgentsOnly }, async () => {
+test("projection persists only canonical workspace-relative counts and survives reopen", { skip: needsPosixFilePathReports }, async () => {
   const f = await fixture();
   const diff = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
   try {

@@ -4,7 +4,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { providerLaunchCommand } from "./provider-executable.mjs";
+import { ProviderInstallError, providerLaunchCommand } from "./provider-executable.mjs";
 
 export { resolveWindowsCommand } from "./provider-executable.mjs";
 
@@ -253,8 +253,7 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
   if (platform !== "win32") return spawnProcess(command, args, spawnOptions);
   const env = treeOptions.env ?? spawnOptions.env ?? process.env;
   const launch = providerLaunchCommand(command, args, {
-    // A batch file that is no npm shim still goes through cmd.exe here, as before.
-    platform, env, cwd: spawnOptions.cwd, exists: treeOptions.exists, launchOptions: treeOptions.launchOptions, electron: treeOptions.electron, allowCmd: true,
+    platform, env, cwd: spawnOptions.cwd, exists: treeOptions.exists, launchOptions: treeOptions.launchOptions, electron: treeOptions.electron,
   });
   const resolved = launch.resolved;
   const helper = treeOptions.helperPath === undefined ? processTreeHelperPath({ platform, env: treeOptions.helperEnv }) : treeOptions.helperPath;
@@ -268,6 +267,9 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   };
   // Not found: the path providerLaunchCommand gives (one that cannot exist, for a bare name), so the caller sees Node's own ENOENT.
+  if (resolved && !helper && (treeOptions.requireHelper ?? packagedApp())) {
+    throw new ProviderInstallError(path.win32.basename(launch.file), processTreeHelperRefusal() ?? `${PROCESS_TREE_HELPER_NAME} is missing from this installation.`);
+  }
   if (!helper || !resolved) return remember(spawnProcess(launch.file, launch.args, direct), null);
   const wait = waitArgument(treeOptions);
   const commandLine = launch.windowsVerbatimArguments
@@ -275,6 +277,12 @@ export function spawnTree(command, args, spawnOptions = {}, treeOptions = {}) {
     : windowsCommandLine(launch.file, launch.args);
   const { argv0: _argv0, windowsVerbatimArguments: _verbatim, ...helperOptions } = spawnOptions;
   return remember(spawnProcess(helper, ["spawn", launch.file, commandLine, ...wait], { ...helperOptions, ...(childEnv ? { env: childEnv } : {}), windowsHide: true }), helper);
+}
+
+/** An installed app ships the helper, so nothing it starts runs outside the job; a development run may not have built it. */
+function packagedApp() {
+  const resources = typeof process.resourcesPath === "string" ? process.resourcesPath : "";
+  return Boolean(resources.trim()) && !/[\\/]node_modules[\\/]/.test(resources);
 }
 
 /** Windows: keep a spawned child findable by pid until it exits; `helper` null for a direct child. */
@@ -328,6 +336,9 @@ export function processBirth(pid, options = {}) {
   const info = windowsProcessInfo(pid, options);
   if (info === null) return null;
   if (info === undefined) return probeAbsence(pid, options);
+  // A process that has ended still has a record while any handle to it is open (the parent's own
+  // handle, for one). The helper waited on the process itself: it is gone, not a live birth.
+  if (info.exited) return null;
   return `${WINDOWS_BIRTH_PREFIX}${info.creationTime}`;
 }
 

@@ -1,20 +1,23 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "../control-request-router.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { windowsSystemTool } from "../../../../shared/owner-private-fs.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
  * A real daemon on its own socket and database. Everything a local process
@@ -28,7 +31,7 @@ type Reply = { ok: boolean; result?: unknown; error?: string };
 
 function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<Reply> {
   return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
+    const client = connectDaemon(socketPath);
     let received = "";
     let settled = false;
     const timeout = setTimeout(() => { client.destroy(); reject(new Error(`'${method}' did not answer`)); }, 10_000);
@@ -77,7 +80,7 @@ async function withDaemon(run: (context: {
   outsider: KeyObject;
 }) => Promise<void>, legacyManifest?: (root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "letagents-home-harness-"));
-  const paths = { lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+  const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl") };
   const host = generateKeyPairSync("ed25519");
   const outsider = generateKeyPairSync("ed25519");
@@ -133,11 +136,11 @@ async function withDaemon(run: (context: {
     await run({ socketPath: paths.socketPath, generation, signed, configuration, setOwnSetup, storedPolicy, forceStoredKey, setRunning, roster, outsider: outsider.privateKey });
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 }
 
-test("only the desktop app's signed request turns an agent's use of its owner's own setup on", { timeout: 60_000 }, async () => {
+test("only the desktop app's signed request turns an agent's use of its owner's own setup on", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, generation, signed, configuration, setOwnSetup, storedPolicy, outsider }) => {
     const created = await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_owner", "codex") });
     assert.equal(created.ok, true, created.error);
@@ -284,7 +287,7 @@ test("only the desktop app's signed request turns an agent's use of its owner's 
   });
 });
 
-test("the roster shows what a running agent really has, not only what is saved", { timeout: 60_000 }, async () => {
+test("the roster shows what a running agent really has, not only what is saved", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setOwnSetup, setRunning, roster }) => {
     const id = "supervised_owner";
     assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent(id, "codex") })).ok, true);
@@ -368,7 +371,7 @@ test("turning the owner's own setup off restarts an idle agent that still has it
   }
 });
 
-test("a signed request still cannot give a rental, a Cursor agent, an Open Model agent or an agent that collects its own messages the owner's own setup", { timeout: 60_000 }, async () => {
+test("a signed request still cannot give a rental, a Cursor agent, an Open Model agent or an agent that collects its own messages the owner's own setup", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setOwnSetup, storedPolicy, forceStoredKey }) => {
     for (const [id, provider, availability, reason, deliveryMode] of [
       ["supervised_rental_0123456789abcdef", "cursor", "rental", /rented agent works for someone else/, "daemon_inbox"],
@@ -416,7 +419,7 @@ test("a signed request still cannot give a rental, a Cursor agent, an Open Model
   });
 });
 
-test("an imported manifest never brings the owner's own setup with it", { timeout: 60_000 }, async () => {
+test("an imported manifest never brings the owner's own setup with it", { timeout: 60_000 * WAIT_SCALE }, async () => {
   const { createHash } = await import("node:crypto");
   await withDaemon(async ({ configuration, storedPolicy }) => {
     assert.equal((await configuration("supervised_imported")).home_harness, false);
@@ -454,7 +457,7 @@ function installedClaude(scratch: string): string | null {
   }
 }
 
-test("a policy an unsigned creation stored keeps nothing of a project running once the owner signs the switch on", { timeout: 180_000 }, async () => {
+test("a policy an unsigned creation stored keeps nothing of a project running once the owner signs the switch on", { timeout: 180_000 * WAIT_SCALE }, async () => {
   const scratch = await mkdtemp(join(tmpdir(), "letagents-home-harness-launch-"));
   try {
     await withDaemon(async ({ socketPath, setOwnSetup, storedPolicy, configuration }) => {
@@ -494,10 +497,15 @@ test("a policy an unsigned creation stored keeps nothing of a project running on
       await mkdir(join(home, ".claude"), { recursive: true });
       await mkdir(join(project, ".claude"), { recursive: true });
       await writeFile(join(home, ".claude", ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true }));
+      // A program that makes a file, the same on every platform: /usr/bin/touch does not exist on Windows.
+      const touch = join(scratch, "touch.mjs");
+      await writeFile(touch, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], '');\n");
+      const slashed = (path: string) => path.replaceAll("\\", "/");
       await writeFile(join(project, ".claude", "settings.json"), JSON.stringify({
-        enableAllProjectMcpServers: true, hooks: { SessionStart: [{ hooks: [{ type: "command", command: `/usr/bin/touch ${hookRan}` }] }] },
+        enableAllProjectMcpServers: true,
+        hooks: { SessionStart: [{ hooks: [{ type: "command", command: `"${slashed(process.execPath)}" "${slashed(touch)}" "${slashed(hookRan)}"` }] }] },
       }));
-      await writeFile(join(project, ".mcp.json"), JSON.stringify({ mcpServers: { repo_only: { command: "/usr/bin/touch", args: [serverRan] } } }));
+      await writeFile(join(project, ".mcp.json"), JSON.stringify({ mcpServers: { repo_only: { command: process.execPath, args: [touch, serverRan] } } }));
       const roomConfig = join(scratch, "room.json");
       await writeFile(roomConfig, JSON.stringify({ mcpServers: {} }));
       const args = claudeCliLaunchArgs({ approvalProfileLabel: null, homeHarness: true, ownerMcpStartupMs: 5_000, cwd: project,
@@ -506,7 +514,7 @@ test("a policy an unsigned creation stored keeps nothing of a project running on
       const claude = installedClaude(home);
       if (!claude) return;
       const child = spawn(claude, args, {
-        cwd: project, stdio: ["pipe", "pipe", "ignore"], detached: true,
+        cwd: project, stdio: ["pipe", "pipe", "ignore"], detached: process.platform !== "win32",
         // Nothing listens on the discard port, and the key is not a key.
         env: claudeChildEnvironment({ env: claudeOwnerSetupStartEnvironment(5_000, true), ownerSetup: true }, {
           PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: join(home, ".claude"), ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
@@ -531,10 +539,16 @@ test("a policy an unsigned creation stored keeps nothing of a project running on
           "the project's hook did not run and its server did not start");
       } finally {
         clearTimeout(timer);
-        try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* Already gone. */ }
+        if (process.platform === "win32") {
+          // There are no process groups: end the whole tree, then wait, as Windows will not delete a folder a process still holds.
+          if (child.pid) spawnSync(windowsSystemTool("taskkill.exe"), ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+          if (child.exitCode === null && child.signalCode === null) await new Promise((resolve) => { child.once("exit", resolve); setTimeout(resolve, 10_000).unref(); });
+        } else {
+          try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* Already gone. */ }
+        }
       }
     });
   } finally {
-    await rm(scratch, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });

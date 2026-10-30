@@ -5,8 +5,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { WINDOWS_TEST_HELPER } from '../../../electron/__tests__/platform.js';
 import { hasReviewableRoomContribution } from '../../../../../shared/room-agent-work.mjs';
-import { captureRecordedRemoteTips, captureRemoteTips, captureWorkspaceHead, captureWorkspacePair, captureWorkspaceTree, releaseWorkspaceTree } from '../../../../../shared/workspace-turn-capture.mjs';
+import { captureRecordedRemoteTips, captureWorkspaceHead, captureWorkspacePair, captureWorkspaceTree, releaseWorkspaceTree } from '../../../../../shared/workspace-turn-capture.mjs';
+
+// Windows ends a stalled remote transport (ssh) with the process-tree helper's job. The test run names the built helper.
+if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.env.LETAGENTS_PROCESS_TREE_HELPER = WINDOWS_TEST_HELPER;
 
 // Real repositories for the tests of what a change card counts: a bare remote with a
 // `staging` branch, a teammate who lands work on it, and agent workspaces whose turns
@@ -117,14 +121,8 @@ export const card = (changes: Changes) => hasReviewableRoomContribution({ versio
 export async function turn(workspace: string, startingRevision: string, work: () => void | Promise<void>,
   evidence: { head?: string | null; tips?: string[] | null | Promise<string[] | null> } = {}) {
   const identity = randomUUID();
-  // The daemon asks the remote it recorded; on Windows that question fails
-  // until tier 3 (its GIT_DIR is os.devNull, which Git for Windows reads as an
-  // empty file), so there the turn asks the workspace's own remote, as the npm
-  // MCP server does (src/mcp/server/runtime/workspace-capture.ts). The rule
-  // under test is the same either way; the recorded-remote tests skip there.
-  const tips = process.platform === 'win32'
-    ? await captureRemoteTips(workspace)
-    : await captureRecordedRemoteTips(recorded.get(workspace));
+  // The daemon asks the remote it recorded, with a real `git ls-remote`.
+  const tips = await captureRecordedRemoteTips(recorded.get(workspace));
   const baseline = await captureWorkspaceTree(workspace, identity);
   assert.ok(baseline);
   const head = await captureWorkspaceHead(workspace);

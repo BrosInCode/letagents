@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import { join, resolve } from "node:path";
+import test from "node:test";
 
 import { WorkDurabilityStore } from "../durability-store.js";
 import {
@@ -11,6 +11,8 @@ import {
   isEphemeralWorkspaceMarker,
 } from "../ephemeral-workspace-provisioner.js";
 import { probeScratchWorkspaceGit, RETAINED_REPLACED_ENTRIES } from "../../../../shared/scratch-workspace-repository.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { assertOwnerPrivate, needsShellScriptGit } from "../../electron/__tests__/platform.js";
 
 test("room-only work attempts conclude and purge without invoking Git", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-rental-ephemeral-")));
@@ -55,7 +57,7 @@ test("room-only work attempts conclude and purge without invoking Git", async ()
     await assert.rejects(stat(workspace.path), { code: "ENOENT" });
   } finally {
     await store.close();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -84,7 +86,7 @@ test("startup orphan collection removes only untracked room-only workspaces", as
     await assert.rejects(stat(emptyCrash), { code: "ENOENT" });
     assert.equal((await stat(unsafe)).isDirectory(), true, "unknown contents fail closed");
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -100,8 +102,9 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.trim();
 }
 function assertOwnRepository(workspace: string): void {
-  assert.equal(git(workspace, "rev-parse", "--show-toplevel"), workspace);
-  assert.equal(git(workspace, "rev-parse", "--absolute-git-dir"), join(workspace, ".git"));
+  // Git prints a path with forward slashes on Windows.
+  assert.equal(resolve(git(workspace, "rev-parse", "--show-toplevel")), workspace);
+  assert.equal(resolve(git(workspace, "rev-parse", "--absolute-git-dir")), join(workspace, ".git"));
   assert.equal(git(workspace, "symbolic-ref", "HEAD"), "refs/heads/main");
   assert.equal(git(workspace, "remote"), "", "the repository has no remote to push to");
   assert.equal(git(workspace, "rev-list", "--all", "--count"), "0", "the repository starts with no commits");
@@ -139,7 +142,7 @@ test("each room-only workspace is the root of its own empty repository, and room
     assert.equal(recorded.stdout.trim() === "true", ignoresCase);
     assert.deepEqual((await readdir(join(first.path, ".git"))).sort(), ["HEAD", "config", "info", "objects", "refs"]);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -173,7 +176,7 @@ test("workspaces and a room-only directory from older versions are upgraded, and
     assert.equal(await provisioner.ensureRepository(launched.path), "replaced");
     assertOwnRepository(launched.path);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -199,7 +202,7 @@ test("a repository is only ever added to exactly one room-only workspace", async
       await assert.rejects(lstat(join(path, ".git")), { code: "ENOENT" }, path);
     }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -218,7 +221,7 @@ test("concurrent provisioning gives every workspace exactly one complete reposit
     assertOwnRepository(target);
     assert.deepEqual((await readdir(target)).sort(), [".git", ".letagents-work-attempt.json"], "no staging directory is left behind");
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -253,7 +256,7 @@ test("provisioning needs no Git and ignores the owner's Git environment", async 
     assert.doesNotMatch(await readFile(join(workspace.path, ".git", "config"), "utf8"), /hostile|hooksPath|template/i);
   } finally {
     restore();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -292,7 +295,7 @@ test("anything at .git that Git would not take as a repository is moved aside an
     }
     assert.equal(git(elsewhere, "rev-parse", "--is-inside-work-tree"), "true", "a linked repository is never touched");
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -301,7 +304,7 @@ test("the repository is private, excludes exactly the daemon's own entries, and 
   try {
     const provisioner = new EphemeralWorkspaceProvisioner(root);
     const workspace = await provisioner.provision({ workAttemptId: ids[0], taskId: "details" });
-    assert.equal((await stat(join(workspace.path, ".git"))).mode & 0o777, 0o700);
+    await assertOwnerPrivate(join(workspace.path, ".git"), "directory");
     assert.equal(await readFile(join(workspace.path, ".git", "info", "exclude"), "utf8"),
       "/.git.*.tmp\n/.git.replaced.*\n/.letagents-work-attempt.json\n/.letagents-work-attempt.json.*.tmp\n");
     // Anchored at the workspace root: the same names elsewhere are the agent's.
@@ -316,14 +319,15 @@ test("the repository is private, excludes exactly the daemon's own entries, and 
 
     // A process that died while writing leaves its staging directory; a live one's is left alone.
     const dead = join(workspace.path, `.git.999999.${ids[2]}.tmp`);
-    const live = join(workspace.path, `.git.1.${ids[3]}.tmp`);
+    // PID 1 is alive on POSIX; a Windows process id is never 1, and this test process is alive.
+    const live = join(workspace.path, `.git.${process.platform === "win32" ? process.pid : 1}.${ids[3]}.tmp`);
     await mkdir(dead);
     await mkdir(live);
     await provisioner.ensureRepository(workspace.path);
     await assert.rejects(lstat(dead), { code: "ENOENT" });
     assert.equal((await stat(live)).isDirectory(), true);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -340,7 +344,7 @@ test("a crash while writing the repository leaves the marker, so orphan collecti
       "the marker is written before the repository");
     assert.deepEqual(await new EphemeralWorkspaceProvisioner(root).garbageCollectOrphans(new Set()), [ids[0]]);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -364,11 +368,23 @@ test("a valid HEAD is kept whatever it names, and only the newest broken entries
     const heads = await Promise.all(aside.map((name) => readFile(join(workspace.path, name, "HEAD"), "utf8")));
     assert.deepEqual(new Set(heads), new Set(["a".repeat(39), "ref: refs/heads/main\nextra\n", ""]));
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
-test("the Git check runs Git as OpenCode will, with only the launch's environment, within its bound", async () => {
+test("the Git check finds no Git when the launch's PATH has none, and reads the repository with the real Git", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-scratch-real-probe-")));
+  try {
+    const workspace = await new EphemeralWorkspaceProvisioner(root).provision({ workAttemptId: ids[0], taskId: "probe" });
+    assert.equal(await probeScratchWorkspaceGit(workspace.path, { PATH: join(root, "nowhere") }), "no git on the launch's PATH");
+    // The real Git on this machine reads the repository.
+    assert.equal(await probeScratchWorkspaceGit(workspace.path, { PATH: process.env.PATH }), null);
+  } finally {
+    await removeTestDirectory(root);
+  }
+});
+
+test("the Git check runs Git as OpenCode will, with only the launch's environment, within its bound", { skip: needsShellScriptGit }, async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "letagents-scratch-probe-")));
   try {
     const workspace = await new EphemeralWorkspaceProvisioner(root).provision({ workAttemptId: ids[0], taskId: "probe" });
@@ -377,7 +393,6 @@ test("the Git check runs Git as OpenCode will, with only the launch's environmen
     const stub = async (body: string) => writeFile(join(bin, "git"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     const path = `${bin}:/bin:/usr/bin`;
 
-    assert.equal(await probeScratchWorkspaceGit(workspace.path, { PATH: join(root, "nowhere") }), "no git on the launch's PATH");
     await stub("exit 128");
     assert.match(await probeScratchWorkspaceGit(workspace.path, { PATH: path }) ?? "", /^git rev-parse --git-dir failed: /);
     await stub("echo /somewhere/else/.git");
@@ -402,9 +417,7 @@ test("the Git check runs Git as OpenCode will, with only the launch's environmen
     await stub("echo .git");
     assert.equal(await probeScratchWorkspaceGit(workspace.path, { PATH: path }, { platform: "darwin", xcodeSelect }), null);
     await assert.rejects(lstat(marker), { code: "ENOENT" });
-    // The real Git on this machine reads the repository.
-    assert.equal(await probeScratchWorkspaceGit(workspace.path, { PATH: process.env.PATH }), null);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

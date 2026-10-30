@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,7 +15,8 @@ import { validateExecutionApprovalPublicationSchema } from "../execution-approva
 import { LifecycleProjectionLedger, validateLegacyLifecycleProjectionLedgerSchema,
   validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
-import { supervisedAgentsOnly } from "../../electron/__tests__/platform.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { assertKilledBySelf, CHILD_PROCESS_TIMEOUT_MS } from "../../electron/__tests__/platform.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -27,7 +28,7 @@ async function fixture() {
   const database = new DatabaseSync(path);
   database.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL");
   new DaemonStateSchema().createSchema(database);
-  return { path, database, cleanup: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
+  return { path, database, cleanup: async () => { database.close(); await removeTestDirectory(directory); } };
 }
 
 /** Restore the physical v44 closure constraints before changing version markers. */
@@ -491,6 +492,9 @@ function versionPair(database: DatabaseSync): unknown[] {
   return [database.prepare("PRAGMA user_version").get(), database.prepare("SELECT generation,schema_version FROM manifest_metadata WHERE singleton=1").get()];
 }
 
+/** A file name made of the characters a SQLite URI treats as syntax. Windows names cannot hold "?", so it is left out there. */
+const DATABASE_NAME = process.platform === "win32" ? "state space#%.sqlite" : "state space?#%.sqlite";
+
 test("v18 preserves blocked FIFO, all child authority and uncertain cutover bytes", async () => {
   const env = await fixture();
   try {
@@ -536,7 +540,7 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, { skip: supervisedAgentsOnly }, async () => {
+for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
     (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture
@@ -554,8 +558,8 @@ for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a 
       database.exec('PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL');
       new DaemonStateSchema(() => process.kill(process.pid, 'SIGKILL')).createSchema(database);
     `;
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: 10_000 });
-    assert.equal(child.signal, "SIGKILL", child.stderr);
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: CHILD_PROCESS_TIMEOUT_MS });
+    assertKilledBySelf(child);
     assert.deepEqual(legacyRows(env.database), before);
     if (cutovers) assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all(), cutovers);
     assert.equal((env.database.prepare("PRAGMA user_version").get() as Row).user_version, version);
@@ -704,7 +708,7 @@ test("future schema refusal precedes WAL conversion and initializer writes", asy
     const inspection = new DatabaseSync(path, { readOnly: true });
     try { assert.equal((inspection.prepare("PRAGMA journal_mode").get() as Row).journal_mode, "delete"); }
     finally { inspection.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("prepared operational opener requires an already-current schema without migrating it", async () => {
@@ -755,13 +759,13 @@ test("prepared operational opener never creates missing state and preserves reje
       assert.equal(database.prepare("PRAGMA journal_mode").get()!.journal_mode, mode);
       database.close();
     }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
-test("prepared operational opener escapes URI metacharacters in existing paths", { skip: supervisedAgentsOnly }, async () => {
+test("prepared operational opener escapes URI metacharacters in existing paths", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-prepared-uri-"));
   try {
-    const path = join(directory, "state space?#%.sqlite");
+    const path = join(directory, DATABASE_NAME);
     const owner = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
     try {
       const prepared = await openPreparedDaemonStateDatabase(path);
@@ -769,9 +773,9 @@ test("prepared operational opener escapes URI metacharacters in existing paths",
         prepared.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('prepared-uri-proof','agent',1); COMMIT");
         assert.ok(owner.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='prepared-uri-proof'").get());
       } finally { prepared.close(); }
-      assert.ok((await readdir(directory)).every((name) => name.startsWith("state space?#%.sqlite")));
+      assert.ok((await readdir(directory)).every((name) => name.startsWith(DATABASE_NAME)));
     } finally { owner.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("migration temporary row snapshots cannot spill plaintext to disk", async () => {
@@ -782,7 +786,7 @@ test("migration temporary row snapshots cannot spill plaintext to disk", async (
       new DaemonStateSchema().createSchema(opened);
     });
     database.close();
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("observation opener accepts current WAL with durable settings and no migration", async () => {
@@ -835,13 +839,13 @@ test("observation opener never creates absent databases or directories and rejec
     assert.throws(() => openDaemonStateObservationDatabase(path), /already-current schema/);
     assert.deepEqual(await readFile(path), before);
     assert.deepEqual(await readdir(directory), ["empty.sqlite"]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
-test("observation opener escapes URI metacharacters in existing local paths", { skip: supervisedAgentsOnly }, async () => {
+test("observation opener escapes URI metacharacters in existing local paths", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-observation-uri-"));
   try {
-    const path = join(directory, "state space?#%.sqlite");
+    const path = join(directory, DATABASE_NAME);
     const operational = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
     try {
       const observer = openDaemonStateObservationDatabase(path);
@@ -849,9 +853,9 @@ test("observation opener escapes URI metacharacters in existing local paths", { 
         observer.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('uri-proof','agent',1); COMMIT");
         assert.ok(operational.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='uri-proof'").get());
       } finally { observer.close(); }
-      assert.ok((await readdir(directory)).every((name) => name.startsWith("state space?#%.sqlite")));
+      assert.ok((await readdir(directory)).every((name) => name.startsWith(DATABASE_NAME)));
     } finally { operational.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 for (const invalid of ["older17", "older20", "older21", "newer", "non_wal", "typed_journal_missing", "legacy_journal_missing"] as const) {
@@ -895,7 +899,7 @@ test("rejected future observation database does not checkpoint an unowned WAL", 
     assert.ok(before.wal.length > 0);
     assert.throws(() => openDaemonStateObservationDatabase(path), /Unsupported daemon state schema version/);
     assert.deepEqual({ database: await readFile(path), wal: await readFile(`${path}-wal`) }, before);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("v19 adds observer and proof slots without rewriting v18 evidence or rebuilding the inbox", async () => {

@@ -71,11 +71,10 @@ function batchProgramOf(program, execPath, env, launchOptions = {}) {
 }
 
 /** A Windows batch file that is neither an npm or pnpm shim nor a known install: only cmd.exe could start it. */
-export class ProviderBatchFileError extends Error {
+export class ProviderBatchFileError extends ProviderInstallError {
   constructor(program) {
-    super(`${path.win32.basename(program)} is a batch file that LetAgents can start only through cmd.exe, `
-      + "which changes quotes, percent signs and line breaks in what it is given. "
-      + "Install the program with npm, or set its LETAGENTS_*_BIN variable to its .exe.");
+    super(path.win32.basename(program), "it is a batch file that LetAgents can start only through cmd.exe, "
+      + "which changes quotes, percent signs and line breaks in what it is given.");
     this.name = "ProviderBatchFileError";
     this.code = "EPROVIDERBATCH";
   }
@@ -95,11 +94,9 @@ export class ProviderBatchFileError extends Error {
  * top of the caller's: `{ ELECTRON_RUN_AS_NODE: "1" }` when a script runs on
  * this Electron, what Cursor's launcher sets, else null. A batch file that is
  * none of these throws ProviderBatchFileError: cmd.exe would re-read every
- * argument, and a prompt holds line breaks and quotes. Only `allowCmd: true`
- * (spawnTree's earlier behaviour for such a file) starts it through cmd.exe,
- * with `argv0` and `windowsVerbatimArguments`. A known install that does not
- * hold up throws ProviderInstallError, with `allowCmd` too: cmd.exe would run
- * what was refused.
+ * argument, and a prompt holds line breaks and quotes. No product code passes
+ * `allowCmd: true`, the only way such a file reaches cmd.exe. A known install
+ * that does not hold up throws ProviderInstallError, with `allowCmd` too.
  */
 export function providerLaunchCommand(command, args, options = {}) {
   const platform = options.platform ?? process.platform;
@@ -131,18 +128,15 @@ export function providerLaunchCommand(command, args, options = {}) {
 /**
  * `execFile` for a provider program, for a version or status check. POSIX:
  * exactly `execFile(command, args, options, callback)`. Windows: the program
- * `providerLaunchCommand` names, with no console window (a batch file that is
- * no npm shim through cmd.exe, as spawnTree starts one).
+ * `providerLaunchCommand` names, with no console window.
  */
 export function execProviderFile(command, args, options, callback, providerOptions = {}) {
   const platform = providerOptions.platform ?? process.platform;
   const run = providerOptions.execFile ?? execFile;
   if (platform !== "win32") return run(command, args, options, callback);
-  // A check passes fixed arguments (`--version`, a model listing), so a plain batch file may still go
-  // through cmd.exe here, which refuses any quote or line break; its callers read errors from the callback.
   let launch;
   try {
-    launch = providerLaunchCommand(command, args, { allowCmd: true, ...providerOptions, platform, env: options.env, cwd: options.cwd });
+    launch = providerLaunchCommand(command, args, { ...providerOptions, platform, env: options.env, cwd: options.cwd });
   } catch (error) {
     if (!(error instanceof ProviderInstallError)) throw error;
     // Nothing ran. The caller's check fails with the reason, in the place it reads a failed program's.

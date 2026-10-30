@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 
 import { spawnTree, windowsCommandLine } from "../../../../../../shared/process-tree.mjs";
 
-import type { ProviderProcessExit } from "../provider-evidence.js";
+import { providerTreeExit, type ProviderProcessExit } from "../provider-evidence.js";
 import {
   CURSOR_LIVE_MCP_CAPABILITY_TIMEOUT_MS,
   CURSOR_SUPERVISED_AGENT_ENDPOINT,
@@ -379,7 +379,7 @@ export function defaultLaunchTurn(input: {
     // (TrailDelta review, msg_1780).
     child.once("close", (code, signal) => {
       if (!wrapperPrepared) rejectPrepared(new Error("Cursor wrapper exited before preparing its durable turn boundary."));
-      resolve({ type: "exit", code, signal });
+      resolve(providerTreeExit("Cursor", code, signal));
     });
   });
   if (child.stdout) {

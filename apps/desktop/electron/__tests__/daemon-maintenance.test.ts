@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createDaemonMaintenance, readDaemonMaintenance, clearDaemonMaintenance, withDaemonMaintenanceOperation } from "../../../../shared/daemon-maintenance.mjs";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { assertOwnerPrivateFile } from "./harness.js";
+import { makeReadableByOthers } from "./platform.js";
 import { forceStopDaemon, performConfirmedMaintenance, type ForceDaemonRestartPort } from "../main/force-daemon-restart.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 function fixture() {
   const events: string[] = [];
@@ -81,33 +83,33 @@ test("force restart retains the hold if a different daemon owns the socket", asy
   await assert.rejects(forceStopDaemon(f.port), /still answers/);
   assert.deepEqual(f.events, ["hold", "SIGTERM"]);
 });
-test("maintenance hold survives reopen, coalesces creation and requires exact resume identity", { skip: supervisedAgentsOnly }, async () => {
+test("maintenance hold survives reopen, coalesces creation and requires exact resume identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-maintenance-")); const path = join(root, "hold.json");
   try {
     assert.equal(await readDaemonMaintenance(path), null);
     const a = await createDaemonMaintenance(path); const b = await createDaemonMaintenance(path);
     assert.deepEqual(a, b); assert.deepEqual(await readDaemonMaintenance(path), a);
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(path, root);
     const bytes = await readFile(path);
     await assert.rejects(clearDaemonMaintenance("wrong", path), /changed/);
     assert.deepEqual(await readFile(path), bytes);
     await clearDaemonMaintenance(a.id, path); assert.equal(await readDaemonMaintenance(path), null);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-test("maintenance corruption, readable-by-others and symlinks cannot silently resume supervision", { skip: supervisedAgentsOnly }, async () => {
+test("maintenance corruption, readable-by-others and symlinks cannot silently resume supervision", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-maintenance-")); const path = join(root, "hold.json");
   try {
     await writeFile(path, "broken", { mode: 0o600 });
     await assert.rejects(readDaemonMaintenance(path)); await assert.rejects(createDaemonMaintenance(path));
     assert.equal(await readFile(path, "utf8"), "broken"); await rm(path);
-    const hold = await createDaemonMaintenance(path); await chmod(path, 0o644);
-    await assert.rejects(readDaemonMaintenance(path), /Unsafe/); await chmod(path, 0o600);
+    const hold = await createDaemonMaintenance(path); makeReadableByOthers(path);
+    await assert.rejects(readDaemonMaintenance(path), /Unsafe/); await protectOwnerPrivate(path, "file", { force: true });
     const link = join(root, "link.json"); await symlink(path, link);
     await assert.rejects(readDaemonMaintenance(link)); assert.deepEqual(await readDaemonMaintenance(path), hold);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("maintenance action owns the hold through stop proof and competing resume cannot remove it", { skip: supervisedAgentsOnly }, async () => {
+test("maintenance action owns the hold through stop proof and competing resume cannot remove it", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-maintenance-")); const path = join(root, "hold.json");
   try {
     let retained: unknown;

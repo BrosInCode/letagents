@@ -8,17 +8,21 @@ import { randomUUID } from "node:crypto";
 import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
-const executable = join(bundle, "Contents", "MacOS", "LetAgents");
+const windows = process.platform === "win32";
+const bundle = windows ? join(root, "release", "LetAgents-win32", "LetAgents") : join(root, "release", "LetAgents-darwin", "LetAgents.app");
+const executable = windows ? join(bundle, "LetAgents.exe") : join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
 const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
+// A Windows daemon's first start takes about 8 s in an emulated x64 VM.
+const launchTimeoutMs = windows ? 90_000 : 15_000;
+const daemonReadyTimeoutMs = windows ? 30_000 : 5_000;
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
-// macOS: <home>/.letagents/daemon.sock; connectDaemon is createConnection there.
+// macOS: <home>/.letagents/daemon.sock. Windows: the named pipe for that folder.
 const socketPath = daemonEndpoint(join(home, ".letagents")).connectPath;
 const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
 
 async function assertPackagedDaemonExecutorSeal() {
-  const appRoot = join(bundle, "Contents", "Resources", "app");
+  const appRoot = windows ? join(bundle, "resources", "app") : join(bundle, "Contents", "Resources", "app");
   const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
   const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
   const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
@@ -56,12 +60,13 @@ function request(method, params) {
 function launch() {
   return new Promise((resolveLaunch, reject) => {
     const child = spawn(executable, [], {
-      env: { ...process.env, HOME: home, LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
+      // Its own APPDATA: an installed app holds the single-instance lock of the real one.
+      env: { ...process.env, HOME: home, USERPROFILE: home, APPDATA: join(home, "AppData"), LETAGENTS_PACKAGED_SUPERVISOR_SMOKE: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
     let ready = false;
-    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`packaged Electron launch timed out: ${output}`)); }, 15_000);
+    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`packaged Electron launch timed out: ${output}`)); }, launchTimeoutMs);
     const capture = (chunk) => {
       output += chunk;
       if (!ready && output.includes("LETAGENTS_PACKAGED_SUPERVISOR_READY")) {
@@ -89,15 +94,17 @@ function launch() {
 async function launchDevelopmentDaemon() {
   const child = spawn(process.execPath, [developmentDaemon], {
     detached: true,
+    windowsHide: true,
     env: {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
       LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT: "packaged-smoke-stale-development-runtime",
     },
     stdio: "ignore",
   });
   child.unref();
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + daemonReadyTimeoutMs;
   while (Date.now() < deadline) {
     try { return await request("daemon.status"); }
     catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
@@ -128,5 +135,5 @@ try {
 } finally {
   await request("daemon.prepare_handoff").catch(() => undefined);
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }

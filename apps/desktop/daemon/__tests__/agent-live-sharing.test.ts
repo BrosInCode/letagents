@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION } from "../daemon-state-database.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
  * A real daemon on its own socket and database. An agent's tools hold the
@@ -21,7 +23,7 @@ type Reply = { ok: boolean; result?: unknown; error?: string };
 
 function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<Reply> {
   return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
+    const client = connectDaemon(socketPath);
     let received = "";
     let settled = false;
     const timeout = setTimeout(() => { client.destroy(); reject(new Error(`'${method}' did not answer`)); }, 10_000);
@@ -63,7 +65,7 @@ async function withDaemon(run: (context: {
   outsider: KeyObject;
 }) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "letagents-live-sharing-"));
-  const paths = { lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+  const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl") };
   const host = generateKeyPairSync("ed25519");
   const outsider = generateKeyPairSync("ed25519");
@@ -91,11 +93,11 @@ async function withDaemon(run: (context: {
     await run({ socketPath: paths.socketPath, manifestPath: paths.manifestPath, generation, signed, configuration, setSharing, outsider: outsider.privateKey });
   } finally {
     await daemon.stop().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 }
 
-test("live sharing is off for a new agent and only the desktop app's signed request turns it on", { timeout: 60_000 }, async () => {
+test("live sharing is off for a new agent and only the desktop app's signed request turns it on", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, manifestPath, generation, signed, configuration, setSharing, outsider }) => {
     assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_owner") })).ok, true);
     const fresh = await configuration("supervised_owner");
@@ -175,7 +177,7 @@ async function setSharingAt(socketPath: string, signed: (operation: HostApproval
   return daemonRequest(socketPath, "supervisor.host_approval_request", signed("set_live_sharing", { entryId: "supervised_owner", daemonGeneration, enabled: true }));
 }
 
-test("an agent that fetches its own messages, or a rented agent, cannot share its live activity", { timeout: 60_000 }, async () => {
+test("an agent that fetches its own messages, or a rented agent, cannot share its live activity", { timeout: 60_000 * WAIT_SCALE }, async () => {
   await withDaemon(async ({ socketPath, configuration, setSharing }) => {
     assert.equal((await daemonRequest(socketPath, "manifest.put", { entry: agent("supervised_polling", { delivery_mode: "mcp_polling" }) })).ok, true);
     assert.equal((await configuration("supervised_polling")).live_sharing_availability, "polling");
@@ -222,6 +224,6 @@ test("a schema 50 database gains the live sharing column off for every existing 
       } finally { inspection.close(); }
     } finally { await migrated.close(); }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });

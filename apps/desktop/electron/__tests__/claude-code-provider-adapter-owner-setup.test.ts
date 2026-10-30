@@ -1,6 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,7 @@ import {
   ownerMcpStartupTimeoutMs,
 } from "../main/agents/claude-code-provider-adapter.js";
 import type { ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
+import { assertOwnerPrivateFile } from "./harness.js";
 import { CLAUDE_REAL_CAPTURES, realClaudeCapture, realClaudeResult } from "./claude-result-shapes.js";
 import {
   ProviderSchedulerFailureCoordinator,
@@ -37,7 +38,6 @@ import {
   STORED_CLAUDE_OPTIONS,
   pause,
 } from "./claude-code-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 test("Claude starts exactly as before without the owner's own setup, and reads the owner's servers and settings with it", async () => {
   const launch = async (homeHarness: boolean, permissionProfileId: string, launchPolicy: Record<string, unknown>) => {
@@ -154,14 +154,15 @@ test("with the owner's own setup the Claude CLI's environment carries nothing th
   assert.equal(claudeChildEnvironment({}, ambient).LETAGENTS_SUPERVISOR_ENTRY_ID, "supervised_other");
 });
 
-test("the room server's config carries the coordinates only when the launch hands them over", { skip: supervisedAgentsOnly }, async () => {
+test("the room server's config carries the coordinates only when the launch hands them over", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-claude-room-config-"));
   try {
     const runtime = () => ({ entryPath: "/fake/letagents-mcp.js" }) as never;
     const read = async (roomServerEnvironment?: Record<string, string>) => {
       const config = await createManagedClaudeMcpConfig("https://letagents.invalid", directory, undefined, runtime, roomServerEnvironment);
       try {
-        return { text: await readFile(config.path, "utf8"), mode: (await stat(config.path)).mode & 0o777 };
+        assertOwnerPrivateFile(config.path, directory); // only the owner can read it
+        return { text: await readFile(config.path, "utf8") };
       } finally {
         await config.dispose();
       }
@@ -174,7 +175,6 @@ test("the room server's config carries the coordinates only when the launch hand
     assert.deepEqual(JSON.parse(ownSetup.text).mcpServers.letagents.env, {
       LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner", LETAGENTS_API_URL: "https://letagents.invalid", ELECTRON_RUN_AS_NODE: "1",
     }, "the endpoint is always the launch's own");
-    assert.equal(ownSetup.mode, 0o600, "only the owner can read it");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

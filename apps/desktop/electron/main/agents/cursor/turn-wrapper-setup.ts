@@ -687,6 +687,11 @@ export const WINDOWS_NATIVE_REAP_SOURCE = String.raw`function signalNativeGroup(
   // Ending the helper closes its job, and Windows ends every process in it.
   try { native.kill(signal); } catch {}
 }
+// 0xE04C5401 is the helper's own answer, not an exit code of Cursor's.
+function nativeExitEvidence(code, signal) {
+  if (code !== 0xE04C5401) return { type: "exit", code, signal };
+  return { type: "error", error: "Cursor's processes did not end when LetAgents closed their job. They may still be running." };
+}
 function endNativeJob() {
   if (!nativeHelperBirth) return null;
   try {

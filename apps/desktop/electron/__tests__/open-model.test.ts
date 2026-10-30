@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,11 +24,11 @@ import {
   saveOpenModelSettings,
 } from "../main/agents/open-model-settings.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
+import { writeFakeProvider } from "./platform.js";
 import {
   listDesktopAgentProviders,
   supervisedDeliveryModeForProvider,
 } from "../main/agents/provider-registry.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 const secretStorage = {
   isEncryptionAvailable: () => true,
@@ -196,27 +196,21 @@ test("unconfigured open model settings report configured=false", async () => {
   assert.equal(status.baseUrl, DEFAULT_OPEN_MODEL_BASE_URL);
 });
 
-test("Open Model preflight checks OpenCode and accepts a per-agent model", { skip: supervisedAgentsOnly }, async (t) => {
+test("Open Model preflight checks OpenCode and accepts a per-agent model", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   const settingsPath = await tempSettingsPath();
-  const bin = join(tmpdir(), `letagents-opencode-${Date.now()}`);
   const previousSettingsPath = process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH;
   const previousOpenCodeBin = process.env.LETAGENTS_OPENCODE_BIN;
   await saveOpenModelSettings(
     { baseUrl: "http://127.0.0.1:11434/v1", model: null },
     { storePath: settingsPath, secretStorage },
   );
-  await writeFile(
-    bin,
-    [
-      "#!/usr/bin/env node",
-      `if (process.argv[2] === '--version') { console.log('opencode ${OPENCODE_RUNTIME_VERSION}'); process.exit(0); }`,
-      "process.exit(2);",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  const bin = writeFakeProvider(join(tmpdir(), `letagents-opencode-${Date.now()}`), [
+    `if (process.argv[2] === '--version') { console.log('opencode ${OPENCODE_RUNTIME_VERSION}'); process.exit(0); }`,
+    "process.exit(2);",
+    "",
+  ].join("\n"));
   process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH = settingsPath;
   process.env.LETAGENTS_OPENCODE_BIN = bin;
   try {

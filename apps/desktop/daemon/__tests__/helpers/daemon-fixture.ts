@@ -2,11 +2,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { connectDaemon, daemonEndpoint } from "../../../../../shared/daemon-endpoint.mjs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { removeTestDirectory } from "../../../electron/__tests__/harness.js";
+import { testDaemonEndpoint, WINDOWS_TEST_HELPER } from "../../../electron/__tests__/platform.js";
 import { WorkDurabilityStore } from "../../durability-store.js";
 import { ManifestStore } from "../../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../../manifest-entry-projection.js";
@@ -139,7 +141,8 @@ export const noWorkLeaseHttp = {
 
 export async function fixture(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-"));
-  return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); } };
+  // Windows refuses to delete a database that is still open: removeTestDirectory closes it, or waits for the process to end.
+  return { root, cleanup: async () => { removeTestDirectory(root); } };
 }
 
 /** Set up the already-admitted ingress assumed by provider-lifecycle tests. */
@@ -148,17 +151,24 @@ export async function admitDaemonInboxForProviderTest(daemon: SupervisorDaemon, 
   await internals.supervisedInbox.bootstrapCursor({ agent_id: agentId, room_id: roomId, last_observed_message_id: null });
 }
 
+/**
+ * How much longer a test waits for something to happen on Windows. A named pipe, a new process and a file
+ * on NTFS each take longer than their POSIX counterpart, and the Windows test machines are slower. This only
+ * lengthens how long a wait for an event lasts before it fails; it never changes what a test asserts.
+ */
+export const WAIT_SCALE = process.platform === "win32" ? 5 : 1;
+
 export async function within<T>(promise: Promise<T>, label: string, timeoutMs = 2_000): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([promise, new Promise<T>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs); })]);
+    return await Promise.race([promise, new Promise<T>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs * WAIT_SCALE); })]);
   } finally {
     if (timeout) clearTimeout(timeout);
   }
 }
 
 export async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + timeoutMs * WAIT_SCALE;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -198,14 +208,17 @@ export function fakeRecoveryClock(startMs = 10_000) {
   };
 }
 
+export { testDaemonEndpoint } from "../../../electron/__tests__/platform.js";
+
+// Windows reads when a process started (its birth) through the process-tree helper. The test run names where
+// the built helper is; the daemon's own process identity finds it through the variable the app sets for it.
+if (WINDOWS_TEST_HELPER && !process.env.LETAGENTS_PROCESS_TREE_HELPER) process.env.LETAGENTS_PROCESS_TREE_HELPER = WINDOWS_TEST_HELPER;
+
 /**
- * The daemon endpoint under a test root: `<root>/daemon.sock` on POSIX, a
- * per-root named pipe with its proof file on Windows.
+ * How long a test waits after it sends a request, before it releases a gate that request waits at.
+ * A request over a Windows pipe takes much longer to reach the daemon (the proof handshake comes first).
  */
-export function testDaemonEndpoint(root: string): { socketPath: string; peerProofPath: string | null } {
-  const endpoint = daemonEndpoint(root);
-  return { socketPath: endpoint.listenPath, peerProofPath: endpoint.proofPath };
-}
+export const REQUEST_ARRIVAL_MS = process.platform === "win32" ? 500 : 10;
 
 export async function daemonRequest(socketPath: string, method: string, params?: unknown, version = DAEMON_PROTOCOL_VERSION): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> {
   return new Promise((resolve, reject) => {

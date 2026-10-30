@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
-import { createConnection, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
+import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { dirname, join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
@@ -19,6 +19,8 @@ import { productionSupervisorGrantHttp } from "../cloud-http.js";
 import { createGitCommand, RepositoryNetworkError, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { needsDeletableCwd, testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 import {
   SupervisorDaemon,
   execFileAsync,
@@ -30,25 +32,26 @@ import {
   provisionedWorkspace,
   fakeGit,
   entry,
-  originRemoteFixture,
-} from "./helpers/daemon-fixture.js";
+  originRemoteFixture, testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
 
 test("fence loss fatally stops the control endpoint", async () => {
   const env = await fixture();
   try {
     const lockPath = join(env.root, "fatal.lock");
-    const socketPath = join(env.root, "fatal.sock");
-    const daemon = new SupervisorDaemon({ lockPath, socketPath, manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") }, "darwin");
+    const { socketPath, peerProofPath } = testNamedDaemonEndpoint(env.root, "fatal");
+    const daemon = new SupervisorDaemon({ lockPath, socketPath, peerProofPath, manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") }, "darwin");
     await daemon.start();
     await writeFile(`${lockPath}.generation`, "2\n");
     await new Promise<void>((resolve, reject) => {
-      const client = createConnection(socketPath); client.once("error", reject);
+      const client = connectDaemon(socketPath); client.once("error", reject);
+      // A connection that nobody reads never reports that the daemon closed it on Windows.
+      client.resume();
       client.on("connect", () => client.write(JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, method: "manifest.list" }) + "\n"));
       client.on("close", () => resolve());
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(() => new Promise<void>((resolve, reject) => {
-      const client = createConnection(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
+      const client = connectDaemon(socketPath); client.once("connect", () => resolve()); client.once("error", reject);
     }));
     await daemon.stop();
   } finally { await env.cleanup(); }
@@ -57,11 +60,12 @@ test("fence loss fatally stops the control endpoint", async () => {
 test("control socket bounds an oversized JSON-lines frame", async () => {
   const env = await fixture();
   try {
-    const socketPath = join(env.root, "bounded.sock");
-    const socket = new DaemonControlSocket(socketPath, () => ({ ok: true }), undefined, 16);
+    const { socketPath, peerProofPath } = testNamedDaemonEndpoint(env.root, "bounded");
+    const socket = new DaemonControlSocket(socketPath, () => ({ ok: true }), undefined, 16, { peerProofPath });
     await socket.start();
     await new Promise<void>((resolve, reject) => {
-      const client = createConnection(socketPath); client.once("error", reject);
+      const client = connectDaemon(socketPath); client.once("error", reject);
+      client.resume();
       client.on("connect", () => client.write("x".repeat(17)));
       client.on("close", () => resolve());
     });
@@ -290,7 +294,7 @@ test("workspace provisioner uses daemon-owned clones, reuses attempts, and rejec
       "+refs/heads/*:refs/letagents/remotes/origin/*",
       "+refs/tags/*:refs/letagents/tags/*",
     ]);
-    assert.match(first.path, new RegExp(`worktrees/repo/${workAttemptId}$`));
+    assert.match(first.path, new RegExp(`worktrees[/\\\\]repo[/\\\\]${workAttemptId}$`));
     assert.ok(commands[0]!.includes("--bare"));
     await rm(join(first.path, ".letagents-work-attempt.json"));
     const recovered = await provisioner.provision({ repo: "repo", workAttemptId, taskId: "task", remoteUrl: "https://example.invalid/repo.git", revision: "abc" });
@@ -681,7 +685,7 @@ test("repository transport errors get friendly bounded recovery, but auth failur
   } finally { await env.cleanup(); }
 });
 
-test("workspace provisioning survives deletion of the daemon's inherited launch cwd", async () => {
+test("workspace provisioning survives deletion of the daemon's inherited launch cwd", { skip: needsDeletableCwd }, async () => {
   const env = await fixture();
   try {
     const source = join(env.root, "source");
@@ -1296,7 +1300,7 @@ test("providerStreamLifecycle never fails the agent on a tool call's own error s
 
 test("all approval settlement callers schedule fault-only recovery under current daemon authority", async () => {
   const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+  const paths = { lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   const daemon = new SupervisorDaemon(paths, "darwin");
   try {
@@ -1384,11 +1388,11 @@ test("worker lease HTTP uses complete worker-scoped inventory and exact grant-fe
   }
 });
 
-test("unchanged delegation replays do not restart a failed provider, but committed changes remain eligible", { timeout: 15_000 }, async () => {
+test("unchanged delegation replays do not restart a failed provider, but committed changes remain eligible", { timeout: 15_000 * WAIT_SCALE }, async () => {
   const env = await fixture();
   const id = "unchanged-delegation";
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };

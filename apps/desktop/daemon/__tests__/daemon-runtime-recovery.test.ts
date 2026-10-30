@@ -2,7 +2,7 @@ import { recordInterruptedCursorRecovery } from "../runtime-recovery-journal.js"
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { WorkDurabilityStore } from "../durability-store.js";
 import { ManifestStore } from "../manifest-store.js";
@@ -30,14 +30,14 @@ import {
   committedSourceRepository,
   primeDaemonBareRepository,
   fakeGit,
-  entry,
-} from "./helpers/daemon-fixture.js";
+  entry, testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
 for (const providerId of ["open-model", "claude-code", "codex"] as const) {
 test(`explicit runtime recovery retires proven-dead ${providerId} without replacing the durable agent`, async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -200,7 +200,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
   test(`runtime recovery releases a crashed Cursor FIFO without replay (${cachedLane ? "cached idle lane" : "terminal execution"}; ${missingTurn ? "missing native turn" : "captured native turn"}; ${recoveryFailure}; ${apiUrl})`, async () => {
     const env = await fixture();
     const paths = {
-      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
       manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
       attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
     };
@@ -569,7 +569,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
 test("runtime recovery atomically fails a pre-join room move without losing its activating authority evidence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "move-recovery.lock"), socketPath: join(env.root, "move-recovery.sock"),
+    lockPath: join(env.root, "move-recovery.lock"), ...testNamedDaemonEndpoint(env.root, "move-recovery"),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "move-recovery-audit.jsonl"),
     attemptsPath: join(env.root, "move-recovery-attempts.json"), attemptsRoot: join(env.root, "move-recovery-attempt-data"), workspaceRoot: env.root,
   };
@@ -770,7 +770,7 @@ test("runtime recovery atomically fails a pre-join room move without losing its 
 test("a provably-gone provider runtime auto-recovers with a fresh runtime instead of dead-ending in recovering", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -851,7 +851,7 @@ test("a provably-gone provider runtime auto-recovers with a fresh runtime instea
 test("credential-only reconnect reattaches the exact OpenCode runtime and checkpoints recovered connection evidence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -998,7 +998,7 @@ test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entr
   for (const desiredState of ["running", "stopped"] as const) {
     const env = await fixture();
     const paths = {
-      lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+      lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
       manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     };
     const lifecycle = { spawn: 0, resume: 0, stop: 0, converge: 0, mint: 0, tail: 0 };
@@ -1069,7 +1069,7 @@ test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entr
 test("fresh desktop bootstrap queues its initial message exactly once while legacy bootstrap queues none", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
   const port: ProviderActionPort = {
@@ -1141,7 +1141,7 @@ test("fresh desktop bootstrap queues its initial message exactly once while lega
 test("bootstrap and launch reuse one fresh host worker mint before creating one provider generation", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1202,7 +1202,7 @@ test("bootstrap and launch reuse one fresh host worker mint before creating one 
 test("Open Model launches with its exact memory-only endpoint credential", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1324,7 +1324,7 @@ test("Open Model launches with its exact memory-only endpoint credential", async
 test("string-thrown transient worker mint failures redact credentials and automatically reconverge", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1397,7 +1397,7 @@ test("string-thrown transient worker mint failures redact credentials and automa
 test("429 worker mint failures retry three times and automatically reconverge", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };
@@ -1467,7 +1467,7 @@ test("429 worker mint failures retry three times and automatically reconverge", 
 test("definitive worker mint rejection attempts once and never schedules automatic convergence", async () => {
   const env = await fixture();
   const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    lockPath: join(env.root, "daemon.lock"), ...testDaemonEndpoint(env.root),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
     attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
   };

@@ -23,7 +23,7 @@ import {
   turnOf,
   scratchCodexHome,
 } from "./codex-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
+import { OS_BIRTH } from "./platform.js";
 
 test("managed launch receipt freezes the exact generated tool policy and is never invented on attach", async () => {
   const harness = createHarness();
@@ -225,7 +225,7 @@ test("a process whose record cannot say how it was started is not asked to read 
 
 test("repairing a conversation never lets a Codex that has its owner's setup reload a project that changed since it started", async () => {
   const repair = async (spawn: Partial<ProviderSpawnRequest>, change: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}, reattachedAs?: boolean) => {
-    const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+    const harness = createHarness({ exitOnSignal: true, processIdentity: OS_BIRTH.first, ...harnessOptions });
     let adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const request = spawnRequest(spawn);
     let handle = await adapter.spawn(request);
@@ -506,7 +506,7 @@ test("the managed launch contract is version 2 or later, so a Codex started befo
   assert.ok(CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION >= 2);
 });
 
-test("a sandboxed Codex takes no turn and loads no conversation in a project that has command rules of its own, at launch, when found running, and at every turn", { skip: supervisedAgentsOnly }, async (t) => {
+test("a sandboxed Codex takes no turn and loads no conversation in a project that has command rules of its own, at launch, when found running, and at every turn", async (t) => {
   const project = await mkdtemp(join(tmpdir(), "letagents-codex-adapter-project-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const top = await realpath(project);

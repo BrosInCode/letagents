@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createConnection, Server } from "node:net";
+import { mkdtemp } from "node:fs/promises";
+import { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supervisedAgentTest as test } from "../../electron/__tests__/platform.js";
+import test from "node:test";
 
 import { SupervisorDaemon } from "../main.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { runEveryStopStep } from "../stop-steps.js";
+import { testDaemonEndpoint } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("every step of a stop runs, in order, whatever an earlier one reports, and the first failure is reported at the end", async () => {
   const first = new Error("first"), later = new Error("later");
@@ -53,7 +56,7 @@ type Step = "typedLifecycleEffects.close" | "boundedEffects.drainJournalReservat
 /** A daemon on its own paths, with a provider and no agent: the provider is never asked to do anything. */
 async function runningDaemon() {
   const root = await mkdtemp(join(tmpdir(), "letagents-daemon-stop-"));
-  const paths = { lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "daemon-state.sqlite"),
+  const paths = { lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "daemon-state.sqlite"),
     auditPath: join(root, "audit.jsonl"), attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root };
   const unasked = async (): Promise<never> => { throw new Error("No agent exists, so the provider is not asked."); };
   const provider: ProviderActionPort = { capabilities: unasked, spawn: unasked, attach: unasked, attachAction: unasked, resume: unasked, poke: unasked, stop: unasked, onExit: unasked };
@@ -85,7 +88,7 @@ async function runningDaemon() {
     listening: () => (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
       .filter((handle) => handle instanceof Server && handle.listening && handle.address() === paths.socketPath).length,
     answers: () => new Promise<boolean>((resolve) => {
-      const socket = createConnection(paths.socketPath);
+      const socket = connectDaemon(paths.socketPath);
       socket.once("connect", () => { socket.destroy(); resolve(true); });
       socket.once("error", () => resolve(false));
     }),
@@ -93,7 +96,7 @@ async function runningDaemon() {
     succeed: async () => { await (await start()).stop(); },
     cleanup: async () => {
       await daemon.stop().catch(() => undefined);
-      await rm(root, { recursive: true, force: true });
+      await removeTestDirectory(root);
     },
   };
 }

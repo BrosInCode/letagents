@@ -1,9 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertOwnerPrivateFile } from "./harness.js";
 import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
 import {
   ClaudeCodeProviderAdapter,
@@ -27,7 +28,6 @@ import {
   flush,
   withLoopAlive,
 } from "./claude-code-provider-adapter.fixture.js";
-import { supervisedAgentsOnly } from "./platform.js";
 
 test("spawn launches the headless CLI with verbatim policy flags and establishes an idle daemon continuation", async () => {
   const harness = createHarness();
@@ -306,7 +306,7 @@ test("Claude launches with the managed commit identity for its work attempt", as
   assert.equal(env.LETAGENTS_SUPERVISOR_ENTRY_ID, "manifest_exact", "the supervisor coordinates are kept");
 });
 
-test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", { skip: supervisedAgentsOnly }, async () => {
+test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-mcp-test-"));
   try {
     const config = await createEphemeralClaudeMcpConfig({
@@ -327,7 +327,7 @@ test("managed Claude MCP config is private, official-runtime-only, and ephemeral
         },
       },
     });
-    assert.equal((await stat(config.path)).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(config.path, root);
     await config.dispose();
     await assert.rejects(access(config.path));
   } finally {

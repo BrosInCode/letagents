@@ -6,14 +6,15 @@ import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { captureRecordedRemoteTips, captureRemoteTips } from '../../../../shared/workspace-turn-capture.mjs';
+import { needsProcessTreeHelper } from '../../electron/__tests__/platform.js';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, assertPlainRows, commit, count, fixture, git, listed, recorded, turn } from './fixtures/workspace-turns.js';
-import { supervisedAgentsOnly } from '../../electron/__tests__/platform.js';
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 // What the capture takes for "upstream" is the answer of the remote that the daemon
 // recorded, asked before the turn. Nothing that an agent can write locally changes
 // that answer or what the capture reads from it.
 
-test('the remote is asked for its branches, and local refs are not part of the answer', { skip: supervisedAgentsOnly }, async t => {
+test('the remote is asked for its branches, and local refs are not part of the answer', async t => {
   const f = fixture(t);
   const workspace = f.clone();
   f.pushFeatureBranch();
@@ -50,12 +51,14 @@ const redirects: Record<string, (workspace: string, own: string, real: string, r
     git(workspace, 'config', 'extensions.worktreeConfig', 'true'); git(workspace, 'config', '--worktree', `url.${own}.insteadOf`, real); return 'origin';
   },
   'the same rewrite in an included file': (workspace, own, real, root) => {
-    writeFileSync(join(root, 'rewrite.config'), `[url "${own}"]\n\tinsteadOf = ${real}\n`);
-    git(workspace, 'config', 'include.path', join(root, 'rewrite.config')); return 'origin';
+    // A configuration file reads a backslash as an escape: a Windows path is written with each one doubled, and the include path uses slashes.
+    const escaped = (path: string) => path.replaceAll('\\', '\\\\');
+    writeFileSync(join(root, 'rewrite.config'), `[url "${escaped(own)}"]\n\tinsteadOf = ${escaped(real)}\n`);
+    git(workspace, 'config', 'include.path', join(root, 'rewrite.config').replaceAll('\\', '/')); return 'origin';
   },
 };
 for (const [name, redirect] of Object.entries(redirects)) {
-  test(`the agent's own repository is never taken for the remote - ${name}`, { skip: supervisedAgentsOnly }, async t => {
+  test(`the agent's own repository is never taken for the remote - ${name}`, async t => {
     const f = fixture(t);
     const workspace = f.clone();
     git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
@@ -79,25 +82,29 @@ for (const [name, redirect] of Object.entries(redirects)) {
   });
 }
 
-test('when the owner\'s own Git configuration sends the recorded address elsewhere, there is no answer', { skip: supervisedAgentsOnly }, async t => {
+test('when the owner\'s own Git configuration sends the recorded address elsewhere, there is no answer', async t => {
   const f = fixture(t);
   const own = join(f.root, 'own.git');
   git(f.root, 'clone', '-q', '--bare', f.remote, own);
   const home = mkdtempSync(join(tmpdir(), 'workspace-base-update-home-'));
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
   const restore = () => { for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value; };
-  t.after(() => { restore(); rmSync(home, { recursive: true, force: true }); });
+  t.after(() => { restore(); removeTestDirectory(home); });
   process.env.HOME = home; process.env.XDG_CONFIG_HOME = join(home, '.config');
   const configure = (text: string) => writeFileSync(join(home, '.gitconfig'), text);
+  // A Git configuration file reads a backslash as an escape, so a Windows path is written with each one doubled.
+  const quoted = (path: string) => path.replaceAll('\\', '\\\\');
+  // A file: URL of a folder: file:///C:/dir on Windows, file:///dir elsewhere.
+  const fileUrl = (path: string) => process.platform === 'win32' ? `file:///${path.replaceAll('\\', '/')}` : `file://${path}`;
 
-  configure(`[url "${own}"]\n\tinsteadOf = ${join(f.root, 'another.git')}\n`);
+  configure(`[url "${quoted(own)}"]\n\tinsteadOf = ${quoted(join(f.root, 'another.git'))}\n`);
   assert.equal((await captureRecordedRemoteTips(f.remote))?.length, 1, 'the owner\'s configuration applies, and this rule is about another address');
-  configure(`[url "${own}"]\n\tinsteadOf = ${f.remote}\n`);
+  configure(`[url "${quoted(own)}"]\n\tinsteadOf = ${quoted(f.remote)}\n`);
   assert.equal(await captureRecordedRemoteTips(f.remote), null, 'a rewrite of the recorded address');
-  configure(`[remote "file://${f.remote}"]\n\turl = ${own}\n`);
-  assert.equal(await captureRecordedRemoteTips(`file://${f.remote}`), null, 'a remote that is named like the recorded address');
+  configure(`[remote "${fileUrl(f.remote)}"]\n\turl = ${quoted(own)}\n`);
+  assert.equal(await captureRecordedRemoteTips(fileUrl(f.remote)), null, 'a remote that is named like the recorded address');
   configure('');
-  assert.equal((await captureRecordedRemoteTips(`file://${f.remote}`))?.length, 1);
+  assert.equal((await captureRecordedRemoteTips(fileUrl(f.remote)))?.length, 1);
   restore();
 });
 
@@ -175,19 +182,34 @@ test('a grafts file or a shallow file changes only which commits look related, n
   for (const row of OWN_ROWS) assert.ok(listed(shallow.after).includes(row), row);
 });
 
-test('the question cannot prompt, and a transport that hangs does not outlive it', { skip: process.platform === 'win32' }, async t => {
+test('the question cannot prompt, and a transport that hangs does not outlive it', { skip: needsProcessTreeHelper }, async t => {
   const f = fixture(t);
   const workspace = f.clone();
   git(workspace, 'remote', 'set-url', 'origin', 'ssh://git.example.invalid/team/project');
   // An "ssh" that writes down how it was started and then hangs. Nothing here uses the network.
+  // A program that Git runs by name from GIT_SSH_COMMAND: a shell script on POSIX, Node running a script on Windows.
   const ssh = join(f.root, 'bin', 'ssh'), seen = join(f.root, 'seen');
   mkdirSync(dirname(ssh)); mkdirSync(seen);
-  writeFileSync(ssh, `#!/bin/sh\n{ echo "arguments=$*"; echo "terminal=$GIT_TERMINAL_PROMPT"; echo "askpass=[$GIT_ASKPASS][$SSH_ASKPASS][$SSH_ASKPASS_REQUIRE]"; echo "manager=$GCM_INTERACTIVE"; } > "${seen}/$$"\nexec sleep 45\n`, { mode: 0o755 });
+  let transport = ssh;
+  if (process.platform === 'win32') {
+    const script = `${ssh}.mjs`;
+    writeFileSync(script, [
+      `import { writeFileSync } from 'node:fs';`,
+      `const env = process.env;`,
+      `writeFileSync(${JSON.stringify(`${seen.replaceAll('\\', '/')}/`)} + process.pid, [`,
+      "  `arguments=${process.argv.slice(2).join(' ')}`, `terminal=${env.GIT_TERMINAL_PROMPT}`,",
+      "  `askpass=[${env.GIT_ASKPASS ?? ''}][${env.SSH_ASKPASS ?? ''}][${env.SSH_ASKPASS_REQUIRE ?? ''}]`, `manager=${env.GCM_INTERACTIVE}`, ''].join('\\n'));",
+      `setTimeout(() => {}, 45_000);`,
+    ].join('\n'));
+    transport = `"${process.execPath.replaceAll('\\', '/')}" "${script.replaceAll('\\', '/')}"`;
+  } else {
+    writeFileSync(ssh, `#!/bin/sh\n{ echo "arguments=$*"; echo "terminal=$GIT_TERMINAL_PROMPT"; echo "askpass=[$GIT_ASKPASS][$SSH_ASKPASS][$SSH_ASKPASS_REQUIRE]"; echo "manager=$GCM_INTERACTIVE"; } > "${seen}/$$"\nexec sleep 45\n`, { mode: 0o755 });
+  }
   const saved = process.env.GIT_SSH_COMMAND;
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   const started: number[] = [];
   t.after(() => { if (saved === undefined) delete process.env.GIT_SSH_COMMAND; else process.env.GIT_SSH_COMMAND = saved; for (const pid of started) if (alive(pid)) process.kill(pid, 'SIGKILL'); });
-  process.env.GIT_SSH_COMMAND = ssh;
+  process.env.GIT_SSH_COMMAND = transport;
   const begun = Date.now();
   assert.deepEqual(await Promise.all([captureRecordedRemoteTips('ssh://git.example.invalid/team/project'), captureRemoteTips(workspace)]), [null, null]);
   assert.ok(Date.now() - begun < 7_500);
@@ -205,13 +227,13 @@ test('the question cannot prompt, and a transport that hangs does not outlive it
   assert.deepEqual(started.filter(alive), [], 'the transport died with the question');
 });
 
-test('a remote that does not answer in time gives no answer and delays nothing', { skip: process.platform === 'win32' }, async t => {
+test('a remote that does not answer in time gives no answer and delays nothing', { skip: needsProcessTreeHelper }, async t => {
   const f = fixture(t);
   const workspace = f.clone();
   f.landOnStaging();
   // A server that accepts the connection and never says anything, and a transport that only sleeps.
   const sockets: Socket[] = [];
-  const silent = createServer(socket => { sockets.push(socket); }).listen(0, '127.0.0.1');
+  const silent = createServer(socket => { sockets.push(socket); socket.on('error', () => { /* The killed Git resets the connection; Windows reports it. */ }); }).listen(0, '127.0.0.1');
   await once(silent, 'listening');
   t.after(() => { for (const socket of sockets) socket.destroy(); silent.close(); });
   git(workspace, 'config', 'protocol.ext.allow', 'always');

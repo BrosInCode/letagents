@@ -9,6 +9,7 @@ import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-hom
 import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
 import { withoutRoomAuthority } from "./room-authority-environment.js";
+import { providerTreeExit } from "./provider-evidence.js";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -441,12 +442,7 @@ function childExitPromise(
     };
     const settleExit = (output = outputCapture?.snapshot()) => {
       if (!exit) return;
-      settle({
-        type: "exit",
-        code: exit.code,
-        signal: exit.signal,
-        output,
-      });
+      settle({ ...providerTreeExit("Codex", exit.code, exit.signal), output });
     };
 
     child.once("error", (error) => {
