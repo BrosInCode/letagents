@@ -218,7 +218,8 @@ line breaks. It reads a batch file and never runs it to find out (`shared/provid
 - An npm shim of a native program (`opencode-ai`): that `.exe`, when it is inside the package folder the shim names and
   no link leads out of that folder.
 - Cursor's official launcher (`%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd`, then `cursor-agent.ps1`): the `node.exe`
-  and `index.js` in the `versions\<version>` folder with the latest date, as the script selects it. The app also sets
+  and `index.js` in the `versions\<version>` folder with the latest date, as the script selects it (except that a
+  hidden folder counts here, and not for the script). The app also sets
   the `CURSOR_INVOKED_AS` and `NODE_COMPILE_CACHE` values that the launcher sets.
 
 Anything else fails. A file that looks like one of these but differs stops the launch with an error that names the

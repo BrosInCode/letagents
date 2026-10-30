@@ -200,6 +200,8 @@ function cursorVersionDate(name) {
  * Two folders of one date have no defined order: PowerShell 5.1's Sort-Object
  * is not stable (2, 3 and 5 equal keys gave the 2nd, 3rd and 4th item), so
  * what the script would run cannot be known, and that is refused too.
+ * One difference: Get-ChildItem skips a hidden folder and Node cannot see that
+ * attribute, so a hidden version folder counts here. Cursor makes none.
  */
 function selectedCursorVersion(launcher, root, files) {
   const versions = join(root, "versions");

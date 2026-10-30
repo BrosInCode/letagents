@@ -57,11 +57,14 @@ export function notFoundPath(command, env) {
   return path.win32.join(systemRoot, "letagents-not-on-path", command);
 }
 
-/** What a batch file runs, read as codexLaunchCommand reads it, with no shell: both null for a batch file only cmd.exe can start. */
+/**
+ * What a batch file runs, read as codexLaunchCommand reads it, with no shell: both null for a batch
+ * file only cmd.exe can start. One that cannot be read is refused: every check here depends on its text.
+ */
 function batchProgramOf(program, execPath, env, launchOptions = {}) {
   const readFile = launchOptions.readFile ?? ((filePath) => readFileSync(filePath, "utf8"));
   let text;
-  try { text = readFile(program); } catch { return { nodeShim: null, installed: null }; }
+  try { text = readFile(program); } catch { throw new ProviderInstallError(program, "it could not be read."); }
   const nodeShim = parseNodeShim(program, text, { execPath, exists: launchOptions.exists });
   return { nodeShim, installed: windowsInstalledProgram(program, text, { ...launchOptions, env, isNodeShim: nodeShim !== null }) };
 }

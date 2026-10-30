@@ -308,6 +308,13 @@ test("a script shim keeps its own path: its node.exe check claims nothing, and n
   assert.equal(launch.envAdditions, null);
 });
 
+test("a batch file that cannot be read fails closed: every check depends on its text, and cmd.exe would skip them", () => {
+  const disk = cursorDisk();
+  const options = disk.options(cursorEnv, { allowCmd: true });
+  options.launchOptions.readFile = () => { throw new Error("EBUSY"); };
+  assert.throws(() => providerLaunchCommand("cursor-agent", [], options), REFUSED(/cursor-agent\.cmd: it could not be read/));
+});
+
 test("a batch file that claims neither install is still refused as a batch file", () => {
   const disk = new Disk().file(`${NPM}\\sometool.cmd`, "@echo off\r\nC:\\tools\\agent.exe %*\r\n");
   assert.throws(() => providerLaunchCommand("sometool", [], disk.options(npmEnv)), ProviderBatchFileError);
@@ -478,23 +485,46 @@ test("Windows: a real junction out of the package, or out of Cursor's versions, 
   }
 });
 
-test("Windows: Cursor's real layout starts through the resolver, in and out of the process-tree start, with no shell", windowsOnly, () => {
+function realCursorInstall(root: string): { folder: string; env: NodeJS.ProcessEnv } {
+  const cursor = join(root, "cursor-agent");
+  const folder = join(cursor, "versions", "2026.10.22-27dcf5f");
+  realNode(join(folder, "node.exe"));
+  writeFileSync(join(folder, "index.js"), PRINT_ARGS);
+  writeFileSync(join(cursor, "cursor-agent.cmd"), CURSOR_CMD);
+  writeFileSync(join(cursor, "cursor-agent.ps1"), CURSOR_PS1);
+  const env: NodeJS.ProcessEnv = { ...process.env, Path: cursor, PATH: cursor, LOCALAPPDATA: root };
+  delete env.NODE_COMPILE_CACHE;
+  return { folder, env };
+}
+
+test("Windows: Cursor's real layout starts through the resolver with no shell", windowsOnly, () => {
   const { root, remove } = windowsInstallRoot();
   try {
-    const cursor = join(root, "cursor-agent");
-    const folder = join(cursor, "versions", "2026.10.22-27dcf5f");
-    realNode(join(folder, "node.exe"));
-    writeFileSync(join(folder, "index.js"), PRINT_ARGS);
-    writeFileSync(join(cursor, "cursor-agent.cmd"), CURSOR_CMD);
-    writeFileSync(join(cursor, "cursor-agent.ps1"), CURSOR_PS1);
-    const env: NodeJS.ProcessEnv = { ...process.env, Path: cursor, PATH: cursor, LOCALAPPDATA: root };
-    delete env.NODE_COMPILE_CACHE;
+    const { folder, env } = realCursorInstall(root);
     const hostile = ["a \"quoted\" arg", "100%PATH%", "x^&|<>", "two\nlines"];
     const launch = providerLaunchCommand("cursor-agent", hostile, { platform: "win32", env });
     assert.equal(launch.file.toLowerCase(), join(folder, "node.exe").toLowerCase());
     const ran = spawnSync(launch.file, launch.args, { encoding: "utf8", env: { ...env, ...launch.envAdditions } });
     assert.equal(ran.status, 0, ran.stderr);
     assert.deepEqual(JSON.parse(ran.stdout), { argv: hostile, invoked: "cursor-agent.cmd", cache: join(root, "cursor-compile-cache") });
+  } finally {
+    remove();
+  }
+});
+
+test("Windows: Cursor's real layout starts inside the process-tree helper's job", {
+  skip: process.platform === "win32" && process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER ? false : "needs Windows and the built helper",
+}, async () => {
+  const { root, remove } = windowsInstallRoot();
+  try {
+    const { env } = realCursorInstall(root);
+    const hostile = ["a \"quoted\" arg", "100%PATH%", "x^&|<>", "two\nlines"];
+    const child = spawnTree("cursor-agent", hostile, { env, stdio: ["ignore", "pipe", "inherit"] }, { helperPath: process.env.LETAGENTS_TEST_PROCESS_TREE_HELPER });
+    let printed = "";
+    child.stdout!.on("data", (chunk) => { printed += String(chunk); });
+    const code = await new Promise((resolve) => child.once("close", resolve));
+    assert.equal(code, 0);
+    assert.deepEqual(JSON.parse(printed), { argv: hostile, invoked: "cursor-agent.cmd", cache: join(root, "cursor-compile-cache") });
   } finally {
     remove();
   }
