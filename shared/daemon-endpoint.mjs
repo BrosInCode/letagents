@@ -7,7 +7,7 @@ import { posix, win32 } from "node:path";
 
 import { loadDaemonPipeAddon } from "./daemon-pipe-native.mjs";
 import { letagentsHome } from "./letagents-home.mjs";
-import { isOwnerPrivate, writePrivateFileAtomically } from "./owner-private-fs.mjs";
+import { isOwnerPrivate, ownerPrivatePlatform, readOwnerPrivateFile, writePrivateFileAtomically } from "./owner-private-fs.mjs";
 
 // Where the desktop, the supervisor daemon and MCP workers meet.
 //
@@ -110,13 +110,17 @@ function parseProof(raw) {
  * proof is written in a private staging folder before it is renamed into
  * place, so no other account can hold a handle to it.
  */
-export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, checkPrivacy = isOwnerPrivate, ...options } = {}) {
+export async function ensureDaemonProof(proofPath, options = {}) {
+  return ownerPrivatePlatform(options) === "win32" ? ensureWindowsDaemonProof(proofPath, options) : ensurePosixDaemonProof(proofPath, options);
+}
+
+/** POSIX (tests only: no POSIX daemon uses a proof): the mode check, then the read. */
+async function ensurePosixDaemonProof(proofPath, { recheckDelayMs = 250, checkPrivacy = isOwnerPrivate, ...options } = {}) {
   try {
     const info = await lstat(proofPath);
-    // On Windows a failed DACL read and a "not private" answer look the same.
-    // A rotation mid-handoff fails clients holding the old proof, so a valid
-    // proof is replaced only when a second check agrees.
-    // The proof is a high-value secret: its own DACL is read every time (see checkObject).
+    // A failed check and a "not private" answer look the same (a test injects
+    // failures). A rotation mid-handoff fails clients holding the old proof,
+    // so a valid proof is replaced only when a second check agrees.
     const objectOptions = { ...options, checkObject: true };
     const isPrivate = async () => await checkPrivacy(proofPath, info, objectOptions)
       || (await new Promise((resolve) => setTimeout(resolve, recheckDelayMs)), await checkPrivacy(proofPath, info, objectOptions));
@@ -136,6 +140,42 @@ export async function ensureDaemonProof(proofPath, { recheckDelayMs = 250, check
   // the file as it is after the rename.
   const written = await lstat(proofPath);
   if (written.isFile() && await checkPrivacy(proofPath, written, { ...options, checkObject: true })) rememberPrivateDaemonProof(proofPath, written);
+  return proof;
+}
+
+/**
+ * Windows: the proof's owner, its DACL and its bytes come from one open
+ * handle (readOwnerPrivateFile), so a file renamed or swapped in between a
+ * check and a read cannot pass one file's DACL off with another's bytes. A
+ * failed DACL read and a "not private" answer look the same (EOWNERPRIVATE),
+ * and a rotation mid-handoff fails clients holding the old proof, so a valid
+ * proof is replaced only when a second read agrees. A proof another process
+ * keeps locked through both reads (EBUSY) is replaced too: the rename either
+ * succeeds (a holder that shares delete access) or fails, and that error is
+ * thrown, as a locked read was before. The new proof needs no
+ * check of its own: writePrivateFileAtomically makes it private from its
+ * create (privateEntryCreated in the daemon's verified state folder, no
+ * icacls) and remembers what it wrote, so this process reads it back with no
+ * tool while it is unchanged.
+ */
+async function ensureWindowsDaemonProof(proofPath, { recheckDelayMs = 250, checkPrivacy: _posixOnly, ...options }) {
+  for (let read = 1; read <= 2; read += 1) {
+    let existing;
+    try {
+      existing = await readOwnerPrivateFile(proofPath, "utf8", options);
+    } catch (error) {
+      if (error?.code === "ENOENT") break;
+      if (error?.code !== "EOWNERPRIVATE") throw error;
+      if (read === 1) await new Promise((resolve) => setTimeout(resolve, recheckDelayMs));
+      continue;
+    }
+    // Private but malformed: replaced.
+    const proof = parseProof(existing);
+    if (proof) return proof;
+    break;
+  }
+  const proof = randomBytes(32).toString("hex");
+  await writePrivateFileAtomically(proofPath, `${proof}\n`, options);
   return proof;
 }
 
@@ -225,13 +265,13 @@ function checkProofPrivacy(path, info, identity, options) {
 }
 
 /**
- * Record a proof this process has just found private (the daemon's own
- * ensureDaemonProof, a test fake that wrote it privately), so clients in the
- * same process need not read its DACL again. `checkedInfo` is the lstat result
- * the privacy check ran on: the record binds to that identity, so a change
- * after the check (a widened DACL moves ctime) is checked again.
+ * POSIX: record a proof this process has just found private (its own
+ * ensureDaemonProof), so clients in the same process need not check it again.
+ * `checkedInfo` is the lstat result the privacy check ran on: the record binds
+ * to that identity, so a change after the check (a widened mode moves ctime)
+ * is checked again. Windows keeps its verdicts in readOwnerPrivateFile.
  */
-export function rememberPrivateDaemonProof(path, checkedInfo) {
+function rememberPrivateDaemonProof(path, checkedInfo) {
   privateProofs.set(path, { identity: proofIdentity(path, checkedInfo), refreshAt: Date.now() + PRIVATE_PROOF_REFRESH_MS });
 }
 
@@ -240,18 +280,18 @@ export function rememberPrivateDaemonProof(path, checkedInfo) {
  * mode 0600 and owner; on Windows the account as owner and a protected DACL
  * for only the account and SYSTEM). An exposed proof could let another
  * account squat the pipe and answer the handshake, so it is refused, never
- * used.
+ * used. Windows: see readWindowsClientProof.
  *
- * A Windows check reads the DACL through PowerShell (about a second), which
- * request budgets as short as 250 ms cannot absorb. So a client waits for the
- * check only when this process has no verdict for the file as it is now (first
- * contact, a rotated proof, or a mode or DACL change, which moves ctime). A
- * verdict older than five minutes is still used while a background check
- * renews it; a "not private" answer drops it, so the next connection checks
- * again and is refused while the proof stays exposed.
+ * POSIX (tests only: a POSIX client runs the handshake only when a test asks):
+ * a client waits for the check only when this process has no verdict for the
+ * file as it is now (first contact, a rotated proof, or a mode change, which
+ * moves ctime). A verdict older than five minutes is still used while a
+ * background check renews it; a "not private" answer drops it, so the next
+ * connection checks again and is refused while the proof stays exposed.
  */
 async function readClientProof(path, options) {
   if (!path) throw untrusted("no LetAgents state directory of this user owns this pipe");
+  if (ownerPrivatePlatform(options) === "win32") return readWindowsClientProof(path, options);
   const info = await lstat(path);
   const identity = proofIdentity(path, info);
   const known = privateProofs.get(path);
@@ -264,6 +304,44 @@ async function readClientProof(path, options) {
     throw untrusted("the proof file is not private to this account");
   }
   const proof = parseProof(await readFile(path, "utf8"));
+  if (!proof) throw untrusted("the proof file is malformed");
+  return proof;
+}
+
+/** Windows: proof reads in flight, by file identity, shared by concurrent connections. */
+const pendingWindowsReads = new Map();
+/** Opening the proof failed for one of these reasons: the code is kept (see connectDaemon), not read as exposure. */
+const PROOF_OPEN_CODES = new Set(["EBUSY", "EACCES", "EPERM"]);
+
+/**
+ * Windows: the proof's owner, DACL and bytes come from one open handle
+ * (readOwnerPrivateFile), so the bytes used are those of the file whose DACL
+ * was found private; a file swapped in during the read is read again, and an
+ * exposed one is refused. readOwnerPrivateFile keeps the verdict per file
+ * identity (change time included: NTFS moves it with the DACL) and the hash
+ * of the checked bytes, so an unchanged proof costs no tool. A verdict past
+ * its five minutes is still used while a background check renews it
+ * (renewInBackground), for request budgets as short as 250 ms.
+ */
+async function readWindowsClientProof(path, { checkPrivacy: _posixOnly, ...options }) {
+  const info = await lstat(path, { bigint: true });
+  const identity = `${path}\0${info.dev}\0${info.ino}\0${info.ctimeNs}\0${info.mtimeNs}\0${info.size}`;
+  let pending = pendingWindowsReads.get(identity);
+  if (!pending) {
+    pending = readOwnerPrivateFile(path, "utf8", { ...options, renewInBackground: true }).finally(() => pendingWindowsReads.delete(identity));
+    pendingWindowsReads.set(identity, pending);
+  }
+  let raw;
+  try {
+    raw = await pending;
+  } catch (error) {
+    if (error?.code !== "EOWNERPRIVATE") throw error;
+    // A file locked past the reader's retries (an antivirus scan) or denied keeps its code; anything else is refused.
+    const cause = error.cause?.code;
+    if (PROOF_OPEN_CODES.has(cause)) throw Object.assign(new Error(error.message), { code: cause, cause: error });
+    throw Object.assign(untrusted("the proof file is not private to this account"), { cause: error });
+  }
+  const proof = parseProof(raw);
   if (!proof) throw untrusted("the proof file is malformed");
   return proof;
 }
