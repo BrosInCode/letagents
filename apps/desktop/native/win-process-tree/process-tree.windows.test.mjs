@@ -355,8 +355,11 @@ function shortListHelper() {
 function shortListTree(args, shortReads, unkillableAfterMs) {
   return spawnTree(process.execPath, args, { stdio: "ignore", env: { ...process.env, LETAGENTS_TEST_SHORT_READS: String(shortReads) } }, { helperPath: shortListHelper(), unkillableAfterMs });
 }
-/** The helper's deadline comes from GetTickCount64, which can lag the wall clock by a tick. */
-const BOUND_WAITED_MS = 900;
+/** A 1 s bound as a test can see it: the helper's GetTickCount64 can lag the wall clock by a tick, and 5 s is its default. */
+function assertWaitedItsBound(waited, who) {
+  assert.ok(waited >= 900, `${who} answered in ${waited} ms, before its bound`);
+  assert.ok(waited < 5_000, `${who} answered in ${waited} ms, past its bound`);
+}
 
 test("a process that is only leaving its job is not called unkillable: a clean exit keeps its own code", { skip }, async () => {
   // More reads than the four the helper once made, all of them in less than a millisecond.
@@ -376,7 +379,7 @@ test("a process that stays counted past the bound is unkillable, and only after 
   const { code } = await exited(tree);
   const waited = Date.now() - before;
   assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
-  assert.ok(waited >= BOUND_WAITED_MS, `the helper answered in ${waited} ms, before its bound`);
+  assertWaitedItsBound(waited, "the helper");
 });
 
 test("a kill that cannot read its list whole answers unkillable after its bound, and still ends the job", { skip }, async () => {
@@ -388,7 +391,7 @@ test("a kill that cannot read its list whole answers unkillable after its bound,
   });
   const waited = Date.now() - before;
   assert.equal(kill.status, 4);
-  assert.ok(waited >= BOUND_WAITED_MS, `the kill answered in ${waited} ms, before its bound`);
+  assertWaitedItsBound(waited, "the kill");
   await exited(started.tree);
   assertAllGone(started);
 });
