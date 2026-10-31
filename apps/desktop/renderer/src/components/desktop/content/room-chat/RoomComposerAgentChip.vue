@@ -55,6 +55,7 @@
       :id="menuId"
       ref="menu"
       class="desktop-composer-agent-menu"
+      :style="menuHeight === null ? undefined : { maxHeight: `${menuHeight}px` }"
       role="dialog"
       :aria-label="view === 'where' ? 'Works in' : `New ${providerName} agent settings`"
       :data-animate="animate || undefined"
@@ -168,6 +169,7 @@ import type {
   DesktopManagedAgentPermissionProfileId,
 } from "../../../../../../electron/ipc-types";
 import ComposerStepSlider from "./ComposerStepSlider.vue";
+import { heightAboveElement } from "./composer-popover-height";
 import type { ComposerAgentReadiness } from "./composer-agent-launch";
 import type { ComposerAgentChip } from "./useComposerAgentDraft";
 
@@ -217,6 +219,7 @@ const open = ref(false);
 const animate = ref(false);
 const view = ref<"main" | "where">("main");
 const coachOff = ref(false);
+const menuHeight = ref<number | null>(null);
 
 const spec = computed(() => {
   const bits: string[] = [];
@@ -286,14 +289,18 @@ function checkedOrFirst(): HTMLElement | null {
 }
 
 function focusItem(item: HTMLElement | null): void {
-  if (item && typeof document !== "undefined" && document.activeElement !== item) item.focus({ preventScroll: true });
+  if (!item || typeof document === "undefined") return;
+  if (document.activeElement !== item) item.focus({ preventScroll: true });
+  // In a short window the row can be below the visible part of the model list.
+  item.scrollIntoView?.({ block: "nearest" });
 }
 
 // The pointer moves the one highlight; it never opens or closes anything.
 function focusUnderPointer(event: PointerEvent): void {
   if ((event.buttons ?? 0) !== 0) return;
   const item = (event.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-item], [role="slider"]');
-  if (item && item.getAttribute("aria-disabled") !== "true" && menu.value?.contains(item)) focusItem(item);
+  // No scrolling here: a list that moves under the pointer would change the row it is on.
+  if (item && item.getAttribute("aria-disabled") !== "true" && menu.value?.contains(item) && document.activeElement !== item) item.focus({ preventScroll: true });
 }
 
 function handleMenuKey(event: KeyboardEvent): void {
@@ -335,13 +342,20 @@ function closeOnEscape(event: KeyboardEvent): void {
   event.preventDefault();
   closeMenu();
 }
+function measureMenu(): void {
+  menuHeight.value = root.value ? heightAboveElement(root.value) : null;
+}
 function setDocumentListeners(listening: boolean): void {
   if (typeof document === "undefined") return;
   const method = listening ? "addEventListener" : "removeEventListener";
   document[method]("pointerdown", closeOnOutsidePointer as EventListener, true);
   document[method]("keydown", closeOnEscape as EventListener, true);
+  window[method]("resize", measureMenu);
 }
-watch(open, setDocumentListeners);
+watch(open, (isOpen) => {
+  if (isOpen) measureMenu();
+  setDocumentListeners(isOpen);
+});
 watch(() => props.launching, (launching) => { if (launching) closeMenu(); });
 onBeforeUnmount(() => setDocumentListeners(false));
 
