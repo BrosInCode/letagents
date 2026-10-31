@@ -310,18 +310,16 @@ export function readDurableTurnTerminal(
       legacyUnversionedTerminal = true;
     }
     if (!raw.init || typeof raw.init !== "object" || Array.isArray(raw.init)) {
-      if (raw.init === null && raw.result === null && authorityProof === "proven") {
+      if (raw.type === "exit" && raw.init === null && raw.result === null && authorityProof === "proven") {
         throw new CursorRoomTurnEndedBeforeInitError<CursorTurnTerminal>("Cursor terminal evidence has no verified init snapshot.", {
           state: "attempt_terminal",
-          exit: raw.type === "exit"
-            ? { type: "exit", code: typeof raw.code === "number" ? raw.code : null, signal: typeof raw.signal === "string" ? raw.signal as NodeJS.Signals : null }
-            : { type: "error", error: new Error(typeof raw.error === "string" ? raw.error : "Cursor wrapper launch failed.") },
+          exit: { type: "exit", code: typeof raw.code === "number" ? raw.code : null, signal: typeof raw.signal === "string" ? raw.signal as NodeJS.Signals : null },
           text: null,
           isError: true,
           providerRequestId: null,
           attemptTerminal: null,
           publicationContract,
-          terminalError: safeCursorTerminalErrorDetail(raw.error) ?? "Cursor stopped before it reported that this turn had started.",
+          terminalError: "Cursor stopped before it reported that this turn had started.",
           ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
           ...(workspaceGenerationSettlement ? { workspaceGenerationSettlement } : {}),
         });
