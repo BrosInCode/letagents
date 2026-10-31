@@ -30,7 +30,7 @@ test("smoke cleanup removes the folder when nothing holds it", () => {
 test("the smoke check follows the agents-off Add agent notice and never waits for the modal there", () => {
   const source = readFileSync(new URL("../main/window.ts", import.meta.url), "utf8");
   const branch = source.indexOf("if (!${JSON.stringify(agentsSupported)}) {");
-  const modalWait = source.indexOf('await waitFor("add-agent modal"');
+  const modalWait = source.indexOf('await openAddAgentWindow("add-agent modal"');
   assert.ok(branch > 0 && modalWait > branch, "the agents-off branch returns before the add-agent modal wait");
   const agentsOff = source.slice(branch, modalWait);
   assert.match(agentsOff, /desktop-add-agent-unavailable-modal/);
