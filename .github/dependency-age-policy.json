@@ -85,6 +85,16 @@
       "name": "joi",
       "version": "18.3.1",
       "reason": "Exact patched release required to remediate GHSA-4528-x5fx-h6hg (high: quadratic-time split in string().email({ multiple: true })) before the normal cooldown expires; development dependency of wait-on only. Remove when it passes the normal cooldown."
+    },
+    {
+      "name": "minimatch",
+      "version": "11.0.3",
+      "reason": "Exact patched release required to remediate GHSA-g3hv-75wg-m249 (moderate: denial of service via globparts amplification, published 2026-10-30) before the normal cooldown expires; development dependency of eslint, typescript-estree and vue-tsc only. Remove when it passes the normal cooldown."
+    },
+    {
+      "name": "@isaacs/nonrecursive-glob-match",
+      "version": "1.0.3",
+      "reason": "Dependency of the patched minimatch 11.0.3 (GHSA-g3hv-75wg-m249), same author, no install scripts; development dependency only. Remove when it passes the normal cooldown."
     }
   ]
 }
