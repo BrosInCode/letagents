@@ -162,8 +162,8 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
     : null;
   const boardScreenshotWidth = Math.max(480, Math.min(1800, Number(process.env.LETAGENTS_DESKTOP_BOARD_WIDTH) || 1600));
   const boardScreenshotHeight = Math.max(640, Math.min(1200, Number(process.env.LETAGENTS_DESKTOP_BOARD_HEIGHT) || 1000));
-  // Where agents are off (Windows for now), "Add agent" opens one notice
-  // instead of the add-agent modal, and the smoke check follows that.
+  // Where agents are off, "Add agent" opens one notice instead of the
+  // add-agent modal, and the smoke check follows that.
   const agentsSupported = supervisedAgentsSupported();
   window.setMinimumSize(360, 480);
 
@@ -363,9 +363,12 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
 
         const addAgentButton = await waitFor("composer add-agent button", () => document.querySelector('[data-testid="desktop-composer-add-agent-button"]'));
         result.addAgentButton = true;
-        addAgentButton.click();
-        const addAgentMenuItem = await waitFor("composer add-agent menu item", () => document.querySelector('[data-testid="desktop-composer-menu-add-agent"]'));
-        addAgentMenuItem.click();
+        const chooseAddAgent = async () => {
+          addAgentButton.click();
+          const item = await waitFor("composer add-agent menu item", () => document.querySelector('[data-testid="desktop-composer-menu-add-agent"]'));
+          item.click();
+        };
+        await chooseAddAgent();
 
         if (!${JSON.stringify(agentsSupported)}) {
           const unavailableModal = '[data-testid="desktop-add-agent-unavailable-modal"]';
@@ -389,7 +392,13 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           return agentsOff;
         }
 
-        await waitFor("add-agent modal", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        // Add agent lists the agents that can start from the composer; the window is one row further.
+        const openAddAgentWindow = async (label) => {
+          const setUpAnother = await waitFor("composer agent list", () => document.querySelector('[data-testid="desktop-composer-agent-setup-another"]'));
+          setUpAnother.click();
+          await waitFor(label, () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        };
+        await openAddAgentWindow("add-agent modal");
         result.addAgentModal = true;
         result.addAgentRoomLabel = (document.querySelector('[data-testid="desktop-add-agent-room-label"]')?.textContent || "")
           .includes("Smoke Room");
@@ -492,8 +501,8 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         const addAgentClose = addAgentModal?.querySelector('button.desktop-modal-close[aria-label="Close add agent dialog"]');
         addAgentClose?.click();
         await waitFor("add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
-        addAgentButton.click();
-        await waitFor("add-agent modal reopened", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        await chooseAddAgent();
+        await openAddAgentWindow("add-agent modal reopened");
         await waitFor("Open Model install confirmation cleared on close", () =>
           (document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Install Open Model") &&
           !(document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Confirm install Open Model")
