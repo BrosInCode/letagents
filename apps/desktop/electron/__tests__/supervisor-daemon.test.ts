@@ -618,7 +618,7 @@ test("host approval signatures bind closed operations and exact daemon birth wit
         const input = { requestId, agentId: "agent_1", decision: "allow_once" };
         const envelope = signer.sign(challenge, operation, input, now);
         assert.deepEqual(verifier.verify(envelope, now), { operation, input });
-        assert.equal(verifier.verify(envelope, now - 1), null, "future requests are not valid yet");
+        assert.equal(verifier.verify(envelope, now - 1_001), null, "future requests are not valid yet");
         assert.equal(verifier.verify(envelope, now + 30_000), null);
         assert.equal(new HostApprovalVerifier(7, signer.publicKey).verify(envelope, now), null, "same generation, different boot");
         assert.equal(new HostApprovalVerifier(8, signer.publicKey).verify(envelope, now), null);
@@ -636,9 +636,13 @@ test("host approval signatures bind closed operations and exact daemon birth wit
     const privateKey = createPrivateKey({ key: Buffer.from(storage.decryptString(Buffer.from(stored.sealedKey, "base64")), "base64"), format: "der", type: "pkcs8" });
     const base = JSON.parse(signer.sign(challenge, "list", {}, now).payload);
     for (const mutation of [{ operation: "execute" }, { domain: "another-protocol" }, { version: 2 },
-      { expiresAt: now + 30_001 }, { issuedAt: now + 1 }, { unexpected: "extra" }, { input: undefined }]) {
+      { expiresAt: now + 30_001 }, { issuedAt: now + 1_001 }, { unexpected: "extra" }, { input: undefined }]) {
       const payload = JSON.stringify({ ...base, ...mutation });
       assert.equal(verifier.verify({ payload, signature: nativeSign(null, Buffer.from(payload), privateKey).toString("base64") }, now), null);
+    }
+    // Signer and verifier are two processes: on a Windows runner a child's clock read 1 ms behind a time its parent had sent.
+    for (const ahead of [1, 1_000]) {
+      assert.deepEqual(verifier.verify(signer.sign(challenge, "list", {}, now + ahead), now), { operation: "list", input: {} }, `${ahead} ms ahead`);
     }
   } finally { await env.cleanup(); }
 });
