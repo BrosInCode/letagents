@@ -279,6 +279,98 @@ test("Cursor session discovery atomically retargets an already-prepared control 
   }
 });
 
+test("a successor runtime records the real session of a Cursor turn only after the runtime that started the turn has ended", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-08-05T09:45:00.000Z");
+  const bindings = new WorkerBindingStore(env.legacyPath, undefined, env.databasePath);
+  const pendingContinuation = "cursor-pending:successor";
+  const sessionContinuation = "cursor-session:successor";
+  const workAttemptId = "cursor-successor-attempt";
+  const wrapperConnection = { kind: "cursor_cli" as const, url: null, serverAuthPath: null, pid: 4813, processIdentity: "cursor-wrapper:4813:birth" };
+  const idleConnection = { kind: "cursor_cli" as const, url: null, serverAuthPath: null, pid: null, processIdentity: null };
+  const cursor: DaemonManifestEntry = {
+    ...entry,
+    id: "cursor-successor",
+    room_id: "cursor-successor-room",
+    provider: "cursor",
+    condition: "none",
+    delivery_mode: "daemon_inbox",
+    provider_ref: {
+      work_attempt_id: workAttemptId,
+      provider_continuation_id: pendingContinuation,
+      provider_connection: null,
+      execution_generation_id: "cursor-origin-generation",
+    },
+    work_attempt_id: workAttemptId,
+    turn_control: undefined,
+    last_turn_control_sequence: 0,
+  };
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    let generation = (await store.write(0, [cursor])).generation;
+    const worker = await bindings.bind({
+      entry_id: cursor.id, room_id: cursor.room_id, work_attempt_id: workAttemptId,
+      execution_generation_id: "cursor-origin-generation", agent_session_id: "cursor-successor-worker",
+      agent_session_token: "memory-only-test-token", api_url: "https://letagents.test",
+    });
+    const active = await inbox.enqueueCorrection({
+      agent_id: cursor.id, room_id: cursor.room_id, source_message_id: "cursor-successor-message",
+      source_message: { text: "A" }, activation: { decision: "activate" },
+    });
+    await inbox.claimHead(cursor.id);
+    generation = (await store.checkpointCursorPreparedTurn(generation, {
+      agentId: cursor.id, roomId: cursor.room_id, inboxItemId: active.inbox_item_id,
+      providerTurnId: "cursor-successor-turn", providerContinuationId: pendingContinuation,
+      workAttemptId, executionGenerationId: "cursor-origin-generation",
+      agentSessionId: worker.agent_session_id, credentialRef: worker.credential_ref, apiUrl: worker.api_url,
+      expectedProviderContinuationId: pendingContinuation, expectedProviderConnection: null,
+      providerConnection: wrapperConnection, configurationRevision: 1, requestedAuthorityMode: "typed_shadow",
+      observedAt: "2026-08-05T09:45:00.100Z",
+    })).generation;
+
+    // The lane restarts in the same work attempt, as it does after a turn that never reported init.
+    database.prepare(`INSERT INTO work_attempts VALUES(?,'task','lease',1,'/successor','repo','remote','revision','/bare','active',?,NULL,NULL,NULL)`)
+      .run(workAttemptId, "2026-08-05T09:45:00.000Z");
+    database.prepare("INSERT INTO work_attempt_executions VALUES('cursor-origin-generation',?,?,'test',1,NULL)").run(workAttemptId, "2026-08-05T09:45:00.000Z");
+    const successor: DaemonManifestEntry = {
+      ...cursor,
+      provider_ref: { ...cursor.provider_ref!, provider_connection: idleConnection, execution_generation_id: "cursor-successor-generation" },
+    };
+    generation = (await store.write(generation, [successor])).generation;
+    const successorWorker = await bindings.bind({
+      entry_id: cursor.id, room_id: cursor.room_id, work_attempt_id: workAttemptId,
+      execution_generation_id: "cursor-successor-generation", agent_session_id: worker.agent_session_id,
+      agent_session_token: "memory-only-test-token", api_url: worker.api_url,
+    });
+    const recover = (expectedGeneration: number) => store.checkpointCursorProviderState(expectedGeneration, {
+      agentId: cursor.id, roomId: cursor.room_id, inboxItemId: active.inbox_item_id,
+      providerTurnId: "cursor-successor-turn", workAttemptId, executionGenerationId: "cursor-successor-generation",
+      agentSessionId: successorWorker.agent_session_id, credentialRef: successorWorker.credential_ref, apiUrl: successorWorker.api_url,
+      expectedProviderContinuationId: pendingContinuation, expectedProviderConnection: idleConnection,
+      providerContinuationId: sessionContinuation, providerConnection: idleConnection,
+      observedAt: "2026-08-05T09:45:01.000Z",
+    });
+    await assert.rejects(recover(generation), /durable provider-turn authority binding/,
+      "nothing yet proves that the turn's own runtime ended");
+    assert.equal((await inbox.providerTurnBinding(active.inbox_item_id))?.provider_continuation_id, pendingContinuation);
+
+    database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='cursor-origin-generation'")
+      .run(JSON.stringify({ ended_at: "2026-08-05T09:45:00.900Z", terminal_cause: "protocol_error" }));
+    const recovered = await recover(generation);
+    assert.equal(recovered.entry.provider_ref?.provider_continuation_id, sessionContinuation);
+    const binding = await inbox.providerTurnBinding(active.inbox_item_id);
+    assert.equal(binding?.provider_continuation_id, sessionContinuation);
+    assert.equal(binding?.origin_execution_generation_id, "cursor-origin-generation", "the turn stays bound to the runtime that started it");
+  } finally {
+    database.close();
+    await inbox.close().catch(() => undefined);
+    await bindings.close().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("turn-control replay authority is exact-next and constant-size across many actions and reopen", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);

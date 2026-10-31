@@ -1,6 +1,13 @@
 import { createHash, createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
 import type { AuthenticatedHostApprovalRequest, HostApprovalChallenge } from "../shared/host-approval-auth.js";
 
+/**
+ * Electron signs and the daemon verifies, each by its own clock. On Windows a
+ * read in one process can be earlier than a read made before it in another, so
+ * a request issued this far ahead is still one issued now.
+ */
+const ISSUED_AT_CLOCK_SKEW_MS = 1_000;
+
 /** Immutable enrollment comes only from Electron's private child bootstrap. */
 export class HostApprovalVerifier {
   private readonly key: KeyObject | null;
@@ -38,7 +45,7 @@ export class HostApprovalVerifier {
         || payload.keyFingerprint !== this.boot.keyFingerprint || !Object.hasOwn(payload, "input")
         || (!["list", "decide", "list_tool_rules", "revoke_tool_rule", "set_home_harness", "set_live_sharing"].includes(String(payload.operation)))
         || !Number.isSafeInteger(payload.issuedAt) || (payload.issuedAt as number) < 0 || !Number.isSafeInteger(payload.expiresAt)
-        || (payload.issuedAt as number) > nowMs || (payload.expiresAt as number) <= nowMs
+        || (payload.issuedAt as number) > nowMs + ISSUED_AT_CLOCK_SKEW_MS || (payload.expiresAt as number) <= nowMs
         || (payload.expiresAt as number) - (payload.issuedAt as number) > 30_000
         || (payload.expiresAt as number) <= (payload.issuedAt as number)) return null;
       return { operation: payload.operation as AuthenticatedHostApprovalRequest["operation"], input: payload.input };

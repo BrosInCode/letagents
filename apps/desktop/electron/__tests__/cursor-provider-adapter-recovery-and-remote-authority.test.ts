@@ -396,6 +396,117 @@ test("a successor marks pre-version legacy durable Cursor results for the bounde
   }
 });
 
+test("a successor settles a turn that was stopped before Cursor reported init, and never reruns it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-no-init-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:stopped-before-init";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    const terminal = {
+      type: "exit", code: 1, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      remote_authority_revoked: true,
+      remote_authority_failed_checks: [],
+      turn_contract_version: 1,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      workspace_generation_manifest_path: null,
+      init: null,
+      result: null,
+    };
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify(terminal));
+    const harness = createHarness();
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest();
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "cursor-pending:stopped-before-init",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (ending) => terminals.push(ending));
+
+    const recovered = await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-no-init", providerTurnId: turnId }, {
+      checkpointTerminalResult: async (result) => ({ acceptedResult: result, cleanupRecoveryEvidence: false }),
+    });
+    assert.equal(recovered.outcome, "interrupted", "a proven ending settles the turn instead of blocking delivery");
+    assert.equal(recovered.providerContinuationId, "cursor-pending:stopped-before-init", "no conversation is invented");
+    assert.match(recovered.error ?? "", /stopped before it reported that this turn had started/);
+    assert.equal(harness.launches.length, 0, "the turn may have run, so it is never started again");
+    assert.equal(terminals.length, 1);
+
+    // Without proof that the turn's processes and authority ended, nothing is settled.
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({ ...terminal, remote_authority_revoked: false }));
+    const successor = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "cursor-pending:stopped-before-init",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    await assert.rejects(adapter.recoverRoomTurn(successor, { inboxItemId: "inbox-no-init", providerTurnId: turnId }),
+      /remote-authority revocation|no verified init snapshot/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a turn stopped before init settles on a second try when its first checkpoint fails after the workspace settled", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-turn-no-init-retry-")));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:stopped-before-init-retry";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    const harness = createHarness();
+    const generation = await harness.dependencies.createWorkspaceGeneration({ realWorkspace: root, turnIdentity: turnId });
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+      type: "exit", code: 1, signal: null,
+      native_process_group_reaped: true,
+      reap_scope: "native_process_group",
+      remote_authority_revoked: true,
+      turn_contract_version: 1,
+      session_contract_valid: true,
+      stream_contract_complete: true,
+      workspace_generation_manifest_path: generation.manifestPath,
+      init: null,
+      result: null,
+    }));
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest({ cwd: root });
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: "cursor-pending:stopped-before-init-retry",
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    const recovery = { inboxItemId: "inbox-no-init-retry", providerTurnId: turnId };
+    await assert.rejects(adapter.recoverRoomTurn(handle, recovery, {
+      checkpointProviderState: async () => { throw new Error("injected checkpoint failure"); },
+    }), /could not checkpoint its exact continuation/);
+    const recovered = await adapter.recoverRoomTurn(handle, recovery, {
+      checkpointTerminalResult: async (result) => ({ acceptedResult: result, cleanupRecoveryEvidence: false }),
+    });
+    assert.equal(recovered.outcome, "interrupted");
+    assert.equal(recovered.providerContinuationId, "cursor-pending:stopped-before-init-retry");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a successor materializes a trusted durable no-result terminal on the recovered lane", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-terminal-recovery-"));
   try {

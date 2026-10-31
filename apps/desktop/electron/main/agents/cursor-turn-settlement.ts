@@ -15,6 +15,16 @@ export class CursorRoomTurnRecoveryError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
 }
 
+/**
+ * A wrapper terminal with proven containment and no Cursor init: the turn was
+ * stopped before Cursor reported it had started. It names no conversation, so
+ * it stays refused as a live room-turn terminal. It carries the ending that
+ * recovery settles, because the turn can neither be read again nor rerun.
+ */
+export class CursorRoomTurnEndedBeforeInitError<T> extends CursorRoomTurnRecoveryError {
+  constructor(message: string, readonly terminal: T) { super(message); }
+}
+
 /** Read one exact inode with O_NOFOLLOW and a preallocated size bound. */
 export function readBoundedCursorTurnFile(path: string, maxBytes: number, label: string): string | null {
   let fd: number;

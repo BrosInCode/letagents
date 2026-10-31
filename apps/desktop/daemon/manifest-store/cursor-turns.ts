@@ -218,11 +218,20 @@ export const cursorTurns = storeMethods({
       }
       const turnBinding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
         .get(input.inboxItemId) as Row | undefined;
+      // A turn whose runtime ended is recovered by that runtime's successor in
+      // the same work attempt, which settles it under its own generation. The
+      // ended runtime's durable terminal is what admits that successor; the
+      // entry check above still fences a stale writer of an older generation.
+      const originRuntimeEnded = turnBinding
+        && String(turnBinding.origin_execution_generation_id) !== input.executionGenerationId
+        && Boolean(database.prepare(`SELECT 1 FROM work_attempt_executions
+          WHERE execution_generation_id=? AND work_attempt_id=? AND terminal_json IS NOT NULL`)
+          .get(String(turnBinding.origin_execution_generation_id), input.workAttemptId));
       if (!turnBinding
         || String(turnBinding.agent_id) !== input.agentId
         || String(turnBinding.room_id) !== input.roomId
         || String(turnBinding.work_attempt_id) !== input.workAttemptId
-        || String(turnBinding.origin_execution_generation_id) !== input.executionGenerationId
+        || (String(turnBinding.origin_execution_generation_id) !== input.executionGenerationId && !originRuntimeEnded)
         || String(turnBinding.provider_turn_id) !== input.providerTurnId) {
         throw new ManifestConflictError("Cursor provider-state transition lost its durable provider-turn authority binding.");
       }
