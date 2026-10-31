@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { posix, win32 } from "node:path";
 import test, { mock } from "node:test";
@@ -196,4 +197,13 @@ test("the Windows editor is VS Code's Code.exe next to code.cmd on PATH, or none
   assert.equal(windowsSourceEditor({ env: { PATH: "C:\\Windows\\System32" }, exists }), null);
   // A code.cmd without the editor next to it is not trusted.
   assert.equal(windowsSourceEditor({ env, exists: (path) => path.endsWith("code.cmd") }), null);
+});
+
+test("the smoke check reaches the Add agent window the way a person does: Add agent lists agents, one more row opens it", () => {
+  const smoke = readFileSync(new URL("../main/window.ts", import.meta.url), "utf8");
+  const menu = readFileSync(new URL("../../renderer/src/components/desktop/content/room-chat/RoomComposerAddMenu.vue", import.meta.url), "utf8");
+  for (const testid of ["desktop-composer-menu-add-agent", "desktop-composer-agent-setup-another"]) {
+    assert.ok(smoke.includes(testid), `the smoke check clicks ${testid}`);
+    assert.ok(menu.includes(testid), `the composer menu has ${testid}`);
+  }
 });
