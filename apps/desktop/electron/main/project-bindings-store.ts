@@ -125,14 +125,50 @@ export function resetProjectBindingsStoreCachesForTest(): void {
   validatedBindings.clear();
 }
 
+const STORE_BUSY_TIMEOUT_MS = 10_000;
+const SQLITE_BUSY = 5;
+
+function isSqliteBusy(error: unknown): boolean {
+  const code = (error as { errcode?: unknown } | null)?.errcode;
+  return typeof code === "number" && (code & 0xff) === SQLITE_BUSY;
+}
+
+/**
+ * Switch a new store file to WAL. SQLite does not apply `busy_timeout` to this
+ * switch: when another process opens the same new file at the same moment, the
+ * call fails with "database is locked" after 1 to 3 ms, however long the busy
+ * timeout is. WAL is stored in the file, so only the first opener has work to
+ * do. Every other opener reads the mode, or retries the switch until the first
+ * one is done. Retries stop at the busy timeout, and the last attempt can then
+ * wait up to that long again, so this blocks for about 10 to 20 s at the worst.
+ */
+function enableWriteAheadLog(database: SqliteDatabase): void {
+  const deadline = Date.now() + STORE_BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const mode = (database.prepare("PRAGMA journal_mode").get() as { journal_mode?: unknown }).journal_mode;
+      if (String(mode).toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error) || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 + Math.floor(Math.random() * 20));
+    }
+  }
+}
+
 function openStoreConnection(storePath: string): SqliteDatabase {
   require("node:fs").mkdirSync(dirname(storePath), { recursive: true });
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => SqliteDatabase;
   };
   const database = new DatabaseSync(storePath);
-  database.exec("PRAGMA busy_timeout = 10000");
-  database.exec("PRAGMA journal_mode = WAL");
+  database.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
+  try {
+    enableWriteAheadLog(database);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
   database.exec(`
     CREATE TABLE IF NOT EXISTS project_bindings (
       id TEXT PRIMARY KEY NOT NULL,
