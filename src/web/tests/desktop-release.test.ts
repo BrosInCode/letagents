@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA, WINDOWS_SMARTSCREEN_NOTE } from '../src/domain/desktopRelease'
+import { desktopDownloadOffer, detectDesktopVisitorPlatform, fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA } from '../src/domain/desktopRelease'
 
 test('Mac beta fallback uses current same-origin download routes', () => {
   assert.deepEqual(MAC_DESKTOP_BETA, {
@@ -79,9 +79,31 @@ test('the Windows installer appears beside the DMGs once the current release lis
   assert.equal(release.downloads.windows, 'https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe')
 
   const heroSource = readFileSync(fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url)), 'utf8')
-  assert.match(heroSource, /v-if="macDesktopBeta\.downloads\.windows"/)
-  assert.match(heroSource, /\{\{ WINDOWS_SMARTSCREEN_NOTE \}\}/)
-  assert.equal(WINDOWS_SMARTSCREEN_NOTE, 'Windows may show SmartScreen: More info → Run anyway.')
+  assert.doesNotMatch(heroSource, /SmartScreen/)
+})
+
+test('the visitor platform leads the download links, and Windows appears only with an installer', () => {
+  const withWindows = { ...MAC_DESKTOP_BETA, downloads: { ...MAC_DESKTOP_BETA.downloads, windows: 'https://downloads.letagents.chat/setup.exe' } }
+  const labels = (offer: ReturnType<typeof desktopDownloadOffer>) => [offer.primary.label, ...offer.others.map((link) => link.label)]
+
+  assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'windows')), ['Windows', 'Mac · Apple Silicon', 'Intel Mac'])
+  assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'mac')), ['Mac · Apple Silicon', 'Intel Mac', 'Windows'])
+  assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'other')), ['Mac · Apple Silicon', 'Intel Mac', 'Windows'])
+  assert.deepEqual(labels(desktopDownloadOffer(MAC_DESKTOP_BETA, 'windows')), ['Mac · Apple Silicon', 'Intel Mac'])
+
+  const icons = (offer: ReturnType<typeof desktopDownloadOffer>) => [offer.primary.icon, ...offer.others.map((link) => link.icon)]
+  assert.deepEqual(icons(desktopDownloadOffer(withWindows, 'windows')), ['windows', 'apple', null])
+  assert.deepEqual(icons(desktopDownloadOffer(withWindows, 'mac')), ['apple', null, 'windows'])
+})
+
+test('visitor platform detection reads the browser and treats phones as neither desktop', () => {
+  assert.equal(detectDesktopVisitorPlatform({ userAgentData: { platform: 'Windows' } }), 'windows')
+  assert.equal(detectDesktopVisitorPlatform({ platform: 'Win32', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }), 'windows')
+  assert.equal(detectDesktopVisitorPlatform({ platform: 'MacIntel', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }), 'mac')
+  assert.equal(detectDesktopVisitorPlatform({ platform: 'iPhone', userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' }), 'other')
+  assert.equal(detectDesktopVisitorPlatform({ platform: 'Linux armv81', userAgent: 'Mozilla/5.0 (Linux; Android 14)' }), 'other')
+  assert.equal(detectDesktopVisitorPlatform({ platform: 'Linux x86_64', userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' }), 'other')
+  assert.equal(detectDesktopVisitorPlatform(undefined), 'other')
 })
 
 test('Mac beta presentation rejects a current manifest older than its bundled fallback', async () => {
