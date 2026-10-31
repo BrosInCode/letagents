@@ -113,35 +113,42 @@ test("a released Windows turn has room for the wrapper's start and Cursor's own;
   assert.equal(cursorTurnStartTimeoutMs("linux"), 30_000);
 });
 
-test("a Windows turn proves its MCP runtime retired when the killed runtime's exit arrives late", async () => {
-  // In a VM the exit event came up to 545 ms after the kill, and the wrapper reported the runtime alive: the turn's
-  // finished reply was then withheld. The second case is an exit that lands during the last wait.
-  for (const exitAfterKillMs of [700, 2_000]) {
+test("a Windows turn proves its MCP runtime retired once the kill succeeded, however late the exit arrives", async () => {
+  // Electron as Node on a Windows runner under CPU load: 14 of 40 kills took over 2 s to report the exit, and one
+  // took 4.9 s. The wrapper reported the runtime alive, so a finished reply was withheld.
+  const close = async (killResult: boolean, exitAfterKillMs: number | null, rmSync: () => void = () => {}) => {
     const checks = new Map<string, boolean>();
     let clock = 0;
     let killedAt: number | null = null;
     const runtime = Object.assign(new EventEmitter(), {
       pid: 4242, exitCode: null, signalCode: null, stdin: { end() {} },
-      kill() { killedAt ??= clock; return true; },
+      kill() { killedAt ??= clock; return killResult; },
     });
-    const close = runInNewContext(`${cursorWrapperMcpSource("win32")}\ncloseMcpConnector`, {
+    const run = runInNewContext(`${cursorWrapperMcpSource("win32")}\ncloseMcpConnector`, {
       process: { platform: "win32" },
       Date: { now: () => clock },
       clearTimeout,
-      path: { dirname: () => "" },
-      mcpConnectorRootPattern: /never/,
+      path: { dirname: () => "connector-root" },
+      mcpConnectorRootPattern: /connector-root/,
+      rmSync,
       mcpCapabilityDeadline: null, mcpConnectorServer: null, mcpConnectorSocket: null, mcpConnectorSocketPath: "",
       mcpRuntime: runtime, mcpRuntimeProcessIdentity: null,
       noteRevocation: (check: string, failed: boolean) => checks.set(check, failed),
       wait: async (ms: number) => {
         clock += ms;
-        if (killedAt !== null && clock >= killedAt + exitAfterKillMs) runtime.emit("exit", null, "SIGKILL");
+        if (killedAt !== null && exitAfterKillMs !== null && clock >= killedAt + exitAfterKillMs) runtime.emit("exit", null, "SIGKILL");
       },
     }) as () => Promise<boolean>;
-    assert.equal(await close(), true, `exit ${exitAfterKillMs} ms after the kill`);
-    assert.equal(checks.get("mcp_runtime"), false);
-    assert.equal(checks.get("mcp_runtime_group"), false);
-  }
+    return { revoked: await run(), runtime: checks.get("mcp_runtime"), group: checks.get("mcp_runtime_group") };
+  };
+  const proved = { revoked: true, runtime: false, group: false };
+  // In the wait, at its very end, and only after it.
+  for (const exitAfterKillMs of [700, 2_000, null]) assert.deepEqual(await close(true, exitAfterKillMs), proved);
+  // A runtime that still holds its folder does not fail the turn.
+  assert.deepEqual(await close(true, null, () => { throw new Error("EBUSY"); }), proved);
+  // A kill Windows did not confirm proves nothing.
+  assert.deepEqual(await close(false, null), { revoked: false, runtime: true, group: true });
+  assert.deepEqual(await close(false, 700), proved);
 });
 
 test("the Windows connector is a per-turn, per-account named pipe; POSIX keeps the socket path", () => {

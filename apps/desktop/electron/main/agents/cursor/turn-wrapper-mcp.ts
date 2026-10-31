@@ -7,8 +7,8 @@
 
 export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platform): string {
   const windows = platform === "win32";
-  // Windows reports a killed runtime's exit later: up to 545 ms seen with four
-  // turns ending together. This stays under the evidence deadline of 3 s.
+  // Windows reports a killed runtime's exit later. Most exits arrive in this
+  // wait, which stays under the evidence deadline of 3 s, and then its folder goes too.
   const killWaitMs = windows ? 2000 : 500;
   return String.raw`async function closeMcpConnector() {
   if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
@@ -19,7 +19,7 @@ export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platf
   let groupMembers = null;
   let signalRuntimeGroup = null;
   let termSignaled = false;
-  if (runtime) {
+${windows ? "  let runtimeTerminated = false;\n" : ""}  if (runtime) {
     const runtimeGroupId = runtime.pid;
     runtimeClosed = runtime.exitCode !== null || runtime.signalCode !== null;
     runtime.once("exit", () => { runtimeClosed = true; });
@@ -30,7 +30,7 @@ export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platf
       // stdin (below) is the stop request; only the escalation kills it.
       signalRuntimeGroup = (signal) => {
         if (signal !== "SIGKILL") return false;
-        try { runtime.kill(signal); } catch {}
+        try { ${windows ? "runtimeTerminated = runtime.kill(signal) === true;" : "runtime.kill(signal);"} } catch {}
         return true;
       };
     } else if (Number.isSafeInteger(runtimeGroupId) && runtimeGroupId > 1) {
@@ -106,7 +106,9 @@ export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platf
       if (runtimeClosed && runtimeGroupClosed) break;
       await wait(25);
     } while (Date.now() < killDeadline);
-${windows ? String.raw`    // The exit can land during that last wait.
+${windows ? String.raw`    // Windows said the kill succeeded, so the runtime runs no more of its code.
+    // It may report its exit seconds later under CPU load.
+    if (runtimeTerminated) runtimeClosed = true;
     runtimeGroupClosed = runtimeClosed;
 ` : ""}  }
   const socketDeadline = Date.now() + 500;
@@ -126,7 +128,7 @@ ${windows ? String.raw`    // The exit can land during that last wait.
   }
   const connectorRoot = path.dirname(mcpConnectorSocketPath || "");
   if (revoked && mcpConnectorRootPattern.test(connectorRoot)) {
-    rmSync(connectorRoot, { recursive: true, force: true });
+    ${windows ? "// A killed runtime can still hold its files open here; the folder stays private.\n    try { rmSync(connectorRoot, { recursive: true, force: true }); } catch {}" : "rmSync(connectorRoot, { recursive: true, force: true });"}
   }
   return revoked;
 }
