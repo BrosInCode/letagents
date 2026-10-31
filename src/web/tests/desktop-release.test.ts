@@ -79,7 +79,7 @@ test('the Windows installer appears beside the DMGs once the current release lis
   assert.equal(release.downloads.windows, 'https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe')
 
   const heroSource = readFileSync(fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url)), 'utf8')
-  assert.match(heroSource, /v-if="downloadOffer\.primary\.platform === 'windows'"/)
+  assert.match(heroSource, /v-if="macDesktopBeta\.downloads\.windows" class="hero-windows-note"/)
   assert.match(heroSource, /\{\{ WINDOWS_SMARTSCREEN_NOTE \}\}/)
   assert.equal(WINDOWS_SMARTSCREEN_NOTE, 'Windows may show SmartScreen: More info → Run anyway.')
 })

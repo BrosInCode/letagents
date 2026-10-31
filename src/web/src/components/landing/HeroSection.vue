@@ -40,7 +40,7 @@
         </template>
         <a class="mac-secondary-link" :href="macDesktopBeta.checksumsUrl">Checksums</a>
       </div>
-      <p v-if="downloadOffer.primary.platform === 'windows'" class="hero-windows-note">{{ WINDOWS_SMARTSCREEN_NOTE }}</p>
+      <p v-if="macDesktopBeta.downloads.windows" class="hero-windows-note">{{ WINDOWS_SMARTSCREEN_NOTE }}</p>
     </div>
   </section>
 </template>
