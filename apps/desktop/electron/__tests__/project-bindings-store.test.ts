@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -667,6 +667,53 @@ test("a migrated hosted name cannot satisfy a different stable repository id", a
       roomIdentifier: "github.com/org/old",
       gitRoom: reusedName,
     }), null);
+  } finally {
+    removeTemporary(temporary);
+  }
+});
+
+test("processes that open a new store at the same moment all open it without a lock error", async () => {
+  // SQLite does not apply busy_timeout to the switch to WAL: a second opener of
+  // a new file fails at once with "database is locked". Each child waits at a
+  // barrier, so the opens collide on any machine, however slow it starts them.
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-open-"));
+  const moduleUrl = new URL("../main/project-bindings-store.ts", import.meta.url).href;
+  const script = `
+    const { writeFileSync, existsSync } = await import("node:fs");
+    const { listProjectBindings } = await import(process.env.BINDINGS_MODULE_URL);
+    writeFileSync(process.env.READY_PATH, "");
+    while (!existsSync(process.env.GO_PATH)) {}
+    await listProjectBindings({ storePath: process.env.STORE_PATH });
+  `;
+  const children = 12;
+  try {
+    for (let round = 0; round < 4; round += 1) {
+      const roundRoot = join(temporary, `round-${round}`);
+      const storePath = join(roundRoot, "bindings.sqlite");
+      const goPath = join(roundRoot, "go");
+      mkdirSync(roundRoot);
+      const exits = Array.from({ length: children }, (_value, index) => new Promise<string | null>((resolve) => {
+        execFile(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            BINDINGS_MODULE_URL: moduleUrl,
+            GO_PATH: goPath,
+            READY_PATH: join(roundRoot, `ready-${index}`),
+            STORE_PATH: storePath,
+          },
+        }, (error, _stdout, stderr) => resolve(error ? String(stderr || error.message) : null));
+      }));
+      const startedAt = Date.now();
+      while (readdirSync(roundRoot).filter((name) => name.startsWith("ready-")).length < children) {
+        assert.ok(Date.now() - startedAt < 120_000, "every child process reaches the barrier");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      writeFileSync(goPath, "");
+      const failures = (await Promise.all(exits)).filter((failure): failure is string => failure !== null);
+      assert.deepEqual(failures, []);
+      assert.ok(existsSync(storePath));
+    }
   } finally {
     removeTemporary(temporary);
   }
