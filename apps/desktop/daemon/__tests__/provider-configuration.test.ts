@@ -470,25 +470,25 @@ test("a supervised Codex agent may be set to Read-only, and nothing else about C
     provider: "open-model", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 1,
   }, {}), /Read-only is unavailable for supervised open-model/);
   // A rented agent is never a Codex agent, whatever level it names.
-  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only"), /verified workspace-rooted permission profile/);
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", null, "darwin"), /verified workspace-rooted permission profile/);
   // A given agent (Ask for an agent) may be Codex, but only Read-only, where its launch switches off every local tool.
   const given = "supervised_rental_ask_0123456789abcdef0123456789abcdef";
-  assert.equal(assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", given), "read_only");
-  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access", given), /verified workspace-rooted permission profile/);
-  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", "supervised_rental_0123456789abcdef"), /verified workspace-rooted permission profile/);
+  assert.equal(assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", given, "darwin"), "read_only");
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access", given, "darwin"), /verified workspace-rooted permission profile/);
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", "supervised_rental_0123456789abcdef", "darwin"), /verified workspace-rooted permission profile/);
 });
 
 test("rental admission rejects trusted-local profiles at the daemon launch boundary", () => {
   assert.equal(
-    assertSupervisedRentalPermissionProfileAvailable("cursor", "sandboxed_write"),
+    assertSupervisedRentalPermissionProfileAvailable("cursor", "sandboxed_write", null, "darwin"),
     "sandboxed_write",
   );
   assert.throws(
-    () => assertSupervisedRentalPermissionProfileAvailable("cursor", "full_access"),
+    () => assertSupervisedRentalPermissionProfileAvailable("cursor", "full_access", null, "darwin"),
     /verified workspace-rooted permission profile/,
   );
   assert.throws(
-    () => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access"),
+    () => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access", null, "darwin"),
     /verified workspace-rooted permission profile/,
   );
 });
@@ -574,7 +574,7 @@ test("Auto hands approval review to the provider and leaves no trace when switch
   }
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "auto_review")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "auto_review")?.risk, "high");
-  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "auto_review"), /verified workspace-rooted/);
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "auto_review", null, "darwin"), /verified workspace-rooted/);
 });
 
 test("Claude approval profile strips previous broad authority and can return to existing profiles", () => {
@@ -1031,4 +1031,14 @@ test("Codex has no Read-only on Windows: its commands can read the sign-in file 
   assert.equal(codexReadOnlyRefusal("codex", "mcp_polling", "darwin"), CODEX_READ_ONLY_NEEDS_DELIVERY);
   assert.equal(codexReadOnlyRefusal("codex", "daemon_inbox", "darwin"), null);
   assert.equal(codexReadOnlyRefusal("claude-code", "daemon_inbox", "win32"), null);
+});
+
+test("the daemon starts no rented or given Cursor or Codex on Windows, and a given Claude still starts", () => {
+  const given = "supervised_rental_ask_1";
+  assert.equal(assertSupervisedRentalPermissionProfileAvailable("cursor", "sandboxed_write", null, "darwin"), "sandboxed_write");
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("cursor", "sandboxed_write", null, "win32"), /verified workspace-rooted/);
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("cursor", "sandboxed_write", given, "win32"), /verified workspace-rooted/);
+  assert.equal(assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", given, "darwin"), "read_only");
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only", given, "win32"), /verified workspace-rooted/);
+  assert.equal(assertSupervisedRentalPermissionProfileAvailable("claude-code", "read_only", given, "win32"), "read_only");
 });

@@ -245,3 +245,11 @@ test("a start refused over the owner's setup is shown as the launch said it, and
     'Your MCP server "owner.slow" did not start, so this agent is running without it. Your MCP server "b" was still starting when this agent began, so its tools may be missing.');
   assert.equal(ownerSetupStartHint("… (deadline). Startup observations: budget_ms=30000."), "");
 });
+
+test("a refused start is shown through the same filter as any error, and every refusal's wording is matched", () => {
+  assert.equal(startRefusalReason("convergence scheduler failure: Codex could not list its MCP servers, so LetAgents will not start it: token=abc123secret\u0007"),
+    "Codex could not list its MCP servers, so LetAgents will not start it: token=[redacted]");
+  assert.equal(startRefusalReason("convergence scheduler failure: Remove the saved rules. So it will not start Codex at this access level."),
+    "Remove the saved rules. So it will not start Codex at this access level.");
+  assert.equal(startRefusalReason("convergence scheduler failure: internal write failed"), null);
+});

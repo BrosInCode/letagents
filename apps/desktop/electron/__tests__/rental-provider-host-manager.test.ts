@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { RentalProviderHostManager } from "../rental/provider-host-manager.js";
 
-test("preflights disabled runtimes, then publishes provider limits and authenticated offers", async (t) => {
+test("preflights disabled runtimes, then publishes provider limits and authenticated offers", { skip: process.platform === "win32" ? "This test offers Cursor, which Windows does not rent out." : false }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-rental-settings-"));
   const previous = process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH;
   process.env.LETAGENTS_RENTAL_PROVIDER_SETTINGS_PATH = join(directory, "settings.json");

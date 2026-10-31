@@ -20,7 +20,7 @@ function harness(clock = { now: 0 }) {
     audit: { append: async () => {} },
     scheduleRecovery: (_id, delayMs) => { scheduled.push(delayMs); },
   });
-  return { coordinator, scheduled, messages };
+  return { coordinator, scheduled, messages, entry };
 }
 
 const quotaError = (resetsAtMs?: number) => Object.assign(
@@ -113,4 +113,14 @@ test("owned contract-probe deadlines use the bounded existing provider-start rec
   coordinator.clearSuccessfulRecovery("agent-1");
   await coordinator.record("agent-1", deadline, "test");
   assert.deepEqual(scheduled, [15_000, 15_000, 15_000, 15_000]);
+});
+
+test("a failure while stopping says so, and does not read as the launch's own failure", async () => {
+  const running = harness();
+  await running.coordinator.record("agent-1", new Error("no store"), "test");
+  assert.equal(running.messages.at(-1), "convergence scheduler failure: no store");
+  const stopping = harness();
+  stopping.entry.desired_state = "stopped";
+  await stopping.coordinator.record("agent-1", new Error("no store"), "test");
+  assert.equal(stopping.messages.at(-1), "The agent could not be stopped: no store");
 });

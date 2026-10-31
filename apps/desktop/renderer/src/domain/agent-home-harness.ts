@@ -6,6 +6,7 @@ import type {
   DesktopSupervisorAgentHomeHarnessResult,
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
+import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
 /**
  * "Your own setup" is what an agent's app loads when its owner runs it
@@ -211,8 +212,8 @@ export function homeHarnessBadge(provider: string, state: NonNullable<DesktopSup
  */
 export function startRefusalReason(lastError: string | null | undefined): string | null {
   const detail = lastError?.trim() ?? "";
-  if (!/\bwith your own setup\b|\bLetAgents will not start\b|\bso the (?:given )?agent was not started\b/i.test(detail)) return null;
-  return detail.replace(/^convergence scheduler failure:\s*/i, "").trim() || null;
+  if (!/\bwith your own setup\b|\b(?:LetAgents|so it) will not start\b|\bso the (?:given )?agent was not started\b/i.test(detail)) return null;
+  return safeUserVisibleErrorDetail(detail.replace(/^convergence scheduler failure:\s*/i, "").trim(), "") || null;
 }
 
 /**

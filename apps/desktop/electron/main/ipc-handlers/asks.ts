@@ -3,6 +3,7 @@ import type { IpcMain } from "electron";
 import { askApi, askErrorMessage } from "../../asks/api.js";
 import { takePendingAskLink } from "../ask-link-inbox.js";
 import { askGiveCoordinator, giftPermissionProfile } from "../../asks/give-coordinator.js";
+import { lendsProvider } from "../agents/rental-permission-profiles.js";
 import type { DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "../../ipc-types/asks.js";
 import { supervisedAgentsSupported, supervisedAgentsUnsupportedMessage } from "../platform-capabilities.js";
 
@@ -31,7 +32,7 @@ export function registerDesktopAskIpcHandlers(targetIpcMain: IpcMain): void {
   // Asking for one and answering "can't right now" work everywhere.
   const canRunAgents = supervisedAgentsSupported();
   targetIpcMain.handle("desktop:asks:can-give", (_event, providerId: unknown) =>
-    canRunAgents && giftPermissionProfile(text(providerId)) !== null);
+    canRunAgents && lendsProvider(text(providerId)) && giftPermissionProfile(text(providerId)) !== null);
   targetIpcMain.handle("desktop:asks:give", (_event, input: DesktopGiveAgentInput) => canRunAgents
     ? result(() => askGiveCoordinator.give(input))
     : Promise.resolve<DesktopAskResult<never>>({ ok: false, error: supervisedAgentsUnsupportedMessage() }));

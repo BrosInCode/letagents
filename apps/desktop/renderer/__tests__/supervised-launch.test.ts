@@ -515,3 +515,13 @@ test("a refused start shows the launch's own reason, without the scheduler's pre
   assert.equal(progress.failed, true);
   assert.equal(progress.failureDetail, reason);
 });
+
+test("a stop the daemon could not apply stays a failed stop, with Retry, even with no provider", () => {
+  const progress = supervisedLaunchProgress(entry({
+    desiredState: "stopped", observedState: "starting", condition: "coordination_blocked",
+    lastError: "The agent could not be stopped: the store refused the write.",
+  }));
+  assert.equal(progress.stopFailed, true);
+  assert.equal(progress.stopping, false);
+  assert.equal(progress.headline, "Couldn't stop the Codex agent");
+});

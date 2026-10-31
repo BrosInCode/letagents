@@ -134,7 +134,10 @@ export class ProviderSchedulerFailureCoordinator {
         : entry.observed_state;
       const lastError = error instanceof UnusableSourceRepositoryError || error instanceof RepositoryNetworkError
         ? error.message
-        : `convergence scheduler failure: ${message}`;
+        // Not the launch's failure: the card must offer to stop the agent again.
+        : entry.desired_state === "stopped"
+          ? `The agent could not be stopped: ${message}`
+          : `convergence scheduler failure: ${message}`;
       await this.ports.transitionOnce(
         entryId,
         observedState,

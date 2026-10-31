@@ -263,6 +263,7 @@ export function assertSupervisedRentalPermissionProfileAvailable(
   providerId: string,
   requestedId: string | null,
   entryId: string | null = null,
+  platform: string = process.platform,
 ): string {
   const provider = providerId.trim().toLowerCase();
   const requested = requestedId?.trim() || null;
@@ -272,7 +273,8 @@ export function assertSupervisedRentalPermissionProfileAvailable(
   const verified = (provider === "cursor" && requested === "sandboxed_write")
     || (given && provider === "claude-code" && requested === "read_only")
     || (given && provider === "codex" && requested === "read_only");
-  if (!verified) {
+  // Windows gives Cursor no OS sandbox and Codex no Read-only (rental-permission-profiles.ts holds the same line).
+  if (!verified || (platform === "win32" && (provider === "cursor" || provider === "codex"))) {
     throw new Error(
       "Rented agents require an explicit verified workspace-rooted permission profile.",
     );
