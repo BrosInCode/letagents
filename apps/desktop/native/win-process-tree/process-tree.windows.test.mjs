@@ -23,6 +23,7 @@ import {
   spawnTree,
   terminateTree,
   terminateTreeOutcome,
+  WINDOWS_BIRTH_PREFIX,
   windowsProcessInfo,
   windowsTreeSize,
 } from "../../../../shared/process-tree.mjs";
@@ -337,6 +338,64 @@ test("a helper whose own bounded wait runs out exits with the unkillable code", 
   assert.equal(processBirth(grandchildPid, helper), grandchildBirth, "the held process ended early");
   await holder.done;
   await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
+});
+
+// A process that has begun to exit is counted by its job and no longer listed, for about a millisecond. Nothing
+// outside can hold that state, not even a debugger: a held exit is still listed. The harness is the helper's own
+// source with the job's process list reading one process short (short-list-harness.c).
+let harnessPath;
+function shortListHelper() {
+  if (!harnessPath) {
+    const built = spawnSync(process.execPath, [join(here, "build.mjs"), "--harness"], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    harnessPath = JSON.parse(built.stdout.slice(built.stdout.indexOf("{"))).file;
+  }
+  return harnessPath;
+}
+function shortListTree(args, shortReads, unkillableAfterMs) {
+  return spawnTree(process.execPath, args, { stdio: "ignore", env: { ...process.env, LETAGENTS_TEST_SHORT_READS: String(shortReads) } }, { helperPath: shortListHelper(), unkillableAfterMs });
+}
+/** A 1 s bound as a test can see it: the helper's GetTickCount64 can lag the wall clock by a tick, and 5 s is its default. */
+function assertWaitedItsBound(waited, who) {
+  assert.ok(waited >= 900, `${who} answered in ${waited} ms, before its bound`);
+  assert.ok(waited < 5_000, `${who} answered in ${waited} ms, past its bound`);
+}
+
+test("a process that is only leaving its job is not called unkillable: a clean exit keeps its own code", { skip }, async () => {
+  // More reads than the four the helper once made, all of them in less than a millisecond.
+  const { code } = await exited(shortListTree(["-e", "process.exit(7)"], 8, 20_000));
+  assert.equal(code, 7);
+});
+
+test("a process that stays counted past the bound is unkillable, and only after the bound", { skip }, async () => {
+  const { child } = setup();
+  const id = Math.random().toString(36).slice(2);
+  const childFile = join(folder, `child-${id}.pid`);
+  const grandchildFile = join(folder, `grandchild-${id}.pid`);
+  const tree = shortListTree([child, childFile, grandchildFile, "leave-on-go"], -1, 1_000);
+  await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
+  const before = Date.now();
+  writeFileSync(`${childFile}.go`, "");
+  const { code } = await exited(tree);
+  const waited = Date.now() - before;
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assertWaitedItsBound(waited, "the helper");
+});
+
+test("a kill that cannot read its list whole answers unkillable after its bound, and still ends the job", { skip }, async () => {
+  const started = await startTree();
+  const harness = shortListHelper();
+  const before = Date.now();
+  // The tree's own helper reads its list normally; this kill's list stays short.
+  const kill = spawnSync(harness, ["kill", String(started.tree.pid), started.births.helper.slice(WINDOWS_BIRTH_PREFIX.length), "1000"], {
+    stdio: "ignore", windowsHide: true, env: { ...process.env, LETAGENTS_TEST_SHORT_READS: "-1" },
+  });
+  const waited = Date.now() - before;
+  assert.equal(kill.status, 4);
+  assertWaitedItsBound(waited, "the kill");
+  await exited(started.tree);
+  // Nothing held the processes this kill could not list: they end shortly after.
+  await waitFor(() => gone(started.childPid, started.births.child) && gone(started.grandchildPid, started.births.grandchild), "the tree to end");
 });
 
 test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
