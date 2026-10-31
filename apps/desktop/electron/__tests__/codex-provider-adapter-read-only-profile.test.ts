@@ -367,7 +367,7 @@ test("a Read-only Codex found with no loaded conversation is held to what the co
   }
 });
 
-test("a turn that is running when a Read-only Codex is stopped at reattach ends as a failed room item that says so, is not run again, and the next message runs on the fresh start", { timeout: 60_000 }, async () => {
+test("a turn that is running when a Read-only Codex is stopped at reattach ends as a failed room item that says so, is not run again, and the next message runs on the fresh start", { skip: process.platform === "win32" ? "Codex has no Read-only on Windows: saving the level is refused." : false }, { timeout: 60_000 }, async () => {
   const agent = await codexDaemonFixture();
   const snap = async () => { const current = await agent.view(); return `agent is ${current.observed_state}/${current.condition} (${current.last_error}); launches ${agent.harness.launches.length}; signals ${JSON.stringify(agent.harness.signals)}`; };
   try {
