@@ -339,39 +339,40 @@ test("a helper whose own bounded wait runs out exits with the unkillable code", 
   await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
 });
 
-/** A tree whose program exits on request and whose grandchild is already ending, its exit held for `holdMs`. */
-async function treeWithExitingGrandchild(holdMs, unkillableAfterMs) {
+// A process that has begun to exit is counted by its job and no longer listed, for about a millisecond. Nothing
+// outside can hold that state, not even a debugger: a held exit is still listed. The harness is the helper's own
+// source with the job's process list reading one process short (short-list-harness.c).
+let harnessPath;
+function shortListTree(args, shortReads, unkillableAfterMs) {
+  if (!harnessPath) {
+    const built = spawnSync(process.execPath, [join(here, "build.mjs"), "--harness"], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    harnessPath = JSON.parse(built.stdout.slice(built.stdout.indexOf("{"))).file;
+  }
+  return spawnTree(process.execPath, args, { stdio: "ignore", env: { ...process.env, LETAGENTS_TEST_SHORT_READS: String(shortReads) } }, { helperPath: harnessPath, unkillableAfterMs });
+}
+
+test("a process that is only leaving its job is not called unkillable: a clean exit keeps its own code", { skip }, async () => {
+  // More reads than the four the helper once made, all of them in less than a millisecond.
+  const { code } = await exited(shortListTree(["-e", "process.exit(7)"], 8, 20_000));
+  assert.equal(code, 7);
+});
+
+test("a process that stays counted past the bound is unkillable after the bound, and the job is still ended", { skip }, async () => {
   const { child } = setup();
   const id = Math.random().toString(36).slice(2);
   const childFile = join(folder, `child-${id}.pid`);
   const grandchildFile = join(folder, `grandchild-${id}.pid`);
-  const tree = spawnTree(process.execPath, [child, childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, { ...helper, unkillableAfterMs });
+  const tree = shortListTree([child, childFile, grandchildFile, "leave-on-go"], -1, 1_000);
   const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
-  const holder = await holdExit(grandchildPid, holdMs);
-  process.kill(grandchildPid);
-  await holder.held;
-  // The job still counts the grandchild, and no longer lists it: only the count shows it. A read of the job finds that.
-  return { tree, holder, go: () => writeFileSync(`${childFile}.go`, "") };
-}
-
-test("a process that is exiting while the helper lists its job is waited for: a clean exit is not called unkillable", { skip }, async () => {
-  const { tree, holder, go } = await treeWithExitingGrandchild(1_500, 20_000);
-  go();
-  const { code } = await exited(tree);
-  assert.equal(code, 0, "the helper gave up on a process that was only leaving");
-  await holder.done;
-});
-
-test("a process that stays in its exit past the helper's bound is unkillable, after the bound", { skip }, async () => {
-  const { tree, holder, go } = await treeWithExitingGrandchild(HOLD_MS, 1_000);
+  const grandchildBirth = processBirth(grandchildPid, helper);
   const before = Date.now();
-  go();
+  writeFileSync(`${childFile}.go`, "");
   const { code } = await exited(tree);
   const waited = Date.now() - before;
   assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
-  assert.ok(waited >= 900, `the helper answered in ${waited} ms, without waiting for its bound`);
-  assert.ok(waited < HOLD_MS, "the helper waited for the held process instead of its bound");
-  await holder.done;
+  assert.ok(waited >= 1_000, `the helper answered in ${waited} ms, before its bound`);
+  await waitFor(() => gone(grandchildPid, grandchildBirth), "the job's other process to end");
 });
 
 test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
