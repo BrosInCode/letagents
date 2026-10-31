@@ -339,6 +339,41 @@ test("a helper whose own bounded wait runs out exits with the unkillable code", 
   await waitFor(() => gone(grandchildPid, grandchildBirth), "the held process to end once let go");
 });
 
+/** A tree whose program exits on request and whose grandchild is already ending, its exit held for `holdMs`. */
+async function treeWithExitingGrandchild(holdMs, unkillableAfterMs) {
+  const { child } = setup();
+  const id = Math.random().toString(36).slice(2);
+  const childFile = join(folder, `child-${id}.pid`);
+  const grandchildFile = join(folder, `grandchild-${id}.pid`);
+  const tree = spawnTree(process.execPath, [child, childFile, grandchildFile, "leave-on-go"], { stdio: "ignore" }, { ...helper, unkillableAfterMs });
+  const grandchildPid = await waitFor(() => readPid(grandchildFile), "the grandchild's pid");
+  const holder = await holdExit(grandchildPid, holdMs);
+  process.kill(grandchildPid);
+  await holder.held;
+  // The job still counts the grandchild, and no longer lists it: only the count shows it. A read of the job finds that.
+  return { tree, holder, go: () => writeFileSync(`${childFile}.go`, "") };
+}
+
+test("a process that is exiting while the helper lists its job is waited for: a clean exit is not called unkillable", { skip }, async () => {
+  const { tree, holder, go } = await treeWithExitingGrandchild(1_500, 20_000);
+  go();
+  const { code } = await exited(tree);
+  assert.equal(code, 0, "the helper gave up on a process that was only leaving");
+  await holder.done;
+});
+
+test("a process that stays in its exit past the helper's bound is unkillable, after the bound", { skip }, async () => {
+  const { tree, holder, go } = await treeWithExitingGrandchild(HOLD_MS, 1_000);
+  const before = Date.now();
+  go();
+  const { code } = await exited(tree);
+  const waited = Date.now() - before;
+  assert.equal(code, PROCESS_TREE_UNKILLABLE_EXIT_CODE);
+  assert.ok(waited >= 900, `the helper answered in ${waited} ms, without waiting for its bound`);
+  assert.ok(waited < HOLD_MS, "the helper waited for the held process instead of its bound");
+  await holder.done;
+});
+
 test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
   // The program exits by itself, so the helper ends its job and waits (5 s) on the held grandchild;
   // a kill then finds the job listing nothing, and must not call that a clean stop.
