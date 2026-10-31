@@ -670,7 +670,7 @@ for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
       assert.equal(agent.harness.launches.length, 1, "while the exit may still be recorded, no replacement is started");
       assert.equal(terminals.settling(agent.id), true);
 
-      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended", 5_000).catch(async (error) => {
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended").catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}`);
       });
@@ -697,7 +697,7 @@ for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
 
       // The replacement crashes as well, and its exit cannot be recorded either: that is a second exit, and the owner is told of it too.
       agent.exitProcess(1, "SIGKILL");
-      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash", 5_000);
+      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash");
       await agent.eventually(async () => ((await agent.request("manifest.list")).result[0] as typeof entry).activity
         ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length === 2, "the owner reads of each exit once");
       await answerOnReplacement(agent, 3);

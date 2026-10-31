@@ -286,3 +286,4 @@ These rules are mandatory. Agents must follow them without human reminders.
 - **Feature branches only** — No direct commits to `staging` or `master`.
 - **Review before merge** — Push your branch and open a PR.
 - **`staging` is integration-only** — Merges go through PRs.
+- **The pre-push hook runs first** — `npm install` points git at `.githooks`, whose `pre-push` type checks each tree the push touches and runs the workflow policy tests when CI config changed. Fix what it reports instead of waiting for CI; `LETAGENTS_SKIP_PRE_PUSH=1` bypasses it only when CI must report the failure itself.
