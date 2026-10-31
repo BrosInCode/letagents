@@ -1216,7 +1216,8 @@ export class ProviderExecutionCoordinator {
     try {
       await this.convergeStopped(entry);
     } catch (error) {
-      throw new ProviderStopError(error);
+      // A pause that fails is not a failed stop.
+      throw entry.desired_state === "stopped" ? new ProviderStopError(error) : error;
     }
   }
 
