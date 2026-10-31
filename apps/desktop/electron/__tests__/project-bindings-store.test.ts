@@ -682,7 +682,8 @@ test("processes that open a new store at the same moment all open it without a l
     const { writeFileSync, existsSync } = await import("node:fs");
     const { listProjectBindings } = await import(process.env.BINDINGS_MODULE_URL);
     writeFileSync(process.env.READY_PATH, "");
-    while (!existsSync(process.env.GO_PATH)) {}
+    const giveUpAt = Date.now() + 150_000;
+    while (!existsSync(process.env.GO_PATH) && Date.now() < giveUpAt) {}
     await listProjectBindings({ storePath: process.env.STORE_PATH });
   `;
   const children = 12;
@@ -692,6 +693,8 @@ test("processes that open a new store at the same moment all open it without a l
       const storePath = join(roundRoot, "bindings.sqlite");
       const goPath = join(roundRoot, "go");
       mkdirSync(roundRoot);
+      let released = false;
+      let endedEarly: string | null = null;
       const exits = Array.from({ length: children }, (_value, index) => new Promise<string | null>((resolve) => {
         execFile(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
           cwd: process.cwd(),
@@ -702,15 +705,25 @@ test("processes that open a new store at the same moment all open it without a l
             READY_PATH: join(roundRoot, `ready-${index}`),
             STORE_PATH: storePath,
           },
-        }, (error, _stdout, stderr) => resolve(error ? String(stderr || error.message) : null));
+          timeout: 180_000,
+        }, (error, _stdout, stderr) => {
+          const failure = error ? String(stderr || error.message) : null;
+          if (!released) endedEarly ??= failure ?? "a child process ended before the barrier opened";
+          resolve(failure);
+        });
       }));
+      const readyCount = () => readdirSync(roundRoot).filter((name) => name.startsWith("ready-")).length;
       const startedAt = Date.now();
-      while (readdirSync(roundRoot).filter((name) => name.startsWith("ready-")).length < children) {
-        assert.ok(Date.now() - startedAt < 120_000, "every child process reaches the barrier");
+      while (readyCount() < children && endedEarly === null && Date.now() - startedAt < 120_000) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
+      // Always opened: a child that waits here keeps this test file alive after a failure.
+      const allReady = readyCount() === children;
+      released = true;
       writeFileSync(goPath, "");
       const failures = (await Promise.all(exits)).filter((failure): failure is string => failure !== null);
+      assert.equal(endedEarly, null);
+      assert.ok(allReady, "every child process reaches the barrier");
       assert.deepEqual(failures, []);
       assert.ok(existsSync(storePath));
     }

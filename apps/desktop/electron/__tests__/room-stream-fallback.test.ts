@@ -1414,8 +1414,8 @@ test('typing bypasses bootstrap buffers and cannot reach cursors or gap repair',
     // The start promise also settles when the ready timer fires, before any room_sync is handled.
     // A slow runner reaches this line after that timer, so wait past it here: the test then covers
     // that order on every run, and it must not read `await starting` as "room_sync was handled".
-    await sleep(CATCH_UP_RETRY_MS * 2);
     const count = emitted.filter(e => e.type === 'typing').length;
+    await sleep(CATCH_UP_RETRY_MS * 2);
     initial.pushRaw('event: room_typing_v1\ndata: not json\n\n');
     initial.pushRaw(`event: room_typing_v1\ndata: ${JSON.stringify({ ...signal, room_id: 'room_other' })}\n\n`);
     initial.pushRaw(`event: room_sync\ndata: ${JSON.stringify({ room_id: ROOM, checkpoint: 'msg_1', gap: false, event_cursor: 'broker_real' })}\n\n`);
@@ -1426,6 +1426,9 @@ test('typing bypasses bootstrap buffers and cannot reach cursors or gap repair',
     await waitUntil(() => emitted.some(e => e.type === 'open' && e.verified && e.gap === false));
     assert.equal(emitted.filter(e => e.type === 'typing').length, count, 'no bootstrap replay');
     assert.equal(emitted.some(e => e.type === 'open' && e.gap === true && e.verified), false);
+    // Last before the drop, so no later room_sync can overwrite a cursor that typing wrongly set.
+    initial.pushRaw(`id: forbidden_typing_cursor\nevent: room_typing_v1\ndata: ${JSON.stringify({ ...signal, sequence: 3, expires_at: Date.now() + 5000 })}\n\n`);
+    await waitUntil(() => emitted.filter(e => e.type === 'typing').length === count + 1);
     initial.error();
     await waitUntil(() => router.streamCalls.length >= 2, 4000);
     assert.equal(router.streamCalls[1]?.headers.get('Last-Event-ID'), 'broker_real');

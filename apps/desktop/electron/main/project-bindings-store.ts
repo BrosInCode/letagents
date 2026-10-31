@@ -139,7 +139,8 @@ function isSqliteBusy(error: unknown): boolean {
  * call fails with "database is locked" after 1 to 3 ms, however long the busy
  * timeout is. WAL is stored in the file, so only the first opener has work to
  * do. Every other opener reads the mode, or retries the switch until the first
- * one is done. The retry is bounded by the same time as the busy timeout.
+ * one is done. Retries stop at the busy timeout, and the last attempt can then
+ * wait up to that long again, so this blocks for about 10 to 20 s at the worst.
  */
 function enableWriteAheadLog(database: SqliteDatabase): void {
   const deadline = Date.now() + STORE_BUSY_TIMEOUT_MS;
@@ -162,7 +163,12 @@ function openStoreConnection(storePath: string): SqliteDatabase {
   };
   const database = new DatabaseSync(storePath);
   database.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
-  enableWriteAheadLog(database);
+  try {
+    enableWriteAheadLog(database);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
   database.exec(`
     CREATE TABLE IF NOT EXISTS project_bindings (
       id TEXT PRIMARY KEY NOT NULL,
