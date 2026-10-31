@@ -279,7 +279,8 @@ export function readDurableTurnTerminal(
     }
     if (raw.workspace_generation_settlement !== undefined) {
       const settlement = raw.workspace_generation_settlement as CursorGenerationSettlement;
-      const expected = raw.type === "not_started" ? handle.providerContinuationId
+      // A turn that never reported init keeps the lane's conversation, as one that never started does.
+      const expected = raw.type === "not_started" || raw.init === null ? handle.providerContinuationId
         : raw.init && typeof raw.init === "object" ? sessionIdOf(raw.init as CursorStreamMessage) : null;
       if (!workspaceGenerationManifestPath || !settlement || settlement.version !== 1
         || settlement.phase !== (raw.type === "not_started" ? "aborted" : "cleaned")
