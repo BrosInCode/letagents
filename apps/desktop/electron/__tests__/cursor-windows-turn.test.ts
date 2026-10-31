@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { Script } from "node:vm";
+import { runInNewContext, Script } from "node:vm";
 
 import { processBirth, processTreeHelperPath } from "../../../../shared/process-tree.mjs";
 import {
@@ -20,6 +21,7 @@ import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "../main/agents
 import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.js";
 import { CURSOR_MCP_PIPE_CONNECTOR_SOURCE } from "../main/agents/cursor/profile-types.js";
 import { cursorTurnWrapperSource, defaultLaunchTurn, type CursorCliChild } from "../main/agents/cursor/turn-launcher.js";
+import { cursorWrapperMcpSource } from "../main/agents/cursor/turn-wrapper-mcp.js";
 import { cursorMcpConnectorRootPattern, WINDOWS_CONNECTOR_PIPE_SEAL_SOURCE, WINDOWS_NATIVE_REAP_SOURCE } from "../main/agents/cursor/turn-wrapper-setup.js";
 import { linkWindowsCursorLogin, removeWindowsCursorLogin } from "../main/agents/cursor/profile-filesystem.js";
 import { cursorNativeSandboxArgs } from "../main/agents/cursor/launch-arguments.js";
@@ -104,11 +106,42 @@ test("the Windows wrapper is valid JavaScript, runs Cursor unsandboxed in the he
 });
 
 test("a released Windows turn has room for the wrapper's start and Cursor's own; macOS keeps its bound", () => {
-  // Seen in a Windows VM: 17 to 21 s before Cursor ran, then 9 to 11 s to its init. A turn stopped at 30 s
-  // had its proxies closed just before Cursor reported init.
-  assert.ok(cursorTurnStartTimeoutMs("win32") >= 90_000);
+  // Seen in a Windows VM with four turns starting together: 38 s before Cursor ran, and 61 to 66 s to its init.
+  // At 30 s every one of the four was stopped before init.
+  assert.ok(cursorTurnStartTimeoutMs("win32") >= 120_000);
   assert.equal(cursorTurnStartTimeoutMs("darwin"), 30_000);
   assert.equal(cursorTurnStartTimeoutMs("linux"), 30_000);
+});
+
+test("a Windows turn proves its MCP runtime retired when the killed runtime's exit arrives late", async () => {
+  // In a VM the exit event came up to 545 ms after the kill, and the wrapper reported the runtime alive: the turn's
+  // finished reply was then withheld. The second case is an exit that lands during the last wait.
+  for (const exitAfterKillMs of [700, 2_000]) {
+    const checks = new Map<string, boolean>();
+    let clock = 0;
+    let killedAt: number | null = null;
+    const runtime = Object.assign(new EventEmitter(), {
+      pid: 4242, exitCode: null, signalCode: null, stdin: { end() {} },
+      kill() { killedAt ??= clock; return true; },
+    });
+    const close = runInNewContext(`${cursorWrapperMcpSource("win32")}\ncloseMcpConnector`, {
+      process: { platform: "win32" },
+      Date: { now: () => clock },
+      clearTimeout,
+      path: { dirname: () => "" },
+      mcpConnectorRootPattern: /never/,
+      mcpCapabilityDeadline: null, mcpConnectorServer: null, mcpConnectorSocket: null, mcpConnectorSocketPath: "",
+      mcpRuntime: runtime, mcpRuntimeProcessIdentity: null,
+      noteRevocation: (check: string, failed: boolean) => checks.set(check, failed),
+      wait: async (ms: number) => {
+        clock += ms;
+        if (killedAt !== null && clock >= killedAt + exitAfterKillMs) runtime.emit("exit", null, "SIGKILL");
+      },
+    }) as () => Promise<boolean>;
+    assert.equal(await close(), true, `exit ${exitAfterKillMs} ms after the kill`);
+    assert.equal(checks.get("mcp_runtime"), false);
+    assert.equal(checks.get("mcp_runtime_group"), false);
+  }
 });
 
 test("the Windows connector is a per-turn, per-account named pipe; POSIX keeps the socket path", () => {

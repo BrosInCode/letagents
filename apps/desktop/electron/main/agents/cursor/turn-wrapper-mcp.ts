@@ -7,6 +7,9 @@
 
 export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platform): string {
   const windows = platform === "win32";
+  // Windows reports a killed runtime's exit later: up to 545 ms seen with four
+  // turns ending together. This stays under the evidence deadline of 3 s.
+  const killWaitMs = windows ? 2000 : 500;
   return String.raw`async function closeMcpConnector() {
   if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
   mcpCapabilityDeadline = null;
@@ -82,7 +85,7 @@ export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platf
       }
       await wait(25);
     }
-    const killDeadline = Math.max(Date.now(), graceDeadline) + 500;
+    const killDeadline = Math.max(Date.now(), graceDeadline) + ${killWaitMs};
     while (!runtimeClosed && Date.now() < killDeadline
       && signalRuntimeGroup
       && (process.platform === "win32" || runtimeGroupSignalAuthorized)) {
@@ -103,7 +106,9 @@ export function cursorWrapperMcpSource(platform: NodeJS.Platform = process.platf
       if (runtimeClosed && runtimeGroupClosed) break;
       await wait(25);
     } while (Date.now() < killDeadline);
-  }
+${windows ? String.raw`    // The exit can land during that last wait.
+    runtimeGroupClosed = runtimeClosed;
+` : ""}  }
   const socketDeadline = Date.now() + 500;
   while (!socketClosed && Date.now() < socketDeadline) await wait(5);
   const revoked = socketClosed && runtimeClosed && runtimeGroupClosed;

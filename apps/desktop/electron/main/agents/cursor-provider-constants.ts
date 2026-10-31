@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 /**
  * How long a released turn has to report Cursor's init. This bound covers the
  * wrapper's own start as well as Cursor's. On Windows that start also hosts a
- * cold MCP runtime and seals its pipe through PowerShell, before Cursor runs.
+ * cold MCP runtime and seals its pipe through PowerShell, before Cursor runs:
+ * 61 to 66 s from release to init with four turns starting in a 4-CPU VM.
  */
 export function cursorTurnStartTimeoutMs(platform: NodeJS.Platform = process.platform): number {
-  return platform === "win32" ? 90_000 : 30_000;
+  return platform === "win32" ? 120_000 : 30_000;
 }
 export const TURN_START_TIMEOUT_MS = cursorTurnStartTimeoutMs();
 
