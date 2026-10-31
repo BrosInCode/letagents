@@ -493,3 +493,35 @@ test("a Claude launch refused by the usage limit says so instead of a generic st
     "LetAgents couldn't start Claude Code in the private project area. Try this launch again or cancel it and start a new agent.",
     "another start failure keeps its own wording");
 });
+
+test("cancelling a launch that failed before a provider existed reads as cancelling, not as a failed stop", () => {
+  const lastError = "convergence scheduler failure: Could not prepare the launch.";
+  const cancelled = supervisedLaunchProgress(entry({ desiredState: "stopped", observedState: "starting", condition: "coordination_blocked", lastError }));
+  assert.equal(cancelled.stopFailed, false);
+  assert.equal(cancelled.stopping, true);
+  assert.equal(cancelled.headline, "Cancelling Codex launch...");
+  const beforeAnyWork = supervisedLaunchProgress(entry({ desiredState: "stopped", observedState: "failed", condition: "coordination_blocked", lastError }));
+  assert.equal(beforeAnyWork.stopFailed, false);
+  assert.equal(beforeAnyWork.stopping, true);
+});
+
+test("a refused start shows the launch's own reason, without the scheduler's prefix", () => {
+  const reason = "LetAgents could not confirm this. So LetAgents will not start Codex at this access level. Choose another access level.";
+  const progress = supervisedLaunchProgress(entry({
+    workspacePath: "/tmp/wt",
+    condition: "coordination_blocked",
+    lastError: `convergence scheduler failure: ${reason}`,
+  }));
+  assert.equal(progress.failed, true);
+  assert.equal(progress.failureDetail, reason);
+});
+
+test("a stop the daemon could not apply stays a failed stop, with Retry, even with no provider", () => {
+  const progress = supervisedLaunchProgress(entry({
+    desiredState: "stopped", observedState: "starting", condition: "coordination_blocked",
+    lastError: "The agent could not be stopped: the store refused the write.",
+  }));
+  assert.equal(progress.stopFailed, true);
+  assert.equal(progress.stopping, false);
+  assert.equal(progress.headline, "Couldn't stop the Codex agent");
+});

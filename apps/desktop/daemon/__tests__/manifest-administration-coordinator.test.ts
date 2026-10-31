@@ -961,7 +961,7 @@ test("an agent that collects its own room messages cannot be given the owner's o
   }
 });
 
-test("a Codex agent that collects its own room messages cannot be saved as Read-only: the level is listed as unavailable with the reason, and the save says it", async () => {
+test("a Codex agent that collects its own room messages cannot be saved as Read-only: the level is listed as unavailable with the reason, and the save says it", { skip: process.platform === "win32" ? "Codex has no Read-only on Windows: codexReadOnlyRefusal has its own test." : false }, async () => {
   const NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
     + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
   type Listed = { id: string; status: string; detail: string | null };

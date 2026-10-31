@@ -14,6 +14,7 @@ import {
 } from "../src/domain/agent-startup";
 import { agentStartupRoomLabel } from "../src/components/desktop/content/room-chat/useAgentStartupRows";
 import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
+import { thisComputerLabel } from "../src/domain/supervised-agents-support";
 
 const T0 = Date.parse("2026-10-26T10:00:00.000Z");
 const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -150,6 +151,12 @@ test("a daemon retry after a failure is timed on its own", () => {
   assert.equal(view.status, "running");
 });
 
+test("a refused start names the launch's own reason on the row", () => {
+  const reason = "It did not confirm this. So LetAgents will not start Codex at this access level.";
+  const view = agentStartupView(entry({ observedState: "failed", lastError: `convergence scheduler failure: ${reason}` }), context, T0);
+  assert.equal(view.line, `Could not start: ${reason}`);
+});
+
 test("scheduler internals never reach the failure line", () => {
   const view = agentStartupView(entry({ observedState: "failed", condition: "quarantined", lastError: "convergence scheduler failure: x" }), context, T0);
   assert.equal(view.line, "Could not start: The start did not finish.");
@@ -167,11 +174,11 @@ test("a failed launch says why, marks its stage and offers its one fix", () => {
   failed.phases.at(-1)!.phase = "process";
   const view = agentStartupView(entry({ launchProgress: { ...failed, phases: failed.phases.slice(0, 4) } }), context, T0 + 2_000);
   assert.equal(view.status, "failed");
-  assert.equal(view.line, "Could not start: Claude Code is not signed in on this Mac.");
-  assert.deepEqual(view.failure, { reason: "Claude Code is not signed in on this Mac.", action: "sign_in" });
+  assert.equal(view.line, `Could not start: Claude Code is not signed in on ${thisComputerLabel()}.`);
+  assert.deepEqual(view.failure, { reason: `Claude Code is not signed in on ${thisComputerLabel()}.`, action: "sign_in" });
   assert.deepEqual(view.stages.map((stage) => stage.state), ["done", "failed", "pending", "pending", "pending"]);
   const install = agentStartupView(entry({ provider: "codex", launchProgress: { ...failed, failure: { phase: "process", action: "install" } } }), context, T0);
-  assert.equal(install.line, "Could not start: Codex could not be found on this Mac.");
+  assert.equal(install.line, `Could not start: Codex could not be found on ${thisComputerLabel()}.`);
 });
 
 test("a manifest failure without daemon progress still shows, with the safe detail", () => {

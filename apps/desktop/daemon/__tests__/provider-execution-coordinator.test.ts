@@ -2764,7 +2764,7 @@ test("a start goes ahead when the agent's ended runtimes cannot be archived, and
   }
 });
 
-test("a launch carries the owner's own setup only for the owner's own agent, and never the stored key", async () => {
+test("a launch carries the owner's own setup only for the owner's own agent, and never the stored key", { skip: process.platform === "win32" ? "This test launches a rented Cursor and Codex, which Windows refuses." : false }, async () => {
   const stored = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt4: false };
   const launch = async (entry: DaemonManifestEntry) => {
     let request: ProviderActionSpawn | null = null;

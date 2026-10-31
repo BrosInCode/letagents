@@ -1,4 +1,5 @@
 import { redactCredentialText } from "./credential-redaction.js";
+import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
   DaemonManifestEntry,
@@ -152,11 +153,18 @@ export class ManifestTransitionCoordinator {
         : entry.last_error === null || entry.last_error === undefined
           ? null
           : redactCredentialText(entry.last_error).value;
+    // Cursor runs no process between turns, so no runtime fact marks it ready
+    // while it starts: its first one comes with its first turn and finds it
+    // idle. Reaching idle after a launch is its ready mark.
+    const readyReachedAt = entry.provider === "cursor"
+      ? resolveReadyReachedAt({ ...entry, observed_state: to, condition }, false, new Date().toISOString())
+      : null;
     const updated: DaemonManifestEntry = {
       ...entry,
       observed_state: to,
       condition,
       last_error: lastError,
+      ...(readyReachedAt ? { ready_reached_at: readyReachedAt } : {}),
       reconciliation: nextReconciliation,
       reconciliation_notices: notices.slice(-32),
     };

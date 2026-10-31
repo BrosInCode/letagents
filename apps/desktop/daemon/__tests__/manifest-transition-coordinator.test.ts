@@ -80,3 +80,29 @@ test("an update without the declaration still reads the full entry once", async 
   assert.deepEqual(reads, ["full"]);
   assert.deepEqual(replaced, []);
 });
+
+test("a Cursor agent that reaches idle after its launch is stamped ready, because no runtime fact can do it", async () => {
+  const { coordinator, replaced, full } = harness();
+  Object.assign(full, { provider: "cursor", observed_state: "starting" });
+  await coordinator.transition("agent-1", "idle", "none", "reattached durable provider handle", "daemon-convergence");
+  assert.equal(typeof replaced.at(-1)?.ready_reached_at, "string");
+});
+
+test("Cursor keeps its first ready stamp, and is not stamped while blocked", async () => {
+  const stamped = harness();
+  Object.assign(stamped.full, { provider: "cursor", observed_state: "working", ready_reached_at: "2026-10-31T09:54:58.000Z" });
+  await stamped.coordinator.transition("agent-1", "idle", "none", "turn ended", "daemon-provider");
+  assert.equal(stamped.replaced.at(-1)?.ready_reached_at, "2026-10-31T09:54:58.000Z");
+
+  const blocked = harness();
+  Object.assign(blocked.full, { provider: "cursor", observed_state: "starting" });
+  await blocked.coordinator.transition("agent-1", "idle", "coordination_blocked", "no binding", "daemon-convergence");
+  assert.equal(blocked.replaced.at(-1)?.ready_reached_at, undefined);
+});
+
+test("another provider is left to its runtime fact", async () => {
+  const { coordinator, replaced, full } = harness();
+  Object.assign(full, { provider: "codex", observed_state: "starting" });
+  await coordinator.transition("agent-1", "idle", "none", "reattached durable provider handle", "daemon-convergence");
+  assert.equal(replaced.at(-1)?.ready_reached_at, undefined);
+});

@@ -34,6 +34,20 @@ const GUEST_SAFE_PROFILE_IDS: Partial<
   codex: ["read_only"],
 };
 
+/**
+ * Not on Windows, whatever the tables say. Cursor runs without an OS sandbox
+ * there, so it has no verified boundary. Codex has no Read-only there: a
+ * command can read the owner's sign-in file (CODEX_READ_ONLY_WINDOWS in
+ * daemon/supervised-permission-profiles.ts). The daemon refuses the launch
+ * (assertSupervisedRentalPermissionProfileAvailable); this keeps it from being offered.
+ */
+const NOT_LENT_ON_WINDOWS: readonly string[] = ["cursor", "codex"];
+
+/** Whether this computer may rent out or give this provider at all. */
+export function lendsProvider(providerId: string, platform: string = process.platform): boolean {
+  return !(platform === "win32" && NOT_LENT_ON_WINDOWS.includes(providerId));
+}
+
 /** Entries for agents given through Ask for an agent (see asks/give-coordinator.ts). */
 export function isGivenAgentEntryId(entryId: string | null | undefined): boolean {
   return Boolean(entryId?.startsWith("supervised_rental_ask_"));

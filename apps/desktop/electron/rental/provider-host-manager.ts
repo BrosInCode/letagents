@@ -9,7 +9,7 @@ import type {
 import { getOrCreateDesktopHostId } from "../main/agents/state.js";
 import { listDesktopAgentProviders } from "../main/agents/provider-registry.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
-import { listRentalSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
+import { lendsProvider, listRentalSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
 import { supervisorDaemonClient, type SupervisorDaemonClient } from "../main/supervisor-daemon.js";
 import type { RentalApiClient } from "./api-client.js";
 import { listRentalLaunches } from "./launch-journal.js";
@@ -146,7 +146,7 @@ export class RentalProviderHostManager {
       const enabled = settings.enabledRuntimes.includes(providerId);
       const check = maintenance ? null : await this.runtimePreflight(provider.id);
       const authenticated = Boolean(check && !["auth_required", "missing_runtime", "error", "config_required"].includes(check.status));
-      const rentalProfiles = listRentalSafePermissionProfiles(provider.id);
+      const rentalProfiles = lendsProvider(provider.id) ? listRentalSafePermissionProfiles(provider.id) : [];
       const rentalReady = Boolean(check?.canStart && rentalProfiles.length);
       return {
         providerId,

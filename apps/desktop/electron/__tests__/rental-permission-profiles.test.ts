@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   assertRentalSafePermissionProfile,
   isRentalSafePermissionProfile,
+  lendsProvider,
   listRentalSafePermissionProfiles,
 } from "../main/agents/rental-permission-profiles.js";
 
@@ -27,4 +28,12 @@ test("only a verified workspace-rooted provider profile is rental-admissible", (
     () => assertRentalSafePermissionProfile("codex", "full_access"),
     /verified workspace-rooted rental profile/,
   );
+});
+
+test("Windows lends no Cursor or Codex: Cursor has no OS sandbox there, and Codex has no Read-only", () => {
+  assert.equal(lendsProvider("cursor", "darwin"), true);
+  assert.equal(lendsProvider("codex", "darwin"), true);
+  assert.equal(lendsProvider("cursor", "win32"), false);
+  assert.equal(lendsProvider("codex", "win32"), false);
+  assert.equal(lendsProvider("claude-code", "win32"), true);
 });

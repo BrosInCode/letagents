@@ -1,6 +1,18 @@
 import { NativeActivityRejectedError, SupervisorGrantRequestError } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
 
+/**
+ * Stopping an agent failed. A launch that fails after Cancel is not this: it
+ * is named by the failed operation, not by the desired state. The cause stays
+ * on it, so the retry rules read the same error chain as before.
+ */
+export class ProviderStopError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ProviderStopError";
+  }
+}
+
 export function schedulerErrorDetail(error: unknown, depth = 0): string {
   if (depth > 3) return "nested error omitted";
   if (!(error instanceof Error)) return redactCredentialText(String(error || "unknown error")).value;

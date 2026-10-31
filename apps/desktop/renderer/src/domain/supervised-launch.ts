@@ -2,7 +2,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
 import { agentCompactionProgress } from "./managed-agents";
-import { ownerSetupRefusalReason } from "./agent-home-harness";
+import { startRefusalReason } from "./agent-home-harness";
 import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
@@ -136,7 +136,7 @@ function missingProviderRuntimeDetail(entry: LaunchFields, providerLabel: string
  * to friendly, retryable copy. */
 const INTERNAL_SCHEDULER_FAILURE = /^convergence scheduler failure:/i;
 function provisioningFailureDetail(lastError: string | null | undefined, fallback: string): string {
-  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return ownerSetupRefusalReason(lastError) ?? fallback;
+  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return startRefusalReason(lastError) ?? fallback;
   return safeUserVisibleErrorDetail(lastError, fallback);
 }
 
@@ -186,16 +186,22 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
   const missingRuntimeDetail = missingProviderRuntimeDetail(entry, providerLabel);
   const agentDisplayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   const reached = reachedIndex(entry);
+  const hasProviderExecution = entry.providerPid != null
+    || entry.providerContinuationId != null
+    || entry.executionGenerationId != null;
+  // A launch that failed before a provider ran has nothing to stop: its own
+  // failure stays on the entry until the daemon applies the stop, seconds later.
+  const launchFailureBeforeProvider = entry.providerPid == null
+    && entry.providerContinuationId == null
+    && INTERNAL_SCHEDULER_FAILURE.test(entry.lastError?.trim() ?? "");
   const stopFailed = entry.desiredState === "stopped"
+    && !launchFailureBeforeProvider
     && (entry.observedState === "failed" || isBlockingCondition(entry));
   const stopping = entry.desiredState === "stopped"
     && entry.observedState !== "stopped"
     && !stopFailed;
   const stopped = entry.desiredState === "stopped" && entry.observedState === "stopped";
   const ready = entry.desiredState === "running" && reached >= 4;
-  const hasProviderExecution = entry.providerPid != null
-    || entry.providerContinuationId != null
-    || entry.executionGenerationId != null;
   const recoverableBlocked = hasProviderExecution
     && !ready
     && !stopFailed
@@ -238,6 +244,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         ? entry.workspacePath == null
           ? provisioningFailureDetail(entry.lastError, "LetAgents couldn't prepare the private project area. Try this launch again or cancel it and start a new agent.")
           : missingRuntimeDetail
+            ?? startRefusalReason(entry.lastError)
             ?? `LetAgents couldn't start ${providerLabel} in the private project area. Try this launch again or cancel it and start a new agent.`
         : safeUserVisibleErrorDetail(entry.lastError, blockedConditionDetail(entry.condition)))
     : null;

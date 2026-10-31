@@ -19,6 +19,7 @@ import { isGenericAgentProviderLabel } from "./agent-provider";
 import { normalizeAgentKey } from "./agents";
 import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../../../../src/shared/agent-presence";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { isWindowsPlatform } from "./local-path";
 import { BACKGROUND_WORK_METHOD, humanFacingSupervisorActivitySummary, isHumanVisibleSupervisorActivity, liveActivityEchoText } from "../../../../../shared/live-activity-summary.mjs";
 // The owner's echo and the line published to room presence share one source.
 export {
@@ -665,7 +666,7 @@ export function supervisedCursorPermissionProfilePresentation(
     return {
       ...profile,
       label: "Full access",
-      description: "Can change files on this Mac and run commands without approval prompts.",
+      description: "Can change files on this computer and run commands without approval prompts.",
       detail: "Changes apply directly to the agent's working directory. Commands can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.",
     };
   }
@@ -682,7 +683,7 @@ export function supervisedCursorPermissionProfilePresentation(
 export function supervisedPermissionProfilePresentation(
   providerId: DesktopAgentProviderId | null | undefined,
   profile: DesktopManagedAgentPermissionProfile,
-  context?: { hasProject: boolean },
+  context?: { hasProject: boolean; platform?: string | null },
 ): DesktopManagedAgentPermissionProfile {
   if (providerId === "cursor") {
     const presented = supervisedCursorPermissionProfilePresentation(profile);
@@ -707,8 +708,9 @@ export function supervisedPermissionProfilePresentation(
       detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
   }
   if (profile.id === "read_only" && providerId === "codex") {
+    if (isWindowsPlatform(context?.platform)) return { ...profile, status: "gated", detail: CODEX_READ_ONLY_WINDOWS };
     return { ...profile, status: "available", risk: "medium",
-      description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+      description: "Can read files on this computer, also outside your project, and read and post in the room.",
       detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
   }
   if (profile.id !== "ask_before_write"
@@ -733,6 +735,9 @@ export function supervisedPermissionProfilePresentation(
     detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.",
   };
 }
+
+/** The exact words main uses too (CODEX_READ_ONLY_WINDOWS in daemon/supervised-permission-profiles.ts). */
+const CODEX_READ_ONLY_WINDOWS = "On Windows, Codex cannot keep your sign-in file from an agent's commands, and Read-only promises that. Choose another access level.";
 
 const NOTHING_BLOCKED = "Nothing is blocked: it can reach the network and files outside the project.";
 const CURSOR_NO_NETWORK = "No network access: can't push or open PRs.";
@@ -767,7 +772,7 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
   // Only Cursor's restricted profiles use the outer macOS sandbox.
   cursor: {
     read_only: `Can't edit files. ${CURSOR_NO_NETWORK}`,
-    sandboxed_write: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
+    sandboxed_write: `Can't write to files on this computer directly. ${CURSOR_NO_NETWORK}`,
     full_access: NOTHING_BLOCKED,
   },
 };

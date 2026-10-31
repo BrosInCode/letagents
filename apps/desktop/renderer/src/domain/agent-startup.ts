@@ -5,7 +5,9 @@ import type {
 } from "../../../electron/ipc-types";
 import { avatarInitials } from "../../../../../shared/chat-appearance";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { startRefusalReason } from "./agent-home-harness";
 import { supervisedLaunchProgress } from "./supervised-launch";
+import { thisComputerLabel } from "./supervised-agents-support";
 
 /**
  * The start-up row a person sees in the room timeline after they start an
@@ -72,7 +74,7 @@ type Entry = Pick<DesktopSupervisorManifestEntry,
   | "workspacePath" | "providerPid" | "providerContinuationId" | "executionGenerationId" | "agentSessionId"
   | "agentSessionBindingState" | "workplaceLiveness">;
 
-/** The runtime's own name, which is what starts on this Mac. */
+/** The runtime's own name, which is what starts on this computer. */
 export function agentRuntimeLabel(provider: string): string {
   switch (provider.trim().toLowerCase()) {
     case "claude":
@@ -156,13 +158,15 @@ function slotNote(ahead: number | null): string | null {
 
 function failureReason(action: AgentStartupAction, entry: Entry): string {
   const runtime = agentRuntimeLabel(entry.provider);
-  if (action === "sign_in") return `${runtime} is not signed in on this Mac.`;
-  if (action === "install") return `${runtime} could not be found on this Mac.`;
+  if (action === "sign_in") return `${runtime} is not signed in on ${thisComputerLabel()}.`;
+  if (action === "install") return `${runtime} could not be found on ${thisComputerLabel()}.`;
   return safeManifestDetail(supervisedLaunchProgress(entry).failureDetail);
 }
 
 /** Scheduler internals are no reason a person can act on. */
 function safeManifestDetail(detail: string | null): string {
+  const refusal = startRefusalReason(detail);
+  if (refusal) return refusal;
   if (!detail?.trim() || /convergence scheduler failure|scheduler failure:/i.test(detail)) return "The start did not finish.";
   return detail;
 }

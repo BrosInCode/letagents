@@ -204,7 +204,7 @@ export class AskGiveCoordinator {
     let creating = false;
     this.giving.add(input.token);
     try {
-      await this.daemon.ensureRunning().catch(() => { throw new AskGiveError("Your Mac couldn't start this agent. The request is still open for others."); });
+      await this.daemon.ensureRunning().catch(() => { throw new AskGiveError("This computer couldn't start this agent. The request is still open for others."); });
       const displayName = `${claimed.asker}'s helper`;
       const agentKey = await this.resolveIdentity({ entryId, displayName, providerId: input.providerId });
       const hostId = this.hostId();
@@ -242,7 +242,7 @@ export class AskGiveCoordinator {
           windowId: null, lastUsedPercent: null, consumedPercent: 0 };
       });
       if (!await this.daemon.compareAndSetDesiredState(entry.id, "paused", "running")) {
-        throw new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
+        throw new AskGiveError("This computer couldn't start this agent. The request is still open for others.");
       }
       const ready = await this.waitUntilReady(entry.id);
       const usage = await this.readUsage(ready.id, roomId);
@@ -284,7 +284,7 @@ export class AskGiveCoordinator {
         this.startWatching();
       }
       await this.api.release(input.token, false).catch(() => undefined);
-      throw error instanceof AskGiveError ? error : new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
+      throw error instanceof AskGiveError ? error : new AskGiveError("This computer couldn't start this agent. The request is still open for others.");
     } finally {
       this.giving.delete(input.token);
     }
@@ -406,7 +406,7 @@ export class AskGiveCoordinator {
       if (entry && entry.desiredState === "running" && entry.agentSessionId && entry.agentSessionBindingState === "active" && entry.readyReachedAt) return entry;
       await new Promise<void>(resolve => setTimeout(resolve, READY_POLL_MS));
     }
-    throw new AskGiveError("Your Mac couldn't start this agent. The request is still open for others.");
+    throw new AskGiveError("This computer couldn't start this agent. The request is still open for others.");
   }
 
   /**

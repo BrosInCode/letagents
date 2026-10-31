@@ -350,7 +350,7 @@ test("Codex in a room with no project is offered Read-only first, and can start 
   // The real catalog, presented as Add Agent presents it for a supervised agent.
   const catalog = listManagedAgentPermissionProfiles("codex");
   const selectedPermissionProfiles = computed(() =>
-    catalog.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: Boolean(repoRootPath.value) })));
+    catalog.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: Boolean(repoRootPath.value), platform: "MacIntel" })));
   const selectedPermissionProfile = computed(() =>
     selectedPermissionProfiles.value.find((profile) => profile.id === configuration.selectedPermissionProfileId.value) ?? null);
   const actions = configuration.bind({

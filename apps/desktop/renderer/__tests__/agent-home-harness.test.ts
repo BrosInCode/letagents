@@ -15,7 +15,7 @@ import {
   homeHarnessTimingNote,
   homeHarnessTitle,
   homeHarnessUnavailableReason,
-  ownerSetupRefusalReason,
+  startRefusalReason,
   ownerSetupStartHint,
 } from "../src/domain/agent-home-harness";
 import { supervisedPermissionProfileLimits } from "../src/domain/managed-agents";
@@ -229,19 +229,27 @@ test("every switch here is the shared switch, and the change is never part of th
 test("a start refused over the owner's setup is shown as the launch said it, and a slow start names what of the owner's held it up", () => {
   const reason = "This project's Codex config (.codex/config.toml) sets model, so LetAgents will not start Codex here with your own setup. "
     + "With your own setup on, an agent starts with your Codex settings only. Remove them from that file in the repository and commit the removal, stop trusting the project in Codex, or turn off \"Use your own Codex setup\" for this agent.";
-  assert.equal(ownerSetupRefusalReason(`convergence scheduler failure: ${reason}`), reason);
-  assert.equal(ownerSetupRefusalReason(reason), reason);
+  assert.equal(startRefusalReason(`convergence scheduler failure: ${reason}`), reason);
+  assert.equal(startRefusalReason(reason), reason);
   // An agent that could not be restarted to end the setup: what the background service records is shown as it was said.
   const stuck = "LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting. "
     + "Pause the agent and resume it to finish switching your setup off; cause: native stop failed";
-  assert.equal(ownerSetupRefusalReason(`convergence scheduler failure: ${stuck}`), stuck);
+  assert.equal(startRefusalReason(`convergence scheduler failure: ${stuck}`), stuck);
   for (const other of [null, undefined, "", "convergence scheduler failure: The saved OpenCode process is no longer running.",
     "convergence scheduler failure: Claude CLI did not report its stream-json init message (deadline). This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up."]) {
-    assert.equal(ownerSetupRefusalReason(other), null, String(other));
+    assert.equal(startRefusalReason(other), null, String(other));
   }
   assert.equal(ownerSetupStartHint("… (deadline). Startup observations: budget_ms=60000. This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up."),
     "One of your own MCP servers or hooks may be holding the start up.");
   assert.equal(ownerSetupStartHint('… (deadline). Startup observations: budget_ms=60000. Your MCP server "owner.slow" did not start, so this agent is running without it. Your MCP server "b" was still starting when this agent began, so its tools may be missing.'),
     'Your MCP server "owner.slow" did not start, so this agent is running without it. Your MCP server "b" was still starting when this agent began, so its tools may be missing.');
   assert.equal(ownerSetupStartHint("… (deadline). Startup observations: budget_ms=30000."), "");
+});
+
+test("a refused start is shown through the same filter as any error, and every refusal's wording is matched", () => {
+  assert.equal(startRefusalReason("convergence scheduler failure: Codex could not list its MCP servers, so LetAgents will not start it: token=abc123secret\u0007"),
+    "Codex could not list its MCP servers, so LetAgents will not start it: token=[redacted]");
+  assert.equal(startRefusalReason("convergence scheduler failure: Remove the saved rules. So it will not start Codex at this access level."),
+    "Remove the saved rules. So it will not start Codex at this access level.");
+  assert.equal(startRefusalReason("convergence scheduler failure: internal write failed"), null);
 });

@@ -1,3 +1,4 @@
+import { appendFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { redactCredentialText } from "../agents/provider-evidence.js";
@@ -13,6 +14,18 @@ export type DesktopDaemonLifecycleEvent = {
   signal?: NodeJS.Signals | null;
   generation?: number | null;
 };
+
+/**
+ * How the app or one of its processes ended, for a closure with no crash
+ * report. Written at once: the app can be gone before a queued append runs. No
+ * record before a closure means something outside the app ended it.
+ */
+export function recordDesktopExit(path: string, event: "desktop_quit" | "desktop_renderer_gone" | "desktop_child_gone", detail: string | null = null): void {
+  try {
+    if (statSync(path).size >= DAEMON_LIFECYCLE_LOG_MAX_BYTES) return;
+    appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), event, pid: process.pid, ...(detail ? { detail } : {}) })}\n`);
+  } catch { /* A record of how the app ended never changes how it ends. */ }
+}
 
 export function appendDaemonLifecycleEvent(path: string, event: DesktopDaemonLifecycleEvent): void {
   const previous = daemonLifecycleLogWrites.get(path) ?? Promise.resolve();

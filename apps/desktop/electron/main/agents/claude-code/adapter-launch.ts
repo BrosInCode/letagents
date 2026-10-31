@@ -207,7 +207,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
       }
       // A guest must have no tool of its own on this Mac: fail closed on anything but LetAgents' tools.
       if (req.supervisorEntryId?.startsWith("supervised_rental_") && !guestHasOnlyRoomTools(observedInit)) {
-        throw new Error("Claude Code started with tools that can reach this Mac, so the given agent was not started. Update Claude Code, then try again.");
+        throw new Error("Claude Code started with tools that can reach this computer, so the given agent was not started. Update Claude Code, then try again.");
       }
       // A named but failed server is not a usable room connection.
       if (!hasReadyRoomWorkplace(observedInit)) {

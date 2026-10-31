@@ -17,7 +17,7 @@ test("managed agent permission profiles map provider-specific available and gate
   assert.equal(claudeProfiles.find((profile) => profile.id === "read_only")?.status, "available");
   assert.match(claudeProfiles.find((profile) => profile.id === "read_only")?.detail ?? "", /Cannot change files or run commands/);
   assert.equal(claudeProfiles.find((profile) => profile.id === "full_access")?.status, "available");
-  assert.match(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /on this Mac/);
+  assert.match(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /on this computer/);
   assert.doesNotMatch(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
 
   const cursorProfiles = listManagedAgentPermissionProfiles("cursor");
@@ -43,7 +43,7 @@ test("managed agent permission profiles map provider-specific available and gate
   const supervisedCodexReadOnly = assertManagedAgentPermissionProfileAvailable("codex", "read_only");
   assert.equal(supervisedCodexReadOnly.status, "available");
   assert.equal(supervisedCodexReadOnly.risk, "medium");
-  assert.equal(supervisedCodexReadOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(supervisedCodexReadOnly.description, "Can read files on this computer, also outside your project, and read and post in the room.");
   assert.equal(supervisedCodexReadOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
   assert.equal(codexProfiles.find((profile) => profile.isDefault)?.id, "full_access");
   assert.throws(
