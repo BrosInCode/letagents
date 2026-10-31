@@ -30,7 +30,7 @@ test("handoff fences an in-flight ingress poll and drains it before returning", 
     assert.equal(aborted, true);
     assert.equal((await store.receipts(agent.agentId)).length, 0, "a fenced poll cannot ingest after its await");
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("messages arriving during handoff replay from the durable cursor exactly once", async () => {
@@ -111,7 +111,7 @@ test("messages arriving during handoff replay from the durable cursor exactly on
     await firstDelivery?.fenceAndDrain().catch(() => undefined);
     await successorStore?.close().catch(() => undefined);
     await firstStore?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
@@ -182,7 +182,7 @@ test("@everyone delivery is per-agent and one blocked FIFO cannot stall another 
     firstBlockedTurn.resolve({ turnId: "cleanup", outcome: "no_reply", text: null });
     await delivery.fenceAndDrain().catch(() => undefined);
     await store.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
@@ -220,7 +220,7 @@ test("room intake continues through a held provider turn while FIFO execution st
     await waitForAsync(async () => (await store.receipts(agent.agentId)).every(item => item.state === "acknowledged_no_reply"));
     assert.deepEqual(turns, ["1", "2", "3"]);
     assert.equal(peak, 1);
-  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("while a turn runs, a person's message overtakes queued work and a notice turn carries the notices behind it", async () => {
@@ -263,7 +263,7 @@ test("while a turn runs, a person's message overtakes queued work and a notice t
     const carried = (await store.getBySourceMessage(agent.agentId, agent.roomId, "4"))!;
     assert.equal(carried.provider_turn_id, null, "the later notice never ran its own provider turn");
     assert.equal(carried.last_error, "Delivered in the turn for 2 together with other queued notices, so this notice had no separate turn.");
-  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("a notice turn that fails after it starts leaves its listed notices queued, so the lease holder's work continues", async () => {
@@ -297,7 +297,7 @@ test("a notice turn that fails after it starts leaves its listed notices queued,
     assert.equal(completed, true);
     assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
   } finally {
-    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
@@ -343,7 +343,7 @@ for (const intakeState of ["observing", "backoff"] as const) {
         "delivery recovery must not change the independent observation state");
       assert.deepEqual(warnings, ["Room delivery recovery for stone: temporary store failure password=[REDACTED]"],
         "one redacted diagnostic covers the recovery episode");
-    } finally { hangingPoll.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+    } finally { hangingPoll.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
   });
 }
 
@@ -374,7 +374,7 @@ test("an intake commit racing an empty pump still wakes delivery without another
     release.resolve();
     await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged_no_reply");
     assert.equal(turns, 1);
-  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("handoff aborts delivery recovery backoff and cannot create a successor pump", async () => {
@@ -394,7 +394,7 @@ test("handoff aborts delivery recovery backoff and cannot create a successor pum
     await delivery.fenceAndDrain();
     assert.equal(aborted, true); assert.equal(normalizations, 1);
     assert.equal(delivery.wake(agent), false);
-  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("the supervised runtime continuously polls and delivers a later activation", async () => {
@@ -420,13 +420,13 @@ test("the supervised runtime continuously polls and delivers a later activation"
     assert.equal(polls >= 2, true);
     assert.equal((await store.receipts(agent.agentId)).length, 2);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("the supervised runtime backs off after a poll error and resumes intake", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-retry-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let polls = 0;
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
       poll: ({ signal }) => {
@@ -447,8 +447,12 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
     }, "the successful recovery poll clears backoff before the received turn is exposed");
     await delivery.fenceAndDrain();
     assert.equal((await store.receipts(agent.agentId)).length, 1);
-    await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    // Closed here, not above: a failed assertion would otherwise leave the
+    // database open and the removal below would report EBUSY in its place.
+    await store.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
 });
 
 test("poll-error backoff grows, caps, and resets after a healthy poll", async () => {
@@ -470,7 +474,7 @@ test("poll-error backoff grows, caps, and resets after a healthy poll", async ()
     await delivery.fenceAndDrain();
     assert.deepEqual(delays, [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 25, 250]);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("successful polling cycles release backoff listeners instead of accumulating them", async () => {
@@ -490,7 +494,7 @@ test("successful polling cycles release backoff listeners instead of accumulatin
     assert.equal(polls, 15);
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 });
 
 test("fence aborts a pending error backoff and releases its listener", async () => {
@@ -518,6 +522,6 @@ test("fence aborts a pending error backoff and releases its listener", async () 
     // worker process through its timer and SQLite handle.
     await delivery?.fenceAndDrain().catch(() => undefined);
     await store?.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });

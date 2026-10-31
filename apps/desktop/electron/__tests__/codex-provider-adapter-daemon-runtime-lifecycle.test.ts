@@ -544,8 +544,15 @@ test("an ended runtime whose room access was refused is not minted for again on 
     // The runtime itself now ends without its process exiting.
     agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
     // The failure itself is reconciled once; let that settle before counting.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const settledMints = agent.mints();
+    // That mint lands later on a loaded Windows runner than a fixed wait
+    // allows, so wait until the count has held still for half a second.
+    let settledMints = agent.mints();
+    await agent.eventually(async () => {
+      const before = agent.mints();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      settledMints = agent.mints();
+      return settledMints === before;
+    }, "the ended runtime's own reconciliation to settle");
     // Thirty heartbeats. Each used to send convergence to mint once more.
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     assert.equal(agent.mints(), settledMints, "no heartbeat mints for an agent that has no room binding");
