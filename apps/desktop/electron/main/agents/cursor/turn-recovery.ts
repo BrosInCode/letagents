@@ -17,6 +17,7 @@ import {
   CursorTerminalAuthorityUnprovenError,
   cursorTerminalAuthorityProof,
   cursorAuthorityMessage,
+  CursorRoomTurnEndedBeforeInitError,
   CursorRoomTurnRecoveryError,
   readBoundedCursorTurnFile,
 } from "../cursor-turn-settlement.js";
@@ -61,7 +62,7 @@ export async function recoverOwnedRoomTurn(adapter: CursorProviderAdapter, provi
   try {
     // Prefer the exact durable wrapper terminal, including late TERM output,
     // over the earlier in-memory teardown snapshot.
-    terminal = adapter.readDurableTurnTerminal(handle, turnId) ?? handle.roomTurnResults.get(turnId) ?? null;
+    terminal = readRecoverableTerminal(adapter, handle, turnId) ?? handle.roomTurnResults.get(turnId) ?? null;
   } catch (error) {
     if (error instanceof CursorRoomTurnNotDispatchedError && error.workspaceGenerationManifestPath) {
       if (error.workspaceGenerationSettlement) {
@@ -217,6 +218,20 @@ export async function recoverOwnedRoomTurn(adapter: CursorProviderAdapter, provi
   return acceptedResult;
 }
 
+/** The durable terminal, or the ending of a turn stopped before Cursor's init: only recovery may settle that one. */
+function readRecoverableTerminal(
+  adapter: CursorProviderAdapter,
+  handle: CursorProviderHandle,
+  turnId: string,
+): CursorTurnTerminal | null {
+  try {
+    return adapter.readDurableTurnTerminal(handle, turnId);
+  } catch (error) {
+    if (error instanceof CursorRoomTurnEndedBeforeInitError) return error.terminal as CursorTurnTerminal;
+    throw error;
+  }
+}
+
 export function readDurableTurnTerminal(
   adapter: CursorProviderAdapter,
   handle: CursorProviderHandle,
@@ -294,6 +309,22 @@ export function readDurableTurnTerminal(
       legacyUnversionedTerminal = true;
     }
     if (!raw.init || typeof raw.init !== "object" || Array.isArray(raw.init)) {
+      if (raw.init === null && raw.result === null && authorityProof === "proven") {
+        throw new CursorRoomTurnEndedBeforeInitError<CursorTurnTerminal>("Cursor terminal evidence has no verified init snapshot.", {
+          state: "attempt_terminal",
+          exit: raw.type === "exit"
+            ? { type: "exit", code: typeof raw.code === "number" ? raw.code : null, signal: typeof raw.signal === "string" ? raw.signal as NodeJS.Signals : null }
+            : { type: "error", error: new Error(typeof raw.error === "string" ? raw.error : "Cursor wrapper launch failed.") },
+          text: null,
+          isError: true,
+          providerRequestId: null,
+          attemptTerminal: null,
+          publicationContract,
+          terminalError: safeCursorTerminalErrorDetail(raw.error) ?? "Cursor stopped before it reported that this turn had started.",
+          ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
+          ...(workspaceGenerationSettlement ? { workspaceGenerationSettlement } : {}),
+        });
+      }
       throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has no verified init snapshot.");
     }
     initMessage = raw.init as CursorStreamMessage;
