@@ -58,15 +58,18 @@ const installation = found.stdout?.trim().split(/\r?\n/)[0];
 if (found.status !== 0 || !installation) throw new Error("No Visual Studio with the C++ x64 tools was found.");
 const vcvarsall = join(installation, "VC", "Auxiliary", "Build", "vcvarsall.bat");
 
-const output = join(here, "build", arch);
+// --harness: the test build of short-list-harness.c, beside the sealed build and never sealed.
+const harness = args.includes("--harness");
+const output = join(here, "build", harness ? "harness" : arch);
 const objects = join(output, "obj");
 rmSync(output, { recursive: true, force: true });
 mkdirSync(objects, { recursive: true });
 const executable = join(output, "letagents-process-tree.exe");
+const program = harness ? join(here, "short-list-harness.c") : source;
 
 const compile = [
   "cl.exe", "/nologo", "/O2", "/W4", "/WX", "/sdl", "/MT", "/GS", "/guard:cf", "/Brepro",
-  "/DUNICODE", "/D_UNICODE", `"${source}"`, `/Fo"${join(objects, "letagents-process-tree.obj")}"`, `/Fe"${executable}"`,
+  "/DUNICODE", "/D_UNICODE", `"${program}"`, `/Fo"${join(objects, "letagents-process-tree.obj")}"`, `/Fe"${executable}"`,
   "/link", "/Brepro", "/DYNAMICBASE", "/NXCOMPAT", "/guard:cf", "/SUBSYSTEM:CONSOLE",
   ...(arch === "x64" ? ["/CETCOMPAT"] : []), "kernel32.lib",
 ].join(" ");

@@ -261,7 +261,7 @@ Measured on 2026-10-30 on the ARM64 VM (Windows 11 build 26300, not elevated, De
 | `-Dependencies` again | every tree skipped | 3 s |
 | `-BuildTools` | Build Tools 2026 18.11.3 | about 9 min |
 | `-Dependencies` (4 trees) | 138, 338, 64 and 110 packages, all with verified registry signatures | 5 min 27 s |
-| Process-tree helper `build.mjs --check` | matches its seal `9ee36c1b…` | 24 s |
+| Process-tree helper `build.mjs --check` | matches its seal `a6d8c4f9…` | 24 s |
 | Process-tree tests | 22 / 22 pass (with `--test-timeout=300000`) | 143 s |
 | Pipe addon `build.mjs --check` | matches its seal `e86964be…` | 16 s |
 | Pipe addon tests | 15: 13 pass, 1 fail, 1 skip (SYSTEM squatter: CI only) | 53 s |
@@ -291,7 +291,7 @@ Mac, 4 virtual CPUs, 6 GB):
   script does); an arm64 Node would look for arm64 builds of the sealed helper and addon, which have no seal.
 - Git and `gh` are native arm64 builds (Git's MSYS tools, such as `bash.exe`, are still x64).
 - Visual Studio's x64 compiler (`Hostx64\x64`) runs emulated and still builds the sealed bytes: the process-tree
-  helper and the pipe addon matched their seals (`9ee36c1b…`, `e86964be…`).
+  helper and the pipe addon matched their seals (`a6d8c4f9…`, `e86964be…`).
 - Everything takes about twice as long as on CI. `process-tree.windows.test.mjs` then needs more than CI's
   `--test-timeout=120000` (143 s; it passes with 300000), and a few tests with their own short limits fail on time
   (see [Known failures](#known-failures)).

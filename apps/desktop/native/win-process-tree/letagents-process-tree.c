@@ -140,6 +140,11 @@ static DWORD job_active_processes(HANDLE job) {
   return accounting.ActiveProcesses;
 }
 
+static DWORD remaining_ms(ULONGLONG deadline) {
+  ULONGLONG now = GetTickCount64();
+  return now >= deadline ? 0 : (DWORD)(deadline - now);
+}
+
 /* Handles to a job's processes, taken while the job still lists them. An
    ended job cannot be waited on through its own counts: TerminateJobObject
    stops counting each process (ActiveProcesses, the process list) at once,
@@ -147,7 +152,11 @@ static DWORD job_active_processes(HANDLE job) {
    job is first closed to new processes (an active-process limit of 1: a
    process that would join is ended before it runs), then every process it
    lists is held, then it is ended. `complete` is 0 when any listed process
-   could not be held: nothing can then prove the job's processes all exited. */
+   could not be held: nothing can then prove the job's processes all exited.
+   A process that has begun to exit is still counted but no longer listed, for
+   about a millisecond, so a list with room that falls short is read again
+   until it is whole or the deadline passes: a process that stays in that
+   state past the deadline is unproved, and the job is ended all the same. */
 typedef struct {
   HANDLE *handles;
   DWORD count;
@@ -173,14 +182,14 @@ static void close_job_to_new_processes(HANDLE job, held_processes *held) {
 }
 
 /* `close`: close the job to new processes first (not again for a second look after the end). */
-static void hold_job_processes(HANDLE job, held_processes *held, int close) {
-  DWORD capacity = 64, attempt, index;
+static void hold_job_processes(HANDLE job, held_processes *held, int close, ULONGLONG deadline) {
+  DWORD capacity = 64, grown = 0, index;
   held->handles = NULL;
   held->count = 0;
   held->complete = 1;
   held->limited = 0;
   if (close) close_job_to_new_processes(job, held);
-  for (attempt = 0; attempt < 4; attempt++) {
+  for (;;) {
     size_t size = offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) + (size_t)capacity * sizeof(ULONG_PTR);
     JOBOBJECT_BASIC_PROCESS_ID_LIST *list = (JOBOBJECT_BASIC_PROCESS_ID_LIST *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
     if (!list) break;
@@ -188,10 +197,14 @@ static void hold_job_processes(HANDLE job, held_processes *held, int close) {
       HeapFree(GetProcessHeap(), 0, list);
       break;
     }
-    /* More processes than room: read again with room for them. */
     if (list->NumberOfAssignedProcesses > list->NumberOfProcessIdsInList) {
-      capacity = list->NumberOfAssignedProcesses + 16;
+      int had_room = list->NumberOfAssignedProcesses <= capacity;
+      /* More processes than room: read again with room for them. */
+      if (!had_room) capacity = list->NumberOfAssignedProcesses + 16;
       HeapFree(GetProcessHeap(), 0, list);
+      if (had_room ? remaining_ms(deadline) == 0 : ++grown >= 4) break;
+      /* It had room, so a process is exiting: give it the time to leave the count. */
+      if (had_room) Sleep(1);
       continue;
     }
     held->handles = (HANDLE *)HeapAlloc(GetProcessHeap(), 0, ((size_t)list->NumberOfProcessIdsInList + 1) * sizeof(HANDLE));
@@ -222,11 +235,6 @@ static void hold_job_processes(HANDLE job, held_processes *held, int close) {
   }
   /* The list could not be read whole. */
   held->complete = 0;
-}
-
-static DWORD remaining_ms(ULONGLONG deadline) {
-  ULONGLONG now = GetTickCount64();
-  return now >= deadline ? 0 : (DWORD)(deadline - now);
 }
 
 /* Wait for each held process until the deadline, then let them go: 1 when every one exited and all were held. */
@@ -272,7 +280,7 @@ static int stop_job(HANDLE job, HANDLE stopping, HANDLE unkillable, HANDLE ended
   if (!stopping || owned == WAIT_ABANDONED) proved = 0;
   if (unkillable && WaitForSingleObject(unkillable, 0) == WAIT_OBJECT_0) proved = 0;
   /* Before the job is ended: afterwards it no longer lists its processes. */
-  hold_job_processes(job, &held, 1);
+  hold_job_processes(job, &held, 1, deadline);
   if (!TerminateJobObject(job, 1)) {
     *error = GetLastError();
     if (held.limited) SetInformationJobObject(job, JobObjectExtendedLimitInformation, &held.previous, sizeof held.previous);
@@ -283,7 +291,7 @@ static int stop_job(HANDLE job, HANDLE stopping, HANDLE unkillable, HANDLE ended
   if (ended) SetEvent(ended);
   /* An ended job counts nothing, so a limit of 1 lets one process join after
      the end: hold and end that one too. */
-  hold_job_processes(job, &late, 0);
+  hold_job_processes(job, &late, 0, deadline);
   if (late.count) TerminateJobObject(job, 1);
   if (!wait_held_processes(&held, deadline)) proved = 0;
   if (!wait_held_processes(&late, deadline)) proved = 0;
