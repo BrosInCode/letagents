@@ -1,5 +1,6 @@
 import {
   exhaustedTransientWorkerMint,
+  ProviderStopError,
   providerQuotaExhaustedFailure,
   providerQuotaResetAtMs,
   providerRuntimeGoneFailure,
@@ -89,7 +90,7 @@ export class ProviderSchedulerFailureCoordinator {
   }
 
   async record(entryId: string, error: unknown, actor: string): Promise<void> {
-    const message = schedulerErrorDetail(error);
+    const message = schedulerErrorDetail(error instanceof ProviderStopError ? error.cause : error);
     // A provably gone saved runtime cannot recover through another resume.
     // Retire its continuation and let ordinary crash-loop policy replace it.
     if (providerRuntimeGoneFailure(error)) {
@@ -135,7 +136,7 @@ export class ProviderSchedulerFailureCoordinator {
       const lastError = error instanceof UnusableSourceRepositoryError || error instanceof RepositoryNetworkError
         ? error.message
         // Not the launch's failure: the card must offer to stop the agent again.
-        : entry.desired_state === "stopped"
+        : error instanceof ProviderStopError
           ? `The agent could not be stopped: ${message}`
           : `convergence scheduler failure: ${message}`;
       await this.ports.transitionOnce(

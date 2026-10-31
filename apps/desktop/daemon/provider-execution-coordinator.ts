@@ -57,6 +57,7 @@ import type {
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
+import { ProviderStopError } from "./daemon-error-policy.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from "./runtime-recovery-journal.js";
 import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
@@ -1212,7 +1213,11 @@ export class ProviderExecutionCoordinator {
     this.failedLaunchAdmissions.delete(entryId);
     // A stopped agent starts its next attempt at the shortest wait.
     this.workspaceRepositoryRetries.delete(entryId);
-    await this.convergeStopped(entry);
+    try {
+      await this.convergeStopped(entry);
+    } catch (error) {
+      throw new ProviderStopError(error);
+    }
   }
 
   private async convergeRunning(

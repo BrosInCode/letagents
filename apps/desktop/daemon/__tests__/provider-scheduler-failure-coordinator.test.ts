@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ProviderStopError } from "../daemon-error-policy.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 
 function harness(clock = { now: 0 }) {
@@ -115,12 +116,13 @@ test("owned contract-probe deadlines use the bounded existing provider-start rec
   assert.deepEqual(scheduled, [15_000, 15_000, 15_000, 15_000]);
 });
 
-test("a failure while stopping says so, and does not read as the launch's own failure", async () => {
-  const running = harness();
-  await running.coordinator.record("agent-1", new Error("no store"), "test");
-  assert.equal(running.messages.at(-1), "convergence scheduler failure: no store");
-  const stopping = harness();
-  stopping.entry.desired_state = "stopped";
-  await stopping.coordinator.record("agent-1", new Error("no store"), "test");
-  assert.equal(stopping.messages.at(-1), "The agent could not be stopped: no store");
+test("a failed stop says so, and a launch that fails after Cancel stays the launch's own failure", async () => {
+  const stop = harness();
+  stop.entry.desired_state = "stopped";
+  await stop.coordinator.record("agent-1", new ProviderStopError(new Error("no store")), "test");
+  assert.equal(stop.messages.at(-1), "The agent could not be stopped: no store");
+  const cancelled = harness();
+  cancelled.entry.desired_state = "stopped";
+  await cancelled.coordinator.record("agent-1", new Error("no store"), "test");
+  assert.equal(cancelled.messages.at(-1), "convergence scheduler failure: no store");
 });
