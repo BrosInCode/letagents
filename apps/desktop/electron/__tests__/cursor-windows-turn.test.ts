@@ -14,7 +14,7 @@ import {
   cursorPermissionProfileInstructionLines,
   cursorPermissionProfileReadyDetail,
 } from "../main/agents/cursor-permission-profile.js";
-import { CURSOR_MCP_CONNECTOR_PARENT } from "../main/agents/cursor-provider-constants.js";
+import { CURSOR_MCP_CONNECTOR_PARENT, cursorTurnStartTimeoutMs } from "../main/agents/cursor-provider-constants.js";
 import { cursorDaemonChildEnv } from "../main/agents/cursor-runner.js";
 import { cursorOsSandbox, prepareCursorTurnRuntimeDataDir } from "../main/agents/cursor-sandbox-policy.js";
 import { defaultCursorSignalProcess } from "../main/agents/cursor/dependencies.js";
@@ -101,6 +101,14 @@ test("the Windows wrapper is valid JavaScript, runs Cursor unsandboxed in the he
   // The reason it runs from a file: it does not fit a Windows command line.
   assert.ok(source.length > 32_767, `wrapper is ${source.length} characters`);
   assert.throws(() => cursorTurnWrapperSource(launchValues, "win32"), /needs its launch values/);
+});
+
+test("a released Windows turn has room for the wrapper's start and Cursor's own; macOS keeps its bound", () => {
+  // Seen in a Windows VM: 17 to 21 s before Cursor ran, then 9 to 11 s to its init. A turn stopped at 30 s
+  // had its proxies closed just before Cursor reported init.
+  assert.ok(cursorTurnStartTimeoutMs("win32") >= 90_000);
+  assert.equal(cursorTurnStartTimeoutMs("darwin"), 30_000);
+  assert.equal(cursorTurnStartTimeoutMs("linux"), 30_000);
 });
 
 test("the Windows connector is a per-turn, per-account named pipe; POSIX keeps the socket path", () => {

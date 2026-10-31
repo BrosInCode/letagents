@@ -1,6 +1,14 @@
 import { tmpdir } from "node:os";
 
-export const TURN_START_TIMEOUT_MS = 30_000;
+/**
+ * How long a released turn has to report Cursor's init. This bound covers the
+ * wrapper's own start as well as Cursor's. On Windows that start also hosts a
+ * cold MCP runtime and seals its pipe through PowerShell, before Cursor runs.
+ */
+export function cursorTurnStartTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32" ? 90_000 : 30_000;
+}
+export const TURN_START_TIMEOUT_MS = cursorTurnStartTimeoutMs();
 
 // Native readiness and MCP capability attestation intentionally share one
 // deadline so a legitimate cold Cursor process keeps a single startup budget.
