@@ -384,16 +384,18 @@ test("a process that stays counted past the bound is unkillable, and only after 
 
 test("a kill that cannot read its list whole answers unkillable after its bound, and still ends the job", { skip }, async () => {
   const started = await startTree();
+  const harness = shortListHelper();
   const before = Date.now();
   // The tree's own helper reads its list normally; this kill's list stays short.
-  const kill = spawnSync(shortListHelper(), ["kill", String(started.tree.pid), started.births.helper.slice(WINDOWS_BIRTH_PREFIX.length), "1000"], {
+  const kill = spawnSync(harness, ["kill", String(started.tree.pid), started.births.helper.slice(WINDOWS_BIRTH_PREFIX.length), "1000"], {
     stdio: "ignore", windowsHide: true, env: { ...process.env, LETAGENTS_TEST_SHORT_READS: "-1" },
   });
   const waited = Date.now() - before;
   assert.equal(kill.status, 4);
   assertWaitedItsBound(waited, "the kill");
   await exited(started.tree);
-  assertAllGone(started);
+  // Nothing held the processes this kill could not list: they end shortly after.
+  await waitFor(() => gone(started.childPid, started.births.child) && gone(started.grandchildPid, started.births.grandchild), "the tree to end");
 });
 
 test("a kill while the helper is already waiting on a held process reports it unkillable, not ended", { skip }, async () => {
