@@ -12,6 +12,7 @@ import {
   prepareDesktopNotifications,
   setDesktopNotificationBadgeCount,
 } from "./main/notifications.js";
+import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
 import { attachmentProtocolScheme, htmlDemoProtocolScheme, workspaceRoot } from "./main/paths.js";
 import {
   setExecutionDelegationInvalidationHandler,
@@ -21,6 +22,7 @@ import { supervisedAgentsSupported, supervisorDaemonAllowed } from "./main/platf
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
 import { allowMainWindowQuit, createWindow, focusMainWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
+import { recordDesktopExit } from "./main/supervisor-daemon/lifecycle-log.js";
 import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
 import { initializeDesktopUpdates, stopDesktopUpdates } from "./main/updates.js";
 import { applyWindowsAppUserModelId, startWindowsSmokeNotification } from "./main/windows-app-identity.js";
@@ -119,7 +121,14 @@ function startDesktopApp(): void {
 
   autoUpdater.on("before-quit-for-update", allowMainWindowQuit);
 
+  const lifecycleLog = letagentsHomePath("daemon-lifecycle.jsonl");
+  app.on("render-process-gone", (_event, _contents, details) => recordDesktopExit(lifecycleLog, "desktop_renderer_gone", details.reason));
+  app.on("child-process-gone", (_event, details) => {
+    if (details.reason !== "clean-exit") recordDesktopExit(lifecycleLog, "desktop_child_gone", `${details.type}: ${details.reason}`);
+  });
+
   app.on("before-quit", () => {
+    recordDesktopExit(lifecycleLog, "desktop_quit");
     allowMainWindowQuit();
     setDesktopNotificationBadgeCount(0);
     stopDesktopUpdates();

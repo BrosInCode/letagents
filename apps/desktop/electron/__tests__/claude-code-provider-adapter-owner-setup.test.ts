@@ -416,7 +416,7 @@ test("a start that ran out of time after Claude came up names the owner's server
 });
 
 test("a UserPromptSubmit hook that stops the prompt that starts a Claude agent fails the start in plain words, with what the owner can do and no word of the hook or of the prompt, and the start waits for the owner", async () => {
-  const { ownerSetupRefusalReason } = await import(new URL("../../renderer/src/domain/agent-home-harness.ts", import.meta.url).href);
+  const { startRefusalReason } = await import(new URL("../../renderer/src/domain/agent-home-harness.ts", import.meta.url).href);
   const fullAccess = { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true };
   const stopped = "A UserPromptSubmit hook stopped the prompt that LetAgents sends to start this agent";
   const change = "Change the hook so that it lets this prompt through, then try again.";
@@ -468,7 +468,7 @@ test("a UserPromptSubmit hook that stops the prompt that starts a Claude agent f
     }).record(entry.id, rejected, "test");
     assert.deepEqual(saved, [{ condition: "coordination_blocked", message: `convergence scheduler failure: ${reads}` }], name);
     // With the owner's setup the desktop shows the launch's own words, and nothing before them.
-    assert.equal(ownerSetupRefusalReason(saved[0]!.message), over.homeHarness ? reads : null, name);
+    assert.equal(startRefusalReason(saved[0]!.message), over.homeHarness ? reads : null, name);
   }
 
   // A text of the CLI's own that is not its words for a hook: the cause is not known. The owner reads that the

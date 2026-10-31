@@ -15,7 +15,7 @@ import {
   type ProviderConfigurationSnapshot,
   type ProviderReasoningEffort,
 } from "./provider-configuration.js";
-import { CODEX_READ_ONLY_NEEDS_DELIVERY, codexReadOnlyNeedsDelivery, describeProfilesForAgent, describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
+import { codexReadOnlyRefusal, describeProfilesForAgent, describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
 import type { ActivityWrite } from "./manifest-store.js";
 import type {
   DaemonActivityEvent,
@@ -616,9 +616,9 @@ export class ManifestAdministrationCoordinator {
         configurationRevision: input.expectedRevision + 1,
       }, trustedPolicy);
       // Refused where it is saved, with the reason: the launch would refuse it too, and its owner would learn it only then.
-      if (normalized.permissionProfileId === "read_only" && codexReadOnlyNeedsDelivery(currentConfiguration.provider, currentConfiguration.delivery_mode)) {
-        return { outcome: "invalid" as const, error: CODEX_READ_ONLY_NEEDS_DELIVERY };
-      }
+      const readOnlyRefusal = normalized.permissionProfileId === "read_only"
+        ? codexReadOnlyRefusal(currentConfiguration.provider, currentConfiguration.delivery_mode) : null;
+      if (readOnlyRefusal) return { outcome: "invalid" as const, error: readOnlyRefusal };
       // The access level the running process may have: what was saved before, as the next start would read it.
       let before: string | null = null;
       try {

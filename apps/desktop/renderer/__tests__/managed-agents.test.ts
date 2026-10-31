@@ -11,7 +11,7 @@ import type {
   DesktopParticipantSummary,
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
-import { supervisedPermissionProfilesForProvider } from "../../daemon/supervised-permission-profiles";
+import { CODEX_READ_ONLY_WINDOWS, supervisedPermissionProfilesForProvider } from "../../daemon/supervised-permission-profiles";
 import { STATE_WATCH_RECEIPT_TIMELINE_PHASES } from "../../daemon/state-watch-projection";
 import {
   agentSetupActionButtonLabel,
@@ -935,7 +935,7 @@ test("supervised Cursor permission copy distinguishes Full access from Workspace
 test("every access level a supervised agent can use states what it does not allow", () => {
   for (const providerId of ["codex", "claude-code", "open-model", "cursor"] as const) {
     for (const profile of supervisedPermissionProfilesForProvider(providerId)) {
-      const presented = supervisedPermissionProfilePresentation(providerId, profile as DesktopManagedAgentPermissionProfile);
+      const presented = supervisedPermissionProfilePresentation(providerId, profile as DesktopManagedAgentPermissionProfile, { hasProject: true, platform: "MacIntel" });
       const limits = supervisedPermissionProfileLimits(providerId, presented);
       if (profile.status === "available") {
         assert.ok(limits, `${providerId} ${profile.id} needs a limits line`);
@@ -991,7 +991,7 @@ test("supervised Codex presents Read-only as usable, in the daemon's own words, 
     detail: "Choose another available access level.",
     isDefault: false,
   };
-  const supervised = supervisedPermissionProfilePresentation("codex", legacy);
+  const supervised = supervisedPermissionProfilePresentation("codex", legacy, { hasProject: true, platform: "MacIntel" });
   assert.equal(legacy.status, "gated");
   assert.equal(supervised.status, "available");
   assert.equal(supervised.isDefault, false);
@@ -1001,7 +1001,7 @@ test("supervised Codex presents Read-only as usable, in the daemon's own words, 
   assert.equal(supervised.detail, daemon.detail);
   assert.equal(supervised.risk, daemon.risk);
   assert.equal(supervised.risk, "medium");
-  assert.equal(supervised.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(supervised.description, "Can read files on this computer, also outside your project, and read and post in the room.");
   assert.equal(supervised.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
   // Its card says what it withholds, and that it asks for no approval.
   assert.equal(supervisedPermissionProfileLimits("codex", supervised),
@@ -1423,4 +1423,20 @@ test("room work indicator reflects current compaction but cannot invent a room t
   assert.notEqual(supervisedAgentWorkIndicators([base], [], "room_1", "stale")[0]?.summary, "Compacting conversation");
   assert.notEqual(supervisedAgentWorkIndicators([{ ...base, providerProgress: null }], [], "room_1")[0]?.summary, "Compacting conversation");
   assert.deepEqual(supervisedAgentWorkIndicators([{ ...base, roomAgentState: { ...base.roomAgentState!, turn: { ...base.roomAgentState!.turn, state: "idle" } } }], [], "room_1"), []);
+});
+
+test("Add agent shows Codex Read-only as not available on Windows, and a remembered choice moves off it", () => {
+  const profiles = supervisedPermissionProfilesForProvider("codex") as DesktopManagedAgentPermissionProfile[];
+  const shown = profiles.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: true, platform: "Win32" }));
+  const readOnly = shown.find((profile) => profile.id === "read_only")!;
+  assert.equal(readOnly.status, "gated");
+  assert.equal(managedAgentPermissionProfileSummary(readOnly), `Not available yet: ${CODEX_READ_ONLY_WINDOWS}`);
+  assert.equal(supervisedPermissionProfileLimits("codex", readOnly), null);
+  const onMac = profiles.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: true, platform: "MacIntel" }));
+  assert.equal(onMac.find((profile) => profile.id === "read_only")?.status, "available");
+  const next = managedAgentPermissionProfileSelectionForProvider(
+    { id: "codex", defaultPermissionProfileId: "full_access", permissionProfiles: shown },
+    { codex: "read_only" },
+  );
+  assert.equal(next, "full_access");
 });

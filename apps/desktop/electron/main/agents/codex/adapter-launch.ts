@@ -164,7 +164,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     const guest = req.supervisorEntryId?.startsWith("supervised_rental_") === true;
     if (guest && !readOnlyLevel) throw new Error("A given Codex agent runs Read-only with no local tools.");
     if (guest && !await codexGuestToolsLocked(this.codexBin, process.env, req.model ?? null)) {
-      throw new Error("Codex offered tools that can reach this Mac, so the given agent was not started. Update Codex, then try again.");
+      throw new Error("Codex offered tools that can reach this computer, so the given agent was not started. Update Codex, then try again.");
     }
     const serverUrl = await this.deps.resolveServerUrl();
     // The launch's own overrides, the room's server among them. Kept with the handle: a later check lists Codex's servers as this launch does.

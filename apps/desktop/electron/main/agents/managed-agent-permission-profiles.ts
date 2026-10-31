@@ -35,7 +35,7 @@ const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "full_access",
     label: "Full access",
-    description: "Can change files and run commands on this Mac without asking.",
+    description: "Can change files and run commands on this computer without asking.",
     status: "available",
     risk: "high",
     detail: "Cannot use LetAgents tools to manage rooms, rentals, or access.",
@@ -56,7 +56,7 @@ const CODEX_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "full_access",
     label: "Full access",
-    description: "Can change files and run commands on this Mac without asking.",
+    description: "Can change files and run commands on this computer without asking.",
     status: "available",
     risk: "high",
     detail: "Commands can access files outside the project. Use only for work you trust.",
@@ -256,7 +256,7 @@ export function assertManagedAgentPermissionProfileAvailable(
   }
   if (providerId === "codex" && profile.id === "read_only") {
     return { ...profile, status: "available", risk: "medium",
-      description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+      description: "Can read files on this computer, also outside your project, and read and post in the room.",
       detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
   }
   if ((providerId === "codex" || providerId === "open-model") && profile.id === "ask_before_write") {

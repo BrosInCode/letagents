@@ -44,7 +44,7 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "read_only", label: "Read-only",
-    description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+    description: "Can read files on this computer, also outside your project, and read and post in the room.",
     // Not "low": the Codex sandbox denies no read, so the agent can read every file this account can, and it can post in the room.
     // The one file kept from its commands is the owner's Codex sign-in file, which its permission profile denies.
     status: "available", risk: "medium",
@@ -73,7 +73,7 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "full_access", label: "Full access",
-    description: "Can change files and run commands on this Mac without asking.",
+    description: "Can change files and run commands on this computer without asking.",
     status: "available", risk: "high",
     detail: "Commands can access files outside your project. Use only for work you trust.", isDefault: false,
   },
@@ -132,10 +132,19 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
     status: "available", risk: "medium", detail: "Cursor restricts file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and project access settings stay protected.", isDefault: true,
   },
   {
-    id: "full_access", label: "Full access", description: "Can change files on this Mac and run commands without approval prompts.",
+    id: "full_access", label: "Full access", description: "Can change files on this computer and run commands without approval prompts.",
     status: "available", risk: "high", detail: "Changes apply directly to the agent's working directory. Commands can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.", isDefault: false,
   },
 ];
+
+/**
+ * Why Codex has no Read-only access on Windows. Read-only promises that a
+ * command cannot read the owner's Codex sign-in file, and Codex 0.166.0 on
+ * Windows does not honour a `deny`: a command printed a denied file. Its
+ * restricted-token sandbox refuses a `deny` outright. The launch still makes
+ * its own check (codex-agent-home.ts); this says so where the level is offered.
+ */
+export const CODEX_READ_ONLY_WINDOWS = "On Windows, Codex cannot keep your sign-in file from an agent's commands, and Read-only promises that. Choose another access level.";
 
 export function supervisedPermissionProfilesForProvider(providerId: string): SupervisedPermissionProfile[] {
   const provider = providerId.trim().toLowerCase();
@@ -216,11 +225,19 @@ export function codexReadOnlyNeedsDelivery(providerId: string, deliveryMode: str
   return providerId.trim().toLowerCase() === "codex" && deliveryMode !== "daemon_inbox";
 }
 
+/** Why this agent cannot have Read-only, for a Codex agent that cannot. Null otherwise. */
+export function codexReadOnlyRefusal(providerId: string, deliveryMode: string | null | undefined, platform: string = process.platform): string | null {
+  if (providerId.trim().toLowerCase() !== "codex") return null;
+  if (platform === "win32") return CODEX_READ_ONLY_WINDOWS;
+  return codexReadOnlyNeedsDelivery(providerId, deliveryMode) ? CODEX_READ_ONLY_NEEDS_DELIVERY : null;
+}
+
 /** A provider's access levels as one agent can use them: Read-only is shown as unavailable, with the reason, to an agent that cannot have it. */
-export function describeProfilesForAgent(providerId: string, deliveryMode: string | null | undefined, profiles: unknown): unknown {
-  if (!codexReadOnlyNeedsDelivery(providerId, deliveryMode) || !Array.isArray(profiles)) return profiles;
+export function describeProfilesForAgent(providerId: string, deliveryMode: string | null | undefined, profiles: unknown, platform: string = process.platform): unknown {
+  const refusal = codexReadOnlyRefusal(providerId, deliveryMode, platform);
+  if (!refusal || !Array.isArray(profiles)) return profiles;
   return profiles.map((profile) => (profile && typeof profile === "object" && (profile as { id?: unknown }).id === "read_only"
-    ? { ...profile, status: "gated", detail: CODEX_READ_ONLY_NEEDS_DELIVERY } : profile));
+    ? { ...profile, status: "gated", detail: refusal } : profile));
 }
 
 export function assertSupervisedPermissionProfileAvailable(providerId: string, requestedId: string | null): string {

@@ -204,14 +204,14 @@ export function homeHarnessBadge(provider: string, state: NonNullable<DesktopSup
 }
 
 /**
- * Why a start was refused for an agent that uses its owner's setup, as the
- * launch said it: what the project or the setup did, and the ways out. The
- * background service files it under a scheduler failure, which says nothing
- * to the owner, so the reason is shown on its own. Null for any other failure.
+ * Why a start was refused, as the launch said it: what the project, the setup
+ * or the provider did, and the ways out. The background service files it under
+ * a scheduler failure, which says nothing to the owner, so the reason is shown
+ * on its own. Null for any other failure.
  */
-export function ownerSetupRefusalReason(lastError: string | null | undefined): string | null {
+export function startRefusalReason(lastError: string | null | undefined): string | null {
   const detail = lastError?.trim() ?? "";
-  if (!/\bwith your own setup\b/i.test(detail)) return null;
+  if (!/\bwith your own setup\b|\bLetAgents will not start\b|\bso the (?:given )?agent was not started\b/i.test(detail)) return null;
   return detail.replace(/^convergence scheduler failure:\s*/i, "").trim() || null;
 }
 

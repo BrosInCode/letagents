@@ -29,6 +29,10 @@ import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-s
 import {
   assertSupervisedPermissionProfileAvailable,
   assertSupervisedRentalPermissionProfileAvailable,
+  CODEX_READ_ONLY_NEEDS_DELIVERY,
+  CODEX_READ_ONLY_WINDOWS,
+  codexReadOnlyRefusal,
+  describeProfilesForAgent,
   describeProfilesWithOwnerSetup,
   supervisedPermissionProfilesForProvider,
 } from "../supervised-permission-profiles.js";
@@ -358,7 +362,7 @@ test("supervised profile contract exposes Claude prompt approval while retaining
   assert.equal(claude.find((profile) => profile.id === "read_only")?.status, "available");
   assert.match(claude.find((profile) => profile.id === "read_only")?.detail ?? "", /Cannot change files or run commands/);
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
-  assert.match(claude.find((profile) => profile.id === "full_access")?.description ?? "", /on this Mac/);
+  assert.match(claude.find((profile) => profile.id === "full_access")?.description ?? "", /on this computer/);
   assert.doesNotMatch(claude.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
   const codex = supervisedPermissionProfilesForProvider("codex");
   assert.equal(codex.find((profile) => profile.id === "full_access")?.status, "available");
@@ -430,11 +434,11 @@ test("a supervised Codex agent may be set to Read-only, and nothing else about C
   assert.equal(readOnly.isDefault, false);
   // The whole card, word for word: what the agent can read, what it cannot do, that it asks for no approval,
   // and that the owner's saved command rules stay away from it.
-  assert.equal(readOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(readOnly.description, "Can read files on this computer, also outside your project, and read and post in the room.");
   assert.equal(readOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
   const card = `${readOnly.description} ${readOnly.detail}`;
   // Reads are not limited to the project, and the card says so instead of leaving it out.
-  assert.match(card, /read files on this Mac, also outside your project/);
+  assert.match(card, /read files on this computer, also outside your project/);
   // One file is kept from the agent's commands, and the card names that file and no more than it.
   assert.match(card, /Its commands cannot read your Codex sign-in file\./);
   assert.doesNotMatch(card, /\bsafe\b|\bprivate\b|\bsecure\b/i, "the rest of the Mac is still readable, so the card promises nothing wider");
@@ -1015,4 +1019,16 @@ test("the daemon's policy for each access level is the one the adapters attest, 
       }
     }
   }
+});
+
+test("Codex has no Read-only on Windows: its commands can read the sign-in file there", () => {
+  const profiles = supervisedPermissionProfilesForProvider("codex");
+  const readOnly = (platform: string) => (describeProfilesForAgent("codex", "daemon_inbox", profiles, platform) as typeof profiles).find((profile) => profile.id === "read_only")!;
+  assert.equal(readOnly("darwin").status, "available");
+  assert.equal(readOnly("win32").status, "gated");
+  assert.equal(readOnly("win32").detail, CODEX_READ_ONLY_WINDOWS);
+  assert.equal(codexReadOnlyRefusal("codex", "daemon_inbox", "win32"), CODEX_READ_ONLY_WINDOWS);
+  assert.equal(codexReadOnlyRefusal("codex", "mcp_polling", "darwin"), CODEX_READ_ONLY_NEEDS_DELIVERY);
+  assert.equal(codexReadOnlyRefusal("codex", "daemon_inbox", "darwin"), null);
+  assert.equal(codexReadOnlyRefusal("claude-code", "daemon_inbox", "win32"), null);
 });

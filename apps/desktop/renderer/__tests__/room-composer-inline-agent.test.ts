@@ -210,6 +210,7 @@ test('picking a ready provider adds a chip with the personal default; a provider
 
 test('Codex has an effort scale of Default plus its real levels', async t => {
   fakeIpc();
+  t.mock.getter(navigator, 'platform', () => 'MacIntel'); // Windows has no Codex Read-only.
   const { draft } = useDraft(t, fakeHost().host);
   await draft.refreshProviders();
   draft.pick('codex');
@@ -219,6 +220,7 @@ test('Codex has an effort scale of Default plus its real levels', async t => {
 
 test('a new personal default moves a chip the person has not changed, never one they set', async t => {
   fakeIpc();
+  t.mock.getter(navigator, 'platform', () => 'MacIntel'); // Windows has no Codex Read-only.
   const { draft } = useDraft(t, fakeHost().host);
   await draft.refreshProviders();
   draft.pick('codex');

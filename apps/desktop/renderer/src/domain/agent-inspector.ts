@@ -18,7 +18,7 @@ import {
   humanFacingSupervisorActivitySummary,
   isHumanVisibleSupervisorActivity,
 } from "./managed-agents";
-import { ownerSetupRefusalReason, ownerSetupStartHint } from "./agent-home-harness";
+import { ownerSetupStartHint, startRefusalReason } from "./agent-home-harness";
 import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { agentInspectorRuntimeControlMatchesFence, type AgentInspectorWorkResource } from "./agent-inspector-work";
@@ -416,8 +416,8 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
       : recovery === "recover" ? " Recover the agent to restart and resume." : "";
     return `Agent startup needs attention. Review the startup error.${nextStep}`;
   }
-  // A start refused over the owner's own setup leads with what the launch said, not with the scheduler's prefix.
-  const refusal = ownerSetupRefusalReason(detail);
+  // A refused start leads with what the launch said, not with the scheduler's prefix.
+  const refusal = startRefusalReason(detail);
   if (refusal) return refusal;
   if (/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(detail)) {
     return "The provider process stopped. Recover the agent to continue with the same identity and workspace.";
