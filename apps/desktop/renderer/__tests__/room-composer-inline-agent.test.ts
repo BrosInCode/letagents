@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createRenderer, effectScope, h, nextTick, reactive, ssrContextKey } from 'vue';
 import { createServer, type ViteDevServer } from 'vite';
 
-let vite: ViteDevServer, access: any, launch: any, draftModule: any, Slider: any, AccessDefault: any, Chip: any, Composer: any, entriesContext: any, controller: any;
+let vite: ViteDevServer, access: any, launch: any, draftModule: any, Slider: any, AccessDefault: any, Chip: any, Composer: any, entriesContext: any, controller: any, popoverHeight: any;
 const originals = { window: Object.getOwnPropertyDescriptor(globalThis, 'window'), document: Object.getOwnPropertyDescriptor(globalThis, 'document') };
 const fakeDocument = Object.assign(new EventTarget(), { activeElement: null as unknown, visibilityState: 'visible' });
 const storage = new Map<string, string>();
@@ -28,6 +28,7 @@ before(async () => {
   access = await vite.ssrLoadModule(`${base}room-chat/composer-agent-access.ts`);
   launch = await vite.ssrLoadModule(`${base}room-chat/composer-agent-launch.ts`);
   draftModule = await vite.ssrLoadModule(`${base}room-chat/useComposerAgentDraft.ts`);
+  popoverHeight = await vite.ssrLoadModule(`${base}room-chat/composer-popover-height.ts`);
   entriesContext = await vite.ssrLoadModule(`${base}add-agent/supervisor-entries-context.ts`);
   controller = await vite.ssrLoadModule(`${base}add-agent/useAddAgentController.ts`);
   Slider = (await vite.ssrLoadModule(`${base}room-chat/ComposerStepSlider.vue`)).default;
@@ -584,6 +585,28 @@ test('number keys choose a model without closing the popover; Escape closes it',
   vm.handleMenuKey(key('Escape', { target: {} }));
   assert.equal(vm.open.value, false);
   assert.deepEqual(events.at(-1), ['dismiss']);
+});
+
+test('the popover height stops at the nearest clipping parent, or at the top of the window', () => {
+  const box = (top: number, overflowY: string, parentElement: any = null) => ({ overflowY, parentElement, getBoundingClientRect: () => ({ top }) });
+  const win = globalThis.window as any;
+  win.getComputedStyle = (element: any) => ({ overflowY: element.overflowY });
+  try {
+    const clipped = box(600, 'visible', box(400, 'visible', box(172, 'hidden', box(0, 'auto'))));
+    assert.equal(popoverHeight.heightAboveElement(clipped), 600 - 172 - 14, 'stops at the nearest clip, not at an outer one');
+    assert.equal(popoverHeight.heightAboveElement(box(600, 'visible', box(400, 'visible'))), 600 - 14, 'no clip means the top of the window');
+    assert.equal(popoverHeight.heightAboveElement(box(180, 'visible', box(172, 'hidden'))), 0, 'never negative');
+  } finally {
+    delete win.getComputedStyle;
+  }
+});
+
+test('the agent menu has a measured height, and only the model list gives up rows first', () => {
+  const source = readFileSync(new URL('../src/components/desktop/content/room-chat/RoomComposerAgentChip.vue', import.meta.url), 'utf8');
+  assert.match(source, /maxHeight: `\$\{menuHeight\}px`/);
+  const css = readFileSync(new URL('../src/styles/composer-agent-reasoning/composer-agent-chip.css', import.meta.url), 'utf8');
+  assert.match(css, /\.desktop-composer-agent-group \{[^}]*flex: 0 1 auto;[^}]*overflow-y: auto;/);
+  assert.match(css, /\.desktop-composer-agent-menu > \* \{\s*flex: none;/);
 });
 
 /* ---------- composer wiring ---------- */
