@@ -14,9 +14,6 @@ export interface MacDesktopBetaPresentation {
   }
 }
 
-/** Builds are unsigned for now, so Windows asks before the first run. */
-export const WINDOWS_SMARTSCREEN_NOTE = 'Windows may show SmartScreen: More info → Run anyway.'
-
 function toPresentation(release: {
   version: string
   checksumsUrl?: string

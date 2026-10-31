@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { desktopDownloadOffer, detectDesktopVisitorPlatform, fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA, WINDOWS_SMARTSCREEN_NOTE } from '../src/domain/desktopRelease'
+import { desktopDownloadOffer, detectDesktopVisitorPlatform, fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA } from '../src/domain/desktopRelease'
 
 test('Mac beta fallback uses current same-origin download routes', () => {
   assert.deepEqual(MAC_DESKTOP_BETA, {
@@ -79,9 +79,7 @@ test('the Windows installer appears beside the DMGs once the current release lis
   assert.equal(release.downloads.windows, 'https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe')
 
   const heroSource = readFileSync(fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url)), 'utf8')
-  assert.match(heroSource, /v-if="macDesktopBeta\.downloads\.windows" class="hero-windows-note"/)
-  assert.match(heroSource, /\{\{ WINDOWS_SMARTSCREEN_NOTE \}\}/)
-  assert.equal(WINDOWS_SMARTSCREEN_NOTE, 'Windows may show SmartScreen: More info → Run anyway.')
+  assert.doesNotMatch(heroSource, /SmartScreen/)
 })
 
 test('the visitor platform leads the download links, and Windows appears only with an installer', () => {

@@ -40,7 +40,6 @@
         </template>
         <a class="mac-secondary-link" :href="macDesktopBeta.checksumsUrl">Checksums</a>
       </div>
-      <p v-if="macDesktopBeta.downloads.windows" class="hero-windows-note">{{ WINDOWS_SMARTSCREEN_NOTE }}</p>
     </div>
   </section>
 </template>
@@ -52,7 +51,6 @@ import {
   detectDesktopVisitorPlatform,
   fetchCurrentMacDesktopBeta,
   MAC_DESKTOP_BETA,
-  WINDOWS_SMARTSCREEN_NOTE,
 } from '@/domain/desktopRelease'
 
 withDefaults(defineProps<{ theme?: 'light' | 'dark' }>(), { theme: 'dark' })
@@ -279,12 +277,6 @@ onUnmounted(() => {
 
 .mac-divider {
   color: var(--l-hairline);
-}
-
-.hero-windows-note {
-  margin: 0;
-  font-size: 0.78rem;
-  color: var(--l-text-dim);
 }
 
 .mac-secondary-link {
